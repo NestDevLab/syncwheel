@@ -9,9 +9,42 @@ Deterministic fork/upstream/integration maintenance for Git repositories.
 
 ## Why it exists
 
-Git can tell you which commits are on a branch. It cannot natively tell you, with certainty, which commits belong to a logical PR stack unless you declare that mapping explicitly.
+Git can tell you which commits are on a branch. What it cannot tell you with certainty is the intended ownership model, for example which commits are meant to travel together as one reviewable workstream.
+
+In syncwheel, that workstream is called a **PR stack**:
+- a named logical change set (feature, fix, refactor)
+- mapped to one `pr/*` branch
+- represented by an explicit commit list in the manifest
+
+Without that declaration, ownership is heuristic. With that declaration, ownership is deterministic.
 
 `syncwheel` makes that mapping explicit in `.syncwheel/manifest.json`, then validates and materializes branch state from it.
+
+## Who this is for
+
+`syncwheel` is for teams or maintainers who have at least one of these conditions:
+- active upstream + fork workflow
+- multiple PR branches that must stay clean while development continues
+- an `integration/*` branch used as day-to-day runnable state
+- need for repeatable branch recovery that does not depend on memory
+
+## Who this is not for
+
+`syncwheel` is usually overkill when:
+- you ship directly from one branch with short-lived PRs only
+- your repo has no integration branch and no stacked branch maintenance
+- your process does not need deterministic rebuilds from a declared manifest
+
+## Three ways to use syncwheel
+
+1. **Guide-first (manual execution)**  
+   Use the docs as an operating playbook and run Git steps manually. This is possible, but cognitively heavier and easier to get wrong in complex branch graphs.
+
+2. **Script-assisted (human-operated)**  
+   Use the CLI for discovery, validation, and materialization, while a human decides what to run and when. This is a strong middle ground once the team knows the model well.
+
+3. **AI-operated (recommended)**  
+   Let an AI agent run the syncwheel flow through prompts, with a human supervising intent and approval boundaries. In practice this gives the best speed/consistency balance for ongoing maintenance.
 
 ## Core model
 

@@ -12,6 +12,15 @@ Git cannot natively answer this with certainty:
 
 That becomes deterministic only when the repo declares that mapping explicitly.
 
+## What "PR stack" means here
+
+In syncwheel, a PR stack is a logical change stream that should be reviewable as one PR branch:
+- one stack id (for example `feature-a`)
+- one `pr/*` branch mapped to that stack
+- one declared commit list that defines stack membership
+
+This avoids guessing ownership from branch names or memory.
+
 ## Preferred source of truth
 
 Create:
