@@ -89,9 +89,20 @@ python3 scripts/syncwheel.py materialize-integration --worktree ../wt-integratio
 
 - `scripts/syncwheel.py`: main CLI
 - `scripts/syncwheel-status.sh`: small compatibility wrapper
-- `docs/`: human-readable workflow docs
+- `docs/`: human-readable workflow docs and guides
 - `examples/manifest.example.json`: starter manifest
 - `tests/`: unit tests and fixture repositories
+
+## Documentation map
+
+- `docs/workflow.md`: concise workflow model
+- `docs/core-procedure.md`: deterministic recovery procedure
+- `docs/branch-model.md`: branch role model and safety defaults
+- `docs/deterministic-model.md`: manifest semantics and validation contract
+- `docs/ai-agents.md`: short AI behavior contract
+- `docs/agent-procedure.md`: extended AI execution guidance
+- `docs/workflow-longform.md`: long-form practical workflow guide
+- `docs/public-article.md`: narrative article version for broader audiences
 
 ## CLI summary
 
