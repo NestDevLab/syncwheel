@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12', '3.13']
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Show versions
+        run: |
+          python --version
+          git --version
+
+      - name: Compile CLI
+        run: python -m py_compile scripts/syncwheel.py
+
+      - name: CLI help smoke test
+        run: |
+          python scripts/syncwheel.py --help
+          python scripts/syncwheel.py init --help
+          python scripts/syncwheel.py status --help
+          python scripts/syncwheel.py validate --help
+          python scripts/syncwheel.py plan --help
+          python scripts/syncwheel.py materialize-pr --help
+          python scripts/syncwheel.py materialize-integration --help
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v

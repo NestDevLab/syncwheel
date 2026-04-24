@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "defaults": {
+    "canonical_remote": "origin",
+    "publication_remote": "fork",
+    "base_branch": "main",
+    "base_ref": "origin/main"
+  },
+  "integration": {
+    "branch": "integration/project-stack",
+    "base": "origin/main",
+    "stacks": [
+      "feature-a",
+      "feature-b"
+    ]
+  },
+  "stacks": [
+    {
+      "id": "feature-a",
+      "branch": "pr/feature-a",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "integration/project-stack",
+      "commits": [
+        "abc1234",
+        "def5678"
+      ]
+    },
+    {
+      "id": "feature-b",
+      "branch": "pr/feature-b",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "integration/project-stack",
+      "commits": [
+        "0123abc"
+      ]
+    }
+  ]
+}
