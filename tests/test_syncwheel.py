@@ -16,6 +16,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-test-'))
         self.repo = self.tmp / 'repo'
         shutil.copytree(FIXTURE, self.repo)
+        self.init_fixture_repo()
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
@@ -34,6 +35,68 @@ class SyncwheelFixtureTest(unittest.TestCase):
                 f"STDERR:\n{result.stderr}"
             )
         return result
+
+    def git(self, *args):
+        result = subprocess.run(
+            ['git', *args],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"git command failed: {args}\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
+            )
+        return result.stdout.strip()
+
+    def init_fixture_repo(self):
+        self.git('init', '-q', '-b', 'main')
+        self.git('config', 'user.name', 'Syncwheel Fixture')
+        self.git('config', 'user.email', 'syncwheel@example.com')
+        self.git('add', 'alpha.txt')
+        self.git('commit', '-q', '-m', 'feat: add alpha')
+        alpha_sha = self.git('rev-parse', '--short=7', 'HEAD')
+        self.git('add', 'beta.txt')
+        self.git('commit', '-q', '-m', 'feat: add beta')
+        beta_sha = self.git('rev-parse', '--short=7', 'HEAD')
+        self.git('branch', 'pr/feature-a', 'HEAD~1')
+        self.git('branch', 'pr/feature-b', 'HEAD')
+        manifest = {
+            'version': 1,
+            'defaults': {
+                'canonical_remote': 'origin',
+                'publication_remote': 'fork',
+                'base_branch': 'main',
+                'base_ref': 'main',
+            },
+            'integration': {
+                'branch': 'main',
+                'base': 'main',
+                'stacks': ['feature-a', 'feature-b'],
+            },
+            'stacks': [
+                {
+                    'id': 'feature-a',
+                    'branch': 'pr/feature-a',
+                    'base': 'main',
+                    'target_remote': 'origin',
+                    'target_branch': 'main',
+                    'integration_branch': 'main',
+                    'commits': [alpha_sha],
+                },
+                {
+                    'id': 'feature-b',
+                    'branch': 'pr/feature-b',
+                    'base': 'main',
+                    'target_remote': 'origin',
+                    'target_branch': 'main',
+                    'integration_branch': 'main',
+                    'commits': [alpha_sha, beta_sha],
+                },
+            ],
+        }
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 
     def test_validate_passes_for_fixture(self):
         result = self.run_cli('validate', expected=0)
