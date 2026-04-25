@@ -54,6 +54,49 @@ Unless a repository documents a different rule:
 - `pr/*` branches are review surfaces for upstream PRs
 - long-lived integration-only product code is drift and should be surfaced
 
+## Integration branch, explained
+
+The `integration/*` branch is the branch where combined reality lives.
+
+Use it to:
+- run and test multiple in-flight changes together
+- continue development without waiting for each upstream PR to merge
+- detect cross-PR conflicts early, before review-time surprises
+
+In syncwheel, synchronization is **bidirectional by design** (through explicit materialization):
+- from declared stacks -> rebuild integration (`materialize-integration`)
+- from declared stacks -> rebuild each PR branch (`materialize-pr`)
+
+This gives you parallel PR development with a shared, testable branch that stays traceable.
+
+```mermaid
+flowchart LR
+    U[upstream/main]
+    I[integration/main]
+    P1[pr/feature-a]
+    P2[pr/feature-b]
+    P3[pr/hotfix-c]
+    M[.syncwheel/manifest.json]
+
+    U --> P1
+    U --> P2
+    U --> P3
+
+    M --> I
+    M --> P1
+    M --> P2
+    M --> P3
+
+    I <--> P1
+    I <--> P2
+    I <--> P3
+```
+
+Practical meaning of the arrows:
+- integration can be rebuilt from the declared stack order
+- PR branches can be rebuilt from the same declared commit ownership
+- the manifest is the source of truth that keeps both sides aligned
+
 ## Install
 
 No package install is required. The tool is a single Python script.
