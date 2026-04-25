@@ -3,9 +3,15 @@
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
-- do day-to-day work on an `integration/*` branch
 - publish clean `pr/*` branches toward an original upstream repository
+- optionally keep an `integration/*` branch for combined runtime testing
 - want AI agents and shell automation to rebuild those branches repeatably
+
+`integration/*` is **recommended**, not mandatory.
+
+You can use syncwheel in two modes:
+- **PR-only mode**: manage and validate PR stacks without an integration branch
+- **Integration mode**: also maintain a combined branch to test multiple in-flight PRs together
 
 ## Why it exists
 
@@ -23,8 +29,8 @@ In syncwheel terms, a **PR stack** is:
 
 Once that mapping is declared, syncwheel can do deterministic operations:
 - verify whether each PR branch contains the right commits
-- verify whether integration contains the declared stack set
-- rebuild PR and integration branches from the same source of truth
+- optionally verify whether integration contains the declared stack set
+- rebuild PR branches, and integration too when used, from the same source of truth
 
 ## Who this is for
 
