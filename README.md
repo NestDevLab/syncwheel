@@ -9,16 +9,22 @@ Deterministic fork/upstream/integration maintenance for Git repositories.
 
 ## Why it exists
 
-Git can tell you which commits are on a branch. What it cannot tell you with certainty is the intended ownership model, for example which commits are meant to travel together as one reviewable workstream.
+When several PRs are in flight, the hard question is not "where is this commit?".
+The hard question is "which PR should this commit belong to?".
 
-In syncwheel, that workstream is called a **PR stack**:
-- a named logical change set (feature, fix, refactor)
-- mapped to one `pr/*` branch
-- represented by an explicit commit list in the manifest
+Git answers the first question well. It does not encode the second one.
 
-Without that declaration, ownership is heuristic. With that declaration, ownership is deterministic.
+`syncwheel` solves this by declaring ownership explicitly in `.syncwheel/manifest.json`.
 
-`syncwheel` makes that mapping explicit in `.syncwheel/manifest.json`, then validates and materializes branch state from it.
+In syncwheel terms, a **PR stack** is:
+- one logical unit of work (for example `feature-a`)
+- one target PR branch (for example `pr/feature-a`)
+- one explicit commit list that defines membership
+
+Once that mapping is declared, syncwheel can do deterministic operations:
+- verify whether each PR branch contains the right commits
+- verify whether integration contains the declared stack set
+- rebuild PR and integration branches from the same source of truth
 
 ## Who this is for
 
