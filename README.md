@@ -13,20 +13,51 @@ You can use syncwheel in two modes:
 - **PR-only mode**: manage and validate PR stacks without an integration branch
 - **Integration mode**: also maintain a combined branch to test multiple in-flight PRs together
 
-## How syncwheel works
+## System flow (visual)
 
-The system has four pieces:
+syncwheel has four pieces:
 - **base branch** (`upstream/main` or similar)
-- **PR stacks** (logical units of work mapped to `pr/*` branches)
-- **optional integration branch** (`integration/*`) for combined runtime testing
-- **manifest** (`.syncwheel/manifest.json`) as the declared ownership model
+- **PR stacks** mapped to `pr/*` branches
+- **manifest** (`.syncwheel/manifest.json`) as source of truth
+- **optional integration branch** (`integration/*`) for combined testing
 
-A PR stack in syncwheel means:
-- one logical change stream (for example `feature-a`)
-- one PR branch (for example `pr/feature-a`)
-- one explicit commit list in the manifest
+```mermaid
+flowchart LR
+    U[upstream/main]
+    I[optional integration/main]
+    P1[pr/feature-a]
+    P2[pr/feature-b]
+    P3[pr/hotfix-c]
+    M[.syncwheel/manifest.json]
 
-This is what makes validation and rebuild deterministic.
+    U --> P1
+    U --> P2
+    U --> P3
+
+    M --> P1
+    M --> P2
+    M --> P3
+    M -. optional .-> I
+
+    P1 -. sync .-> I
+    P2 -. sync .-> I
+    P3 -. sync .-> I
+    I -. sync .-> P1
+    I -. sync .-> P2
+    I -. sync .-> P3
+```
+
+Practical meaning:
+- PR branches are rebuilt from declared commit ownership
+- integration (if used) is rebuilt from declared stack order
+- one manifest keeps both sides aligned
+
+### How it works in practice
+
+- A **PR stack** is one logical change stream mapped to one `pr/*` branch with an explicit commit list.
+- `materialize-pr` rebuilds one PR branch from the manifest.
+- `materialize-integration` rebuilds integration from ordered stacks (only in integration mode).
+- `validate` and `plan` detect drift before branch mutation.
 
 ## Who this is for
 
@@ -53,57 +84,6 @@ This is what makes validation and rebuild deterministic.
 
 3. **AI-operated (recommended)**  
    Let an AI agent run the syncwheel flow through prompts, with a human supervising intent and approval boundaries. In practice this gives the best speed/consistency balance for ongoing maintenance.
-
-## Core model
-
-Unless a repository documents a different rule:
-- normal development happens on `integration/*`
-- every persistent change on integration should also belong to a `pr/*` stack
-- `pr/*` branches are review surfaces for upstream PRs
-- long-lived integration-only product code is drift and should be surfaced
-
-## System flow (visual)
-
-The `integration/*` branch is where combined runtime reality lives when enabled.
-
-Use it to:
-- run and test multiple in-flight changes together
-- continue development without waiting for each upstream PR to merge
-- detect cross-PR conflicts early, before review-time surprises
-
-In syncwheel, synchronization is **bidirectional by design** (through explicit materialization):
-- from declared stacks -> rebuild integration (`materialize-integration`)
-- from declared stacks -> rebuild each PR branch (`materialize-pr`)
-
-This gives you parallel PR development with a shared, testable branch that stays traceable.
-
-```mermaid
-flowchart LR
-    U[upstream/main]
-    I[integration/main]
-    P1[pr/feature-a]
-    P2[pr/feature-b]
-    P3[pr/hotfix-c]
-    M[.syncwheel/manifest.json]
-
-    U --> P1
-    U --> P2
-    U --> P3
-
-    M --> I
-    M --> P1
-    M --> P2
-    M --> P3
-
-    I <--> P1
-    I <--> P2
-    I <--> P3
-```
-
-Practical meaning of the arrows:
-- integration can be rebuilt from the declared stack order
-- PR branches can be rebuilt from the same declared commit ownership
-- the manifest is the source of truth that keeps both sides aligned
 
 ## Install
 
