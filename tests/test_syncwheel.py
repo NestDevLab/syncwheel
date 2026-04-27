@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -15,6 +16,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-test-'))
         self.repo = self.tmp / 'repo'
+        self.registry = self.tmp / 'repos.json'
         shutil.copytree(FIXTURE, self.repo)
         self.init_fixture_repo()
 
@@ -22,11 +24,14 @@ class SyncwheelFixtureTest(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def run_cli(self, *args, expected=0):
+        env = dict(**os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
         result = subprocess.run(
             ['python3', str(CLI), *args],
             cwd=self.repo,
             text=True,
             capture_output=True,
+            env=env,
         )
         if result.returncode != expected:
             raise AssertionError(
@@ -128,6 +133,17 @@ class SyncwheelFixtureTest(unittest.TestCase):
         manifest.write_text(json.dumps(data, indent=2) + '\n')
         result = self.run_cli('validate', expected=1)
         self.assertIn('missing commit', result.stdout + result.stderr)
+
+    def test_repo_alias_can_be_used_with_short_repo_flag(self):
+        self.run_cli('repo', 'add', 'fixture', str(self.repo), expected=0)
+        result = self.run_cli('status', '-r', 'fixture', '--json', expected=0)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['manifest_present'])
+
+    def test_short_repo_flag_accepts_direct_path(self):
+        result = self.run_cli('status', '-r', str(self.repo), '--json', expected=0)
+        data = json.loads(result.stdout)
+        self.assertTrue(data['manifest_present'])
 
 
 if __name__ == '__main__':

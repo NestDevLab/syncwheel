@@ -13,24 +13,20 @@ You can use syncwheel in two modes:
 - **PR-only mode**: manage and validate PR stacks without an integration branch
 - **Integration mode**: also maintain a combined branch to test multiple in-flight PRs together
 
-## Why it exists
+## How syncwheel works
 
-When several PRs are in flight, the hard question is not "where is this commit?".
-The hard question is "which PR should this commit belong to?".
+The system has four pieces:
+- **base branch** (`upstream/main` or similar)
+- **PR stacks** (logical units of work mapped to `pr/*` branches)
+- **optional integration branch** (`integration/*`) for combined runtime testing
+- **manifest** (`.syncwheel/manifest.json`) as the declared ownership model
 
-Git answers the first question well. It does not encode the second one.
+A PR stack in syncwheel means:
+- one logical change stream (for example `feature-a`)
+- one PR branch (for example `pr/feature-a`)
+- one explicit commit list in the manifest
 
-`syncwheel` solves this by declaring ownership explicitly in `.syncwheel/manifest.json`.
-
-In syncwheel terms, a **PR stack** is:
-- one logical unit of work (for example `feature-a`)
-- one target PR branch (for example `pr/feature-a`)
-- one explicit commit list that defines membership
-
-Once that mapping is declared, syncwheel can do deterministic operations:
-- verify whether each PR branch contains the right commits
-- optionally verify whether integration contains the declared stack set
-- rebuild PR branches, and integration too when used, from the same source of truth
+This is what makes validation and rebuild deterministic.
 
 ## Who this is for
 
@@ -66,9 +62,9 @@ Unless a repository documents a different rule:
 - `pr/*` branches are review surfaces for upstream PRs
 - long-lived integration-only product code is drift and should be surfaced
 
-## Integration branch, explained
+## System flow (visual)
 
-The `integration/*` branch is the branch where combined reality lives.
+The `integration/*` branch is where combined runtime reality lives when enabled.
 
 Use it to:
 - run and test multiple in-flight changes together
@@ -116,6 +112,36 @@ No package install is required. The tool is a single Python script.
 Requirements:
 - Python 3.11+
 - Git
+
+## Installation and adoption modes
+
+1. **Global toolkit (recommended)**
+   - Clone `syncwheel` once in a stable location.
+   - Run it against target repos via `-r/--repo` using either paths or aliases.
+   - Best when you want one central install to keep updated.
+
+2. **Git submodule**
+   - Add `syncwheel` as a submodule inside each target repo.
+   - Good when each project must pin an explicit syncwheel version.
+
+3. **Vendored script**
+   - Copy `scripts/syncwheel.py` into a project.
+   - Fastest for experiments, but updates are manual.
+
+## Repo aliases
+
+You can register repo aliases and keep commands short.
+
+```bash
+python3 scripts/syncwheel.py repo add yalc ~/code/nestjs-yalc
+python3 scripts/syncwheel.py repo ls
+python3 scripts/syncwheel.py status -r yalc --fetch
+python3 scripts/syncwheel.py repo rm yalc
+```
+
+`-r/--repo` accepts both:
+- a filesystem path
+- a registered alias
 
 ## Quick start
 

@@ -12,6 +12,9 @@ class SyncwheelError(Exception):
     pass
 
 
+ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
+
+
 def run(cmd, cwd=None, check=True, input_text=None):
     result = subprocess.run(
         cmd,
@@ -33,6 +36,64 @@ def get_repo_root(explicit=None):
     cwd = explicit or os.getcwd()
     result = run(['git', 'rev-parse', '--show-toplevel'], cwd=cwd)
     return Path(result.stdout.strip())
+
+
+def get_repo_registry_path():
+    raw = os.environ.get(ENV_REGISTRY_PATH)
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / '.config' / 'syncwheel' / 'repos.json'
+
+
+def load_repo_registry(path=None):
+    registry_path = path or get_repo_registry_path()
+    if not registry_path.exists():
+        return {}, registry_path
+    try:
+        data = json.loads(registry_path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SyncwheelError(f'invalid repo registry JSON: {registry_path}: {exc}') from exc
+    if not isinstance(data, dict):
+        raise SyncwheelError(f'repo registry must be an object: {registry_path}')
+    registry = {}
+    for alias, value in data.items():
+        if not isinstance(alias, str) or not alias.strip():
+            raise SyncwheelError(f'invalid alias key in registry: {registry_path}')
+        if not isinstance(value, str) or not value.strip():
+            raise SyncwheelError(f'invalid alias path for {alias!r} in registry: {registry_path}')
+        registry[alias] = value
+    return registry, registry_path
+
+
+def save_repo_registry(registry, path=None):
+    registry_path = path or get_repo_registry_path()
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    registry_path.write_text(json.dumps(registry, indent=2, sort_keys=True) + '\n')
+    return registry_path
+
+
+def resolve_repo_root(repo_value=None):
+    if not repo_value:
+        return get_repo_root()
+
+    candidate_path = Path(repo_value).expanduser()
+    if candidate_path.exists():
+        return get_repo_root(str(candidate_path.resolve()))
+
+    registry, registry_path = load_repo_registry()
+    alias_path = registry.get(repo_value)
+    if alias_path:
+        alias_target = Path(alias_path).expanduser()
+        if not alias_target.exists():
+            raise SyncwheelError(
+                f"repo alias '{repo_value}' points to a missing path: {alias_target} "
+                f"(registry: {registry_path})"
+            )
+        return get_repo_root(str(alias_target.resolve()))
+
+    raise SyncwheelError(
+        f"repo not found: {repo_value} (not a path, not an alias in {registry_path})"
+    )
 
 
 def branch_exists(repo_root, branch):
@@ -303,7 +364,7 @@ def run_command_list(commands, repo_root, apply):
 
 
 def command_init(args):
-    repo_root = get_repo_root(args.repo)
+    repo_root = resolve_repo_root(args.repo)
     canonical_remote = args.canonical_remote
     base_branch = args.base_branch
     publication_remote = args.publication_remote
@@ -336,7 +397,7 @@ def command_init(args):
 
 
 def command_status(args):
-    repo_root = get_repo_root(args.repo)
+    repo_root = resolve_repo_root(args.repo)
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = load_manifest(repo_root, args.manifest)
@@ -403,7 +464,7 @@ def command_status(args):
 
 
 def command_validate(args):
-    repo_root = get_repo_root(args.repo)
+    repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = load_manifest(repo_root, args.manifest)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -421,7 +482,7 @@ def command_validate(args):
 
 
 def command_plan(args):
-    repo_root = get_repo_root(args.repo)
+    repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = load_manifest(repo_root, args.manifest)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -438,7 +499,7 @@ def command_plan(args):
 
 
 def command_materialize_pr(args):
-    repo_root = get_repo_root(args.repo)
+    repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = load_manifest(repo_root, args.manifest)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -452,7 +513,7 @@ def command_materialize_pr(args):
 
 
 def command_materialize_integration(args):
-    repo_root = get_repo_root(args.repo)
+    repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = load_manifest(repo_root, args.manifest)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -465,9 +526,25 @@ def command_materialize_integration(args):
 def build_parser():
     parser = argparse.ArgumentParser(description='Deterministic syncwheel helper for fork/upstream/integration repos.')
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument('--repo', help='path inside the target git repo')
+    common.add_argument('-r', '--repo', help='target repo path or registered alias')
     common.add_argument('--manifest', help='path to a syncwheel manifest JSON file')
     sub = parser.add_subparsers(dest='command', required=True)
+
+    repo_p = sub.add_parser('repo', help='manage repo aliases')
+    repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
+
+    repo_add_p = repo_sub.add_parser('add', help='add/update one repo alias')
+    repo_add_p.add_argument('alias')
+    repo_add_p.add_argument('path')
+    repo_add_p.set_defaults(func=command_repo_add)
+
+    repo_rm_p = repo_sub.add_parser('rm', help='remove one repo alias')
+    repo_rm_p.add_argument('alias')
+    repo_rm_p.set_defaults(func=command_repo_rm)
+
+    repo_ls_p = repo_sub.add_parser('ls', help='list repo aliases')
+    repo_ls_p.add_argument('--json', action='store_true')
+    repo_ls_p.set_defaults(func=command_repo_ls)
 
     init_p = sub.add_parser('init', help='create a starter manifest', parents=[common])
     init_p.add_argument('--canonical-remote', default='origin')
@@ -503,6 +580,56 @@ def build_parser():
     int_p.set_defaults(func=command_materialize_integration)
 
     return parser
+
+
+def command_repo_add(args):
+    alias = args.alias.strip()
+    if not alias:
+        raise SyncwheelError('alias must be non-empty')
+    path = Path(args.path).expanduser().resolve()
+    if not path.exists():
+        raise SyncwheelError(f'path does not exist: {path}')
+    repo_root = get_repo_root(str(path))
+    registry, registry_path = load_repo_registry()
+    registry[alias] = str(repo_root)
+    save_repo_registry(registry, registry_path)
+    print(f'{alias} -> {repo_root}')
+    return 0
+
+
+def command_repo_rm(args):
+    alias = args.alias
+    registry, registry_path = load_repo_registry()
+    if alias not in registry:
+        raise SyncwheelError(f"alias not found: {alias} (registry: {registry_path})")
+    del registry[alias]
+    save_repo_registry(registry, registry_path)
+    print(f'removed: {alias}')
+    return 0
+
+
+def command_repo_ls(args):
+    registry, registry_path = load_repo_registry()
+    rows = []
+    for alias in sorted(registry.keys()):
+        raw_path = registry[alias]
+        resolved = str(Path(raw_path).expanduser())
+        rows.append({
+            'alias': alias,
+            'path': raw_path,
+            'exists': Path(resolved).exists(),
+        })
+    if args.json:
+        print(json.dumps({'registry': str(registry_path), 'repos': rows}, indent=2))
+        return 0
+    print(f'registry: {registry_path}')
+    if not rows:
+        print('no aliases configured')
+        return 0
+    for item in rows:
+        suffix = '' if item['exists'] else ' (missing)'
+        print(f"{item['alias']}\t{item['path']}{suffix}")
+    return 0
 
 
 def main():
