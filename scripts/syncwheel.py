@@ -59,9 +59,24 @@ def load_repo_registry(path=None):
     for alias, value in data.items():
         if not isinstance(alias, str) or not alias.strip():
             raise SyncwheelError(f'invalid alias key in registry: {registry_path}')
-        if not isinstance(value, str) or not value.strip():
-            raise SyncwheelError(f'invalid alias path for {alias!r} in registry: {registry_path}')
-        registry[alias] = value
+        if isinstance(value, str):
+            if not value.strip():
+                raise SyncwheelError(f'invalid alias path for {alias!r} in registry: {registry_path}')
+            registry[alias] = {'path': value}
+            continue
+        if isinstance(value, dict):
+            path_value = value.get('path')
+            manifest_value = value.get('manifest')
+            if not isinstance(path_value, str) or not path_value.strip():
+                raise SyncwheelError(f'invalid alias path for {alias!r} in registry: {registry_path}')
+            if manifest_value is not None and (not isinstance(manifest_value, str) or not manifest_value.strip()):
+                raise SyncwheelError(f'invalid alias manifest for {alias!r} in registry: {registry_path}')
+            item = {'path': path_value}
+            if manifest_value is not None:
+                item['manifest'] = manifest_value
+            registry[alias] = item
+            continue
+        raise SyncwheelError(f'invalid alias entry for {alias!r} in registry: {registry_path}')
     return registry, registry_path
 
 
@@ -81,9 +96,9 @@ def resolve_repo_root(repo_value=None):
         return get_repo_root(str(candidate_path.resolve()))
 
     registry, registry_path = load_repo_registry()
-    alias_path = registry.get(repo_value)
-    if alias_path:
-        alias_target = Path(alias_path).expanduser()
+    alias_entry = registry.get(repo_value)
+    if alias_entry:
+        alias_target = Path(alias_entry['path']).expanduser()
         if not alias_target.exists():
             raise SyncwheelError(
                 f"repo alias '{repo_value}' points to a missing path: {alias_target} "
@@ -94,6 +109,17 @@ def resolve_repo_root(repo_value=None):
     raise SyncwheelError(
         f"repo not found: {repo_value} (not a path, not an alias in {registry_path})"
     )
+
+
+def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None):
+    if manifest_override:
+        return Path(manifest_override).expanduser()
+    if repo_value:
+        registry, _ = load_repo_registry()
+        alias_entry = registry.get(repo_value)
+        if alias_entry and alias_entry.get('manifest'):
+            return Path(alias_entry['manifest']).expanduser()
+    return repo_root / '.syncwheel' / 'manifest.json'
 
 
 def branch_exists(repo_root, branch):
@@ -212,6 +238,9 @@ def load_manifest(repo_root, manifest_path=None):
         stack.setdefault('target_remote', canonical_remote)
         stack.setdefault('target_branch', defaults['base_branch'])
         stack.setdefault('integration_branch', integration['branch'])
+        if 'meta' in stack and not isinstance(stack['meta'], dict):
+            raise SyncwheelError(f'stack {stack_id} meta must be an object when present')
+        stack.setdefault('meta', {})
         normalized.append(stack)
     data['stacks'] = normalized
     return data, path
@@ -260,6 +289,7 @@ def validate_manifest(repo_root, manifest):
         item = {
             'id': stack['id'],
             'branch': stack['branch'],
+            'meta': stack.get('meta', {}),
             'branch_exists': branch_exists(repo_root, stack['branch']),
             'base_exists': ref_exists(repo_root, stack['base']),
             'target': f"{stack['target_remote']}/{stack['target_branch']}",
@@ -307,6 +337,7 @@ def build_plan(repo_root, manifest, validation):
                 'type': 'create_pr_branch',
                 'stack': item['id'],
                 'branch': item['branch'],
+                'meta': item.get('meta', {}),
             })
         if item['missing_from_branch']:
             actions.append({
@@ -314,6 +345,7 @@ def build_plan(repo_root, manifest, validation):
                 'stack': item['id'],
                 'branch': item['branch'],
                 'missing_commits': item['missing_from_branch'],
+                'meta': item.get('meta', {}),
             })
         if item['missing_from_integration']:
             actions.append({
@@ -321,6 +353,7 @@ def build_plan(repo_root, manifest, validation):
                 'stack': item['id'],
                 'branch': integration['branch'],
                 'missing_commits': item['missing_from_integration'],
+                'meta': item.get('meta', {}),
             })
     return actions
 
@@ -387,7 +420,7 @@ def command_init(args):
     if args.stdout:
         print(output, end='')
         return 0
-    manifest_path = repo_root / '.syncwheel' / 'manifest.json'
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     if manifest_path.exists() and not args.force:
         raise SyncwheelError(f'manifest already exists: {manifest_path}')
@@ -400,7 +433,8 @@ def command_status(args):
     repo_root = resolve_repo_root(args.repo)
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
-    manifest, manifest_path = load_manifest(repo_root, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
     snapshot = collect_repo_snapshot(repo_root, manifest)
     output = {'snapshot': snapshot, 'manifest_path': str(manifest_path), 'manifest_present': manifest is not None}
     if manifest:
@@ -465,7 +499,8 @@ def command_status(args):
 
 def command_validate(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = load_manifest(repo_root, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     validation = validate_manifest(repo_root, manifest)
@@ -483,7 +518,8 @@ def command_validate(args):
 
 def command_plan(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = load_manifest(repo_root, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     validation = validate_manifest(repo_root, manifest)
@@ -500,7 +536,8 @@ def command_plan(args):
 
 def command_materialize_pr(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = load_manifest(repo_root, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     stacks = stack_map(manifest)
@@ -514,7 +551,8 @@ def command_materialize_pr(args):
 
 def command_materialize_integration(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = load_manifest(repo_root, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     worktree = Path(args.worktree).resolve()
@@ -536,7 +574,14 @@ def build_parser():
     repo_add_p = repo_sub.add_parser('add', help='add/update one repo alias')
     repo_add_p.add_argument('alias')
     repo_add_p.add_argument('path')
+    repo_add_p.add_argument('--manifest', help='optional default manifest path for this alias')
     repo_add_p.set_defaults(func=command_repo_add)
+
+    repo_manifest_p = repo_sub.add_parser('set-manifest', help='set/clear default manifest path for one alias')
+    repo_manifest_p.add_argument('alias')
+    repo_manifest_p.add_argument('manifest', nargs='?', help='manifest path; omit with --clear to remove')
+    repo_manifest_p.add_argument('--clear', action='store_true')
+    repo_manifest_p.set_defaults(func=command_repo_set_manifest)
 
     repo_rm_p = repo_sub.add_parser('rm', help='remove one repo alias')
     repo_rm_p.add_argument('alias')
@@ -591,9 +636,32 @@ def command_repo_add(args):
         raise SyncwheelError(f'path does not exist: {path}')
     repo_root = get_repo_root(str(path))
     registry, registry_path = load_repo_registry()
-    registry[alias] = str(repo_root)
+    item = {'path': str(repo_root)}
+    if args.manifest:
+        item['manifest'] = str(Path(args.manifest).expanduser())
+    registry[alias] = item
     save_repo_registry(registry, registry_path)
     print(f'{alias} -> {repo_root}')
+    if args.manifest:
+        print(f"manifest -> {item['manifest']}")
+    return 0
+
+
+def command_repo_set_manifest(args):
+    alias = args.alias
+    registry, registry_path = load_repo_registry()
+    if alias not in registry:
+        raise SyncwheelError(f"alias not found: {alias} (registry: {registry_path})")
+    if args.clear:
+        registry[alias].pop('manifest', None)
+        save_repo_registry(registry, registry_path)
+        print(f'cleared manifest for: {alias}')
+        return 0
+    if not args.manifest:
+        raise SyncwheelError('manifest path is required unless --clear is used')
+    registry[alias]['manifest'] = str(Path(args.manifest).expanduser())
+    save_repo_registry(registry, registry_path)
+    print(f"{alias} manifest -> {registry[alias]['manifest']}")
     return 0
 
 
@@ -612,11 +680,14 @@ def command_repo_ls(args):
     registry, registry_path = load_repo_registry()
     rows = []
     for alias in sorted(registry.keys()):
-        raw_path = registry[alias]
+        entry = registry[alias]
+        raw_path = entry['path']
         resolved = str(Path(raw_path).expanduser())
+        manifest = entry.get('manifest')
         rows.append({
             'alias': alias,
             'path': raw_path,
+            'manifest': manifest,
             'exists': Path(resolved).exists(),
         })
     if args.json:
@@ -628,7 +699,8 @@ def command_repo_ls(args):
         return 0
     for item in rows:
         suffix = '' if item['exists'] else ' (missing)'
-        print(f"{item['alias']}\t{item['path']}{suffix}")
+        manifest_part = f" | manifest={item['manifest']}" if item.get('manifest') else ''
+        print(f"{item['alias']}\t{item['path']}{suffix}{manifest_part}")
     return 0
 
 

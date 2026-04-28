@@ -123,6 +123,37 @@ python3 scripts/syncwheel.py repo rm yalc
 - a filesystem path
 - a registered alias
 
+Alias entries can also carry a default manifest path (useful for private/local manifests on public repos):
+
+```bash
+python3 scripts/syncwheel.py repo add cas ~/code/openclaw-codex-app-server \
+  --manifest ~/.config/syncwheel/manifests/cas.json
+python3 scripts/syncwheel.py repo set-manifest cas ~/.config/syncwheel/manifests/cas.json
+python3 scripts/syncwheel.py repo set-manifest cas --clear
+```
+
+## Stack metadata (optional)
+
+Each stack can include optional `meta` fields so humans and AI can understand intent better.
+
+Example:
+
+```json
+{
+  "id": "cas-endpoint-resolution-policy",
+  "branch": "pr/cas-endpoint-resolution-policy",
+  "commits": ["abc1234"],
+  "meta": {
+    "purpose": "Endpoint policy and routing",
+    "status": "active",
+    "priority": "p1",
+    "dependencies": [],
+    "integrationPolicy": "required",
+    "notes": "Keep in integration for runtime validation"
+  }
+}
+```
+
 ## Quick start
 
 ### 1. Bootstrap a manifest

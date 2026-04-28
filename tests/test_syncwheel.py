@@ -145,6 +145,16 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertTrue(data['manifest_present'])
 
+    def test_repo_alias_can_store_default_manifest_path(self):
+        custom_manifest = self.tmp / 'custom-manifest.json'
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        custom_manifest.write_text(manifest.read_text())
+
+        self.run_cli('repo', 'add', 'fixture2', str(self.repo), '--manifest', str(custom_manifest), expected=0)
+        result = self.run_cli('status', '-r', 'fixture2', '--json', expected=0)
+        data = json.loads(result.stdout)
+        self.assertEqual(data['manifest_path'], str(custom_manifest))
+
 
 if __name__ == '__main__':
     unittest.main()
