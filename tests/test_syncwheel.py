@@ -101,6 +101,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
             ],
         }
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 
     def test_validate_passes_for_fixture(self):
