@@ -182,6 +182,28 @@ class SyncwheelFixtureTest(unittest.TestCase):
         )
         self.assertEqual(data['validation']['details']['stacks'][0]['id'], 'feature-c')
 
+    def test_use_sets_repo_local_default_personal_manifest(self):
+        self.run_cli('init', '--personal', 'alice', '--force', expected=0)
+        self.run_cli('use', 'alice', expected=0)
+
+        result = self.run_cli('check', '--no-fetch', '--json', expected=1)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(
+            data['manifest_path'],
+            str(self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'),
+        )
+
+    def test_use_shared_clears_repo_local_profile(self):
+        self.run_cli('init', '--personal', 'alice', '--force', expected=0)
+        self.run_cli('use', 'alice', expected=0)
+        self.run_cli('use', '--shared', expected=0)
+
+        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data['manifest_path'], str(self.repo / '.syncwheel' / 'manifest.json'))
+
     def test_stack_create_adds_stack_without_hand_editing_manifest(self):
         gamma = self.git('rev-parse', 'HEAD')
 

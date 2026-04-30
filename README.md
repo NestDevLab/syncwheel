@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.4.0`
+Current version: `0.5.0`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -193,6 +193,17 @@ python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
 
 Long names are still available: `stack create --personal alice` is equivalent.
+
+To make a personal manifest the default for the current clone:
+
+```bash
+python3 scripts/syncwheel.py use alice
+python3 scripts/syncwheel.py check
+python3 scripts/syncwheel.py use --shared
+```
+
+`use alice` writes `.syncwheel/profile.local.json`, which should be ignored by
+the host repository because it is local operator state.
 
 ## Stack metadata (optional)
 

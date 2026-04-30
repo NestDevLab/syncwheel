@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 - 2026-04-30
+
+- Add repo-local profile selection with `use <profile>` and `use --shared`.
+- Resolve `.syncwheel/profile.local.json` automatically when no explicit
+  manifest or personal profile is passed.
+
 ## 0.4.0 - 2026-04-30
 
 - Add `check`/`ck` as a single fetch + validate + plan command for the common

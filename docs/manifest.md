@@ -56,6 +56,14 @@ Use the personal manifest with the short `--personal` flag:
 python3 scripts/syncwheel.py check -p alice
 ```
 
+Or set the personal manifest as the default for the current clone:
+
+```bash
+python3 scripts/syncwheel.py use alice
+python3 scripts/syncwheel.py check
+python3 scripts/syncwheel.py use --shared
+```
+
 Create stack entries through the CLI:
 
 ```bash

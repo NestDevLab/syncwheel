@@ -16,8 +16,9 @@ class SyncwheelError(Exception):
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
+PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
-VERSION = '0.4.0'
+VERSION = '0.5.0'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):
@@ -118,8 +119,16 @@ def resolve_repo_root(repo_value=None):
     )
 
 
-def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, personal=None):
+def resolve_personal(repo_root, personal=None):
     personal = personal or os.environ.get(ENV_PERSONAL)
+    if personal:
+        return personal
+    profile = load_repo_profile(repo_root)
+    return profile.get('personal')
+
+
+def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, personal=None):
+    personal = resolve_personal(repo_root, personal)
     if personal:
         if manifest_override:
             raise SyncwheelError('use either --personal or --manifest, not both')
@@ -360,6 +369,35 @@ def personal_manifest_path(repo_root, name):
 
 def personal_integration_branch(name):
     return f'integration/{safe_ref_segment(name)}/main'
+
+
+def repo_profile_path(repo_root):
+    return repo_root / '.syncwheel' / PROFILE_FILENAME
+
+
+def load_repo_profile(repo_root):
+    path = repo_profile_path(repo_root)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SyncwheelError(f'invalid syncwheel profile JSON: {path}: {exc}') from exc
+    if not isinstance(data, dict):
+        raise SyncwheelError(f'syncwheel profile must be an object: {path}')
+    personal = data.get('personal')
+    if personal is not None:
+        if not isinstance(personal, str) or not personal.strip():
+            raise SyncwheelError(f'invalid syncwheel profile personal value: {path}')
+        data['personal'] = safe_ref_segment(personal)
+    return data
+
+
+def save_repo_profile(repo_root, profile):
+    path = repo_profile_path(repo_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(profile, indent=2, sort_keys=True) + '\n')
+    return path
 
 
 def default_worktree_path(repo_root, branch):
@@ -660,12 +698,14 @@ def command_init(args):
     base_branch = args.base_branch
     publication_remote = args.publication_remote
     if args.personal:
-        manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+        if args.manifest:
+            raise SyncwheelError('use either --personal or --manifest, not both')
+        manifest_path = personal_manifest_path(repo_root, args.personal)
         integration_branch = args.integration_branch
         if integration_branch == 'integration/main':
             integration_branch = personal_integration_branch(args.personal)
     else:
-        manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+        manifest_path = Path(args.manifest).expanduser() if args.manifest else repo_root / '.syncwheel' / 'manifest.json'
         integration_branch = args.integration_branch
     manifest = {
         'version': 1,
@@ -692,6 +732,31 @@ def command_init(args):
         raise SyncwheelError(f'manifest already exists: {manifest_path}')
     manifest_path.write_text(output)
     print(manifest_path)
+    return 0
+
+
+def command_use(args):
+    repo_root = resolve_repo_root(args.repo)
+    if args.shared:
+        path = repo_profile_path(repo_root)
+        if path.exists():
+            path.unlink()
+        print('using shared manifest')
+        return 0
+    if not args.personal:
+        profile = load_repo_profile(repo_root)
+        personal = profile.get('personal')
+        if personal:
+            print(f'using personal manifest: {personal}')
+            print(personal_manifest_path(repo_root, personal))
+        else:
+            print('using shared manifest')
+            print(repo_root / '.syncwheel' / 'manifest.json')
+        return 0
+    personal = safe_ref_segment(args.personal)
+    path = save_repo_profile(repo_root, {'personal': personal})
+    print(f'using personal manifest: {personal}')
+    print(path)
     return 0
 
 
@@ -1071,6 +1136,11 @@ def build_parser():
     repo_ls_p = repo_sub.add_parser('ls', help='list repo aliases')
     repo_ls_p.add_argument('--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
+
+    use_p = sub.add_parser('use', help='show or set the repo-local default syncwheel profile', parents=[common])
+    use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
+    use_p.add_argument('--shared', action='store_true', help='clear the local profile and use the shared manifest')
+    use_p.set_defaults(func=command_use)
 
     init_p = sub.add_parser('init', aliases=['in'], help='create a starter manifest', parents=[common])
     init_p.add_argument('--canonical-remote', default='origin')
