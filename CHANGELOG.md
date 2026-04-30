@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0 - 2026-04-30
+
+- Add `check`/`ck` as a single fetch + validate + plan command for the common
+  inspection flow.
+- Add short aliases for common commands (`st`, `v`, `pl`, `s`, `i`, `s new`,
+  `s rb`, `i rb`, `g`) and `-p` for personal manifests.
+- Add `SYNCWHEEL_REPO` and `SYNCWHEEL_PERSONAL` environment defaults so host
+  projects can provide concise wrapper commands.
+
 ## 0.3.0 - 2026-04-30
 
 - Add `init --personal <name>` to create ignored local manifests under

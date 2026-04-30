@@ -53,8 +53,7 @@ branch to `integration/alice/main`.
 Use the personal manifest with the short `--personal` flag:
 
 ```bash
-python3 scripts/syncwheel.py validate --personal alice
-python3 scripts/syncwheel.py plan --personal alice --json
+python3 scripts/syncwheel.py check -p alice
 ```
 
 Create stack entries through the CLI:

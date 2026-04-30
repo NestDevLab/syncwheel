@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.3.0`
+Current version: `0.4.0`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -162,6 +162,12 @@ python3 scripts/syncwheel.py repo set-manifest cas ~/.config/syncwheel/manifests
 python3 scripts/syncwheel.py repo set-manifest cas --clear
 ```
 
+You can also set `SYNCWHEEL_REPO` when wrapping syncwheel from another project:
+
+```bash
+SYNCWHEEL_REPO=/path/to/repo python3 scripts/syncwheel.py check
+```
+
 ## Manifest creation
 
 Create the shared manifest with `init`:
@@ -177,14 +183,16 @@ python3 scripts/syncwheel.py init --personal alice
 ```
 
 This writes `.syncwheel/manifests/alice.local.json` and defaults its integration
-branch to `integration/alice/main`. Use `--personal alice` on later commands
+branch to `integration/alice/main`. Use `-p alice` on later commands
 when you want to target that personal manifest:
 
 ```bash
-python3 scripts/syncwheel.py status --personal alice
-python3 scripts/syncwheel.py stack create --personal alice feature-a --branch pr/alice/feature-a --include-in-integration
-python3 scripts/syncwheel.py stack set --personal alice feature-a origin/main..HEAD
+python3 scripts/syncwheel.py check -p alice
+python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a --include-in-integration
+python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
+
+Long names are still available: `stack create --personal alice` is equivalent.
 
 ## Stack metadata (optional)
 
@@ -226,7 +234,7 @@ cp examples/manifest.example.json .syncwheel/manifest.json
 ### 2. Inspect current state
 
 ```bash
-python3 scripts/syncwheel.py status --fetch
+python3 scripts/syncwheel.py check
 ```
 
 ### 3. Validate manifest against Git
@@ -430,6 +438,7 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py --help
 python3 scripts/syncwheel.py --version
 python3 scripts/syncwheel.py init --help
+python3 scripts/syncwheel.py check --help
 python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
 python3 scripts/syncwheel.py plan --help
@@ -442,6 +451,19 @@ python3 scripts/syncwheel.py int rebuild --help
 python3 scripts/syncwheel.py int push --help
 python3 scripts/syncwheel.py int git --help
 ```
+
+Common aliases:
+- `check` -> `ck`
+- `status` -> `st`
+- `validate` -> `v`
+- `plan` -> `pl`
+- `stack` -> `s`
+- `int` -> `i`
+- `stack create` -> `s new`
+- `stack rebuild` -> `s rb`
+- `int rebuild` -> `i rb`
+- `git` subcommands -> `g`
+- `--personal` -> `-p`
 
 ## AI agent usage
 

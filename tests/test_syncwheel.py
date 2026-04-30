@@ -23,12 +23,14 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def run_cli(self, *args, expected=0):
+    def run_cli(self, *args, expected=0, extra_env=None, cwd=None):
         env = dict(**os.environ)
         env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        if extra_env:
+            env.update(extra_env)
         result = subprocess.run(
             ['python3', str(CLI), *args],
-            cwd=self.repo,
+            cwd=cwd or self.repo,
             text=True,
             capture_output=True,
             env=env,
@@ -123,6 +125,27 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('validation', data)
         self.assertEqual(data['validation']['errors'], [])
 
+    def test_check_json_reports_validation_and_plan(self):
+        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertIn('validation', data)
+        self.assertEqual(data['validation']['errors'], [])
+        self.assertEqual(data['plan'], [])
+
+    def test_env_repo_allows_running_outside_target_repo(self):
+        result = self.run_cli(
+            'ck',
+            '--no-fetch',
+            '--json',
+            expected=0,
+            extra_env={'SYNCWHEEL_REPO': str(self.repo)},
+            cwd=self.tmp,
+        )
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data['snapshot']['repo_root'], str(self.repo))
+
     def test_init_personal_creates_local_manifest_path(self):
         personal_manifest = self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'
 
@@ -140,7 +163,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.run_cli(
             'stack',
             'create',
-            '--personal',
+            '-p',
             'alice',
             'feature-c',
             gamma,
@@ -149,8 +172,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
             '--include-in-integration',
             expected=0,
         )
-        self.run_cli('stack', 'set', '--personal', 'alice', 'feature-c', 'HEAD~1..HEAD', expected=0)
-        result = self.run_cli('status', '--personal', 'alice', '--json', expected=0)
+        self.run_cli('s', 'set', '-p', 'alice', 'feature-c', 'HEAD~1..HEAD', expected=0)
+        result = self.run_cli('st', '-p', 'alice', '--json', expected=0)
         data = json.loads(result.stdout)
 
         self.assertEqual(
@@ -163,8 +186,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         gamma = self.git('rev-parse', 'HEAD')
 
         result = self.run_cli(
-            'stack',
-            'create',
+            's',
+            'new',
             'feature-c',
             gamma,
             '--branch',

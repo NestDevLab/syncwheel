@@ -14,8 +14,10 @@ class SyncwheelError(Exception):
 
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
+ENV_REPO = 'SYNCWHEEL_REPO'
+ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
-VERSION = '0.3.0'
+VERSION = '0.4.0'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):
@@ -92,6 +94,8 @@ def save_repo_registry(registry, path=None):
 
 def resolve_repo_root(repo_value=None):
     if not repo_value:
+        repo_value = os.environ.get(ENV_REPO)
+    if not repo_value:
         return get_repo_root()
 
     candidate_path = Path(repo_value).expanduser()
@@ -115,6 +119,7 @@ def resolve_repo_root(repo_value=None):
 
 
 def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, personal=None):
+    personal = personal or os.environ.get(ENV_PERSONAL)
     if personal:
         if manifest_override:
             raise SyncwheelError('use either --personal or --manifest, not both')
@@ -795,6 +800,53 @@ def command_plan(args):
     return 1 if validation['errors'] else 0
 
 
+def command_check(args):
+    repo_root = resolve_repo_root(args.repo)
+    if args.fetch:
+        git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    if not manifest:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    snapshot = collect_repo_snapshot(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest)
+    plan = build_plan(repo_root, manifest, validation)
+    output = {
+        'snapshot': snapshot,
+        'manifest_path': str(manifest_path),
+        'validation': validation,
+        'plan': plan,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return 1 if validation['errors'] else 0
+    print(f"repo: {snapshot['repo_root']}")
+    print(f"branch: {snapshot['current_branch']}")
+    print(f"manifest: {manifest_path}")
+    if validation['errors']:
+        print('\nvalidation:')
+        for line in validation['errors']:
+            print(f'  - ERROR: {line}')
+    if validation['warnings']:
+        if not validation['errors']:
+            print('\nvalidation:')
+        for line in validation['warnings']:
+            print(f'  - WARN: {line}')
+    if not validation['errors'] and not validation['warnings']:
+        print('\nvalidation: OK')
+    print('\nplan:')
+    if not plan:
+        print('  - no actions needed')
+    for action in plan:
+        line = action['type']
+        if 'stack' in action:
+            line += f" stack={action['stack']}"
+        if 'branch' in action:
+            line += f" branch={action['branch']}"
+        print(f'  - {line}')
+    return 1 if validation['errors'] else 0
+
+
 def command_stack_list(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -994,10 +1046,10 @@ def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('-r', '--repo', help='target repo path or registered alias')
     common.add_argument('--manifest', help='path to a syncwheel manifest JSON file')
-    common.add_argument('--personal', help='use .syncwheel/manifests/<name>.local.json')
+    common.add_argument('-p', '--personal', help='use .syncwheel/manifests/<name>.local.json')
     sub = parser.add_subparsers(dest='command', required=True)
 
-    repo_p = sub.add_parser('repo', help='manage repo aliases')
+    repo_p = sub.add_parser('repo', aliases=['r'], help='manage repo aliases')
     repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
 
     repo_add_p = repo_sub.add_parser('add', help='add/update one repo alias')
@@ -1020,7 +1072,7 @@ def build_parser():
     repo_ls_p.add_argument('--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
 
-    init_p = sub.add_parser('init', help='create a starter manifest', parents=[common])
+    init_p = sub.add_parser('init', aliases=['in'], help='create a starter manifest', parents=[common])
     init_p.add_argument('--canonical-remote', default='origin')
     init_p.add_argument('--publication-remote', default='fork')
     init_p.add_argument('--base-branch', default='main')
@@ -1029,30 +1081,35 @@ def build_parser():
     init_p.add_argument('--stdout', action='store_true')
     init_p.set_defaults(func=command_init)
 
-    status_p = sub.add_parser('status', help='show repo and manifest state', parents=[common])
+    status_p = sub.add_parser('status', aliases=['st'], help='show repo and manifest state', parents=[common])
     status_p.add_argument('--fetch', action='store_true')
     status_p.add_argument('--json', action='store_true')
     status_p.set_defaults(func=command_status)
 
-    validate_p = sub.add_parser('validate', help='validate the manifest against local git state', parents=[common])
+    validate_p = sub.add_parser('validate', aliases=['v'], help='validate the manifest against local git state', parents=[common])
     validate_p.add_argument('--json', action='store_true')
     validate_p.set_defaults(func=command_validate)
 
-    plan_p = sub.add_parser('plan', help='emit a deterministic action plan from the manifest', parents=[common])
+    plan_p = sub.add_parser('plan', aliases=['pl'], help='emit a deterministic action plan from the manifest', parents=[common])
     plan_p.add_argument('--json', action='store_true')
     plan_p.set_defaults(func=command_plan)
 
-    stack_p = sub.add_parser('stack', help='inspect, create, edit, rebuild, push, or run git for one stack')
+    check_p = sub.add_parser('check', aliases=['ck'], help='fetch, validate, and print the current action plan', parents=[common])
+    check_p.add_argument('--no-fetch', dest='fetch', action='store_false')
+    check_p.add_argument('--json', action='store_true')
+    check_p.set_defaults(func=command_check, fetch=True)
+
+    stack_p = sub.add_parser('stack', aliases=['s'], help='inspect, create, edit, rebuild, push, or run git for one stack')
     stack_sub = stack_p.add_subparsers(dest='stack_command', required=True)
 
-    stack_list_p = stack_sub.add_parser('list', parents=[common])
+    stack_list_p = stack_sub.add_parser('list', aliases=['ls'], parents=[common])
     stack_list_p.set_defaults(func=command_stack_list)
 
-    stack_show_p = stack_sub.add_parser('show', parents=[common])
+    stack_show_p = stack_sub.add_parser('show', aliases=['sh'], parents=[common])
     stack_show_p.add_argument('stack')
     stack_show_p.set_defaults(func=command_stack_show)
 
-    stack_create_p = stack_sub.add_parser('create', parents=[common])
+    stack_create_p = stack_sub.add_parser('create', aliases=['new'], parents=[common])
     stack_create_p.add_argument('stack')
     stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
     stack_create_p.add_argument('--branch')
@@ -1078,7 +1135,7 @@ def build_parser():
     stack_add_p.add_argument('specs', nargs='+')
     stack_add_p.set_defaults(func=command_stack_add)
 
-    stack_rebuild_p = stack_sub.add_parser('rebuild', parents=[common])
+    stack_rebuild_p = stack_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     stack_rebuild_p.add_argument('stack')
     add_rebuild_args(stack_rebuild_p)
     stack_rebuild_p.set_defaults(func=command_stack_rebuild)
@@ -1088,18 +1145,18 @@ def build_parser():
     add_push_args(stack_push_p)
     stack_push_p.set_defaults(func=command_stack_push)
 
-    stack_git_p = stack_sub.add_parser('git', parents=[common])
+    stack_git_p = stack_sub.add_parser('git', aliases=['g'], parents=[common])
     stack_git_p.add_argument('stack')
     add_git_args(stack_git_p)
     stack_git_p.set_defaults(func=command_stack_git)
 
-    int_p = sub.add_parser('int', help='inspect, rebuild, push, or run git for integration')
+    int_p = sub.add_parser('int', aliases=['i'], help='inspect, rebuild, push, or run git for integration')
     int_sub = int_p.add_subparsers(dest='int_command', required=True)
 
-    int_show_p = int_sub.add_parser('show', parents=[common])
+    int_show_p = int_sub.add_parser('show', aliases=['sh'], parents=[common])
     int_show_p.set_defaults(func=command_int_show)
 
-    int_rebuild_p = int_sub.add_parser('rebuild', parents=[common])
+    int_rebuild_p = int_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     add_rebuild_args(int_rebuild_p)
     int_rebuild_p.set_defaults(func=command_int_rebuild)
 
@@ -1107,7 +1164,7 @@ def build_parser():
     add_push_args(int_push_p)
     int_push_p.set_defaults(func=command_int_push)
 
-    int_git_p = int_sub.add_parser('git', parents=[common])
+    int_git_p = int_sub.add_parser('git', aliases=['g'], parents=[common])
     add_git_args(int_git_p)
     int_git_p.set_defaults(func=command_int_git)
 
