@@ -80,6 +80,8 @@ Practical meaning:
 - `stack push` and `int push` wrap `git push`, with arbitrary Git arguments
   after `--`.
 - `validate` and `plan` detect drift before branch mutation.
+- validation also reports non-merge commits on integration that are not
+  declared in any stack, so integration-only work cannot hide silently.
 - `integration.strategy` controls how integration is rebuilt:
   - `cherry-pick` replays every declared commit into one linear history.
   - `merge-stacks` merges each declared stack branch in manifest order with
@@ -248,6 +250,15 @@ python3 scripts/syncwheel.py stack push feature-a -- --force-with-lease
 Use `--dry-run` on rebuild/push commands to print commands without applying
 them.
 
+`stack git` and `int git` run Git commands inside the worktree for the target
+branch. If no worktree exists yet, pass `--worktree <path>` or
+`--auto-worktree`:
+
+```bash
+python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
+python3 scripts/syncwheel.py int git --auto-worktree -- status
+```
+
 ### 6. Rebuild and push integration from declared stack order
 
 Worktree mode:
@@ -401,8 +412,10 @@ python3 scripts/syncwheel.py stack --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help
 python3 scripts/syncwheel.py stack push --help
+python3 scripts/syncwheel.py stack git --help
 python3 scripts/syncwheel.py int rebuild --help
 python3 scripts/syncwheel.py int push --help
+python3 scripts/syncwheel.py int git --help
 ```
 
 ## AI agent usage

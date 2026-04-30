@@ -161,6 +161,17 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('git reset --hard main', result.stdout)
         self.assertIn('git cherry-pick', result.stdout)
 
+    def test_int_rebuild_skips_empty_cherry_pick(self):
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['stacks'] = []
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('int', 'rebuild', '--in-place', '--dry-run', expected=0)
+
+        self.assertIn('git reset --hard main', result.stdout)
+        self.assertNotIn('git cherry-pick', result.stdout)
+
     def test_in_place_apply_requires_current_target_branch(self):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', expected=2)
         self.assertIn('requires current branch', result.stderr)
@@ -206,6 +217,83 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_int_git_runs_in_integration_worktree(self):
         result = self.run_cli('int', 'git', '--', 'branch', '--show-current', expected=0)
         self.assertEqual(result.stdout.strip(), 'main')
+
+    def test_stack_git_can_create_explicit_worktree(self):
+        worktree = self.tmp / 'wt-feature-a'
+        result = self.run_cli(
+            'stack',
+            'git',
+            'feature-a',
+            '--worktree',
+            str(worktree),
+            '--',
+            'branch',
+            '--show-current',
+            expected=0,
+        )
+
+        self.assertEqual(result.stdout.strip(), 'pr/feature-a')
+        self.assertTrue(worktree.exists())
+
+    def test_int_git_can_create_explicit_worktree(self):
+        self.git('branch', 'integration/test', 'main')
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+        worktree = self.tmp / 'wt-integration'
+
+        result = self.run_cli(
+            'int',
+            'git',
+            '--worktree',
+            str(worktree),
+            '--',
+            'branch',
+            '--show-current',
+            expected=0,
+        )
+
+        self.assertEqual(result.stdout.strip(), 'integration/test')
+        self.assertTrue(worktree.exists())
+
+    def test_validate_warns_for_unmapped_integration_commits(self):
+        self.git('branch', 'integration/test', 'main')
+        self.git('switch', '-q', 'integration/test')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('validate', '--json', expected=0)
+        validation = json.loads(result.stdout)
+
+        self.assertIn('not declared in any stack', '\n'.join(validation['warnings']))
+        self.assertEqual(len(validation['details']['integration']['unmapped_commits']), 1)
+
+    def test_plan_reports_unmapped_integration_commits(self):
+        self.git('branch', 'integration/test', 'main')
+        self.git('switch', '-q', 'integration/test')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('plan', '--json', expected=0)
+        plan = json.loads(result.stdout)
+
+        self.assertEqual(plan[-1]['type'], 'classify_integration_commits')
+        self.assertEqual(len(plan[-1]['commits']), 1)
 
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'

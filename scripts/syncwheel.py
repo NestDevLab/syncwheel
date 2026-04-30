@@ -141,6 +141,27 @@ def branch_contains(repo_root, branch, commit):
     return git(repo_root, 'merge-base', '--is-ancestor', commit, branch, check=False).returncode == 0
 
 
+def commit_full_sha(repo_root, ref):
+    return git(repo_root, 'rev-parse', f'{ref}^{{commit}}').stdout.strip()
+
+
+def commit_parent_count(repo_root, commit):
+    result = git(repo_root, 'rev-list', '--parents', '-n', '1', commit)
+    parts = result.stdout.strip().split()
+    return max(0, len(parts) - 1)
+
+
+def commit_patch_id(repo_root, commit):
+    if commit_parent_count(repo_root, commit) != 1:
+        return None
+    show = git(repo_root, 'show', '--format=', commit)
+    patch_id = run(['git', 'patch-id', '--stable'], input_text=show.stdout)
+    line = patch_id.stdout.strip()
+    if not line:
+        return None
+    return line.split()[0]
+
+
 def get_default_remote_head(repo_root, remote):
     symref = git(repo_root, 'symbolic-ref', '--quiet', '--short', f'refs/remotes/{remote}/HEAD', check=False)
     if symref.returncode == 0 and symref.stdout.strip():
@@ -323,6 +344,24 @@ def find_worktree_for_branch(repo_root, branch):
     return None
 
 
+def resolve_git_worktree(repo_root, branch, worktree=None, auto_worktree=False):
+    found = find_worktree_for_branch(repo_root, branch)
+    if found:
+        return found
+    if worktree:
+        path = Path(worktree).expanduser().resolve()
+        run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+        return path
+    if auto_worktree:
+        path = default_worktree_path(repo_root, branch)
+        run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+        return path
+    raise SyncwheelError(
+        f"no worktree found for branch: {branch}; pass --worktree <path> "
+        'or --auto-worktree to create one'
+    )
+
+
 def passthrough_args(values):
     return values or []
 
@@ -379,6 +418,9 @@ def validate_manifest(repo_root, manifest):
     integration = manifest['integration']
     integration_branch = integration['branch']
     integration_strategy = integration.get('strategy')
+    declared_commits = []
+    declared_commit_shas = set()
+    declared_patch_ids = set()
     if integration_strategy not in INTEGRATION_STRATEGIES:
         errors.append(
             'integration strategy must be one of '
@@ -415,11 +457,35 @@ def validate_manifest(repo_root, manifest):
                 item['missing_commits'].append(commit)
                 errors.append(f"stack {stack['id']} references missing commit: {commit}")
                 continue
+            declared_commits.append(commit)
+            declared_commit_shas.add(commit_full_sha(repo_root, commit))
+            patch_id = commit_patch_id(repo_root, commit)
+            if patch_id:
+                declared_patch_ids.add(patch_id)
             if item['branch_exists'] and not branch_contains(repo_root, stack['branch'], commit):
                 item['missing_from_branch'].append(commit)
             if integration_exists and not branch_contains(repo_root, integration_branch, commit):
                 item['missing_from_integration'].append(commit)
         details['stacks'].append(item)
+
+    integration_commits = []
+    unmapped_commits = []
+    integration_merge_commits = []
+    if integration_exists and ref_exists(repo_root, integration['base']):
+        integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
+        for commit in integration_commits:
+            full_sha = commit_full_sha(repo_root, commit)
+            if commit_parent_count(repo_root, commit) > 1:
+                integration_merge_commits.append(full_sha)
+                continue
+            patch_id = commit_patch_id(repo_root, commit)
+            if full_sha not in declared_commit_shas and (not patch_id or patch_id not in declared_patch_ids):
+                unmapped_commits.append(full_sha)
+        if unmapped_commits:
+            warnings.append(
+                f"integration contains {len(unmapped_commits)} non-merge commit(s) "
+                'not declared in any stack'
+            )
 
     details['integration'] = {
         'branch': integration_branch,
@@ -427,6 +493,10 @@ def validate_manifest(repo_root, manifest):
         'base': integration['base'],
         'strategy': integration_strategy,
         'stacks': integration.get('stacks', []),
+        'commits': integration_commits,
+        'declared_commits': declared_commits,
+        'unmapped_commits': unmapped_commits,
+        'merge_commits': integration_merge_commits,
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
 
@@ -465,6 +535,12 @@ def build_plan(repo_root, manifest, validation):
                 'missing_commits': item['missing_from_integration'],
                 'meta': item.get('meta', {}),
             })
+    if details['integration'].get('unmapped_commits'):
+        actions.append({
+            'type': 'classify_integration_commits',
+            'branch': integration['branch'],
+            'commits': details['integration']['unmapped_commits'],
+        })
     return actions
 
 
@@ -503,6 +579,8 @@ def integration_stack_commands(manifest, worktree=None):
         commits = []
         for stack_id in integration['stacks']:
             commits.extend(stacks_by_id[stack_id]['commits'])
+        if not commits:
+            return []
         return [[*prefix, 'cherry-pick', *commits]]
     if strategy == 'merge-stacks':
         commands = []
@@ -769,9 +847,7 @@ def command_stack_git(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
     stack = require_stack(manifest, args.stack)
-    worktree = find_worktree_for_branch(repo_root, stack['branch'])
-    if not worktree:
-        raise SyncwheelError(f"no worktree found for stack branch: {stack['branch']}")
+    worktree = resolve_git_worktree(repo_root, stack['branch'], args.worktree, args.auto_worktree)
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('stack git requires git arguments after --')
@@ -820,9 +896,7 @@ def command_int_git(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
     branch = manifest['integration']['branch']
-    worktree = find_worktree_for_branch(repo_root, branch)
-    if not worktree:
-        raise SyncwheelError(f'no worktree found for integration branch: {branch}')
+    worktree = resolve_git_worktree(repo_root, branch, args.worktree, args.auto_worktree)
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('int git requires git arguments after --')
@@ -846,8 +920,9 @@ def add_push_args(parser):
 
 
 def add_git_args(parser):
+    parser.add_argument('--worktree', help='create/use this worktree path when the branch has no worktree')
+    parser.add_argument('--auto-worktree', action='store_true', help='create the default worktree when missing')
     return parser
-    return 0
 
 
 def build_parser():

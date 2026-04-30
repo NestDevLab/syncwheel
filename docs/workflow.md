@@ -31,11 +31,12 @@ That becomes deterministic only when the repository declares the mapping in `.sy
 1. recover current state with `status`
 2. validate the manifest with `validate`
 3. inspect planned actions with `plan --json`
-4. update stale stack commit lists with `stack sync`, `stack set`, or `stack add`
-5. rebuild individual PR branches with `stack rebuild` if needed
-6. rebuild integration with `int rebuild` if needed
-7. rerun validation
-8. run project-specific tests outside `syncwheel`
+4. classify any integration commits that are not declared in a stack
+5. update stale stack commit lists with `stack sync`, `stack set`, or `stack add`
+6. rebuild individual PR branches with `stack rebuild` if needed
+7. rebuild integration with `int rebuild` if needed
+8. rerun validation
+9. run project-specific tests outside `syncwheel`
 
 ## Manifest semantics
 
@@ -44,6 +45,10 @@ That becomes deterministic only when the repository declares the mapping in `.sy
 - `integration.stacks`: replay order of logical stacks into integration
 - `stacks[].branch`: PR branch for that stack
 - `stacks[].commits`: exact commit list for that logical stack
+
+`validate` also reports non-merge commits that exist on integration after
+`integration.base` but are not declared in any stack. These commits need a
+manifest update or an explicit decision to keep them temporary.
 
 ## What remains non-deterministic
 

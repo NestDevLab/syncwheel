@@ -55,3 +55,8 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 - whether PR branches contain declared commits
 - whether integration contains declared commits
 - whether integration references unknown stacks
+- whether integration contains non-merge commits that are not declared in any stack
+
+Unmapped integration commits are reported as warnings plus a
+`classify_integration_commits` plan action. The tool can identify the commits,
+but a human or AI agent still needs to decide which stack owns each change.
