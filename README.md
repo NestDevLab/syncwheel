@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.5.0`
+Current version: `0.5.1`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -232,15 +232,17 @@ Example:
 ### 1. Bootstrap a manifest
 
 ```bash
-python3 scripts/syncwheel.py init --stdout > .syncwheel/manifest.json
+python3 scripts/syncwheel.py init
 ```
 
-Or copy the example:
+For a custom integration branch:
 
 ```bash
-mkdir -p .syncwheel
-cp examples/manifest.example.json .syncwheel/manifest.json
+python3 scripts/syncwheel.py init --integration-branch main-integration
 ```
+
+Use `--stdout` only when you need to pipe the generated manifest instead of
+writing it to `.syncwheel/manifest.json`.
 
 ### 2. Inspect current state
 

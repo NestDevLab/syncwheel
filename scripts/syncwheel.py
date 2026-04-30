@@ -18,7 +18,7 @@ ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
-VERSION = '0.5.0'
+VERSION = '0.5.1'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):

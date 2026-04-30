@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1 - 2026-04-30
+
+- Document `init` as the default manifest bootstrap command; keep `--stdout`
+  as an advanced piping option.
+
 ## 0.5.0 - 2026-04-30
 
 - Add repo-local profile selection with `use <profile>` and `use --shared`.

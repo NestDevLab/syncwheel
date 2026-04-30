@@ -38,7 +38,7 @@ Preferred file:
 
 If missing, create a starter file:
 ```bash
-python3 scripts/syncwheel.py init --stdout
+python3 scripts/syncwheel.py init
 ```
 
 Then fill in:
