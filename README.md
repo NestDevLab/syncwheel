@@ -143,10 +143,10 @@ Requirements:
 You can register repo aliases and keep commands short.
 
 ```bash
-python3 scripts/syncwheel.py repo add yalc ~/code/nestjs-yalc
+python3 scripts/syncwheel.py repo add project ~/code/sample-project
 python3 scripts/syncwheel.py repo ls
-python3 scripts/syncwheel.py status -r yalc --fetch
-python3 scripts/syncwheel.py repo rm yalc
+python3 scripts/syncwheel.py status -r project --fetch
+python3 scripts/syncwheel.py repo rm project
 ```
 
 `-r/--repo` accepts both:
@@ -156,10 +156,10 @@ python3 scripts/syncwheel.py repo rm yalc
 Alias entries can also carry a default manifest path (useful for private/local manifests on public repos):
 
 ```bash
-python3 scripts/syncwheel.py repo add cas ~/code/openclaw-codex-app-server \
-  --manifest ~/.config/syncwheel/manifests/cas.json
-python3 scripts/syncwheel.py repo set-manifest cas ~/.config/syncwheel/manifests/cas.json
-python3 scripts/syncwheel.py repo set-manifest cas --clear
+python3 scripts/syncwheel.py repo add service ~/code/sample-service \
+  --manifest ~/.config/syncwheel/manifests/sample-service.json
+python3 scripts/syncwheel.py repo set-manifest service ~/.config/syncwheel/manifests/sample-service.json
+python3 scripts/syncwheel.py repo set-manifest service --clear
 ```
 
 You can also set `SYNCWHEEL_REPO` when wrapping syncwheel from another project:
@@ -213,8 +213,8 @@ Example:
 
 ```json
 {
-  "id": "cas-endpoint-resolution-policy",
-  "branch": "pr/cas-endpoint-resolution-policy",
+  "id": "endpoint-resolution-policy",
+  "branch": "pr/endpoint-resolution-policy",
   "commits": ["abc1234"],
   "meta": {
     "purpose": "Endpoint policy and routing",
