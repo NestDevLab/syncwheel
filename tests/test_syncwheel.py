@@ -123,6 +123,40 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('validation', data)
         self.assertEqual(data['validation']['errors'], [])
 
+    def test_init_personal_creates_local_manifest_path(self):
+        personal_manifest = self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'
+
+        result = self.run_cli('init', '--personal', 'alice', '--force', expected=0)
+
+        self.assertEqual(result.stdout.strip(), str(personal_manifest))
+        data = json.loads(personal_manifest.read_text())
+        self.assertEqual(data['integration']['branch'], 'integration/alice/main')
+        self.assertEqual(data['stacks'], [])
+
+    def test_stack_create_adds_stack_without_hand_editing_manifest(self):
+        gamma = self.git('rev-parse', 'HEAD')
+
+        result = self.run_cli(
+            'stack',
+            'create',
+            'feature-c',
+            gamma,
+            '--branch',
+            'pr/alice/feature-c',
+            '--purpose',
+            'Exercise stack creation',
+            '--include-in-integration',
+            expected=0,
+        )
+
+        self.assertIn('feature-c: created pr/alice/feature-c with 1 commits', result.stdout)
+        manifest = self.read_manifest()
+        feature_c = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-c')
+        self.assertEqual(feature_c['branch'], 'pr/alice/feature-c')
+        self.assertEqual(feature_c['commits'], [gamma])
+        self.assertEqual(feature_c['meta']['purpose'], 'Exercise stack creation')
+        self.assertIn('feature-c', manifest['integration']['stacks'])
+
     def test_stack_rebuild_worktree_commands_are_emitted(self):
         worktree = self.tmp / 'wt-feature-a'
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--worktree', str(worktree), '--dry-run', expected=0)

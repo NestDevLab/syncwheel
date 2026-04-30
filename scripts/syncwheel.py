@@ -15,7 +15,7 @@ class SyncwheelError(Exception):
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
-VERSION = '0.2.0'
+VERSION = '0.3.0'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):
@@ -332,6 +332,27 @@ def commit_list_for_spec(repo_root, spec):
     return [git(repo_root, 'rev-parse', spec).stdout.strip()]
 
 
+def safe_ref_segment(value):
+    cleaned = value.strip().replace('\\', '/').strip('/')
+    if not cleaned or cleaned.startswith('.') or '..' in cleaned:
+        raise SyncwheelError(f'invalid ref segment: {value!r}')
+    disallowed = set(' ~^:?*[')
+    if any(char in disallowed for char in cleaned):
+        raise SyncwheelError(f'invalid ref segment: {value!r}')
+    if cleaned.endswith('.lock') or cleaned.endswith('/'):
+        raise SyncwheelError(f'invalid ref segment: {value!r}')
+    return cleaned
+
+
+def personal_manifest_path(repo_root, name):
+    segment = safe_ref_segment(name)
+    return repo_root / '.syncwheel' / 'manifests' / f'{segment}.local.json'
+
+
+def personal_integration_branch(name):
+    return f'integration/{safe_ref_segment(name)}/main'
+
+
 def default_worktree_path(repo_root, branch):
     safe = branch.replace('/', '-').replace('\\', '-')
     return repo_root.parent / f'{repo_root.name}-wt-{safe}'
@@ -629,6 +650,16 @@ def command_init(args):
     canonical_remote = args.canonical_remote
     base_branch = args.base_branch
     publication_remote = args.publication_remote
+    if args.personal:
+        if args.manifest:
+            raise SyncwheelError('use either --personal or --manifest, not both')
+        manifest_path = personal_manifest_path(repo_root, args.personal)
+        integration_branch = args.integration_branch
+        if integration_branch == 'integration/main':
+            integration_branch = personal_integration_branch(args.personal)
+    else:
+        manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+        integration_branch = args.integration_branch
     manifest = {
         'version': 1,
         'defaults': {
@@ -638,7 +669,7 @@ def command_init(args):
             'base_ref': f'{canonical_remote}/{base_branch}',
         },
         'integration': {
-            'branch': args.integration_branch,
+            'branch': integration_branch,
             'base': f'{canonical_remote}/{base_branch}',
             'strategy': 'cherry-pick',
             'stacks': [],
@@ -649,7 +680,6 @@ def command_init(args):
     if args.stdout:
         print(output, end='')
         return 0
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     if manifest_path.exists() and not args.force:
         raise SyncwheelError(f'manifest already exists: {manifest_path}')
@@ -776,6 +806,37 @@ def command_stack_show(args):
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
     stack = require_stack(manifest, args.stack)
     print(json.dumps(stack, indent=2))
+    return 0
+
+
+def command_stack_create(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    stacks = stack_map(manifest)
+    if args.stack in stacks:
+        raise SyncwheelError(f"stack already exists: {args.stack}")
+    branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
+    if any(stack['branch'] == branch for stack in manifest['stacks']):
+        raise SyncwheelError(f'stack branch already exists in manifest: {branch}')
+    commits = []
+    for spec in args.specs:
+        commits.extend(commit_list_for_spec(repo_root, spec))
+    stack = {
+        'id': args.stack,
+        'branch': branch,
+        'base': args.base or manifest['defaults']['base_ref'],
+        'target_remote': args.target_remote or manifest['defaults']['canonical_remote'],
+        'target_branch': args.target_branch or manifest['defaults']['base_branch'],
+        'integration_branch': args.integration_branch or manifest['integration']['branch'],
+        'commits': list(dict.fromkeys(commits)),
+    }
+    if args.purpose:
+        stack['meta'] = {'purpose': args.purpose}
+    manifest['stacks'].append(stack)
+    if args.include_in_integration and args.stack not in manifest['integration']['stacks']:
+        manifest['integration']['stacks'].append(args.stack)
+    save_manifest(manifest_path, manifest)
+    print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits")
     return 0
 
 
@@ -961,6 +1022,7 @@ def build_parser():
     init_p.add_argument('--publication-remote', default='fork')
     init_p.add_argument('--base-branch', default='main')
     init_p.add_argument('--integration-branch', default='integration/main')
+    init_p.add_argument('--personal', help='create .syncwheel/manifests/<name>.local.json with integration/<name>/main')
     init_p.add_argument('--force', action='store_true')
     init_p.add_argument('--stdout', action='store_true')
     init_p.set_defaults(func=command_init)
@@ -978,7 +1040,7 @@ def build_parser():
     plan_p.add_argument('--json', action='store_true')
     plan_p.set_defaults(func=command_plan)
 
-    stack_p = sub.add_parser('stack', help='inspect, edit, rebuild, push, or run git for one stack')
+    stack_p = sub.add_parser('stack', help='inspect, create, edit, rebuild, push, or run git for one stack')
     stack_sub = stack_p.add_subparsers(dest='stack_command', required=True)
 
     stack_list_p = stack_sub.add_parser('list', parents=[common])
@@ -987,6 +1049,18 @@ def build_parser():
     stack_show_p = stack_sub.add_parser('show', parents=[common])
     stack_show_p.add_argument('stack')
     stack_show_p.set_defaults(func=command_stack_show)
+
+    stack_create_p = stack_sub.add_parser('create', parents=[common])
+    stack_create_p.add_argument('stack')
+    stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
+    stack_create_p.add_argument('--branch')
+    stack_create_p.add_argument('--base')
+    stack_create_p.add_argument('--target-remote')
+    stack_create_p.add_argument('--target-branch')
+    stack_create_p.add_argument('--integration-branch')
+    stack_create_p.add_argument('--purpose')
+    stack_create_p.add_argument('--include-in-integration', action='store_true')
+    stack_create_p.set_defaults(func=command_stack_create)
 
     stack_sync_p = stack_sub.add_parser('sync', parents=[common])
     stack_sync_p.add_argument('stack')

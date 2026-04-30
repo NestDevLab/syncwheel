@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.2.0`
+Current version: `0.3.0`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -162,6 +162,24 @@ python3 scripts/syncwheel.py repo set-manifest cas ~/.config/syncwheel/manifests
 python3 scripts/syncwheel.py repo set-manifest cas --clear
 ```
 
+## Manifest creation
+
+Create the shared manifest with `init`:
+
+```bash
+python3 scripts/syncwheel.py init --integration-branch main-integration
+```
+
+Create a personal local manifest without copying or hand-writing JSON:
+
+```bash
+python3 scripts/syncwheel.py init --personal alice
+```
+
+This writes `.syncwheel/manifests/alice.local.json` and defaults its integration
+branch to `integration/alice/main`. Use `--manifest` on later commands when you
+want to target that personal manifest.
+
 ## Stack metadata (optional)
 
 Each stack can include optional `meta` fields so humans and AI can understand intent better.
@@ -221,6 +239,7 @@ python3 scripts/syncwheel.py stack sync feature-a
 Or set it from an explicit commit/range:
 
 ```bash
+python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
 python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 python3 scripts/syncwheel.py stack add feature-a HEAD
 ```

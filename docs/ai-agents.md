@@ -26,7 +26,8 @@ An AI agent should then:
 1. run `python3 scripts/syncwheel.py status --fetch`
 2. run `python3 scripts/syncwheel.py validate`
 3. run `python3 scripts/syncwheel.py plan --json`
-4. if the manifest is stale, update it first
+4. if the manifest is missing or stale, update it first with `init` and
+   `stack create`/`stack set`/`stack add`
 5. run `stack rebuild` or `int rebuild` only when needed
 6. rerun `validate`
 7. summarize what changed and what still needs a human

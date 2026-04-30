@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0 - 2026-04-30
+
+- Add `init --personal <name>` to create ignored local manifests under
+  `.syncwheel/manifests/<name>.local.json`.
+- Add `stack create` so stack entries can be created without hand-editing the
+  manifest.
+- Document command-first manifest and stack creation flows for humans and AI
+  agents.
+
 ## 0.2.0 - 2026-04-30
 
 - Replace the previous materialization UI with the object/action CLI:

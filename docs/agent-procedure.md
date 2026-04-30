@@ -24,6 +24,14 @@ The agent should not improvise branch ownership if:
 - integration contains real work not present in any declared stack
 
 In those cases, the agent should update `.syncwheel/manifest.json` first.
+Prefer syncwheel commands over manual JSON edits:
+
+```bash
+python3 scripts/syncwheel.py init --integration-branch main-integration
+python3 scripts/syncwheel.py init --personal alice
+python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
+```
 
 ## Prompt-friendly workflow
 

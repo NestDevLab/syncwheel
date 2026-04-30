@@ -33,6 +33,30 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 }
 ```
 
+## Create manifests with commands
+
+Create a shared manifest:
+
+```bash
+python3 scripts/syncwheel.py init --integration-branch main-integration
+```
+
+Create a personal local manifest:
+
+```bash
+python3 scripts/syncwheel.py init --personal alice
+```
+
+This writes `.syncwheel/manifests/alice.local.json` and sets the integration
+branch to `integration/alice/main`.
+
+Create stack entries through the CLI:
+
+```bash
+python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
+```
+
 ## Rules
 
 - `version` is currently `1`
