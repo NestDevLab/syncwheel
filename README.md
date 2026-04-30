@@ -177,8 +177,14 @@ python3 scripts/syncwheel.py init --personal alice
 ```
 
 This writes `.syncwheel/manifests/alice.local.json` and defaults its integration
-branch to `integration/alice/main`. Use `--manifest` on later commands when you
-want to target that personal manifest.
+branch to `integration/alice/main`. Use `--personal alice` on later commands
+when you want to target that personal manifest:
+
+```bash
+python3 scripts/syncwheel.py status --personal alice
+python3 scripts/syncwheel.py stack create --personal alice feature-a --branch pr/alice/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack set --personal alice feature-a origin/main..HEAD
+```
 
 ## Stack metadata (optional)
 

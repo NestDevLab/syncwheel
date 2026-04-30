@@ -114,7 +114,11 @@ def resolve_repo_root(repo_value=None):
     )
 
 
-def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None):
+def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, personal=None):
+    if personal:
+        if manifest_override:
+            raise SyncwheelError('use either --personal or --manifest, not both')
+        return personal_manifest_path(repo_root, personal)
     if manifest_override:
         return Path(manifest_override).expanduser()
     if repo_value:
@@ -304,8 +308,8 @@ def stack_map(manifest):
     return {stack['id']: stack for stack in manifest.get('stacks', [])}
 
 
-def require_manifest(repo_root, repo_value=None, manifest_override=None):
-    manifest_path = resolve_manifest_path(repo_root, repo_value, manifest_override)
+def require_manifest(repo_root, repo_value=None, manifest_override=None, personal=None):
+    manifest_path = resolve_manifest_path(repo_root, repo_value, manifest_override, personal)
     manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -651,14 +655,12 @@ def command_init(args):
     base_branch = args.base_branch
     publication_remote = args.publication_remote
     if args.personal:
-        if args.manifest:
-            raise SyncwheelError('use either --personal or --manifest, not both')
-        manifest_path = personal_manifest_path(repo_root, args.personal)
+        manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
         integration_branch = args.integration_branch
         if integration_branch == 'integration/main':
             integration_branch = personal_integration_branch(args.personal)
     else:
-        manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+        manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
         integration_branch = args.integration_branch
     manifest = {
         'version': 1,
@@ -692,7 +694,7 @@ def command_status(args):
     repo_root = resolve_repo_root(args.repo)
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
     manifest, manifest_path = load_manifest(repo_root, manifest_path)
     snapshot = collect_repo_snapshot(repo_root, manifest)
     output = {'snapshot': snapshot, 'manifest_path': str(manifest_path), 'manifest_present': manifest is not None}
@@ -758,7 +760,7 @@ def command_status(args):
 
 def command_validate(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
     manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -777,7 +779,7 @@ def command_validate(args):
 
 def command_plan(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
     manifest, manifest_path = load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -795,7 +797,7 @@ def command_plan(args):
 
 def command_stack_list(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     for stack in manifest['stacks']:
         print(f"{stack['id']}\t{stack['branch']}\tcommits={len(stack['commits'])}")
     return 0
@@ -803,7 +805,7 @@ def command_stack_list(args):
 
 def command_stack_show(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     print(json.dumps(stack, indent=2))
     return 0
@@ -811,7 +813,7 @@ def command_stack_show(args):
 
 def command_stack_create(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stacks = stack_map(manifest)
     if args.stack in stacks:
         raise SyncwheelError(f"stack already exists: {args.stack}")
@@ -842,7 +844,7 @@ def command_stack_create(args):
 
 def command_stack_sync(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     commits = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
     stack['commits'] = commits
@@ -853,7 +855,7 @@ def command_stack_sync(args):
 
 def command_stack_set(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     commits = []
     for spec in args.specs:
@@ -866,7 +868,7 @@ def command_stack_set(args):
 
 def command_stack_add(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     commits = list(stack['commits'])
     for spec in args.specs:
@@ -879,7 +881,7 @@ def command_stack_add(args):
 
 def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     worktree, in_place = resolve_stack_rebuild_location(repo_root, stack, args)
     if not args.dry_run and in_place:
@@ -891,7 +893,7 @@ def command_stack_rebuild(args):
 
 def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
     push_args = passthrough_args(args.git_args)
@@ -906,7 +908,7 @@ def command_stack_push(args):
 
 def command_stack_git(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     worktree = resolve_git_worktree(repo_root, stack['branch'], args.worktree, args.auto_worktree)
     git_args = passthrough_args(args.git_args)
@@ -922,14 +924,14 @@ def command_stack_git(args):
 
 def command_int_show(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     print(json.dumps(manifest['integration'], indent=2))
     return 0
 
 
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     worktree, in_place = resolve_int_rebuild_location(repo_root, manifest, args)
     if not args.dry_run and in_place:
         ensure_in_place_target(repo_root, manifest['integration']['branch'])
@@ -940,7 +942,7 @@ def command_int_rebuild(args):
 
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
     remote = args.remote or manifest['defaults']['publication_remote']
     push_args = passthrough_args(args.git_args)
@@ -955,7 +957,7 @@ def command_int_push(args):
 
 def command_int_git(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     branch = manifest['integration']['branch']
     worktree = resolve_git_worktree(repo_root, branch, args.worktree, args.auto_worktree)
     git_args = passthrough_args(args.git_args)
@@ -992,6 +994,7 @@ def build_parser():
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('-r', '--repo', help='target repo path or registered alias')
     common.add_argument('--manifest', help='path to a syncwheel manifest JSON file')
+    common.add_argument('--personal', help='use .syncwheel/manifests/<name>.local.json')
     sub = parser.add_subparsers(dest='command', required=True)
 
     repo_p = sub.add_parser('repo', help='manage repo aliases')
@@ -1022,7 +1025,6 @@ def build_parser():
     init_p.add_argument('--publication-remote', default='fork')
     init_p.add_argument('--base-branch', default='main')
     init_p.add_argument('--integration-branch', default='integration/main')
-    init_p.add_argument('--personal', help='create .syncwheel/manifests/<name>.local.json with integration/<name>/main')
     init_p.add_argument('--force', action='store_true')
     init_p.add_argument('--stdout', action='store_true')
     init_p.set_defaults(func=command_init)

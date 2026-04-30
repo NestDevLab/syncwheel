@@ -50,6 +50,13 @@ python3 scripts/syncwheel.py init --personal alice
 This writes `.syncwheel/manifests/alice.local.json` and sets the integration
 branch to `integration/alice/main`.
 
+Use the personal manifest with the short `--personal` flag:
+
+```bash
+python3 scripts/syncwheel.py validate --personal alice
+python3 scripts/syncwheel.py plan --personal alice --json
+```
+
 Create stack entries through the CLI:
 
 ```bash

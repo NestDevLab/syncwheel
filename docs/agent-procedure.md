@@ -29,8 +29,8 @@ Prefer syncwheel commands over manual JSON edits:
 ```bash
 python3 scripts/syncwheel.py init --integration-branch main-integration
 python3 scripts/syncwheel.py init --personal alice
-python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
-python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
+python3 scripts/syncwheel.py stack create --personal alice feature-a --branch pr/alice/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack set --personal alice feature-a origin/main..HEAD
 ```
 
 ## Prompt-friendly workflow

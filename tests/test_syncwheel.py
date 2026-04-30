@@ -133,6 +133,32 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['integration']['branch'], 'integration/alice/main')
         self.assertEqual(data['stacks'], [])
 
+    def test_personal_flag_selects_local_manifest_for_commands(self):
+        self.run_cli('init', '--personal', 'alice', '--force', expected=0)
+        gamma = self.git('rev-parse', 'HEAD')
+
+        self.run_cli(
+            'stack',
+            'create',
+            '--personal',
+            'alice',
+            'feature-c',
+            gamma,
+            '--branch',
+            'pr/alice/feature-c',
+            '--include-in-integration',
+            expected=0,
+        )
+        self.run_cli('stack', 'set', '--personal', 'alice', 'feature-c', 'HEAD~1..HEAD', expected=0)
+        result = self.run_cli('status', '--personal', 'alice', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(
+            data['manifest_path'],
+            str(self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'),
+        )
+        self.assertEqual(data['validation']['details']['stacks'][0]['id'], 'feature-c')
+
     def test_stack_create_adds_stack_without_hand_editing_manifest(self):
         gamma = self.git('rev-parse', 'HEAD')
 
