@@ -42,6 +42,12 @@ python3 scripts/syncwheel.py init
 ```
 
 By default this creates a shared integration branch named `main-integration`.
+Use `--integration-branch <name>` when a repository wants a different shared
+integration branch name:
+
+```bash
+python3 scripts/syncwheel.py init --integration-branch integration/team-stack
+```
 
 Create a personal local manifest:
 
