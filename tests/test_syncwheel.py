@@ -54,6 +54,9 @@ class SyncwheelFixtureTest(unittest.TestCase):
             )
         return result.stdout.strip()
 
+    def read_manifest(self):
+        return json.loads((self.repo / '.syncwheel' / 'manifest.json').read_text())
+
     def init_fixture_repo(self):
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.name', 'Syncwheel Fixture')
@@ -120,12 +123,97 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('validation', data)
         self.assertEqual(data['validation']['errors'], [])
 
-    def test_materialize_commands_are_emitted(self):
+    def test_stack_rebuild_worktree_commands_are_emitted(self):
         worktree = self.tmp / 'wt-feature-a'
-        result = self.run_cli('materialize-pr', 'feature-a', '--worktree', str(worktree), expected=0)
+        result = self.run_cli('stack', 'rebuild', 'feature-a', '--worktree', str(worktree), '--dry-run', expected=0)
         self.assertIn('git fetch --all --prune', result.stdout)
+        self.assertIn('git branch backup/pr/feature-a-before-syncwheel-', result.stdout)
         self.assertIn('git worktree add -B pr/feature-a', result.stdout)
         self.assertIn('git -C', result.stdout)
+
+    def test_stack_rebuild_in_place_commands_are_emitted(self):
+        result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', '--dry-run', expected=0)
+        self.assertIn('git fetch --all --prune', result.stdout)
+        self.assertIn('git branch backup/pr/feature-a-before-syncwheel-', result.stdout)
+        self.assertIn('git reset --hard main', result.stdout)
+        self.assertIn('git cherry-pick', result.stdout)
+
+    def test_int_rebuild_merge_stack_commands_are_emitted(self):
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['strategy'] = 'merge-stacks'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        worktree = self.tmp / 'wt-integration'
+        result = self.run_cli('int', 'rebuild', '--worktree', str(worktree), '--dry-run', expected=0)
+
+        self.assertIn('git fetch --all --prune', result.stdout)
+        self.assertIn('git branch backup/main-before-syncwheel-', result.stdout)
+        self.assertIn('git worktree add -B main', result.stdout)
+        self.assertIn("git -C", result.stdout)
+        self.assertIn("merge --no-ff pr/feature-a -m 'Merge stack '", result.stdout)
+        self.assertIn("merge --no-ff pr/feature-b -m 'Merge stack '", result.stdout)
+
+    def test_int_rebuild_in_place_commands_are_emitted(self):
+        result = self.run_cli('int', 'rebuild', '--in-place', '--dry-run', expected=0)
+        self.assertIn('git fetch --all --prune', result.stdout)
+        self.assertIn('git branch backup/main-before-syncwheel-', result.stdout)
+        self.assertIn('git reset --hard main', result.stdout)
+        self.assertIn('git cherry-pick', result.stdout)
+
+    def test_in_place_apply_requires_current_target_branch(self):
+        result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', expected=2)
+        self.assertIn('requires current branch', result.stderr)
+
+    def test_stack_sync_updates_manifest_from_branch(self):
+        self.git('switch', '-q', 'pr/feature-a')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+
+        result = self.run_cli('stack', 'sync', 'feature-a', expected=0)
+        self.assertIn('synced 1 commits', result.stdout)
+        manifest = self.read_manifest()
+        feature_a = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-a')
+        self.assertEqual(len(feature_a['commits']), 1)
+
+    def test_stack_set_and_add_update_manifest(self):
+        beta = self.git('rev-parse', 'HEAD')
+        self.run_cli('stack', 'set', 'feature-a', beta, expected=0)
+        manifest = self.read_manifest()
+        feature_a = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-a')
+        self.assertEqual(feature_a['commits'], [beta])
+
+        alpha = self.git('rev-parse', 'HEAD~1')
+        self.run_cli('stack', 'add', 'feature-a', alpha, expected=0)
+        manifest = self.read_manifest()
+        feature_a = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-a')
+        self.assertEqual(feature_a['commits'], [beta, alpha])
+
+    def test_stack_push_is_emitted_with_passthrough_args(self):
+        result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--', '--force-with-lease', expected=0)
+        self.assertIn('git push --force-with-lease fork pr/feature-a', result.stdout)
+
+    def test_int_push_is_emitted_with_passthrough_args(self):
+        result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
+        self.assertIn('git push --force-with-lease fork main', result.stdout)
+
+    def test_stack_git_runs_in_stack_worktree(self):
+        self.git('worktree', 'add', '-q', str(self.tmp / 'wt-feature-a'), 'pr/feature-a')
+        result = self.run_cli('stack', 'git', 'feature-a', '--', 'branch', '--show-current', expected=0)
+        self.assertEqual(result.stdout.strip(), 'pr/feature-a')
+
+    def test_int_git_runs_in_integration_worktree(self):
+        result = self.run_cli('int', 'git', '--', 'branch', '--show-current', expected=0)
+        self.assertEqual(result.stdout.strip(), 'main')
+
+    def test_validate_fails_for_unknown_integration_strategy(self):
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['strategy'] = 'octopus'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+        result = self.run_cli('validate', expected=1)
+        self.assertIn('integration strategy must be one of', result.stdout + result.stderr)
 
     def test_validate_fails_when_commit_is_missing(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'

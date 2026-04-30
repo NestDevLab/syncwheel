@@ -31,10 +31,11 @@ That becomes deterministic only when the repository declares the mapping in `.sy
 1. recover current state with `status`
 2. validate the manifest with `validate`
 3. inspect planned actions with `plan --json`
-4. materialize individual PR branches if needed
-5. materialize integration if needed
-6. rerun validation
-7. run project-specific tests outside `syncwheel`
+4. update stale stack commit lists with `stack sync`, `stack set`, or `stack add`
+5. rebuild individual PR branches with `stack rebuild` if needed
+6. rebuild integration with `int rebuild` if needed
+7. rerun validation
+8. run project-specific tests outside `syncwheel`
 
 ## Manifest semantics
 

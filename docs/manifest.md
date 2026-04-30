@@ -16,6 +16,7 @@ The preferred source of truth is `.syncwheel/manifest.json`.
   "integration": {
     "branch": "integration/project-stack",
     "base": "origin/main",
+    "strategy": "merge-stacks",
     "stacks": ["feature-a", "feature-b"]
   },
   "stacks": [
@@ -38,6 +39,10 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 - every stack id must be unique
 - every stack branch must be unique
 - every declared commit must exist in Git
+- `integration.strategy` is optional and defaults to `cherry-pick`
+- supported integration strategies are:
+  - `cherry-pick`: replay all declared commits into integration as a linear history
+  - `merge-stacks`: merge each declared stack branch into integration in manifest order with `--no-ff`
 - every persistent integration change should belong to exactly one declared stack unless it is explicit temporary debug work
 
 ## What validation checks

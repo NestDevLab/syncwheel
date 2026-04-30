@@ -27,14 +27,14 @@ An AI agent should then:
 2. run `python3 scripts/syncwheel.py validate`
 3. run `python3 scripts/syncwheel.py plan --json`
 4. if the manifest is stale, update it first
-5. run `materialize-pr` or `materialize-integration` only when needed
+5. run `stack rebuild` or `int rebuild` only when needed
 6. rerun `validate`
 7. summarize what changed and what still needs a human
 
 ## Safety rules
 
 - do not mutate branches from a dirty worktree
-- prefer dedicated worktrees for every materialization step
-- treat `--apply` as branch mutation, not inspection
+- prefer dedicated worktrees for every rebuild step
+- use `--dry-run` when inspecting rebuild/push commands
 - if manifest and Git disagree, fix the manifest or call out the conflict explicitly
 - do not claim a repo is aligned if integration and PR branches still disagree

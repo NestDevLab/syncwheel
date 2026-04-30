@@ -2,6 +2,8 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
+Current version: `0.2.0`
+
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
 - optionally keep an `integration/*` branch for combined runtime testing
@@ -12,6 +14,20 @@ Deterministic fork/upstream/integration maintenance for Git repositories.
 You can use syncwheel in two modes:
 - **PR-only mode**: manage and validate PR stacks without an integration branch
 - **Integration mode**: also maintain a combined branch to test multiple in-flight PRs together
+
+## Worktree-first model
+
+Syncwheel is fundamentally built around Git worktrees. The safest default is:
+
+- keep one administrative checkout for inspection and manifest edits
+- use one worktree per PR branch when rebuilding or validating PR state
+- use one worktree for the integration branch when rebuilding combined state
+
+This keeps branch mutation explicit and avoids losing your place in a normal
+working checkout. For simpler human-operated workflows, `stack rebuild` and
+`int rebuild` also support `--in-place`; in-place mode requires the current
+checkout to already be on the target branch and to be clean before anything is
+reset or replayed.
 
 ## System flow (visual)
 
@@ -51,13 +67,23 @@ Practical meaning:
 - PR branches are rebuilt from declared commit ownership
 - integration (if used) is rebuilt from declared stack order
 - one manifest keeps both sides aligned
+- branch rebuilds create a backup branch first when the target branch already
+  exists
 
 ### How it works in practice
 
 - A **PR stack** is one logical change stream mapped to one `pr/*` branch with an explicit commit list.
-- `materialize-pr` rebuilds one PR branch from the manifest.
-- `materialize-integration` rebuilds integration from ordered stacks (only in integration mode).
+- `stack sync`, `stack set`, and `stack add` update commit ownership without
+  hand-editing SHA lists.
+- `stack rebuild` rebuilds one PR branch from the manifest.
+- `int rebuild` rebuilds integration from ordered stacks.
+- `stack push` and `int push` wrap `git push`, with arbitrary Git arguments
+  after `--`.
 - `validate` and `plan` detect drift before branch mutation.
+- `integration.strategy` controls how integration is rebuilt:
+  - `cherry-pick` replays every declared commit into one linear history.
+  - `merge-stacks` merges each declared stack branch in manifest order with
+    `--no-ff`, preserving an integration history made of merge commits.
 
 ## Who this is for
 
@@ -80,7 +106,9 @@ Practical meaning:
    Use the docs as an operating playbook and run Git steps manually. This is possible, but cognitively heavier and easier to get wrong in complex branch graphs.
 
 2. **Script-assisted (human-operated)**  
-   Use the CLI for discovery, validation, and materialization, while a human decides what to run and when. This is a strong middle ground once the team knows the model well.
+   Use the CLI for discovery, validation, manifest updates, branch rebuilds,
+   Git wrappers, and push wrappers while a human decides what to run and when.
+   This is a strong middle ground once the team knows the model well.
 
 3. **AI-operated (recommended)**  
    Let an AI agent run the syncwheel flow through prompts, with a human supervising intent and approval boundaries. In practice this gives the best speed/consistency balance for ongoing maintenance.
@@ -182,32 +210,161 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 ```
 
-### 4. Rebuild one PR branch from the declared stack
-
-Dry run:
+### 4. Update one stack from its branch
 
 ```bash
-python3 scripts/syncwheel.py materialize-pr feature-a --worktree ../wt-pr-feature-a
+python3 scripts/syncwheel.py stack sync feature-a
 ```
 
-Apply:
+Or set it from an explicit commit/range:
 
 ```bash
-python3 scripts/syncwheel.py materialize-pr feature-a --worktree ../wt-pr-feature-a --apply
+python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
+python3 scripts/syncwheel.py stack add feature-a HEAD
 ```
 
-### 5. Rebuild integration from declared stack order
+### 5. Rebuild and push one PR branch
 
-Dry run:
+Worktree mode:
 
 ```bash
-python3 scripts/syncwheel.py materialize-integration --worktree ../wt-integration
+python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
+python3 scripts/syncwheel.py stack push feature-a
 ```
 
-Apply:
+In-place, when you are already on `pr/feature-a` and the checkout is clean:
 
 ```bash
-python3 scripts/syncwheel.py materialize-integration --worktree ../wt-integration --apply
+python3 scripts/syncwheel.py stack rebuild feature-a --in-place
+python3 scripts/syncwheel.py stack push feature-a
+```
+
+Add arbitrary Git push arguments after `--`:
+
+```bash
+python3 scripts/syncwheel.py stack push feature-a -- --force-with-lease
+```
+
+Use `--dry-run` on rebuild/push commands to print commands without applying
+them.
+
+### 6. Rebuild and push integration from declared stack order
+
+Worktree mode:
+
+```bash
+python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
+python3 scripts/syncwheel.py int push
+```
+
+In-place, when you are already on the configured integration branch and the
+checkout is clean:
+
+```bash
+python3 scripts/syncwheel.py int rebuild --in-place
+python3 scripts/syncwheel.py int push
+```
+
+Add arbitrary Git push arguments after `--`:
+
+```bash
+python3 scripts/syncwheel.py int push -- --force-with-lease
+```
+
+For merge-shaped integration history, set:
+
+```json
+{
+  "integration": {
+    "branch": "integration/project-stack",
+    "base": "origin/main",
+    "strategy": "merge-stacks",
+    "stacks": ["feature-a", "feature-b"]
+  }
+}
+```
+
+With `merge-stacks`, `int rebuild` runs ordered merge commands instead of one
+cherry-pick command.
+
+## Human command recipes
+
+These examples use three stacks:
+
+- `feature-a` -> `pr/feature-a`
+- `feature-b` -> `pr/feature-b`
+- `feature-c` -> `pr/feature-c`
+
+The commits can originate from integration or from any other local branch. The
+requirement is that each commit is declared under exactly one stack in the
+manifest.
+
+### Send declared commits to three PR branches
+
+Worktree mode keeps your current checkout where it is:
+
+```bash
+python3 scripts/syncwheel.py validate
+python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
+python3 scripts/syncwheel.py stack rebuild feature-b --worktree ../wt-pr-feature-b
+python3 scripts/syncwheel.py stack rebuild feature-c --worktree ../wt-pr-feature-c
+
+python3 scripts/syncwheel.py stack push feature-a
+python3 scripts/syncwheel.py stack push feature-b
+python3 scripts/syncwheel.py stack push feature-c
+
+python3 scripts/syncwheel.py validate
+```
+
+In-place mode is shorter when you are already on each target branch:
+
+```bash
+git switch pr/feature-a
+python3 scripts/syncwheel.py stack rebuild feature-a --in-place
+python3 scripts/syncwheel.py stack push feature-a
+
+git switch pr/feature-b
+python3 scripts/syncwheel.py stack rebuild feature-b --in-place
+python3 scripts/syncwheel.py stack push feature-b
+
+git switch pr/feature-c
+python3 scripts/syncwheel.py stack rebuild feature-c --in-place
+python3 scripts/syncwheel.py stack push feature-c
+```
+
+### Merge three PR branches into integration
+
+Set `integration.strategy` to `merge-stacks` when you want integration to keep
+merge commits:
+
+```json
+{
+  "integration": {
+    "branch": "integration/project-stack",
+    "base": "origin/main",
+    "strategy": "merge-stacks",
+    "stacks": ["feature-a", "feature-b", "feature-c"]
+  }
+}
+```
+
+Then rebuild integration in one command.
+
+Worktree mode:
+
+```bash
+python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
+python3 scripts/syncwheel.py int push
+python3 scripts/syncwheel.py validate
+```
+
+In-place mode, when you are already on the integration branch:
+
+```bash
+git switch integration/project-stack
+python3 scripts/syncwheel.py int rebuild --in-place
+python3 scripts/syncwheel.py int push
+python3 scripts/syncwheel.py validate
 ```
 
 ## Files
@@ -217,6 +374,8 @@ python3 scripts/syncwheel.py materialize-integration --worktree ../wt-integratio
 - `docs/`: human-readable workflow docs and guides
 - `examples/manifest.example.json`: starter manifest
 - `tests/`: unit tests and fixture repositories
+- `VERSION`: current release version
+- `CHANGELOG.md`: release notes
 
 ## Documentation map
 
@@ -233,12 +392,17 @@ python3 scripts/syncwheel.py materialize-integration --worktree ../wt-integratio
 
 ```bash
 python3 scripts/syncwheel.py --help
+python3 scripts/syncwheel.py --version
 python3 scripts/syncwheel.py init --help
 python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
 python3 scripts/syncwheel.py plan --help
-python3 scripts/syncwheel.py materialize-pr --help
-python3 scripts/syncwheel.py materialize-integration --help
+python3 scripts/syncwheel.py stack --help
+python3 scripts/syncwheel.py int --help
+python3 scripts/syncwheel.py stack rebuild --help
+python3 scripts/syncwheel.py stack push --help
+python3 scripts/syncwheel.py int rebuild --help
+python3 scripts/syncwheel.py int push --help
 ```
 
 ## AI agent usage
@@ -250,9 +414,10 @@ Recommended sequence:
 2. `validate`
 3. `plan --json`
 4. update the manifest if reality changed
-5. `materialize-pr` and/or `materialize-integration`
-6. rerun `validate`
-7. report remaining drift honestly
+5. `stack sync`, `stack set`, or `stack add`
+6. `stack rebuild` and/or `int rebuild`
+7. rerun `validate`
+8. report remaining drift honestly
 
 See [docs/ai-agents.md](docs/ai-agents.md).
 

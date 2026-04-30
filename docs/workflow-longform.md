@@ -29,8 +29,9 @@ That file should describe:
 python3 scripts/syncwheel.py status --fetch
 python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
-python3 scripts/syncwheel.py materialize-pr <stack> --worktree <path>
-python3 scripts/syncwheel.py materialize-integration --worktree <path>
+python3 scripts/syncwheel.py stack sync <stack>
+python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
+python3 scripts/syncwheel.py int rebuild --worktree <path>
 ```
 
 ## What becomes deterministic

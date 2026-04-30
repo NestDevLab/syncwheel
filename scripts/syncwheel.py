@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import json
 import os
 import shlex
@@ -13,6 +14,8 @@ class SyncwheelError(Exception):
 
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
+INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
+VERSION = '0.2.0'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):
@@ -184,6 +187,30 @@ def ensure_clean_worktree(path):
         raise SyncwheelError(f'{path} is not clean')
 
 
+def syncwheel_timestamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+
+
+def backup_branch_name(branch, timestamp):
+    return f'backup/{branch}-before-syncwheel-{timestamp}'
+
+
+def backup_branch_command(repo_root, branch, timestamp):
+    if not branch_exists(repo_root, branch):
+        return None
+    return ['git', 'branch', backup_branch_name(branch, timestamp), branch]
+
+
+def ensure_in_place_target(repo_root, target_branch):
+    current_branch = get_current_branch(repo_root)
+    if current_branch != target_branch:
+        raise SyncwheelError(
+            f'in-place materialization requires current branch {target_branch!r}; '
+            f'current branch is {current_branch!r}'
+        )
+    ensure_clean_worktree(repo_root)
+
+
 def load_manifest(repo_root, manifest_path=None):
     path = Path(manifest_path) if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
     if not path.exists():
@@ -206,6 +233,7 @@ def load_manifest(repo_root, manifest_path=None):
     integration = data.setdefault('integration', {})
     integration.setdefault('branch', 'integration/main')
     integration.setdefault('base', defaults['base_ref'])
+    integration.setdefault('strategy', 'cherry-pick')
     integration.setdefault('stacks', [])
 
     stacks = data.setdefault('stacks', [])
@@ -246,8 +274,82 @@ def load_manifest(repo_root, manifest_path=None):
     return data, path
 
 
+def save_manifest(path, manifest):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+
 def stack_map(manifest):
     return {stack['id']: stack for stack in manifest.get('stacks', [])}
+
+
+def require_manifest(repo_root, repo_value=None, manifest_override=None):
+    manifest_path = resolve_manifest_path(repo_root, repo_value, manifest_override)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    if not manifest:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    return manifest, manifest_path
+
+
+def require_stack(manifest, stack_id):
+    stacks = stack_map(manifest)
+    if stack_id not in stacks:
+        raise SyncwheelError(f'unknown stack: {stack_id}')
+    return stacks[stack_id]
+
+
+def rev_list(repo_root, rev_range):
+    result = git(repo_root, 'rev-list', '--reverse', rev_range)
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def commit_list_for_spec(repo_root, spec):
+    if '..' in spec:
+        return rev_list(repo_root, spec)
+    if not commit_exists(repo_root, spec):
+        raise SyncwheelError(f'commit does not exist: {spec}')
+    return [git(repo_root, 'rev-parse', spec).stdout.strip()]
+
+
+def default_worktree_path(repo_root, branch):
+    safe = branch.replace('/', '-').replace('\\', '-')
+    return repo_root.parent / f'{repo_root.name}-wt-{safe}'
+
+
+def find_worktree_for_branch(repo_root, branch):
+    for worktree in get_worktrees(repo_root):
+        if worktree.get('branch') == branch:
+            return Path(worktree['path'])
+    return None
+
+
+def passthrough_args(values):
+    return values or []
+
+
+def resolve_stack_rebuild_location(repo_root, stack, args):
+    if args.in_place and args.worktree:
+        raise SyncwheelError('use either --in-place or --worktree, not both')
+    if args.in_place:
+        return None, True
+    if args.worktree:
+        return Path(args.worktree).resolve(), False
+    if get_current_branch(repo_root) == stack['branch']:
+        return None, True
+    return default_worktree_path(repo_root, stack['branch']), False
+
+
+def resolve_int_rebuild_location(repo_root, manifest, args):
+    integration = manifest['integration']
+    if args.in_place and args.worktree:
+        raise SyncwheelError('use either --in-place or --worktree, not both')
+    if args.in_place:
+        return None, True
+    if args.worktree:
+        return Path(args.worktree).resolve(), False
+    if get_current_branch(repo_root) == integration['branch']:
+        return None, True
+    return default_worktree_path(repo_root, integration['branch']), False
 
 
 def collect_repo_snapshot(repo_root, manifest):
@@ -276,6 +378,13 @@ def validate_manifest(repo_root, manifest):
     stacks_by_id = stack_map(manifest)
     integration = manifest['integration']
     integration_branch = integration['branch']
+    integration_strategy = integration.get('strategy')
+    if integration_strategy not in INTEGRATION_STRATEGIES:
+        errors.append(
+            'integration strategy must be one of '
+            + ', '.join(sorted(INTEGRATION_STRATEGIES))
+            + f': {integration_strategy}'
+        )
     integration_exists = branch_exists(repo_root, integration_branch)
     if not ref_exists(repo_root, integration['base']):
         errors.append(f"integration base ref does not exist: {integration['base']}")
@@ -316,6 +425,7 @@ def validate_manifest(repo_root, manifest):
         'branch': integration_branch,
         'exists': integration_exists,
         'base': integration['base'],
+        'strategy': integration_strategy,
         'stacks': integration.get('stacks', []),
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
@@ -362,28 +472,68 @@ def quoted(parts):
     return ' '.join(shlex.quote(part) for part in parts)
 
 
-def materialize_pr_commands(manifest, stack, worktree):
+def materialize_pr_commands(repo_root, manifest, stack, worktree=None, in_place=False, timestamp=None):
     branch = stack['branch']
     base = stack['base']
     commit_args = stack['commits']
-    return [
-        ['git', 'fetch', '--all', '--prune'],
+    timestamp = timestamp or syncwheel_timestamp()
+    commands = [['git', 'fetch', '--all', '--prune']]
+    backup = backup_branch_command(repo_root, branch, timestamp)
+    if backup:
+        commands.append(backup)
+    if in_place:
+        commands.extend([
+            ['git', 'reset', '--hard', base],
+            ['git', 'cherry-pick', *commit_args],
+        ])
+        return commands
+    commands.extend([
         ['git', 'worktree', 'add', '-B', branch, str(worktree), base],
         ['git', '-C', str(worktree), 'cherry-pick', *commit_args],
-    ]
+    ])
+    return commands
 
 
-def materialize_integration_commands(manifest, worktree):
+def integration_stack_commands(manifest, worktree=None):
     integration = manifest['integration']
     stacks_by_id = stack_map(manifest)
-    commits = []
-    for stack_id in integration['stacks']:
-        commits.extend(stacks_by_id[stack_id]['commits'])
-    return [
-        ['git', 'fetch', '--all', '--prune'],
-        ['git', 'worktree', 'add', '-B', integration['branch'], str(worktree), integration['base']],
-        ['git', '-C', str(worktree), 'cherry-pick', *commits],
-    ]
+    prefix = ['git'] if worktree is None else ['git', '-C', str(worktree)]
+    strategy = integration.get('strategy', 'cherry-pick')
+    if strategy == 'cherry-pick':
+        commits = []
+        for stack_id in integration['stacks']:
+            commits.extend(stacks_by_id[stack_id]['commits'])
+        return [[*prefix, 'cherry-pick', *commits]]
+    if strategy == 'merge-stacks':
+        commands = []
+        for stack_id in integration['stacks']:
+            stack = stacks_by_id[stack_id]
+            commands.append([
+                *prefix,
+                'merge',
+                '--no-ff',
+                stack['branch'],
+                '-m',
+                f"Merge stack '{stack_id}' into {integration['branch']}",
+            ])
+        return commands
+    raise SyncwheelError(f"unsupported integration strategy: {strategy}")
+
+
+def materialize_integration_commands(repo_root, manifest, worktree=None, in_place=False, timestamp=None):
+    integration = manifest['integration']
+    timestamp = timestamp or syncwheel_timestamp()
+    commands = [['git', 'fetch', '--all', '--prune']]
+    backup = backup_branch_command(repo_root, integration['branch'], timestamp)
+    if backup:
+        commands.append(backup)
+    if in_place:
+        commands.append(['git', 'reset', '--hard', integration['base']])
+        commands.extend(integration_stack_commands(manifest))
+        return commands
+    commands.append(['git', 'worktree', 'add', '-B', integration['branch'], str(worktree), integration['base']])
+    commands.extend(integration_stack_commands(manifest, worktree))
+    return commands
 
 
 def run_command_list(commands, repo_root, apply):
@@ -412,6 +562,7 @@ def command_init(args):
         'integration': {
             'branch': args.integration_branch,
             'base': f'{canonical_remote}/{base_branch}',
+            'strategy': 'cherry-pick',
             'stacks': [],
         },
         'stacks': [],
@@ -534,35 +685,174 @@ def command_plan(args):
     return 1 if validation['errors'] else 0
 
 
-def command_materialize_pr(args):
+def command_stack_list(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
-    if not manifest:
-        raise SyncwheelError(f'manifest not found: {manifest_path}')
-    stacks = stack_map(manifest)
-    if args.stack not in stacks:
-        raise SyncwheelError(f'unknown stack: {args.stack}')
-    worktree = Path(args.worktree).resolve()
-    commands = materialize_pr_commands(manifest, stacks[args.stack], worktree)
-    run_command_list(commands, repo_root, args.apply)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    for stack in manifest['stacks']:
+        print(f"{stack['id']}\t{stack['branch']}\tcommits={len(stack['commits'])}")
     return 0
 
 
-def command_materialize_integration(args):
+def command_stack_show(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
-    if not manifest:
-        raise SyncwheelError(f'manifest not found: {manifest_path}')
-    worktree = Path(args.worktree).resolve()
-    commands = materialize_integration_commands(manifest, worktree)
-    run_command_list(commands, repo_root, args.apply)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    print(json.dumps(stack, indent=2))
+    return 0
+
+
+def command_stack_sync(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    commits = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+    stack['commits'] = commits
+    save_manifest(manifest_path, manifest)
+    print(f"{args.stack}: synced {len(commits)} commits from {stack['branch']}")
+    return 0
+
+
+def command_stack_set(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    commits = []
+    for spec in args.specs:
+        commits.extend(commit_list_for_spec(repo_root, spec))
+    stack['commits'] = list(dict.fromkeys(commits))
+    save_manifest(manifest_path, manifest)
+    print(f"{args.stack}: set {len(stack['commits'])} commits")
+    return 0
+
+
+def command_stack_add(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    commits = list(stack['commits'])
+    for spec in args.specs:
+        commits.extend(commit_list_for_spec(repo_root, spec))
+    stack['commits'] = list(dict.fromkeys(commits))
+    save_manifest(manifest_path, manifest)
+    print(f"{args.stack}: now has {len(stack['commits'])} commits")
+    return 0
+
+
+def command_stack_rebuild(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    worktree, in_place = resolve_stack_rebuild_location(repo_root, stack, args)
+    if not args.dry_run and in_place:
+        ensure_in_place_target(repo_root, stack['branch'])
+    commands = materialize_pr_commands(repo_root, manifest, stack, worktree, in_place)
+    run_command_list(commands, repo_root, not args.dry_run)
+    return 0
+
+
+def command_stack_push(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
+    push_args = passthrough_args(args.git_args)
+    command = ['git', 'push', *push_args, remote, stack['branch']]
+    if args.dry_run:
+        print(quoted(command))
+        return 0
+    run(command, cwd=repo_root)
+    print(quoted(command))
+    return 0
+
+
+def command_stack_git(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    stack = require_stack(manifest, args.stack)
+    worktree = find_worktree_for_branch(repo_root, stack['branch'])
+    if not worktree:
+        raise SyncwheelError(f"no worktree found for stack branch: {stack['branch']}")
+    git_args = passthrough_args(args.git_args)
+    if not git_args:
+        raise SyncwheelError('stack git requires git arguments after --')
+    result = run(['git', *git_args], cwd=worktree, check=False)
+    if result.stdout:
+        print(result.stdout, end='')
+    if result.stderr:
+        print(result.stderr, end='', file=sys.stderr)
+    return result.returncode
+
+
+def command_int_show(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    print(json.dumps(manifest['integration'], indent=2))
+    return 0
+
+
+def command_int_rebuild(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    worktree, in_place = resolve_int_rebuild_location(repo_root, manifest, args)
+    if not args.dry_run and in_place:
+        ensure_in_place_target(repo_root, manifest['integration']['branch'])
+    commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
+    run_command_list(commands, repo_root, not args.dry_run)
+    return 0
+
+
+def command_int_push(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    integration = manifest['integration']
+    remote = args.remote or manifest['defaults']['publication_remote']
+    push_args = passthrough_args(args.git_args)
+    command = ['git', 'push', *push_args, remote, integration['branch']]
+    if args.dry_run:
+        print(quoted(command))
+        return 0
+    run(command, cwd=repo_root)
+    print(quoted(command))
+    return 0
+
+
+def command_int_git(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest)
+    branch = manifest['integration']['branch']
+    worktree = find_worktree_for_branch(repo_root, branch)
+    if not worktree:
+        raise SyncwheelError(f'no worktree found for integration branch: {branch}')
+    git_args = passthrough_args(args.git_args)
+    if not git_args:
+        raise SyncwheelError('int git requires git arguments after --')
+    result = run(['git', *git_args], cwd=worktree, check=False)
+    if result.stdout:
+        print(result.stdout, end='')
+    if result.stderr:
+        print(result.stderr, end='', file=sys.stderr)
+    return result.returncode
+
+
+def add_rebuild_args(parser):
+    parser.add_argument('--worktree')
+    parser.add_argument('--in-place', action='store_true')
+    parser.add_argument('--dry-run', action='store_true')
+
+
+def add_push_args(parser):
+    parser.add_argument('--remote')
+    parser.add_argument('--dry-run', action='store_true')
+
+
+def add_git_args(parser):
+    return parser
     return 0
 
 
 def build_parser():
     parser = argparse.ArgumentParser(description='Deterministic syncwheel helper for fork/upstream/integration repos.')
+    parser.add_argument('--version', action='version', version=f'syncwheel {VERSION}')
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('-r', '--repo', help='target repo path or registered alias')
     common.add_argument('--manifest', help='path to a syncwheel manifest JSON file')
@@ -613,16 +903,62 @@ def build_parser():
     plan_p.add_argument('--json', action='store_true')
     plan_p.set_defaults(func=command_plan)
 
-    pr_p = sub.add_parser('materialize-pr', help='create/rebuild one PR branch from the manifest stack', parents=[common])
-    pr_p.add_argument('stack')
-    pr_p.add_argument('--worktree', required=True)
-    pr_p.add_argument('--apply', action='store_true')
-    pr_p.set_defaults(func=command_materialize_pr)
+    stack_p = sub.add_parser('stack', help='inspect, edit, rebuild, push, or run git for one stack')
+    stack_sub = stack_p.add_subparsers(dest='stack_command', required=True)
 
-    int_p = sub.add_parser('materialize-integration', help='create/rebuild the integration branch from manifest order', parents=[common])
-    int_p.add_argument('--worktree', required=True)
-    int_p.add_argument('--apply', action='store_true')
-    int_p.set_defaults(func=command_materialize_integration)
+    stack_list_p = stack_sub.add_parser('list', parents=[common])
+    stack_list_p.set_defaults(func=command_stack_list)
+
+    stack_show_p = stack_sub.add_parser('show', parents=[common])
+    stack_show_p.add_argument('stack')
+    stack_show_p.set_defaults(func=command_stack_show)
+
+    stack_sync_p = stack_sub.add_parser('sync', parents=[common])
+    stack_sync_p.add_argument('stack')
+    stack_sync_p.set_defaults(func=command_stack_sync)
+
+    stack_set_p = stack_sub.add_parser('set', parents=[common])
+    stack_set_p.add_argument('stack')
+    stack_set_p.add_argument('specs', nargs='+')
+    stack_set_p.set_defaults(func=command_stack_set)
+
+    stack_add_p = stack_sub.add_parser('add', parents=[common])
+    stack_add_p.add_argument('stack')
+    stack_add_p.add_argument('specs', nargs='+')
+    stack_add_p.set_defaults(func=command_stack_add)
+
+    stack_rebuild_p = stack_sub.add_parser('rebuild', parents=[common])
+    stack_rebuild_p.add_argument('stack')
+    add_rebuild_args(stack_rebuild_p)
+    stack_rebuild_p.set_defaults(func=command_stack_rebuild)
+
+    stack_push_p = stack_sub.add_parser('push', parents=[common])
+    stack_push_p.add_argument('stack')
+    add_push_args(stack_push_p)
+    stack_push_p.set_defaults(func=command_stack_push)
+
+    stack_git_p = stack_sub.add_parser('git', parents=[common])
+    stack_git_p.add_argument('stack')
+    add_git_args(stack_git_p)
+    stack_git_p.set_defaults(func=command_stack_git)
+
+    int_p = sub.add_parser('int', help='inspect, rebuild, push, or run git for integration')
+    int_sub = int_p.add_subparsers(dest='int_command', required=True)
+
+    int_show_p = int_sub.add_parser('show', parents=[common])
+    int_show_p.set_defaults(func=command_int_show)
+
+    int_rebuild_p = int_sub.add_parser('rebuild', parents=[common])
+    add_rebuild_args(int_rebuild_p)
+    int_rebuild_p.set_defaults(func=command_int_rebuild)
+
+    int_push_p = int_sub.add_parser('push', parents=[common])
+    add_push_args(int_push_p)
+    int_push_p.set_defaults(func=command_int_push)
+
+    int_git_p = int_sub.add_parser('git', parents=[common])
+    add_git_args(int_git_p)
+    int_git_p.set_defaults(func=command_int_git)
 
     return parser
 
@@ -706,7 +1042,14 @@ def command_repo_ls(args):
 
 def main():
     parser = build_parser()
-    args = parser.parse_args()
+    raw_args = sys.argv[1:]
+    passthrough = []
+    if '--' in raw_args:
+        marker = raw_args.index('--')
+        passthrough = raw_args[marker + 1:]
+        raw_args = raw_args[:marker]
+    args = parser.parse_args(raw_args)
+    args.git_args = passthrough
     try:
         return args.func(args)
     except SyncwheelError as exc:

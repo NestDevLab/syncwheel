@@ -46,7 +46,8 @@ Then fill in:
 - integration branch
 - stack order inside integration
 - one stack id per logical PR
-- exact commits for each stack
+- exact commits for each stack, preferably using `stack sync`, `stack set`, or
+  `stack add`
 
 Do not call the workflow deterministic until this file exists and matches reality.
 
@@ -69,33 +70,56 @@ Look for:
 
 For each stack that needs repair:
 1. use the manifest as the exact commit list
-2. materialize the PR branch in a dedicated worktree
+2. rebuild the PR branch in a dedicated worktree
 3. validate again
 4. only then push or update the PR
 
 Dry-run:
 ```bash
-python3 scripts/syncwheel.py materialize-pr <stack> --worktree <path>
+python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path> --dry-run
 ```
 
 Apply:
 ```bash
-python3 scripts/syncwheel.py materialize-pr <stack> --worktree <path> --apply
+python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
+python3 scripts/syncwheel.py stack push <stack>
+```
+
+If you are already on the target PR branch and the checkout is clean, you can
+use in-place mode instead:
+
+```bash
+python3 scripts/syncwheel.py stack rebuild <stack> --in-place
+python3 scripts/syncwheel.py stack push <stack>
 ```
 
 ## Phase 5. Repair integration deterministically
 
 Integration is not a mystery branch. It is an ordered replay of declared stacks.
+By default this replay is a linear `cherry-pick` of declared commits. If the
+manifest sets `integration.strategy` to `merge-stacks`, syncwheel instead
+merges each declared stack branch in manifest order with `--no-ff`.
 
 Dry-run:
 ```bash
-python3 scripts/syncwheel.py materialize-integration --worktree <path>
+python3 scripts/syncwheel.py int rebuild --worktree <path> --dry-run
 ```
 
 Apply:
 ```bash
-python3 scripts/syncwheel.py materialize-integration --worktree <path> --apply
+python3 scripts/syncwheel.py int rebuild --worktree <path>
+python3 scripts/syncwheel.py int push
 ```
+
+If you are already on the integration branch and the checkout is clean:
+
+```bash
+python3 scripts/syncwheel.py int rebuild --in-place
+python3 scripts/syncwheel.py int push
+```
+
+Rebuilds create a `backup/<branch>-before-syncwheel-<timestamp>` branch first
+when the target branch already exists.
 
 ## Phase 6. Validate honestly
 

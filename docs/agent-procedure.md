@@ -37,15 +37,16 @@ Given one of those prompts, the agent should:
 2. run `validate`
 3. run `plan`
 4. summarize the planned actions
-5. if authorized, run `materialize-pr` and/or `materialize-integration`
+5. if authorized, run `stack rebuild` and/or `int rebuild`
 6. rerun `validate`
 7. report remaining gaps honestly
 
 ## Safe execution rules
 
 - Do not run branch-rebuilding commands against a dirty worktree.
-- Prefer dedicated worktrees for each materialization step.
-- Treat `materialize-* --apply` as branch mutation, not as a read-only inspection.
+- Prefer dedicated worktrees for each rebuild step.
+- Treat `stack rebuild` and `int rebuild` as branch mutation unless `--dry-run`
+  is used.
 - If the repo uses GitHub, validate publication state after branch rebuilds.
 - If the manifest and Git disagree, fix the manifest or name the conflict explicitly.
 
