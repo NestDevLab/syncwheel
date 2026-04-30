@@ -156,6 +156,15 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['integration']['branch'], 'integration/alice/main')
         self.assertEqual(data['stacks'], [])
 
+    def test_init_defaults_to_main_integration(self):
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        manifest.unlink()
+
+        self.run_cli('init', expected=0)
+        data = self.read_manifest()
+
+        self.assertEqual(data['integration']['branch'], 'main-integration')
+
     def test_personal_flag_selects_local_manifest_for_commands(self):
         self.run_cli('init', '--personal', 'alice', '--force', expected=0)
         gamma = self.git('rev-parse', 'HEAD')

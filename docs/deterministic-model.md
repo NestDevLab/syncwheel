@@ -41,7 +41,7 @@ Suggested shape:
     "base_ref": "origin/main"
   },
   "integration": {
-    "branch": "integration/main",
+    "branch": "main-integration",
     "base": "origin/main",
     "stacks": ["stack-a", "stack-b"]
   },
@@ -52,7 +52,7 @@ Suggested shape:
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
-      "integration_branch": "integration/main",
+      "integration_branch": "main-integration",
       "commits": ["abc1234", "def5678"]
     }
   ]

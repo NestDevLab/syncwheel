@@ -7,7 +7,7 @@
     "base_ref": "origin/main"
   },
   "integration": {
-    "branch": "integration/project-stack",
+    "branch": "main-integration",
     "base": "origin/main",
     "stacks": [
       "feature-a",
@@ -21,7 +21,7 @@
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
-      "integration_branch": "integration/project-stack",
+      "integration_branch": "main-integration",
       "commits": [
         "abc1234",
         "def5678"
@@ -33,7 +33,7 @@
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
-      "integration_branch": "integration/project-stack",
+      "integration_branch": "main-integration",
       "commits": [
         "0123abc"
       ]

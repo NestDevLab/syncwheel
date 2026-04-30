@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.6.0 - 2026-04-30
+
+- Make `main-integration` the default shared integration branch created by
+  `init`.
+- Update the documented default operating model so day-to-day combined work
+  happens on the integration branch and `main` remains the promotion branch.
+
 ## 0.5.1 - 2026-04-30
 
 - Document `init` as the default manifest bootstrap command; keep `--stdout`

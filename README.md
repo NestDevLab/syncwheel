@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.5.1`
+Current version: `0.6.0`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -19,9 +19,9 @@ You can use syncwheel in two modes:
 
 Syncwheel is fundamentally built around Git worktrees. The safest default is:
 
-- keep one administrative checkout for inspection and manifest edits
+- keep the primary working checkout on the shared integration branch
 - use one worktree per PR branch when rebuilding or validating PR state
-- use one worktree for the integration branch when rebuilding combined state
+- optionally keep a separate administrative checkout for manifest-only work
 
 This keeps branch mutation explicit and avoids losing your place in a normal
 working checkout. For simpler human-operated workflows, `stack rebuild` and
@@ -35,12 +35,12 @@ syncwheel has four pieces:
 - **base branch** (`upstream/main` or similar)
 - **PR stacks** mapped to `pr/*` branches
 - **manifest** (`.syncwheel/manifest.json`) as source of truth
-- **optional integration branch** (`integration/*`) for combined testing
+- **integration branch** (`main-integration` by default) for combined testing
 
 ```mermaid
 flowchart LR
     U[upstream/main]
-    I[optional integration/main]
+    I[main-integration]
     P1[pr/feature-a]
     P2[pr/feature-b]
     P3[pr/hotfix-c]
@@ -173,7 +173,7 @@ SYNCWHEEL_REPO=/path/to/repo python3 scripts/syncwheel.py check
 Create the shared manifest with `init`:
 
 ```bash
-python3 scripts/syncwheel.py init --integration-branch main-integration
+python3 scripts/syncwheel.py init
 ```
 
 Create a personal local manifest without copying or hand-writing JSON:
@@ -238,7 +238,7 @@ python3 scripts/syncwheel.py init
 For a custom integration branch:
 
 ```bash
-python3 scripts/syncwheel.py init --integration-branch main-integration
+python3 scripts/syncwheel.py init --integration-branch integration/team-stack
 ```
 
 Use `--stdout` only when you need to pipe the generated manifest instead of

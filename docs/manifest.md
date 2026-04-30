@@ -38,8 +38,10 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 Create a shared manifest:
 
 ```bash
-python3 scripts/syncwheel.py init --integration-branch main-integration
+python3 scripts/syncwheel.py init
 ```
+
+By default this creates a shared integration branch named `main-integration`.
 
 Create a personal local manifest:
 

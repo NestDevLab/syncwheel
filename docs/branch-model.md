@@ -12,7 +12,7 @@ Keep four concerns separate:
 
 Unless a repo documents otherwise:
 - `main` or equivalent is the canonical base
-- `integration/*` is where day-to-day work happens
+- `main-integration` is where day-to-day combined work happens
 - `pr/*` branches are extracted review surfaces for upstream PRs
 - integration should not be the only home of long-lived product changes
 
@@ -30,8 +30,8 @@ With that mapping, syncwheel becomes scriptable.
 ## Worktrees
 
 Recommended layout:
-- repo root = administrative checkout
-- one worktree for the active integration branch
+- repo root = active integration checkout by default
+- optional administrative checkout for manifest-only work
 - one worktree per active PR branch
 - temporary worktrees for rebuilds only when needed
 

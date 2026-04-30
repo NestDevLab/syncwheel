@@ -18,7 +18,8 @@ ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
-VERSION = '0.5.1'
+DEFAULT_INTEGRATION_BRANCH = 'main-integration'
+VERSION = '0.6.0'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):
@@ -270,7 +271,7 @@ def load_manifest(repo_root, manifest_path=None):
     defaults.setdefault('base_ref', f"{canonical_remote}/{defaults['base_branch']}")
 
     integration = data.setdefault('integration', {})
-    integration.setdefault('branch', 'integration/main')
+    integration.setdefault('branch', DEFAULT_INTEGRATION_BRANCH)
     integration.setdefault('base', defaults['base_ref'])
     integration.setdefault('strategy', 'cherry-pick')
     integration.setdefault('stacks', [])
@@ -701,12 +702,10 @@ def command_init(args):
         if args.manifest:
             raise SyncwheelError('use either --personal or --manifest, not both')
         manifest_path = personal_manifest_path(repo_root, args.personal)
-        integration_branch = args.integration_branch
-        if integration_branch == 'integration/main':
-            integration_branch = personal_integration_branch(args.personal)
+        integration_branch = args.integration_branch or personal_integration_branch(args.personal)
     else:
         manifest_path = Path(args.manifest).expanduser() if args.manifest else repo_root / '.syncwheel' / 'manifest.json'
-        integration_branch = args.integration_branch
+        integration_branch = args.integration_branch or DEFAULT_INTEGRATION_BRANCH
     manifest = {
         'version': 1,
         'defaults': {
@@ -1146,7 +1145,7 @@ def build_parser():
     init_p.add_argument('--canonical-remote', default='origin')
     init_p.add_argument('--publication-remote', default='fork')
     init_p.add_argument('--base-branch', default='main')
-    init_p.add_argument('--integration-branch', default='integration/main')
+    init_p.add_argument('--integration-branch')
     init_p.add_argument('--force', action='store_true')
     init_p.add_argument('--stdout', action='store_true')
     init_p.set_defaults(func=command_init)

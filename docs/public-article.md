@@ -124,9 +124,9 @@ Below is a minimal Git-oriented implementation flow.
 If a repository has multiple active PR branches plus an integration branch, Git worktrees are usually the cleanest operational model.
 
 A very practical setup is:
-- the **repo root** stays on `main` as an administrative checkout
+- the **repo root** stays on the shared integration branch for daily work
 - each **PR branch** gets its own worktree
-- the **integration branch** gets its own worktree too
+- `main` remains the clean promotion branch
 
 That gives you three benefits immediately:
 - less branch-hopping confusion
@@ -149,7 +149,7 @@ With that layout:
 - `../repo-pr-feature-a` is only for PR A
 - `../repo-pr-feature-b` is only for PR B
 - `../repo-integration` is only for the combined runtime branch
-- the original repo directory can return to `main`
+- the original repo directory can stay on the integration branch
 
 ### 1. Inspect the real state
 

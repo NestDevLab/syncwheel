@@ -9,7 +9,7 @@
 - PR review surfaces
 
 Default operating stance:
-- day-to-day work happens on `integration/*`
+- day-to-day work happens on `main-integration`
 - every persistent integration change should map to one PR stack
 - each stack maps to one `pr/*` branch
 - integration is rebuilt as an ordered replay of declared stacks
