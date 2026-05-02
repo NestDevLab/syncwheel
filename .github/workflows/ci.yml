@@ -36,8 +36,10 @@ jobs:
           python scripts/syncwheel.py status --help
           python scripts/syncwheel.py validate --help
           python scripts/syncwheel.py plan --help
-          python scripts/syncwheel.py materialize-pr --help
-          python scripts/syncwheel.py materialize-integration --help
+          python scripts/syncwheel.py check --help
+          python scripts/syncwheel.py stack --help
+          python scripts/syncwheel.py int --help
+          python scripts/syncwheel.py self --help
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
