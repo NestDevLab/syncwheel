@@ -121,6 +121,38 @@ python3 scripts/syncwheel.py int push
 Rebuilds create a `backup/<branch>-before-syncwheel-<timestamp>` branch first
 when the target branch already exists.
 
+### Manifest self-reference rule
+
+If `.syncwheel/manifest.json` is the source of truth for exact stack commit
+ownership, do **not** model a commit that edits that manifest as a normal stack
+commit inside the same manifest revision.
+
+Why:
+- the manifest would need to name the SHA of the commit that changes the
+  manifest itself
+- updating the manifest to include that SHA creates another manifest-changing
+  commit
+- that creates an ownership recursion loop
+
+Stable rule:
+- treat manifest edits and syncwheel-version bumps as **control-plane metadata**,
+  not as stack-owned product commits
+- keep that metadata in an admin checkout/branch or a dedicated maintenance PR
+  that is intentionally excluded from `integration.stacks`
+- rebuild PR branches and integration from the manifest; then validate again
+
+Practical flow:
+1. update `.syncwheel/manifest.json` in a clean admin checkout
+2. rebuild/push each declared `pr/*` stack from that manifest
+3. rebuild integration from declared stacks only
+4. rerun `check`
+5. commit/publish the manifest update separately if you want it reviewed, but do
+   not expect syncwheel to classify that manifest-maintenance commit as a normal
+   stack commit in the same manifest revision
+
+This keeps `main-integration` free of stale cherry-picks and avoids infinite
+manifest self-classification.
+
 ## Phase 6. Validate honestly
 
 Minimum checks:

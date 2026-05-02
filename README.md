@@ -531,6 +531,20 @@ Recommended sequence:
 
 See [docs/ai-agents.md](docs/ai-agents.md).
 
+## Manifest maintenance rule
+
+When `.syncwheel/manifest.json` is the source of truth for exact stack commits,
+do not try to make a manifest-editing commit describe itself inside that same
+manifest revision.
+
+Use this rule instead:
+- stack commits describe product/runtime changes
+- manifest edits and syncwheel-version bumps are control-plane metadata
+- rebuild `pr/*` branches and integration from the manifest
+- keep manifest-maintenance commits out of `integration.stacks`
+
+For the operational flow, see [docs/core-procedure.md](docs/core-procedure.md).
+
 ## License
 
 MIT

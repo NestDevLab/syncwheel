@@ -740,10 +740,19 @@ def resolve_stack_rebuild_location(repo_root, stack, args):
         raise SyncwheelError('use either --in-place or --worktree, not both')
     if args.in_place:
         return None, True
+    existing = find_worktree_for_branch(repo_root, stack['branch'])
     if args.worktree:
-        return Path(args.worktree).resolve(), False
+        path = Path(args.worktree).resolve()
+        if existing and existing != path:
+            raise SyncwheelError(
+                f"branch {stack['branch']!r} already has a worktree at {existing}; "
+                'reuse that worktree or use --in-place from that checkout'
+            )
+        return path, False
     if get_current_branch(repo_root) == stack['branch']:
         return None, True
+    if existing:
+        return existing, False
     return default_worktree_path(repo_root, stack['branch']), False
 
 
@@ -753,10 +762,19 @@ def resolve_int_rebuild_location(repo_root, manifest, args):
         raise SyncwheelError('use either --in-place or --worktree, not both')
     if args.in_place:
         return None, True
+    existing = find_worktree_for_branch(repo_root, integration['branch'])
     if args.worktree:
-        return Path(args.worktree).resolve(), False
+        path = Path(args.worktree).resolve()
+        if existing and existing != path:
+            raise SyncwheelError(
+                f"branch {integration['branch']!r} already has a worktree at {existing}; "
+                'reuse that worktree or use --in-place from that checkout'
+            )
+        return path, False
     if get_current_branch(repo_root) == integration['branch']:
         return None, True
+    if existing:
+        return existing, False
     return default_worktree_path(repo_root, integration['branch']), False
 
 
@@ -917,6 +935,15 @@ def quoted(parts):
     return ' '.join(shlex.quote(part) for part in parts)
 
 
+def worktree_matches_branch(repo_root, branch, worktree):
+    if worktree is None:
+        return False
+    found = find_worktree_for_branch(repo_root, branch)
+    if not found:
+        return False
+    return found.resolve() == Path(worktree).resolve()
+
+
 def materialize_pr_commands(repo_root, manifest, stack, worktree=None, in_place=False, timestamp=None):
     branch = stack['branch']
     base = stack['base']
@@ -930,6 +957,12 @@ def materialize_pr_commands(repo_root, manifest, stack, worktree=None, in_place=
         commands.extend([
             ['git', 'reset', '--hard', base],
             ['git', 'cherry-pick', *commit_args],
+        ])
+        return commands
+    if worktree_matches_branch(repo_root, branch, worktree):
+        commands.extend([
+            ['git', '-C', str(worktree), 'reset', '--hard', base],
+            ['git', '-C', str(worktree), 'cherry-pick', *commit_args],
         ])
         return commands
     commands.extend([
@@ -978,6 +1011,10 @@ def materialize_integration_commands(repo_root, manifest, worktree=None, in_plac
         commands.append(['git', 'reset', '--hard', integration['base']])
         commands.extend(integration_stack_commands(manifest))
         return commands
+    if worktree_matches_branch(repo_root, integration['branch'], worktree):
+        commands.append(['git', '-C', str(worktree), 'reset', '--hard', integration['base']])
+        commands.extend(integration_stack_commands(manifest, worktree))
+        return commands
     commands.append(['git', 'worktree', 'add', '-B', integration['branch'], str(worktree), integration['base']])
     commands.extend(integration_stack_commands(manifest, worktree))
     return commands
@@ -991,6 +1028,19 @@ def run_command_list(commands, repo_root, apply):
     for command in commands:
         run(command, cwd=repo_root)
         print(quoted(command))
+
+
+def ensure_non_in_place_target_clean(repo_root, branch, worktree):
+    if worktree is None:
+        return
+    path = Path(worktree).resolve()
+    if worktree_matches_branch(repo_root, branch, path):
+        ensure_clean_worktree(path)
+        current_branch = get_current_branch(path)
+        if current_branch != branch:
+            raise SyncwheelError(
+                f'{path} is expected to be on {branch!r} but is on {current_branch!r}'
+            )
 
 
 def command_init(args):
@@ -1302,6 +1352,8 @@ def command_stack_rebuild(args):
     worktree, in_place = resolve_stack_rebuild_location(repo_root, stack, args)
     if not args.dry_run and in_place:
         ensure_in_place_target(repo_root, stack['branch'])
+    if not args.dry_run and not in_place:
+        ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
     commands = materialize_pr_commands(repo_root, manifest, stack, worktree, in_place)
     run_command_list(commands, repo_root, not args.dry_run)
     return 0
@@ -1351,6 +1403,8 @@ def command_int_rebuild(args):
     worktree, in_place = resolve_int_rebuild_location(repo_root, manifest, args)
     if not args.dry_run and in_place:
         ensure_in_place_target(repo_root, manifest['integration']['branch'])
+    if not args.dry_run and not in_place:
+        ensure_non_in_place_target_clean(repo_root, manifest['integration']['branch'], worktree)
     commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
     run_command_list(commands, repo_root, not args.dry_run)
     return 0

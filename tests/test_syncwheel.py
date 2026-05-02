@@ -298,6 +298,16 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('git worktree add -B pr/feature-a', result.stdout)
         self.assertIn('git -C', result.stdout)
 
+    def test_stack_rebuild_reuses_existing_stack_worktree(self):
+        worktree = self.tmp / 'wt-feature-a'
+        self.git('worktree', 'add', str(worktree), 'pr/feature-a')
+
+        result = self.run_cli('stack', 'rebuild', 'feature-a', '--dry-run', expected=0)
+
+        self.assertIn(f'git -C {worktree} reset --hard main', result.stdout)
+        self.assertIn(f'git -C {worktree} cherry-pick', result.stdout)
+        self.assertNotIn('git worktree add -B pr/feature-a', result.stdout)
+
     def test_stack_rebuild_in_place_commands_are_emitted(self):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', '--dry-run', expected=0)
         self.assertIn('git fetch --all --prune', result.stdout)
@@ -308,6 +318,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_int_rebuild_merge_stack_commands_are_emitted(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         data = json.loads(manifest.read_text())
+        self.git('branch', 'integration/test', 'main')
+        data['integration']['branch'] = 'integration/test'
         data['integration']['strategy'] = 'merge-stacks'
         manifest.write_text(json.dumps(data, indent=2) + '\n')
 
@@ -315,8 +327,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('int', 'rebuild', '--worktree', str(worktree), '--dry-run', expected=0)
 
         self.assertIn('git fetch --all --prune', result.stdout)
-        self.assertIn('git branch backup/main-before-syncwheel-', result.stdout)
-        self.assertIn('git worktree add -B main', result.stdout)
+        self.assertIn('git branch backup/integration/test-before-syncwheel-', result.stdout)
+        self.assertIn('git worktree add -B integration/test', result.stdout)
         self.assertIn("git -C", result.stdout)
         self.assertIn("merge --no-ff pr/feature-a -m 'Merge stack '", result.stdout)
         self.assertIn("merge --no-ff pr/feature-b -m 'Merge stack '", result.stdout)
@@ -327,6 +339,22 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('git branch backup/main-before-syncwheel-', result.stdout)
         self.assertIn('git reset --hard main', result.stdout)
         self.assertIn('git cherry-pick', result.stdout)
+
+    def test_int_rebuild_reuses_existing_integration_worktree(self):
+        self.git('branch', 'integration/test', 'main')
+        worktree = self.tmp / 'wt-integration'
+        self.git('worktree', 'add', str(worktree), 'integration/test')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('int', 'rebuild', '--dry-run', expected=0)
+
+        self.assertIn(f'git -C {worktree} reset --hard main', result.stdout)
+        self.assertIn(f'git -C {worktree} cherry-pick', result.stdout)
+        self.assertNotIn('git worktree add -B integration/test', result.stdout)
 
     def test_int_rebuild_skips_empty_cherry_pick(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
