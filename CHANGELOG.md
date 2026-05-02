@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 - 2026-05-02
+
+- Detect available updates for detached-head and submodule-style syncwheel installs.
+- Reuse existing target worktrees more safely during rebuilds.
+- Clarify detached-install update detection in the docs.
+
 ## 0.7.0 - 2026-05-02
 
 - Add built-in self update commands: `self status`, `self check-update`, and
