@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2 - 2026-05-02
+
+- Publish the detached-head update-detection fix as a new release version so pinned installs can verify the notifier behavior against a newer tagged version.
+
 ## 0.7.1 - 2026-05-02
 
 - Detect available updates for detached-head and submodule-style syncwheel installs.
