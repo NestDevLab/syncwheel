@@ -82,6 +82,8 @@ Practical meaning:
 - `validate` and `plan` detect drift before branch mutation.
 - validation also reports non-merge commits on integration that are not
   declared in any stack, so integration-only work cannot hide silently.
+- update detection also works for normal branch checkouts and detached
+  submodule-style installs.
 - `integration.strategy` controls how integration is rebuilt:
   - `cherry-pick` replays every declared commit into one linear history.
   - `merge-stacks` merges each declared stack branch in manifest order with
