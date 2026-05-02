@@ -547,6 +547,59 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['current_version'], '0.6.0')
         self.assertEqual(data['latest_version'], '0.7.0')
 
+    def test_self_check_update_uses_origin_main_when_install_is_detached(self):
+        fixture = self.init_syncwheel_install_fixture()
+        subprocess.run(['git', 'checkout', '--detach', 'HEAD'], cwd=fixture['install'], check=True)
+
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'self',
+            'check-update',
+            '--fetch',
+            '--json',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+            },
+            cwd=fixture['install'],
+        )
+        data = json.loads(result.stdout)
+        self.assertEqual(data['branch'], 'DETACHED')
+        self.assertIsNone(data['upstream'])
+        self.assertFalse(data['can_self_update'])
+        self.assertTrue(data['update_available'])
+        self.assertEqual(data['latest_version'], '0.7.0')
+        self.assertIn('checking against origin/main', data['reason'])
+
+    def test_self_check_update_falls_back_to_remote_head_when_origin_main_is_missing(self):
+        fixture = self.init_syncwheel_install_fixture()
+        subprocess.run(['git', 'checkout', '--detach', 'HEAD'], cwd=fixture['install'], check=True)
+        subprocess.run(['git', 'branch', '-m', 'main', 'trunk'], cwd=fixture['seed'], check=True)
+        subprocess.run(['git', 'push', 'origin', 'trunk'], cwd=fixture['seed'], check=True)
+        subprocess.run(['git', '--git-dir', str(fixture['origin']), 'symbolic-ref', 'HEAD', 'refs/heads/trunk'], check=True)
+        subprocess.run(['git', 'push', 'origin', '--delete', 'main'], cwd=fixture['seed'], check=True)
+        subprocess.run(['git', 'update-ref', '-d', 'refs/remotes/origin/main'], cwd=fixture['install'], check=True)
+
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'self',
+            'check-update',
+            '--fetch',
+            '--json',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+            },
+            cwd=fixture['install'],
+        )
+        data = json.loads(result.stdout)
+        self.assertEqual(data['branch'], 'DETACHED')
+        self.assertTrue(data['update_available'])
+        self.assertEqual(data['latest_version'], '0.7.0')
+        self.assertIn('checking against origin/trunk', data['reason'])
+
     def test_self_update_fast_forwards_install(self):
         fixture = self.init_syncwheel_install_fixture()
         result = self.run_custom_cli(

@@ -199,6 +199,56 @@ def install_git_upstream(root):
     return result.stdout.strip() or None
 
 
+def install_git_remotes(root):
+    result = git(root, 'remote', check=False)
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def remote_branch_exists(repo_root, remote, branch):
+    result = git(repo_root, 'ls-remote', '--exit-code', '--heads', remote, branch, check=False)
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def remote_head_branch(repo_root, remote):
+    result = git(repo_root, 'ls-remote', '--symref', remote, 'HEAD', check=False)
+    for line in result.stdout.splitlines():
+        if line.startswith('ref: ') and line.endswith('\tHEAD'):
+            ref = line.split()[1]
+            if ref.startswith('refs/heads/'):
+                return ref.replace('refs/heads/', '', 1)
+    return None
+
+
+def resolve_install_update_ref(root, upstream=None, prefer_network=False):
+    upstream = upstream or install_git_upstream(root)
+    if upstream and ref_exists(root, upstream):
+        return upstream
+
+    remotes = install_git_remotes(root)
+    ordered = []
+    if 'origin' in remotes:
+        ordered.append('origin')
+    ordered.extend(remote for remote in remotes if remote != 'origin')
+
+    for remote in ordered:
+        preferred = f'{remote}/main'
+        if prefer_network:
+            if remote_branch_exists(root, remote, 'main'):
+                return preferred
+        elif ref_exists(root, preferred):
+            return preferred
+
+    for remote in ordered:
+        if prefer_network:
+            branch = remote_head_branch(root, remote)
+            if branch:
+                return f'{remote}/{branch}'
+        fallback = get_default_remote_head(root, remote)
+        if fallback:
+            return fallback
+    return None
+
+
 def install_is_clean(root):
     result = git(root, 'status', '--porcelain', check=False)
     return result.returncode == 0 and not result.stdout.strip()
@@ -232,25 +282,27 @@ def collect_self_update_status(root=None, fetch=False):
     upstream = install_git_upstream(root)
     status['upstream'] = upstream
     status['can_self_update'] = bool(upstream) and status['branch'] != 'DETACHED'
-    if not upstream:
-        status['reason'] = 'syncwheel checkout has no upstream tracking branch'
-        return status
 
-    remote = upstream.split('/', 1)[0]
+    remotes = install_git_remotes(root)
     if fetch:
-        git(root, 'fetch', '--quiet', remote, '--tags', check=False)
+        for remote in remotes:
+            git(root, 'fetch', '--quiet', remote, '--tags', check=False)
 
-    if not ref_exists(root, upstream):
-        status['reason'] = f'upstream ref not found locally: {upstream}'
+    update_ref = resolve_install_update_ref(root, upstream=upstream, prefer_network=fetch)
+    if not update_ref:
+        status['reason'] = 'syncwheel checkout has no upstream tracking branch or remote head to compare against'
         return status
 
-    counts = git(root, 'rev-list', '--left-right', '--count', f'HEAD...{upstream}', check=False)
+    if not upstream:
+        status['reason'] = f'no upstream tracking branch; checking against {update_ref}'
+
+    counts = git(root, 'rev-list', '--left-right', '--count', f'HEAD...{update_ref}', check=False)
     parts = counts.stdout.strip().split()
     if len(parts) == 2:
         status['ahead_commits'] = parse_int(parts[0], 0)
         status['behind_commits'] = parse_int(parts[1], 0)
 
-    remote_version = git(root, 'show', f'{upstream}:VERSION', check=False).stdout.strip() or current_version
+    remote_version = git(root, 'show', f'{update_ref}:VERSION', check=False).stdout.strip() or current_version
     status['latest_version'] = remote_version
     status['update_available'] = (
         compare_versions(remote_version, current_version) > 0 or status['behind_commits'] > 0
