@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.6.0`
+Current version: `0.7.0`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -123,6 +123,39 @@ Requirements:
 - Python 3.11+
 - Git
 
+## Self update, notifications, and AI-safe visibility
+
+Syncwheel now includes a built-in install/update channel so humans and AI agents
+can notice new releases instead of silently drifting.
+
+- default mode: `notify`
+- automatic notice is emitted on normal syncwheel usage when the local install is
+  behind its upstream branch
+- manual inspection:
+
+```bash
+python3 scripts/syncwheel.py self status
+python3 scripts/syncwheel.py self check-update --fetch
+```
+
+- manual update:
+
+```bash
+python3 scripts/syncwheel.py self update
+```
+
+- update policy:
+
+```bash
+python3 scripts/syncwheel.py self mode notify
+python3 scripts/syncwheel.py self mode auto
+python3 scripts/syncwheel.py self mode off
+```
+
+`auto` tries a safe fast-forward self-update when a newer upstream version is
+detected. If the syncwheel checkout is dirty or detached, syncwheel falls back
+to a visible notice instead of mutating it unsafely.
+
 ## Installation and adoption modes
 
 1. **Global toolkit (recommended)**
@@ -145,6 +178,10 @@ You can register repo aliases and keep commands short.
 ```bash
 python3 scripts/syncwheel.py repo add project ~/code/sample-project
 python3 scripts/syncwheel.py repo ls
+python3 scripts/syncwheel.py self status
+python3 scripts/syncwheel.py self check-update --fetch
+python3 scripts/syncwheel.py self update
+python3 scripts/syncwheel.py self mode notify
 python3 scripts/syncwheel.py status -r project --fetch
 python3 scripts/syncwheel.py repo rm project
 ```

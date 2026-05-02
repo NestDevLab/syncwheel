@@ -43,6 +43,25 @@ class SyncwheelFixtureTest(unittest.TestCase):
             )
         return result
 
+    def run_custom_cli(self, cli_path, *args, expected=0, extra_env=None, cwd=None):
+        env = dict(**os.environ)
+        if extra_env:
+            env.update(extra_env)
+        result = subprocess.run(
+            ['python3', str(cli_path), *args],
+            cwd=cwd,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        if result.returncode != expected:
+            raise AssertionError(
+                f"expected exit {expected}, got {result.returncode}\n"
+                f"STDOUT:\n{result.stdout}\n"
+                f"STDERR:\n{result.stderr}"
+            )
+        return result
+
     def git(self, *args):
         result = subprocess.run(
             ['git', *args],
@@ -108,6 +127,40 @@ class SyncwheelFixtureTest(unittest.TestCase):
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+    def init_syncwheel_install_fixture(self):
+        seed = self.tmp / 'syncwheel-seed'
+        origin = self.tmp / 'syncwheel-origin.git'
+        install = self.tmp / 'syncwheel-install'
+        (seed / 'scripts').mkdir(parents=True)
+        shutil.copy2(CLI, seed / 'scripts' / 'syncwheel.py')
+        (seed / 'VERSION').write_text('0.6.0\n')
+        (seed / 'README.md').write_text('syncwheel fixture\n')
+
+        subprocess.run(['git', 'init', '-q', '-b', 'main'], cwd=seed, check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Syncwheel Fixture'], cwd=seed, check=True)
+        subprocess.run(['git', 'config', 'user.email', 'syncwheel@example.com'], cwd=seed, check=True)
+        subprocess.run(['git', 'add', '.'], cwd=seed, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'syncwheel 0.6.0'], cwd=seed, check=True)
+        subprocess.run(['git', 'clone', '--bare', str(seed), str(origin)], check=True)
+        subprocess.run(['git', 'remote', 'add', 'origin', str(origin)], cwd=seed, check=True)
+        subprocess.run(['git', 'push', '-u', 'origin', 'main'], cwd=seed, check=True)
+        subprocess.run(['git', 'clone', str(origin), str(install)], check=True)
+
+        (seed / 'VERSION').write_text('0.7.0\n')
+        subprocess.run(['git', 'add', 'VERSION'], cwd=seed, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'syncwheel 0.7.0'], cwd=seed, check=True)
+        subprocess.run(['git', 'push', 'origin', 'main'], cwd=seed, check=True)
+
+        return {
+            'seed': seed,
+            'origin': origin,
+            'install': install,
+            'cli': install / 'scripts' / 'syncwheel.py',
+            'state': self.tmp / 'syncwheel-update-state.json',
+            'settings': self.tmp / 'syncwheel-settings.json',
+            'registry': self.tmp / 'syncwheel-registry.json',
+        }
 
     def test_validate_passes_for_fixture(self):
         result = self.run_cli('validate', expected=0)
@@ -445,6 +498,79 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('status', '-r', 'fixture2', '--json', expected=0)
         data = json.loads(result.stdout)
         self.assertEqual(data['manifest_path'], str(custom_manifest))
+
+    def test_self_check_update_reports_newer_version_after_fetch(self):
+        fixture = self.init_syncwheel_install_fixture()
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'self',
+            'check-update',
+            '--fetch',
+            '--json',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+            },
+            cwd=fixture['install'],
+        )
+        data = json.loads(result.stdout)
+        self.assertTrue(data['update_available'])
+        self.assertEqual(data['current_version'], '0.6.0')
+        self.assertEqual(data['latest_version'], '0.7.0')
+
+    def test_self_update_fast_forwards_install(self):
+        fixture = self.init_syncwheel_install_fixture()
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'self',
+            'update',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+            },
+            cwd=fixture['install'],
+        )
+        self.assertIn('updated syncwheel: 0.6.0 -> 0.7.0', result.stdout)
+        self.assertEqual((fixture['install'] / 'VERSION').read_text().strip(), '0.7.0')
+
+    def test_startup_notify_mode_emits_update_notice(self):
+        fixture = self.init_syncwheel_install_fixture()
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'repo',
+            'ls',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_REPO_REGISTRY': str(fixture['registry']),
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+                'SYNCWHEEL_UPDATE_MODE': 'notify',
+                'SYNCWHEEL_UPDATE_INTERVAL_SECONDS': '0',
+            },
+            cwd=fixture['install'],
+        )
+        self.assertIn('NOTICE: syncwheel update available (0.6.0 -> 0.7.0)', result.stderr)
+
+    def test_startup_auto_mode_updates_before_normal_command(self):
+        fixture = self.init_syncwheel_install_fixture()
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'repo',
+            'ls',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_REPO_REGISTRY': str(fixture['registry']),
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+                'SYNCWHEEL_UPDATE_MODE': 'auto',
+                'SYNCWHEEL_UPDATE_INTERVAL_SECONDS': '0',
+            },
+            cwd=fixture['install'],
+        )
+        self.assertIn('syncwheel auto-updated 0.6.0 -> 0.7.0', result.stderr)
+        self.assertEqual((fixture['install'] / 'VERSION').read_text().strip(), '0.7.0')
 
 
 if __name__ == '__main__':

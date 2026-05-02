@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.7.0 - 2026-05-02
+
+- Add built-in self update commands: `self status`, `self check-update`, and
+  `self update`.
+- Add automatic per-install update policy with `self mode off|notify|auto`.
+- Emit visible update notices on normal syncwheel usage so human operators and
+  AI agents do not silently keep using an outdated checkout.
+
 ## 0.6.0 - 2026-04-30
 
 - Make `main-integration` the default shared integration branch created by

@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -16,10 +17,27 @@ class SyncwheelError(Exception):
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
+ENV_UPDATE_MODE = 'SYNCWHEEL_UPDATE_MODE'
+ENV_UPDATE_INTERVAL_SECONDS = 'SYNCWHEEL_UPDATE_INTERVAL_SECONDS'
+ENV_UPDATE_STATE_PATH = 'SYNCWHEEL_UPDATE_STATE_PATH'
+ENV_UPDATE_SETTINGS_PATH = 'SYNCWHEEL_UPDATE_SETTINGS_PATH'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 DEFAULT_INTEGRATION_BRANCH = 'main-integration'
-VERSION = '0.6.0'
+UPDATE_MODES = {'off', 'notify', 'auto'}
+DEFAULT_UPDATE_MODE = 'notify'
+DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
+
+
+def read_version_file(path):
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+INSTALL_ROOT = Path(__file__).resolve().parents[1]
+VERSION = read_version_file(INSTALL_ROOT / 'VERSION') or '0.6.0'
 
 
 def run(cmd, cwd=None, check=True, input_text=None):
@@ -43,6 +61,288 @@ def get_repo_root(explicit=None):
     cwd = explicit or os.getcwd()
     result = run(['git', 'rev-parse', '--show-toplevel'], cwd=cwd)
     return Path(result.stdout.strip())
+
+
+def iso_utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def get_settings_path():
+    raw = os.environ.get(ENV_UPDATE_SETTINGS_PATH)
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / '.config' / 'syncwheel' / 'settings.json'
+
+
+def get_update_state_path():
+    raw = os.environ.get(ENV_UPDATE_STATE_PATH)
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / '.config' / 'syncwheel' / 'update-state.json'
+
+
+def load_json_file(path, default):
+    if not path.exists():
+        return default
+    try:
+        data = json.loads(path.read_text())
+    except json.JSONDecodeError as exc:
+        raise SyncwheelError(f'invalid JSON file: {path}: {exc}') from exc
+    if not isinstance(data, dict):
+        raise SyncwheelError(f'JSON root must be an object: {path}')
+    return data
+
+
+def save_json_file(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n')
+    return path
+
+
+def parse_int(value, default):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse_version_tuple(value):
+    parts = []
+    for raw in str(value or '').strip().split('.'):
+        if raw == '':
+            continue
+        if raw.isdigit():
+            parts.append(int(raw))
+        else:
+            return None
+    return tuple(parts) if parts else None
+
+
+def compare_versions(left, right):
+    left_tuple = parse_version_tuple(left)
+    right_tuple = parse_version_tuple(right)
+    if left_tuple is None or right_tuple is None:
+        return (str(left) > str(right)) - (str(left) < str(right))
+    width = max(len(left_tuple), len(right_tuple))
+    left_tuple = left_tuple + (0,) * (width - len(left_tuple))
+    right_tuple = right_tuple + (0,) * (width - len(right_tuple))
+    return (left_tuple > right_tuple) - (left_tuple < right_tuple)
+
+
+def load_update_settings():
+    path = get_settings_path()
+    data = load_json_file(path, {})
+    update = data.get('update', {})
+    if update is None:
+        update = {}
+    if not isinstance(update, dict):
+        raise SyncwheelError(f'update settings must be an object: {path}')
+    mode = os.environ.get(ENV_UPDATE_MODE) or update.get('mode') or DEFAULT_UPDATE_MODE
+    if mode not in UPDATE_MODES:
+        raise SyncwheelError(
+            f'invalid update mode: {mode!r} (expected one of: {", ".join(sorted(UPDATE_MODES))})'
+        )
+    interval = parse_int(
+        os.environ.get(ENV_UPDATE_INTERVAL_SECONDS) or update.get('check_interval_seconds'),
+        DEFAULT_UPDATE_INTERVAL_SECONDS,
+    )
+    if interval < 0:
+        interval = DEFAULT_UPDATE_INTERVAL_SECONDS
+    return {
+        'path': str(path),
+        'mode': mode,
+        'check_interval_seconds': interval,
+    }
+
+
+def set_update_mode(mode):
+    if mode not in UPDATE_MODES:
+        raise SyncwheelError(f'unknown update mode: {mode}')
+    path = get_settings_path()
+    data = load_json_file(path, {})
+    update = data.get('update')
+    if update is None or not isinstance(update, dict):
+        update = {}
+    update['mode'] = mode
+    update.setdefault('check_interval_seconds', DEFAULT_UPDATE_INTERVAL_SECONDS)
+    data['update'] = update
+    save_json_file(path, data)
+    return path
+
+
+def load_update_state():
+    path = get_update_state_path()
+    data = load_json_file(path, {})
+    return data, path
+
+
+def save_update_state(data, path=None):
+    return save_json_file(path or get_update_state_path(), data)
+
+
+def install_root():
+    return INSTALL_ROOT
+
+
+def install_is_git_checkout(root):
+    result = run(['git', 'rev-parse', '--show-toplevel'], cwd=root, check=False)
+    return result.returncode == 0
+
+
+def install_git_branch(root):
+    result = git(root, 'branch', '--show-current', check=False)
+    return result.stdout.strip() or 'DETACHED'
+
+
+def install_git_upstream(root):
+    result = git(root, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}', check=False)
+    return result.stdout.strip() or None
+
+
+def install_is_clean(root):
+    result = git(root, 'status', '--porcelain', check=False)
+    return result.returncode == 0 and not result.stdout.strip()
+
+
+def collect_self_update_status(root=None, fetch=False):
+    root = Path(root or install_root()).resolve()
+    current_version = read_version_file(root / 'VERSION') or VERSION
+    status = {
+        'install_root': str(root),
+        'current_version': current_version,
+        'latest_version': current_version,
+        'git_repo': False,
+        'branch': None,
+        'upstream': None,
+        'clean': None,
+        'can_self_update': False,
+        'update_available': False,
+        'ahead_commits': 0,
+        'behind_commits': 0,
+        'reason': None,
+        'checked_at': iso_utc_now(),
+    }
+    if not install_is_git_checkout(root):
+        status['reason'] = 'syncwheel install is not a git checkout'
+        return status
+
+    status['git_repo'] = True
+    status['branch'] = install_git_branch(root)
+    status['clean'] = install_is_clean(root)
+    upstream = install_git_upstream(root)
+    status['upstream'] = upstream
+    status['can_self_update'] = bool(upstream) and status['branch'] != 'DETACHED'
+    if not upstream:
+        status['reason'] = 'syncwheel checkout has no upstream tracking branch'
+        return status
+
+    remote = upstream.split('/', 1)[0]
+    if fetch:
+        git(root, 'fetch', '--quiet', remote, '--tags', check=False)
+
+    if not ref_exists(root, upstream):
+        status['reason'] = f'upstream ref not found locally: {upstream}'
+        return status
+
+    counts = git(root, 'rev-list', '--left-right', '--count', f'HEAD...{upstream}', check=False)
+    parts = counts.stdout.strip().split()
+    if len(parts) == 2:
+        status['ahead_commits'] = parse_int(parts[0], 0)
+        status['behind_commits'] = parse_int(parts[1], 0)
+
+    remote_version = git(root, 'show', f'{upstream}:VERSION', check=False).stdout.strip() or current_version
+    status['latest_version'] = remote_version
+    status['update_available'] = (
+        compare_versions(remote_version, current_version) > 0 or status['behind_commits'] > 0
+    )
+    return status
+
+
+def recommended_self_update_command():
+    return f'python3 {shlex.quote(str(Path(__file__).resolve()))} self update'
+
+
+def refresh_cached_self_update_status(force=False):
+    settings = load_update_settings()
+    state, state_path = load_update_state()
+    now = int(time.time())
+    last_checked_epoch = parse_int(state.get('last_checked_epoch'), 0)
+    cached = state.get('status') if isinstance(state.get('status'), dict) else None
+    stale = force or not cached or (now - last_checked_epoch) >= settings['check_interval_seconds']
+    if stale:
+        cached = collect_self_update_status(fetch=True)
+        state['status'] = cached
+        state['last_checked_at'] = cached.get('checked_at') or iso_utc_now()
+        state['last_checked_epoch'] = now
+        save_update_state(state, state_path)
+    return cached, settings, state, state_path
+
+
+def perform_self_update(root=None, dry_run=False, fetch=True):
+    root = Path(root or install_root()).resolve()
+    before = collect_self_update_status(root, fetch=fetch)
+    if not before['git_repo']:
+        raise SyncwheelError(before['reason'] or 'syncwheel install is not a git checkout')
+    if not before['upstream']:
+        raise SyncwheelError(before['reason'] or 'syncwheel checkout has no upstream tracking branch')
+    if before['branch'] == 'DETACHED':
+        raise SyncwheelError('syncwheel checkout is detached; self-update requires a branch checkout')
+    if not before['clean']:
+        raise SyncwheelError('syncwheel checkout is not clean; commit or stash local changes before self-update')
+
+    remote = before['upstream'].split('/', 1)[0]
+    commands = []
+    if fetch:
+        commands.append(['git', 'fetch', '--quiet', remote, '--tags'])
+    commands.append(['git', 'merge', '--ff-only', before['upstream']])
+    if dry_run:
+        for command in commands:
+            print(quoted(command))
+        return before, before, commands
+
+    for command in commands:
+        run(command, cwd=root)
+    after = collect_self_update_status(root, fetch=False)
+    state, state_path = load_update_state()
+    state['status'] = after
+    state['last_checked_at'] = after.get('checked_at') or iso_utc_now()
+    state['last_checked_epoch'] = int(time.time())
+    save_update_state(state, state_path)
+    return before, after, commands
+
+
+def maybe_handle_startup_update_policy(args):
+    if getattr(args, 'command', None) == 'self':
+        return
+    try:
+        status, settings, _, _ = refresh_cached_self_update_status(force=False)
+    except SyncwheelError:
+        return
+    if settings['mode'] == 'off' or not status.get('update_available'):
+        return
+    current_version = status.get('current_version') or VERSION
+    latest_version = status.get('latest_version') or current_version
+    if settings['mode'] == 'auto':
+        try:
+            before, after, _ = perform_self_update(fetch=True)
+            print(
+                f'syncwheel auto-updated {before["current_version"]} -> {after["current_version"]}',
+                file=sys.stderr,
+            )
+            return
+        except SyncwheelError as exc:
+            print(
+                'NOTICE: syncwheel update available '
+                f'({current_version} -> {latest_version}) but auto-update was blocked: {exc}. '
+                f'Run: {recommended_self_update_command()}',
+                file=sys.stderr,
+            )
+            return
+    print(
+        f'NOTICE: syncwheel update available ({current_version} -> {latest_version}). '
+        f'Run: {recommended_self_update_command()}',
+        file=sys.stderr,
+    )
 
 
 def get_repo_registry_path():
@@ -1136,6 +1436,28 @@ def build_parser():
     repo_ls_p.add_argument('--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
 
+    self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
+    self_sub = self_p.add_subparsers(dest='self_command', required=True)
+
+    self_status_p = self_sub.add_parser('status', help='show syncwheel install/update status')
+    self_status_p.add_argument('--fetch', action='store_true', help='refresh remote tracking info before reporting')
+    self_status_p.add_argument('--json', action='store_true')
+    self_status_p.set_defaults(func=command_self_status)
+
+    self_check_p = self_sub.add_parser('check-update', help='check whether a newer syncwheel version exists')
+    self_check_p.add_argument('--fetch', action='store_true', help='refresh remote tracking info before checking')
+    self_check_p.add_argument('--json', action='store_true')
+    self_check_p.set_defaults(func=command_self_check_update)
+
+    self_update_p = self_sub.add_parser('update', help='fast-forward this syncwheel checkout to its upstream branch')
+    self_update_p.add_argument('--dry-run', action='store_true')
+    self_update_p.add_argument('--no-fetch', action='store_true')
+    self_update_p.set_defaults(func=command_self_update)
+
+    self_mode_p = self_sub.add_parser('mode', help='show or set automatic update policy: off, notify, auto')
+    self_mode_p.add_argument('mode', nargs='?', choices=sorted(UPDATE_MODES))
+    self_mode_p.set_defaults(func=command_self_mode)
+
     use_p = sub.add_parser('use', help='show or set the repo-local default syncwheel profile', parents=[common])
     use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
     use_p.add_argument('--shared', action='store_true', help='clear the local profile and use the shared manifest')
@@ -1317,6 +1639,78 @@ def command_repo_ls(args):
     return 0
 
 
+def command_self_status(args):
+    status, settings, state, state_path = refresh_cached_self_update_status(force=args.fetch)
+    output = {
+        'settings': settings,
+        'settings_path': settings['path'],
+        'state_path': str(state_path),
+        'last_checked_at': state.get('last_checked_at'),
+        'status': status,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return 0
+    print(f"install_root: {status['install_root']}")
+    print(f"current_version: {status['current_version']}")
+    print(f"update_mode: {settings['mode']}")
+    print(f"check_interval_seconds: {settings['check_interval_seconds']}")
+    if status['git_repo']:
+        print(f"branch: {status['branch']}")
+        print(f"upstream: {status['upstream'] or 'none'}")
+        print(f"clean: {'yes' if status['clean'] else 'no'}")
+        print(f"ahead_commits: {status['ahead_commits']}")
+        print(f"behind_commits: {status['behind_commits']}")
+    else:
+        print('git_repo: no')
+    if status.get('reason'):
+        print(f"note: {status['reason']}")
+    if status['update_available']:
+        print(f"update: available ({status['current_version']} -> {status['latest_version']})")
+        print(f"recommended: {recommended_self_update_command()}")
+    else:
+        print('update: none')
+    if output['last_checked_at']:
+        print(f"last_checked_at: {output['last_checked_at']}")
+    return 0
+
+
+def command_self_check_update(args):
+    status, _, _, _ = refresh_cached_self_update_status(force=args.fetch)
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    if status['update_available']:
+        print(f"update available: {status['current_version']} -> {status['latest_version']}")
+        print(recommended_self_update_command())
+    else:
+        print(f"up to date: {status['current_version']}")
+    if status.get('reason'):
+        print(f"note: {status['reason']}")
+    return 0
+
+
+def command_self_update(args):
+    before, after, _ = perform_self_update(dry_run=args.dry_run, fetch=not args.no_fetch)
+    if args.dry_run:
+        return 0
+    if before['current_version'] == after['current_version'] and not before['update_available']:
+        print(f"already up to date: {after['current_version']}")
+        return 0
+    print(f"updated syncwheel: {before['current_version']} -> {after['current_version']}")
+    return 0
+
+
+def command_self_mode(args):
+    if not args.mode:
+        settings = load_update_settings()
+        print(settings['mode'])
+        return 0
+    path = set_update_mode(args.mode)
+    print(f'{args.mode}\n{path}')
+    return 0
+
+
 def main():
     parser = build_parser()
     raw_args = sys.argv[1:]
@@ -1328,6 +1722,7 @@ def main():
     args = parser.parse_args(raw_args)
     args.git_args = passthrough
     try:
+        maybe_handle_startup_update_policy(args)
         return args.func(args)
     except SyncwheelError as exc:
         print(f'error: {exc}', file=sys.stderr)
