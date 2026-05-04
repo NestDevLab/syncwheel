@@ -16,4 +16,4 @@ jobs:
           python-version: '3.12'
 
       - name: Run fixture smoke
-        run: python -m unittest tests.test_syncwheel.SyncwheelFixtureTest.test_materialize_commands_are_emitted -v
+        run: python -m unittest tests.test_syncwheel.SyncwheelFixtureTest.test_int_sync_status_and_align_remote_with_local_git_remote -v

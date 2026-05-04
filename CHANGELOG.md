@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 - 2026-05-04
 
 - Add `int sync-status` to compare local integration, remote integration, and
   the manifest-projected integration tree.
@@ -11,6 +11,8 @@
   identify shared, divergent, and composition-only stacks.
 - Add end-to-end Git tests covering shared-integration remote alignment and
   multi-manifest comparison.
+- Add a version-bump guard so release-relevant CLI changes must update
+  `VERSION`, `CHANGELOG.md`, and the README current-version line.
 
 ## 0.7.2 - 2026-05-02
 

@@ -62,6 +62,21 @@ class SyncwheelFixtureTest(unittest.TestCase):
             )
         return result
 
+    def run_script(self, script_path, *args, expected=0, cwd=None):
+        result = subprocess.run(
+            ['python3', str(script_path), *args],
+            cwd=cwd or self.repo,
+            text=True,
+            capture_output=True,
+        )
+        if result.returncode != expected:
+            raise AssertionError(
+                f"expected exit {expected}, got {result.returncode}\n"
+                f"STDOUT:\n{result.stdout}\n"
+                f"STDERR:\n{result.stderr}"
+            )
+        return result
+
     def git(self, *args):
         result = subprocess.run(
             ['git', *args],
@@ -403,6 +418,46 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_int_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork main', result.stdout)
+
+    def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
+        base = self.git('rev-parse', 'HEAD')
+        script = self.repo / 'scripts' / 'demo.py'
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('print("demo")\n')
+        self.git('add', 'scripts/demo.py')
+        self.git('commit', '-q', '-m', 'feat: add demo script')
+
+        result = self.run_script(
+            CLI.parent / 'check-version-bump.py',
+            '--base',
+            base,
+            expected=1,
+        )
+
+        self.assertIn('Release-relevant changes require a version bump', result.stdout)
+        self.assertIn('VERSION', result.stdout)
+        self.assertIn('CHANGELOG.md', result.stdout)
+        self.assertIn('README.md', result.stdout)
+
+    def test_version_bump_guard_passes_with_version_and_changelog(self):
+        base = self.git('rev-parse', 'HEAD')
+        script = self.repo / 'scripts' / 'demo.py'
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('print("demo")\n')
+        (self.repo / 'VERSION').write_text('9.9.9\n')
+        (self.repo / 'CHANGELOG.md').write_text('# Changelog\n\n## 9.9.9\n\n- Demo.\n')
+        (self.repo / 'README.md').write_text('Current version: `9.9.9`\n')
+        self.git('add', 'scripts/demo.py', 'VERSION', 'CHANGELOG.md', 'README.md')
+        self.git('commit', '-q', '-m', 'feat: add demo script')
+
+        result = self.run_script(
+            CLI.parent / 'check-version-bump.py',
+            '--base',
+            base,
+            expected=0,
+        )
+
+        self.assertIn('Version bump check passed', result.stdout)
 
     def test_int_sync_status_and_align_remote_with_local_git_remote(self):
         self.git('add', '.syncwheel/manifest.json')
