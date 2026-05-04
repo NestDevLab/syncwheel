@@ -165,36 +165,12 @@ Practical meaning:
 - your repo has no integration branch and no stacked branch maintenance
 - your process does not need deterministic rebuilds from a declared manifest
 
-## Open Source Maintainer Use Case
-
-A common Syncwheel setup looks like this:
-
-- `upstream/main` keeps moving
-- your fork has many open PR branches
-- each PR branch should stay reviewable on its own
-- a local integration branch combines selected PRs for real testing
-- more than one machine or agent may need to repair and publish the same state
-
-Without Syncwheel, the maintainer has to remember which commits belong to which
-PR, which local integration commits are temporary, which branch has already
-been rebased, and whether a force push is intentional. That works for one or two
-PRs. It becomes fragile with ten.
-
-With Syncwheel, the normal lifecycle is manifest-driven:
-
-```bash
-python3 scripts/syncwheel.py reconcile
-python3 scripts/syncwheel.py reconcile --apply
-python3 scripts/syncwheel.py reconcile --apply --push
-```
-
-The manifest is the contract. PR branches and integration branches are
-rebuildable projections of that contract.
-
 ## Three ways to use syncwheel
 
 1. **Guide-first (manual execution)**  
-   Use the docs as an operating playbook and run Git steps manually. This is possible, but cognitively heavier and easier to get wrong in complex branch graphs.
+   Use [docs/manual-git-flow.md](docs/manual-git-flow.md) as an operating
+   playbook and run the underlying Git steps manually. This is possible, but
+   cognitively heavier and easier to get wrong in complex branch graphs.
 
 2. **Script-assisted (human-operated)**  
    Use the CLI for discovery, validation, manifest updates, branch rebuilds,
@@ -355,10 +331,11 @@ Example:
 
 ## Quick start
 
-### 1. Bootstrap a manifest
+### 1. Bootstrap or inspect a manifest
 
 ```bash
 python3 scripts/syncwheel.py init
+python3 scripts/syncwheel.py check
 ```
 
 For a custom integration branch:
@@ -370,94 +347,22 @@ python3 scripts/syncwheel.py init --integration-branch integration/team-stack
 Use `--stdout` only when you need to pipe the generated manifest instead of
 writing it to `.syncwheel/manifest.json`.
 
-### 2. Inspect current state
-
-```bash
-python3 scripts/syncwheel.py check
-```
-
-### 3. Validate manifest against Git
-
-```bash
-python3 scripts/syncwheel.py validate
-python3 scripts/syncwheel.py plan --json
-```
-
-### 4. Update one stack from its branch
-
-```bash
-python3 scripts/syncwheel.py stack sync feature-a
-```
-
-Or set it from an explicit commit/range:
+### 2. Declare stack ownership
 
 ```bash
 python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack sync feature-a
 python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 python3 scripts/syncwheel.py stack add feature-a HEAD
 ```
 
-### 5. Rebuild and push one PR branch
+Use `stack sync` when the branch already represents the intended PR stack. Use
+`stack set` or `stack add` when you want to declare an explicit revision range
+or append a new commit.
 
-Worktree mode:
+### 3. Reconcile managed branches
 
-```bash
-python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
-python3 scripts/syncwheel.py stack push feature-a
-```
-
-In-place, when you are already on `pr/feature-a` and the checkout is clean:
-
-```bash
-python3 scripts/syncwheel.py stack rebuild feature-a --in-place
-python3 scripts/syncwheel.py stack push feature-a
-```
-
-Add arbitrary Git push arguments after `--`:
-
-```bash
-python3 scripts/syncwheel.py stack push feature-a -- --force-with-lease
-```
-
-Use `--dry-run` on rebuild/push commands to print commands without applying
-them.
-
-`stack git` and `int git` run Git commands inside the worktree for the target
-branch. If no worktree exists yet, pass `--worktree <path>` or
-`--auto-worktree`:
-
-```bash
-python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
-python3 scripts/syncwheel.py int git --auto-worktree -- status
-```
-
-### 6. Rebuild and push integration from declared stack order
-
-Worktree mode:
-
-```bash
-python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
-python3 scripts/syncwheel.py int push
-```
-
-In-place, when you are already on the configured integration branch and the
-checkout is clean:
-
-```bash
-python3 scripts/syncwheel.py int rebuild --in-place
-python3 scripts/syncwheel.py int push
-```
-
-Add arbitrary Git push arguments after `--`:
-
-```bash
-python3 scripts/syncwheel.py int push -- --force-with-lease
-```
-
-### 7. Synchronize shared integration branch checkouts
-
-When two machines use the same configured integration branch, prefer
-manifest-driven reconciliation over raw Git pull/merge:
+Use `reconcile` as the normal maintenance entrypoint:
 
 ```bash
 python3 scripts/syncwheel.py reconcile
@@ -472,10 +377,16 @@ the current manifest, and uses Syncwheel push wrappers when `--push` is present.
 When the remote branch already matches the manifest projection, `reconcile`
 aligns the local branch to the remote and does not update the manifest or push
 new replacement commits.
+
 When both local and remote match the manifest projection but have different Git
 histories, `reconcile` reports no action by default. Pass
 `--align-local-to-remote` to normalize the local branch tip to the remote ref so
-plain Git status stops showing ahead/behind.
+plain Git status stops showing ahead/behind:
+
+```bash
+python3 scripts/syncwheel.py reconcile --apply --align-local-to-remote
+```
+
 `reconcile --push` uses `--force-with-lease` by default because rebuilt managed
 branches commonly replace older remote history in multi-device workflows. Pass
 `--no-force-with-lease` only when a normal push is intentionally required.
@@ -485,26 +396,29 @@ override the publication remote, and `--in-place-integration` only when the
 current checkout is already on the clean integration branch and should be reset
 as part of the reconcile.
 
-For lower-level inspection, compare the local integration branch, remote branch,
-and manifest projection:
+### 4. Use lower-level commands when needed
+
+`reconcile` is the preferred lifecycle command. The object/action commands are
+still useful for targeted repair and inspection:
 
 ```bash
+python3 scripts/syncwheel.py validate
+python3 scripts/syncwheel.py plan --json
+python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
+python3 scripts/syncwheel.py stack push feature-a -- --force-with-lease
+python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
+python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
+python3 scripts/syncwheel.py int push -- --force-with-lease
+python3 scripts/syncwheel.py int git --auto-worktree -- status
 python3 scripts/syncwheel.py int sync-status --json
 ```
 
-If the remote integration branch already matches the manifest projection and the
-local checkout is stale, align the current clean integration checkout to the
-remote. A backup branch is created before reset:
+Use `--dry-run` on rebuild and push commands to print commands without applying
+them. If the remote integration branch already matches the manifest projection
+and the local checkout is stale, `int align-remote` can align a clean local
+integration checkout to the remote with a backup branch first.
 
-```bash
-python3 scripts/syncwheel.py int align-remote
-```
-
-Use `--dry-run` to print the backup/reset commands. If the remote integration
-branch does not match the manifest projection, `align-remote` stops; use
-`int rebuild` and review before pushing instead.
-
-### 8. Compare different integration compositions
+### 5. Compare different integration compositions
 
 When two devices or workstreams use different manifests and integration
 branches, compare the manifests instead of merging their integration branches:
@@ -517,7 +431,7 @@ python3 scripts/syncwheel.py manifest compare --other-manifest ../other-manifest
 The comparison reports shared stacks, stacks only present in one composition,
 and shared stacks whose branch/base/commit list diverges.
 
-### 9. Install local Git hooks
+### 6. Install local Git hooks
 
 Syncwheel includes a pre-commit hook that runs the version-bump guard against
 staged files. Enable the tracked hooks once per clone:
@@ -531,103 +445,8 @@ After that, commits that stage release-relevant changes under `scripts/`,
 README current-version line.
 
 `self status` reports whether the hooks are active in the current Syncwheel
-installation.
-
-For merge-shaped integration history, set:
-
-```json
-{
-  "integration": {
-    "branch": "integration/project-stack",
-    "base": "origin/main",
-    "strategy": "merge-stacks",
-    "stacks": ["feature-a", "feature-b"]
-  }
-}
-```
-
-With `merge-stacks`, `int rebuild` runs ordered merge commands instead of one
-cherry-pick command.
-
-## Human command recipes
-
-These examples use three stacks:
-
-- `feature-a` -> `pr/feature-a`
-- `feature-b` -> `pr/feature-b`
-- `feature-c` -> `pr/feature-c`
-
-The commits can originate from integration or from any other local branch. The
-requirement is that each commit is declared under exactly one stack in the
-manifest.
-
-### Send declared commits to three PR branches
-
-Worktree mode keeps your current checkout where it is:
-
-```bash
-python3 scripts/syncwheel.py validate
-python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
-python3 scripts/syncwheel.py stack rebuild feature-b --worktree ../wt-pr-feature-b
-python3 scripts/syncwheel.py stack rebuild feature-c --worktree ../wt-pr-feature-c
-
-python3 scripts/syncwheel.py stack push feature-a
-python3 scripts/syncwheel.py stack push feature-b
-python3 scripts/syncwheel.py stack push feature-c
-
-python3 scripts/syncwheel.py validate
-```
-
-In-place mode is shorter when you are already on each target branch:
-
-```bash
-git switch pr/feature-a
-python3 scripts/syncwheel.py stack rebuild feature-a --in-place
-python3 scripts/syncwheel.py stack push feature-a
-
-git switch pr/feature-b
-python3 scripts/syncwheel.py stack rebuild feature-b --in-place
-python3 scripts/syncwheel.py stack push feature-b
-
-git switch pr/feature-c
-python3 scripts/syncwheel.py stack rebuild feature-c --in-place
-python3 scripts/syncwheel.py stack push feature-c
-```
-
-### Merge three PR branches into integration
-
-Set `integration.strategy` to `merge-stacks` when you want integration to keep
-merge commits:
-
-```json
-{
-  "integration": {
-    "branch": "integration/project-stack",
-    "base": "origin/main",
-    "strategy": "merge-stacks",
-    "stacks": ["feature-a", "feature-b", "feature-c"]
-  }
-}
-```
-
-Then rebuild integration in one command.
-
-Worktree mode:
-
-```bash
-python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
-python3 scripts/syncwheel.py int push
-python3 scripts/syncwheel.py validate
-```
-
-In-place mode, when you are already on the integration branch:
-
-```bash
-git switch integration/project-stack
-python3 scripts/syncwheel.py int rebuild --in-place
-python3 scripts/syncwheel.py int push
-python3 scripts/syncwheel.py validate
-```
+installation. See [docs/manual-git-flow.md](docs/manual-git-flow.md) for the
+raw Git equivalent of the Syncwheel lifecycle.
 
 ## Files
 
@@ -643,6 +462,7 @@ python3 scripts/syncwheel.py validate
 
 - `docs/workflow.md`: concise workflow model
 - `docs/core-procedure.md`: deterministic recovery procedure
+- `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/ai-agents.md`: short AI behavior contract
