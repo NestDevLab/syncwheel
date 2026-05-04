@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.9.0`
+Current version: `0.9.1`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -379,13 +379,15 @@ manifest-driven reconciliation over raw Git pull/merge:
 ```bash
 python3 scripts/syncwheel.py reconcile
 python3 scripts/syncwheel.py reconcile --apply --worktree-root ../syncwheel-worktrees
-python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwheel-worktrees -- --force-with-lease
+python3 scripts/syncwheel.py reconcile --apply --push --force-with-lease --worktree-root ../syncwheel-worktrees
 ```
 
 `reconcile` fetches by default, classifies stack and integration drift, rebuilds
 only branches that differ from the manifest projection unless `--rebuild all`
 is passed, refreshes stack commit SHAs after rebuilds, rebuilds integration from
 the current manifest, and uses Syncwheel push wrappers when `--push` is present.
+Use `--force-with-lease` for the common multi-device case where rebuilt managed
+branches intentionally replace older remote history.
 
 Use `--json` for automation, `--stack <id>` to limit stack work, `--remote` to
 override the publication remote, and `--in-place-integration` only when the
@@ -601,7 +603,7 @@ Recommended sequence:
 2. update the manifest with `stack sync`, `stack set`, or `stack add` if the
    dry-run report shows real ownership changes
 3. `reconcile --apply --worktree-root <path>`
-4. `reconcile --apply --push --worktree-root <path> -- --force-with-lease`
+4. `reconcile --apply --push --force-with-lease --worktree-root <path>`
    when the rebuilt managed branches should become the shared remote state
 5. rerun `reconcile` or `check` and report remaining drift honestly
 

@@ -33,7 +33,7 @@ That becomes deterministic only when the repository declares the mapping in `.sy
    when the report identifies real ownership changes
 3. repair managed branch drift with `reconcile --apply --worktree-root <path>`
 4. publish rebuilt managed branches with
-   `reconcile --apply --push --worktree-root <path> -- --force-with-lease` when
+   `reconcile --apply --push --force-with-lease --worktree-root <path>` when
    the shared remote state should move
 5. rerun validation or `reconcile`
 6. run project-specific tests outside `syncwheel`

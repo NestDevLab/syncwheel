@@ -825,6 +825,13 @@ def passthrough_args(values):
     return values or []
 
 
+def push_args_with_options(args):
+    push_args = passthrough_args(args.git_args)
+    if getattr(args, 'force_with_lease', False) and '--force-with-lease' not in push_args:
+        push_args = ['--force-with-lease', *push_args]
+    return push_args
+
+
 def resolve_stack_rebuild_location(repo_root, stack, args):
     if args.in_place and args.worktree:
         raise SyncwheelError('use either --in-place or --worktree, not both')
@@ -1493,7 +1500,7 @@ def command_stack_push(args):
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
-    push_args = passthrough_args(args.git_args)
+    push_args = push_args_with_options(args)
     command = ['git', 'push', *push_args, remote, stack['branch']]
     if args.dry_run:
         print(quoted(command))
@@ -1870,7 +1877,7 @@ def command_reconcile(args):
     if manual_actions:
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
 
-    push_args = passthrough_args(args.git_args)
+    push_args = push_args_with_options(args)
     for action in actions:
         if action['type'] == 'rebuild_stack':
             stack = require_stack(manifest, action['stack'])
@@ -1985,7 +1992,7 @@ def command_int_push(args):
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
     remote = args.remote or manifest['defaults']['publication_remote']
-    push_args = passthrough_args(args.git_args)
+    push_args = push_args_with_options(args)
     command = ['git', 'push', *push_args, remote, integration['branch']]
     if args.dry_run:
         print(quoted(command))
@@ -2107,6 +2114,11 @@ def add_rebuild_args(parser):
 def add_push_args(parser):
     parser.add_argument('--remote')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument(
+        '--force-with-lease',
+        action='store_true',
+        help='pass --force-with-lease to git push',
+    )
 
 
 def add_git_args(parser):
@@ -2215,6 +2227,11 @@ def build_parser():
     reconcile_p.add_argument('--json', action='store_true')
     reconcile_p.add_argument('--apply', action='store_true', help='execute the reported rebuild/push plan')
     reconcile_p.add_argument('--push', action='store_true', help='push rebuilt or drifted managed branches')
+    reconcile_p.add_argument(
+        '--force-with-lease',
+        action='store_true',
+        help='pass --force-with-lease to reconcile-managed git pushes',
+    )
     reconcile_p.add_argument('--remote', help='publication remote override for stack and integration pushes')
     reconcile_p.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
     reconcile_p.add_argument('--skip-integration', action='store_true')

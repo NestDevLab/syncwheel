@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.1 - 2026-05-04
+
+- Add explicit `--force-with-lease` support to `reconcile --push`, `stack push`,
+  and `int push` so the common rewritten-branch publish path does not require
+  remembering Git passthrough syntax.
+- Keep Git passthrough after `--` available for advanced push flags.
+
 ## 0.9.0 - 2026-05-04
 
 - Add top-level `reconcile` / `rec` as the preferred multi-device maintenance

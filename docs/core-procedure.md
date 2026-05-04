@@ -145,7 +145,7 @@ Practical flow:
 1. update `.syncwheel/manifest.json` in a clean admin checkout
 2. run `python3 scripts/syncwheel.py reconcile`
 3. run `python3 scripts/syncwheel.py reconcile --apply --worktree-root <path>`
-4. add `--push -- --force-with-lease` when the rebuilt managed branches should
+4. add `--push --force-with-lease` when the rebuilt managed branches should
    become the shared remote state
 5. rerun `check` or `reconcile`
 6. commit/publish the manifest update separately if you want it reviewed, but do

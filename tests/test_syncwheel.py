@@ -418,9 +418,44 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork pr/feature-a', result.stdout)
 
+    def test_stack_push_has_explicit_force_with_lease_flag(self):
+        result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--force-with-lease', expected=0)
+        self.assertIn('git push --force-with-lease fork pr/feature-a', result.stdout)
+
     def test_int_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork main', result.stdout)
+
+    def test_reconcile_push_has_explicit_force_with_lease_flag(self):
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'fork', str(origin))
+        self.git('branch', 'pr/publish', 'main')
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'publish',
+            'branch': 'pr/publish',
+            'base': 'main',
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'main',
+            'commits': [],
+        })
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli(
+            'reconcile',
+            '--no-fetch',
+            '--apply',
+            '--push',
+            '--force-with-lease',
+            '--stack',
+            'publish',
+            '--skip-integration',
+            expected=0,
+        )
+
+        self.assertIn('git push --force-with-lease fork pr/publish', result.stdout)
 
     def test_reconcile_reports_stack_and_integration_rebuild_plan(self):
         beta = self.git('rev-parse', 'main')
