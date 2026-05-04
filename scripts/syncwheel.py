@@ -2230,7 +2230,14 @@ def build_parser():
     reconcile_p.add_argument(
         '--force-with-lease',
         action='store_true',
-        help='pass --force-with-lease to reconcile-managed git pushes',
+        default=True,
+        help='pass --force-with-lease to reconcile-managed git pushes (default)',
+    )
+    reconcile_p.add_argument(
+        '--no-force-with-lease',
+        dest='force_with_lease',
+        action='store_false',
+        help='use normal git push for reconcile-managed pushes',
     )
     reconcile_p.add_argument('--remote', help='publication remote override for stack and integration pushes')
     reconcile_p.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')

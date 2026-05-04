@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.10.0 - 2026-05-04
+
+- Make `reconcile --push` use `--force-with-lease` by default, matching the
+  normal multi-device lifecycle for rebuilt managed branches.
+- Add `reconcile --no-force-with-lease` as the explicit escape hatch for normal
+  Git pushes.
+
 ## 0.9.1 - 2026-05-04
 
 - Add explicit `--force-with-lease` support to `reconcile --push`, `stack push`,

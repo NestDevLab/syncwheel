@@ -29,7 +29,7 @@ An AI agent should then:
    `stack create`/`stack set`/`stack add`
 3. run `reconcile --apply --worktree-root <path>` only when the dry-run plan is
    understood
-4. add `--push --force-with-lease` only when the shared remote branches
+4. add `--push` only when the shared remote branches
    should be updated
 5. rerun `check` or `reconcile`
 6. summarize what changed and what still needs a human
