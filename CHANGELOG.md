@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 - 2026-05-04
+
+- Add `self install-hooks` so any Syncwheel clone can install the tracked Git
+  hooks with a standard Syncwheel command.
+- Report hook activation state in `self status`.
+
 ## 0.8.1 - 2026-05-04
 
 - Add a tracked pre-commit hook for the version-bump guard.

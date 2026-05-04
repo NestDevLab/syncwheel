@@ -42,6 +42,7 @@ jobs:
           python scripts/syncwheel.py stack --help
           python scripts/syncwheel.py int --help
           python scripts/syncwheel.py self --help
+          python scripts/syncwheel.py self install-hooks --help
 
       - name: Version bump guard
         run: |

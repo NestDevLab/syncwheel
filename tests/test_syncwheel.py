@@ -148,7 +148,10 @@ class SyncwheelFixtureTest(unittest.TestCase):
         origin = self.tmp / 'syncwheel-origin.git'
         install = self.tmp / 'syncwheel-install'
         (seed / 'scripts').mkdir(parents=True)
+        (seed / 'githooks').mkdir(parents=True)
         shutil.copy2(CLI, seed / 'scripts' / 'syncwheel.py')
+        shutil.copy2(CLI.parent / 'check-version-bump.py', seed / 'scripts' / 'check-version-bump.py')
+        shutil.copy2(REPO_ROOT / 'githooks' / 'pre-commit', seed / 'githooks' / 'pre-commit')
         (seed / 'VERSION').write_text('0.6.0\n')
         (seed / 'README.md').write_text('syncwheel fixture\n')
 
@@ -799,6 +802,47 @@ class SyncwheelFixtureTest(unittest.TestCase):
         )
         self.assertIn('updated syncwheel: 0.6.0 -> 0.7.0', result.stdout)
         self.assertEqual((fixture['install'] / 'VERSION').read_text().strip(), '0.7.0')
+
+    def test_self_install_hooks_sets_core_hooks_path(self):
+        fixture = self.init_syncwheel_install_fixture()
+
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'self',
+            'install-hooks',
+            expected=0,
+            cwd=fixture['install'],
+        )
+
+        configured = subprocess.run(
+            ['git', 'config', '--get', 'core.hooksPath'],
+            cwd=fixture['install'],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(configured, 'githooks')
+        self.assertIn('pre_commit: active', result.stdout)
+
+    def test_self_status_reports_hook_status(self):
+        fixture = self.init_syncwheel_install_fixture()
+        subprocess.run(['git', 'config', 'core.hooksPath', 'githooks'], cwd=fixture['install'], check=True)
+
+        result = self.run_custom_cli(
+            fixture['cli'],
+            'self',
+            'status',
+            '--json',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(fixture['state']),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(fixture['settings']),
+            },
+            cwd=fixture['install'],
+        )
+        data = json.loads(result.stdout)
+        self.assertTrue(data['hooks']['active'])
+        self.assertEqual(data['hooks']['configured_hooks_path'], 'githooks')
 
     def test_startup_notify_mode_emits_update_notice(self):
         fixture = self.init_syncwheel_install_fixture()

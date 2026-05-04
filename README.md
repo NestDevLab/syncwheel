@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.8.1`
+Current version: `0.8.2`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -407,12 +407,15 @@ Syncwheel includes a pre-commit hook that runs the version-bump guard against
 staged files. Enable the tracked hooks once per clone:
 
 ```bash
-git config core.hooksPath githooks
+python3 scripts/syncwheel.py self install-hooks
 ```
 
 After that, commits that stage release-relevant changes under `scripts/`,
 `tests/`, or `githooks/` must also stage `VERSION`, `CHANGELOG.md`, and the
 README current-version line.
+
+`self status` reports whether the hooks are active in the current Syncwheel
+installation.
 
 For merge-shaped integration history, set:
 

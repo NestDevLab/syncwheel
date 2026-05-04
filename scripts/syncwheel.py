@@ -28,6 +28,7 @@ DEFAULT_INTEGRATION_BRANCH = 'main-integration'
 UPDATE_MODES = {'off', 'notify', 'auto'}
 DEFAULT_UPDATE_MODE = 'notify'
 DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
+SYNCWHEEL_HOOKS_PATH = 'githooks'
 
 
 def read_version_file(path):
@@ -253,6 +254,38 @@ def resolve_install_update_ref(root, upstream=None, prefer_network=False):
 def install_is_clean(root):
     result = git(root, 'status', '--porcelain', check=False)
     return result.returncode == 0 and not result.stdout.strip()
+
+
+def install_hooks_status(root=None):
+    root = Path(root or install_root()).resolve()
+    hook_path = root / SYNCWHEEL_HOOKS_PATH / 'pre-commit'
+    configured = None
+    git_repo = install_is_git_checkout(root)
+    if git_repo:
+        result = git(root, 'config', '--get', 'core.hooksPath', check=False)
+        configured = result.stdout.strip() or None
+    return {
+        'git_repo': git_repo,
+        'expected_hooks_path': SYNCWHEEL_HOOKS_PATH,
+        'configured_hooks_path': configured,
+        'pre_commit_exists': hook_path.exists(),
+        'active': git_repo and hook_path.exists() and configured == SYNCWHEEL_HOOKS_PATH,
+    }
+
+
+def install_syncwheel_hooks(root=None, dry_run=False):
+    root = Path(root or install_root()).resolve()
+    status = install_hooks_status(root)
+    if not status['git_repo']:
+        raise SyncwheelError('syncwheel install is not a git checkout')
+    if not status['pre_commit_exists']:
+        raise SyncwheelError(f"missing hook: {SYNCWHEEL_HOOKS_PATH}/pre-commit")
+    command = ['git', 'config', 'core.hooksPath', SYNCWHEEL_HOOKS_PATH]
+    if dry_run:
+        print(quoted(command))
+        return status
+    run(command, cwd=root)
+    return install_hooks_status(root)
 
 
 def collect_self_update_status(root=None, fetch=False):
@@ -1791,6 +1824,10 @@ def build_parser():
     self_update_p.add_argument('--no-fetch', action='store_true')
     self_update_p.set_defaults(func=command_self_update)
 
+    self_hooks_p = self_sub.add_parser('install-hooks', help='install syncwheel Git hooks in this syncwheel checkout')
+    self_hooks_p.add_argument('--dry-run', action='store_true')
+    self_hooks_p.set_defaults(func=command_self_install_hooks)
+
     self_mode_p = self_sub.add_parser('mode', help='show or set automatic update policy: off, notify, auto')
     self_mode_p.add_argument('mode', nargs='?', choices=sorted(UPDATE_MODES))
     self_mode_p.set_defaults(func=command_self_mode)
@@ -2000,12 +2037,14 @@ def command_repo_ls(args):
 
 def command_self_status(args):
     status, settings, state, state_path = refresh_cached_self_update_status(force=args.fetch)
+    hooks = install_hooks_status()
     output = {
         'settings': settings,
         'settings_path': settings['path'],
         'state_path': str(state_path),
         'last_checked_at': state.get('last_checked_at'),
         'status': status,
+        'hooks': hooks,
     }
     if args.json:
         print(json.dumps(output, indent=2))
@@ -2029,6 +2068,8 @@ def command_self_status(args):
         print(f"recommended: {recommended_self_update_command()}")
     else:
         print('update: none')
+    print(f"hooks_active: {'yes' if hooks['active'] else 'no'}")
+    print(f"hooks_path: {hooks['configured_hooks_path'] or 'none'}")
     if output['last_checked_at']:
         print(f"last_checked_at: {output['last_checked_at']}")
     return 0
@@ -2057,6 +2098,15 @@ def command_self_update(args):
         print(f"already up to date: {after['current_version']}")
         return 0
     print(f"updated syncwheel: {before['current_version']} -> {after['current_version']}")
+    return 0
+
+
+def command_self_install_hooks(args):
+    status = install_syncwheel_hooks(dry_run=args.dry_run)
+    if args.dry_run:
+        return 0
+    print(f"hooks_path: {status['configured_hooks_path']}")
+    print(f"pre_commit: {'active' if status['active'] else 'inactive'}")
     return 0
 
 
