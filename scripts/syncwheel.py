@@ -1085,9 +1085,10 @@ def materialize_stack_projection(repo_root, stack):
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
 
 
-def integration_stack_commands(manifest, worktree=None):
+def integration_stack_commands(manifest, worktree=None, stack_ref_overrides=None):
     integration = manifest['integration']
     stacks_by_id = stack_map(manifest)
+    stack_ref_overrides = stack_ref_overrides or {}
     prefix = ['git'] if worktree is None else ['git', '-C', str(worktree)]
     strategy = integration.get('strategy', 'cherry-pick')
     if strategy == 'cherry-pick':
@@ -1101,11 +1102,12 @@ def integration_stack_commands(manifest, worktree=None):
         commands = []
         for stack_id in integration['stacks']:
             stack = stacks_by_id[stack_id]
+            stack_ref = stack_ref_overrides.get(stack_id, stack['branch'])
             commands.append([
                 *prefix,
                 'merge',
                 '--no-ff',
-                stack['branch'],
+                stack_ref,
                 '-m',
                 f"Merge stack '{stack_id}' into {integration['branch']}",
             ])
@@ -1113,7 +1115,7 @@ def integration_stack_commands(manifest, worktree=None):
     raise SyncwheelError(f"unsupported integration strategy: {strategy}")
 
 
-def materialize_integration_projection(repo_root, manifest):
+def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
     integration = manifest['integration']
     with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
         worktree = Path(tmp)
@@ -1129,7 +1131,7 @@ def materialize_integration_projection(repo_root, manifest):
                             continue
                         run(['git', '-C', str(worktree), 'cherry-pick', commit], cwd=repo_root)
             else:
-                for command in integration_stack_commands(manifest, worktree):
+                for command in integration_stack_commands(manifest, worktree, stack_ref_overrides):
                     run(command, cwd=repo_root)
             return ref_tree(worktree, 'HEAD')
         finally:
@@ -1153,6 +1155,19 @@ def materialize_integration_commands(repo_root, manifest, worktree=None, in_plac
         return commands
     commands.append(['git', 'worktree', 'add', '-B', integration['branch'], str(worktree), integration['base']])
     commands.extend(integration_stack_commands(manifest, worktree))
+    return commands
+
+
+def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=None, timestamp=None):
+    timestamp = timestamp or syncwheel_timestamp()
+    commands = [['git', 'fetch', '--all', '--prune']]
+    backup = backup_branch_command(repo_root, branch, timestamp)
+    if backup:
+        commands.append(backup)
+    if worktree_matches_branch(repo_root, branch, worktree):
+        commands.append(['git', '-C', str(worktree), 'reset', '--hard', remote_ref])
+        return commands
+    commands.append(['git', 'worktree', 'add', '-B', branch, str(worktree), remote_ref])
     return commands
 
 
@@ -1545,7 +1560,7 @@ def rev_left_right_count(repo_root, left, right):
     return int(left_count), int(right_count)
 
 
-def integration_sync_report(repo_root, manifest, remote=None):
+def integration_sync_report(repo_root, manifest, remote=None, stack_ref_overrides=None):
     integration = manifest['integration']
     branch = integration['branch']
     remote_ref = remote_integration_ref(manifest, remote)
@@ -1587,7 +1602,7 @@ def integration_sync_report(repo_root, manifest, remote=None):
         report['relation'] = 'remote_only'
 
     try:
-        projected_tree = materialize_integration_projection(repo_root, manifest)
+        projected_tree = materialize_integration_projection(repo_root, manifest, stack_ref_overrides)
         report['projected_tree'] = projected_tree
         if report['remote_tree']:
             report['remote_matches_projection'] = report['remote_tree'] == projected_tree
@@ -1685,6 +1700,21 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
                 'detail': report['projection_error'],
             })
             continue
+        align_from_remote = (
+            args.rebuild != 'all'
+            and report['remote_exists']
+            and report.get('remote_matches_projection') is True
+            and report.get('local_matches_projection') is not True
+        )
+        if align_from_remote:
+            actions.append({
+                'type': 'align_stack_to_remote',
+                'stack': stack['id'],
+                'branch': stack['branch'],
+                'remote_ref': report['remote_ref'],
+                'reason': 'remote_matches_manifest_projection',
+            })
+            continue
         rebuild_needed = (
             args.rebuild == 'all'
             or not report['local_exists']
@@ -1735,6 +1765,22 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             'reason': 'projection_failed',
             'detail': integration_report['projection_error'],
         })
+    integration_align_from_remote = (
+        not args.skip_integration
+        and args.rebuild != 'all'
+        and not integration_report.get('projection_error')
+        and integration_report['remote_exists']
+        and integration_report.get('remote_matches_projection') is True
+        and integration_report.get('local_matches_projection') is not True
+    )
+    if integration_align_from_remote:
+        actions.append({
+            'type': 'align_integration_to_remote',
+            'branch': manifest['integration']['branch'],
+            'remote_ref': integration_report['remote_ref'],
+            'reason': 'remote_matches_manifest_projection',
+        })
+        integration_rebuild_needed = False
     if integration_rebuild_needed and args.rebuild != 'none':
         actions.append({
             'type': 'rebuild_integration',
@@ -1853,7 +1899,12 @@ def command_reconcile(args):
         for stack in manifest['stacks']
         if stack['id'] in stack_ids
     }
-    integration_report = integration_sync_report(repo_root, manifest, args.remote)
+    stack_ref_overrides = {
+        stack_id: report['remote_ref']
+        for stack_id, report in stack_reports.items()
+        if report['remote_exists'] and report.get('remote_matches_projection') is True
+    }
+    integration_report = integration_sync_report(repo_root, manifest, args.remote, stack_ref_overrides)
     actions = reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args)
     output = {
         'snapshot': collect_repo_snapshot(repo_root, manifest),
@@ -1889,6 +1940,17 @@ def command_reconcile(args):
                 stack['commits'] = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
                 save_manifest(manifest_path, manifest)
                 print(f"{stack['id']}: manifest updated from rebuilt branch")
+        elif action['type'] == 'align_stack_to_remote':
+            stack = require_stack(manifest, action['stack'])
+            worktree = reconcile_worktree_path(repo_root, stack['branch'], args.worktree_root)
+            ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
+            commands = materialize_remote_align_commands(
+                repo_root,
+                stack['branch'],
+                action['remote_ref'],
+                worktree,
+            )
+            run_command_list(commands, repo_root, True)
         elif action['type'] == 'push_stack':
             stack = require_stack(manifest, action['stack'])
             remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
@@ -1906,6 +1968,17 @@ def command_reconcile(args):
                 ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
                 in_place = False
             commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
+            run_command_list(commands, repo_root, True)
+        elif action['type'] == 'align_integration_to_remote':
+            integration = manifest['integration']
+            worktree = reconcile_worktree_path(repo_root, integration['branch'], args.worktree_root)
+            ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
+            commands = materialize_remote_align_commands(
+                repo_root,
+                integration['branch'],
+                action['remote_ref'],
+                worktree,
+            )
             run_command_list(commands, repo_root, True)
         elif action['type'] == 'push_integration':
             remote = args.remote or manifest['defaults']['publication_remote']

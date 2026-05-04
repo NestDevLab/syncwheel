@@ -588,6 +588,81 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
 
+    def test_reconcile_aligns_local_to_remote_when_remote_matches_projection(self):
+        beta = self.git('rev-parse', 'main')
+        base = self.git('rev-parse', 'main~1')
+        manifest_path = self.tmp / 'align-manifest.json'
+        data = self.read_manifest()
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/reconcile',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-b',
+                'branch': 'pr/feature-b',
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/reconcile',
+                'commits': [beta],
+            }
+        ]
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        before_manifest = manifest_path.read_text()
+
+        self.git('branch', 'integration/reconcile', base)
+        self.git('switch', '-q', 'integration/reconcile')
+        self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin', '--prune')
+
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: local stale stack commit')
+        stale_stack = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', 'integration/reconcile')
+        self.git('clean', '-fd')
+        Path(self.repo / 'integration-only.txt').write_text('local only\n')
+        self.git('add', 'integration-only.txt')
+        self.git('commit', '-q', '-m', 'debug: local integration only')
+
+        result = self.run_cli('reconcile', '--manifest', str(manifest_path), '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        self.assertEqual(
+            [action['type'] for action in report['actions']],
+            ['align_stack_to_remote', 'align_integration_to_remote'],
+        )
+
+        result = self.run_cli(
+            'reconcile',
+            '--manifest',
+            str(manifest_path),
+            '--no-fetch',
+            '--apply',
+            '--push',
+            expected=0,
+        )
+
+        self.assertIn('align_stack_to_remote', result.stdout)
+        self.assertIn('align_integration_to_remote', result.stdout)
+        self.assertNotIn('git push', result.stdout)
+        self.assertNotEqual(self.git('rev-parse', 'pr/feature-b'), stale_stack)
+        self.assertEqual(self.git('rev-parse', 'pr/feature-b'), self.git('rev-parse', 'origin/pr/feature-b'))
+        self.assertEqual(
+            self.git('rev-parse', 'integration/reconcile'),
+            self.git('rev-parse', 'origin/integration/reconcile'),
+        )
+        self.assertEqual(manifest_path.read_text(), before_manifest)
+
     def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
         base = self.git('rev-parse', 'HEAD')
         script = self.repo / 'scripts' / 'demo.py'

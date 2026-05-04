@@ -1,19 +1,66 @@
 # syncwheel
 
-Deterministic fork/upstream/integration maintenance for Git repositories.
+Keep many long-lived pull requests clean, rebuildable, and publishable from one
+manifest.
 
-Current version: `0.10.0`
+Current version: `0.11.0`
 
-`syncwheel` is a small CLI plus a documentation model for teams that:
-- publish clean `pr/*` branches toward an original upstream repository
-- optionally keep an `integration/*` branch for combined runtime testing
-- want AI agents and shell automation to rebuild those branches repeatably
+`syncwheel` is a small CLI and workflow model for maintainers who carry several
+PR branches against an upstream repository and need those branches to stay
+under control over time.
+
+It is especially useful when you:
+
+- keep many open PRs alive while upstream keeps moving
+- maintain a fork with clean review branches and a combined local runtime branch
+- need to rebuild PR branches deterministically instead of hand-rebasing them
+- work across multiple devices or AI agents without one checkout becoming the
+  hidden source of truth
+- want branch recovery to follow a manifest, not memory
 
 `integration/*` is **recommended**, not mandatory.
 
 You can use syncwheel in two modes:
 - **PR-only mode**: manage and validate PR stacks without an integration branch
 - **Integration mode**: also maintain a combined branch to test multiple in-flight PRs together
+
+## Why Syncwheel Exists
+
+Git can tell you what happened. It cannot reliably tell you which commits belong
+to logical PR `feature-a`, which commits are temporary integration-only work,
+or how to rebuild ten open PRs after upstream changed.
+
+Syncwheel adds that missing control plane:
+
+- one manifest declares commit ownership
+- each stack maps to one PR branch
+- integration is a disposable projection of the manifest
+- `reconcile` compares local branches, remote tips, and manifest projections
+- humans, scripts, and AI agents can all run the same lifecycle
+
+The practical result is that a maintainer can keep many PRs open without
+turning branch history into tribal knowledge.
+
+## 30-Second Workflow
+
+```bash
+python3 scripts/syncwheel.py reconcile
+python3 scripts/syncwheel.py reconcile --apply --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwheel-worktrees
+```
+
+Default behavior is conservative:
+
+- `reconcile` is dry-run by default
+- `--apply` is required before branches are rebuilt
+- `--push` is required before remote branches move
+- `reconcile --push` uses `--force-with-lease` by default, because managed
+  branches are often rewritten by deterministic rebuilds
+- if a remote managed branch already matches the manifest projection,
+  `reconcile --apply` aligns the local branch to that remote instead of
+  rebuilding new replacement commits
+
+Use `--no-force-with-lease` only when a normal push is intentionally required.
 
 ## Worktree-first model
 
@@ -83,6 +130,9 @@ Practical meaning:
   manifest ownership, stack branches, integration, and remote tips; reports a
   dry-run plan by default; and can rebuild, update manifest SHAs, and push when
   explicitly run with `--apply` and `--push`.
+- In multi-device workflows, `reconcile` converges toward a remote branch that
+  already matches the manifest projection instead of rebuilding the same logical
+  state into new SHAs on every device.
 - `validate` and `plan` detect drift before branch mutation.
 - validation also reports non-merge commits on integration that are not
   declared in any stack, so integration-only work cannot hide silently.
@@ -96,9 +146,12 @@ Practical meaning:
 ## Who this is for
 
 `syncwheel` is for teams or maintainers who have at least one of these conditions:
-- active upstream + fork workflow
+- active upstream + fork workflow, especially in open source
 - multiple PR branches that must stay clean while development continues
+- long-lived PRs that need regular rebuilds on top of a moving base branch
 - an `integration/*` branch used as day-to-day runnable state
+- multi-device or AI-agent workflows where no single checkout should be
+  considered authoritative
 - need for repeatable branch recovery that does not depend on memory
 
 ## Who this is not for
@@ -107,6 +160,32 @@ Practical meaning:
 - you ship directly from one branch with short-lived PRs only
 - your repo has no integration branch and no stacked branch maintenance
 - your process does not need deterministic rebuilds from a declared manifest
+
+## Open Source Maintainer Use Case
+
+A common Syncwheel setup looks like this:
+
+- `upstream/main` keeps moving
+- your fork has many open PR branches
+- each PR branch should stay reviewable on its own
+- a local integration branch combines selected PRs for real testing
+- more than one machine or agent may need to repair and publish the same state
+
+Without Syncwheel, the maintainer has to remember which commits belong to which
+PR, which local integration commits are temporary, which branch has already
+been rebased, and whether a force push is intentional. That works for one or two
+PRs. It becomes fragile with ten.
+
+With Syncwheel, the normal lifecycle is manifest-driven:
+
+```bash
+python3 scripts/syncwheel.py reconcile
+python3 scripts/syncwheel.py reconcile --apply
+python3 scripts/syncwheel.py reconcile --apply --push
+```
+
+The manifest is the contract. PR branches and integration branches are
+rebuildable projections of that contract.
 
 ## Three ways to use syncwheel
 
@@ -386,6 +465,9 @@ python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwhe
 only branches that differ from the manifest projection unless `--rebuild all`
 is passed, refreshes stack commit SHAs after rebuilds, rebuilds integration from
 the current manifest, and uses Syncwheel push wrappers when `--push` is present.
+When the remote branch already matches the manifest projection, `reconcile`
+aligns the local branch to the remote and does not update the manifest or push
+new replacement commits.
 `reconcile --push` uses `--force-with-lease` by default because rebuilt managed
 branches commonly replace older remote history in multi-device workflows. Pass
 `--no-force-with-lease` only when a normal push is intentionally required.

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.11.0 - 2026-05-04
+
+- Make `reconcile` converge stale local managed branches to remote refs when
+  those remote refs already match the manifest projection.
+- Avoid regenerating new replacement SHAs, updating the manifest, or pushing
+  again in the normal multi-device case where another device has already
+  published the correct projection.
+- For `merge-stacks` integration projections, let `reconcile` evaluate remote
+  stack refs that already match the manifest so stale local stack branches do
+  not cause false integration rebuilds.
+
 ## 0.10.0 - 2026-05-04
 
 - Make `reconcile --push` use `--force-with-lease` by default, matching the
