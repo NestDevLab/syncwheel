@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0 - 2026-05-04
+
+- Add top-level `reconcile` / `rec` as the preferred multi-device maintenance
+  workflow for manifest-owned stacks and integration branches.
+- Report stack and integration drift against local branches, remote refs, and
+  manifest-projected trees.
+- Support dry-run-by-default planning, explicit `--apply`, optional `--push`,
+  worktree-root rebuilds, stack filtering, publication remote override, and
+  manifest SHA refresh after stack rebuilds.
+- Add tests for reconcile planning and apply behavior with an external
+  manifest.
+
 ## 0.8.2 - 2026-05-04
 
 - Add `self install-hooks` so any Syncwheel clone can install the tracked Git

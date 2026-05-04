@@ -143,10 +143,12 @@ Stable rule:
 
 Practical flow:
 1. update `.syncwheel/manifest.json` in a clean admin checkout
-2. rebuild/push each declared `pr/*` stack from that manifest
-3. rebuild integration from declared stacks only
-4. rerun `check`
-5. commit/publish the manifest update separately if you want it reviewed, but do
+2. run `python3 scripts/syncwheel.py reconcile`
+3. run `python3 scripts/syncwheel.py reconcile --apply --worktree-root <path>`
+4. add `--push -- --force-with-lease` when the rebuilt managed branches should
+   become the shared remote state
+5. rerun `check` or `reconcile`
+6. commit/publish the manifest update separately if you want it reviewed, but do
    not expect syncwheel to classify that manifest-maintenance commit as a normal
    stack commit in the same manifest revision
 

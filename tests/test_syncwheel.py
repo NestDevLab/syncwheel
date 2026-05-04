@@ -422,6 +422,106 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork main', result.stdout)
 
+    def test_reconcile_reports_stack_and_integration_rebuild_plan(self):
+        beta = self.git('rev-parse', 'main')
+        base = self.git('rev-parse', 'main~1')
+        self.git('branch', 'integration/reconcile', base)
+        self.git('switch', '-q', 'integration/reconcile')
+        self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        self.git('switch', '-q', 'main')
+
+        manifest_path = self.tmp / 'reconcile-manifest.json'
+        data = self.read_manifest()
+        data['integration'] = {
+            'branch': 'integration/reconcile',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-b',
+                'branch': 'pr/feature-b',
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/reconcile',
+                'commits': [beta],
+            }
+        ]
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli(
+            'reconcile',
+            '--manifest',
+            str(manifest_path),
+            '--no-fetch',
+            '--json',
+            expected=0,
+        )
+        report = json.loads(result.stdout)
+
+        self.assertEqual(
+            [action['type'] for action in report['actions']],
+            ['rebuild_stack', 'rebuild_integration'],
+        )
+        self.assertEqual(report['actions'][0]['reason'], 'local_branch_differs_from_manifest_projection')
+
+    def test_reconcile_apply_rebuilds_stack_updates_manifest_and_rebuilds_integration(self):
+        beta = self.git('rev-parse', 'main')
+        base = self.git('rev-parse', 'main~1')
+        self.git('branch', 'integration/reconcile', base)
+        self.git('switch', '-q', 'integration/reconcile')
+        self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        self.git('switch', '-q', 'main')
+
+        manifest_path = self.tmp / 'reconcile-manifest.json'
+        data = self.read_manifest()
+        data['integration'] = {
+            'branch': 'integration/reconcile',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-b',
+                'branch': 'pr/feature-b',
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/reconcile',
+                'commits': [beta],
+            }
+        ]
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        self.run_cli(
+            'reconcile',
+            '--manifest',
+            str(manifest_path),
+            '--no-fetch',
+            '--apply',
+            '--worktree-root',
+            str(self.tmp / 'worktrees'),
+            expected=0,
+        )
+        updated = json.loads(manifest_path.read_text())
+        updated_commit = updated['stacks'][0]['commits'][0]
+
+        self.assertNotEqual(updated_commit, beta)
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
+        self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+
     def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
         base = self.git('rev-parse', 'HEAD')
         script = self.repo / 'scripts' / 'demo.py'

@@ -28,15 +28,15 @@ That becomes deterministic only when the repository declares the mapping in `.sy
 
 ## Basic procedure
 
-1. recover current state with `status`
-2. validate the manifest with `validate`
-3. inspect planned actions with `plan --json`
-4. classify any integration commits that are not declared in a stack
-5. update stale stack commit lists with `stack sync`, `stack set`, or `stack add`
-6. rebuild individual PR branches with `stack rebuild` if needed
-7. rebuild integration with `int rebuild` if needed
-8. rerun validation
-9. run project-specific tests outside `syncwheel`
+1. recover and classify current state with `reconcile`
+2. update stale stack commit lists with `stack sync`, `stack set`, or `stack add`
+   when the report identifies real ownership changes
+3. repair managed branch drift with `reconcile --apply --worktree-root <path>`
+4. publish rebuilt managed branches with
+   `reconcile --apply --push --worktree-root <path> -- --force-with-lease` when
+   the shared remote state should move
+5. rerun validation or `reconcile`
+6. run project-specific tests outside `syncwheel`
 
 ## Manifest semantics
 

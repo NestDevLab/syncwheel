@@ -1062,6 +1062,22 @@ def materialize_pr_commands(repo_root, manifest, stack, worktree=None, in_place=
     return commands
 
 
+def materialize_stack_projection(repo_root, stack):
+    with tempfile.TemporaryDirectory(prefix='syncwheel-stack-projection-') as tmp:
+        worktree = Path(tmp)
+        git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), stack['base'])
+        try:
+            git(worktree, 'config', 'user.name', 'Syncwheel')
+            git(worktree, 'config', 'user.email', 'syncwheel@example.com')
+            for commit in stack['commits']:
+                if branch_contains(worktree, 'HEAD', commit):
+                    continue
+                run(['git', '-C', str(worktree), 'cherry-pick', commit], cwd=repo_root)
+            return ref_tree(worktree, 'HEAD')
+        finally:
+            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+
+
 def integration_stack_commands(manifest, worktree=None):
     integration = manifest['integration']
     stacks_by_id = stack_map(manifest)
@@ -1098,8 +1114,16 @@ def materialize_integration_projection(repo_root, manifest):
         try:
             git(worktree, 'config', 'user.name', 'Syncwheel')
             git(worktree, 'config', 'user.email', 'syncwheel@example.com')
-            for command in integration_stack_commands(manifest, worktree):
-                run(command, cwd=repo_root)
+            if integration.get('strategy', 'cherry-pick') == 'cherry-pick':
+                stacks_by_id = stack_map(manifest)
+                for stack_id in integration['stacks']:
+                    for commit in stacks_by_id[stack_id]['commits']:
+                        if branch_contains(worktree, 'HEAD', commit):
+                            continue
+                        run(['git', '-C', str(worktree), 'cherry-pick', commit], cwd=repo_root)
+            else:
+                for command in integration_stack_commands(manifest, worktree):
+                    run(command, cwd=repo_root)
             return ref_tree(worktree, 'HEAD')
         finally:
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
@@ -1567,6 +1591,323 @@ def integration_sync_report(repo_root, manifest, remote=None):
     return report
 
 
+def stack_remote_ref(manifest, stack, remote=None):
+    remote = remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
+    return f"{remote}/{stack['branch']}"
+
+
+def stack_reconcile_report(repo_root, manifest, stack, remote=None):
+    branch = stack['branch']
+    remote_ref = stack_remote_ref(manifest, stack, remote)
+    local_exists = branch_exists(repo_root, branch)
+    remote_exists = ref_exists(repo_root, remote_ref)
+    report = {
+        'id': stack['id'],
+        'branch': branch,
+        'remote_ref': remote_ref,
+        'local_exists': local_exists,
+        'remote_exists': remote_exists,
+        'relation': 'missing',
+        'ahead': None,
+        'behind': None,
+        'local_tree': None,
+        'remote_tree': None,
+        'projected_tree': None,
+        'local_matches_projection': None,
+        'remote_matches_projection': None,
+    }
+    if local_exists:
+        report['local_tree'] = ref_tree(repo_root, branch)
+    if remote_exists:
+        report['remote_tree'] = ref_tree(repo_root, remote_ref)
+    if local_exists and remote_exists:
+        ahead, behind = rev_left_right_count(repo_root, branch, remote_ref)
+        report['ahead'] = ahead
+        report['behind'] = behind
+        if ahead == 0 and behind == 0:
+            report['relation'] = 'aligned'
+        elif ahead == 0:
+            report['relation'] = 'local_behind'
+        elif behind == 0:
+            report['relation'] = 'local_ahead'
+        else:
+            report['relation'] = 'diverged'
+    elif local_exists:
+        report['relation'] = 'local_only'
+    elif remote_exists:
+        report['relation'] = 'remote_only'
+
+    try:
+        projected_tree = materialize_stack_projection(repo_root, stack)
+        report['projected_tree'] = projected_tree
+        if report['local_tree']:
+            report['local_matches_projection'] = report['local_tree'] == projected_tree
+        if report['remote_tree']:
+            report['remote_matches_projection'] = report['remote_tree'] == projected_tree
+    except SyncwheelError as exc:
+        report['projection_error'] = str(exc)
+    return report
+
+
+def reconcile_worktree_path(repo_root, branch, worktree_root):
+    existing = find_worktree_for_branch(repo_root, branch)
+    if existing:
+        return existing
+    if worktree_root:
+        safe = branch.replace('/', '-').replace('\\', '-')
+        return Path(worktree_root).expanduser().resolve() / safe
+    return default_worktree_path(repo_root, branch)
+
+
+def reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args):
+    stack_ids = set(args.stack or [stack['id'] for stack in manifest['stacks']])
+    actions = []
+    validation_action_types = {action['type'] for action in build_plan(repo_root, manifest, validation)}
+    stack_rebuild_planned = False
+    for stack in manifest['stacks']:
+        if stack['id'] not in stack_ids:
+            continue
+        report = stack_reports[stack['id']]
+        if report.get('projection_error'):
+            actions.append({
+                'type': 'manual_review',
+                'scope': 'stack',
+                'stack': stack['id'],
+                'branch': stack['branch'],
+                'reason': 'projection_failed',
+                'detail': report['projection_error'],
+            })
+            continue
+        rebuild_needed = (
+            args.rebuild == 'all'
+            or not report['local_exists']
+            or report.get('local_matches_projection') is False
+            or any(
+                item['id'] == stack['id'] and item['missing_from_branch']
+                for item in validation['details']['stacks']
+            )
+        )
+        if args.rebuild != 'none' and rebuild_needed:
+            stack_rebuild_planned = True
+            actions.append({
+                'type': 'rebuild_stack',
+                'stack': stack['id'],
+                'branch': stack['branch'],
+                'reason': classify_stack_reconcile(report),
+            })
+        push_needed = args.push and (
+            rebuild_needed
+            or not report['remote_exists']
+            or report.get('remote_matches_projection') is False
+        )
+        if push_needed:
+            actions.append({
+                'type': 'push_stack',
+                'stack': stack['id'],
+                'branch': stack['branch'],
+                'remote_ref': report['remote_ref'],
+            })
+
+    integration_rebuild_needed = (
+        not args.skip_integration
+        and not integration_report.get('projection_error')
+        and (
+            args.rebuild == 'all'
+            or stack_rebuild_planned
+            or not integration_report['local_exists']
+            or integration_report.get('local_matches_projection') is False
+            or 'refresh_integration_for_stack' in validation_action_types
+            or 'classify_integration_commits' in validation_action_types
+        )
+    )
+    if not args.skip_integration and integration_report.get('projection_error'):
+        actions.append({
+            'type': 'manual_review',
+            'scope': 'integration',
+            'branch': manifest['integration']['branch'],
+            'reason': 'projection_failed',
+            'detail': integration_report['projection_error'],
+        })
+    if integration_rebuild_needed and args.rebuild != 'none':
+        actions.append({
+            'type': 'rebuild_integration',
+            'branch': manifest['integration']['branch'],
+            'reason': classify_integration_reconcile(integration_report, validation_action_types),
+        })
+    if args.push and not args.skip_integration and (
+        integration_rebuild_needed
+        or not integration_report['remote_exists']
+        or integration_report.get('remote_matches_projection') is False
+    ):
+        actions.append({
+            'type': 'push_integration',
+            'branch': manifest['integration']['branch'],
+            'remote_ref': integration_report['remote_ref'],
+        })
+    return actions
+
+
+def classify_stack_reconcile(report):
+    if not report['local_exists']:
+        return 'local_branch_missing'
+    if report.get('projection_error'):
+        return 'projection_failed'
+    if report.get('local_matches_projection') is False:
+        return 'local_branch_differs_from_manifest_projection'
+    if report['relation'] in ('local_behind', 'diverged', 'remote_only'):
+        return f"remote_relation_{report['relation']}"
+    return 'requested'
+
+
+def classify_integration_reconcile(report, validation_action_types):
+    if not report['local_exists']:
+        return 'local_branch_missing'
+    if 'classify_integration_commits' in validation_action_types:
+        return 'integration_contains_unmapped_commits'
+    if 'refresh_integration_for_stack' in validation_action_types:
+        return 'integration_missing_declared_stack_commits'
+    if report.get('projection_error'):
+        return 'projection_failed'
+    if report.get('local_matches_projection') is False:
+        return 'local_branch_differs_from_manifest_projection'
+    if report['relation'] in ('local_behind', 'diverged', 'remote_only'):
+        return f"remote_relation_{report['relation']}"
+    return 'requested'
+
+
+def print_reconcile_report(output):
+    print(f"repo: {output['snapshot']['repo_root']}")
+    print(f"manifest: {output['manifest_path']}")
+    print('\nvalidation:')
+    validation = output['validation']
+    if validation['errors']:
+        for line in validation['errors']:
+            print(f'  - ERROR: {line}')
+    if validation['warnings']:
+        for line in validation['warnings']:
+            print(f'  - WARN: {line}')
+    if not validation['errors'] and not validation['warnings']:
+        print('  - OK')
+    print('\nstack drift:')
+    for report in output['stacks']:
+        parts = [f"relation={report['relation']}"]
+        if report['ahead'] is not None:
+            parts.append(f"ahead={report['ahead']}")
+            parts.append(f"behind={report['behind']}")
+        if report.get('projection_error'):
+            parts.append(f"projection_error={report['projection_error']}")
+        else:
+            parts.append(f"local_matches_projection={report['local_matches_projection']}")
+            parts.append(f"remote_matches_projection={report['remote_matches_projection']}")
+        print(f"  - {report['id']}: " + ', '.join(parts))
+    integration = output['integration']
+    print('\nintegration drift:')
+    parts = [f"relation={integration['relation']}"]
+    if integration['ahead'] is not None:
+        parts.append(f"ahead={integration['ahead']}")
+        parts.append(f"behind={integration['behind']}")
+    if integration.get('projection_error'):
+        parts.append(f"projection_error={integration['projection_error']}")
+    else:
+        parts.append(f"local_matches_projection={integration['local_matches_projection']}")
+        parts.append(f"remote_matches_projection={integration['remote_matches_projection']}")
+    print('  - ' + ', '.join(parts))
+    print('\nreconcile plan:')
+    if output['actions']:
+        for action in output['actions']:
+            line = action['type']
+            if 'stack' in action:
+                line += f" stack={action['stack']}"
+            if 'branch' in action:
+                line += f" branch={action['branch']}"
+            if 'reason' in action:
+                line += f" reason={action['reason']}"
+            print(f'  - {line}')
+    else:
+        print('  - no actions needed')
+    if not output['applied']:
+        print('\nmode: dry-run; pass --apply to execute branch rebuilds')
+
+
+def command_reconcile(args):
+    repo_root = resolve_repo_root(args.repo)
+    if args.fetch:
+        git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if args.stack:
+        known = stack_map(manifest)
+        for stack_id in args.stack:
+            if stack_id not in known:
+                raise SyncwheelError(f'unknown stack: {stack_id}')
+    validation = validate_manifest(repo_root, manifest)
+    stack_ids = set(args.stack or [stack['id'] for stack in manifest['stacks']])
+    stack_reports = {
+        stack['id']: stack_reconcile_report(repo_root, manifest, stack, args.remote)
+        for stack in manifest['stacks']
+        if stack['id'] in stack_ids
+    }
+    integration_report = integration_sync_report(repo_root, manifest, args.remote)
+    actions = reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args)
+    output = {
+        'snapshot': collect_repo_snapshot(repo_root, manifest),
+        'manifest_path': str(manifest_path),
+        'validation': validation,
+        'stacks': list(stack_reports.values()),
+        'integration': integration_report,
+        'actions': actions,
+        'applied': args.apply,
+        'push': args.push,
+    }
+    if args.json and not args.apply:
+        print(json.dumps(output, indent=2))
+        return 1 if validation['errors'] else 0
+    print_reconcile_report(output)
+    if validation['errors']:
+        return 1
+    if not args.apply:
+        return 0
+    manual_actions = [action for action in actions if action['type'] == 'manual_review']
+    if manual_actions:
+        raise SyncwheelError('reconcile requires manual review before --apply can continue')
+
+    push_args = passthrough_args(args.git_args)
+    for action in actions:
+        if action['type'] == 'rebuild_stack':
+            stack = require_stack(manifest, action['stack'])
+            worktree = reconcile_worktree_path(repo_root, stack['branch'], args.worktree_root)
+            ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
+            commands = materialize_pr_commands(repo_root, manifest, stack, worktree, False)
+            run_command_list(commands, repo_root, True)
+            if args.update_manifest:
+                stack['commits'] = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+                save_manifest(manifest_path, manifest)
+                print(f"{stack['id']}: manifest updated from rebuilt branch")
+        elif action['type'] == 'push_stack':
+            stack = require_stack(manifest, action['stack'])
+            remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
+            command = ['git', 'push', *push_args, remote, stack['branch']]
+            run(command, cwd=repo_root)
+            print(quoted(command))
+        elif action['type'] == 'rebuild_integration':
+            integration = manifest['integration']
+            if args.in_place_integration:
+                ensure_in_place_target(repo_root, integration['branch'])
+                worktree = None
+                in_place = True
+            else:
+                worktree = reconcile_worktree_path(repo_root, integration['branch'], args.worktree_root)
+                ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
+                in_place = False
+            commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
+            run_command_list(commands, repo_root, True)
+        elif action['type'] == 'push_integration':
+            remote = args.remote or manifest['defaults']['publication_remote']
+            command = ['git', 'push', *push_args, remote, manifest['integration']['branch']]
+            run(command, cwd=repo_root)
+            print(quoted(command))
+    return 0
+
+
 def command_int_sync_status(args):
     repo_root = resolve_repo_root(args.repo)
     if args.fetch:
@@ -1863,6 +2204,42 @@ def build_parser():
     check_p.add_argument('--no-fetch', dest='fetch', action='store_false')
     check_p.add_argument('--json', action='store_true')
     check_p.set_defaults(func=command_check, fetch=True)
+
+    reconcile_p = sub.add_parser(
+        'reconcile',
+        aliases=['rec'],
+        help='reconcile manifest, stack branches, integration, and remote tips',
+        parents=[common],
+    )
+    reconcile_p.add_argument('--no-fetch', dest='fetch', action='store_false')
+    reconcile_p.add_argument('--json', action='store_true')
+    reconcile_p.add_argument('--apply', action='store_true', help='execute the reported rebuild/push plan')
+    reconcile_p.add_argument('--push', action='store_true', help='push rebuilt or drifted managed branches')
+    reconcile_p.add_argument('--remote', help='publication remote override for stack and integration pushes')
+    reconcile_p.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
+    reconcile_p.add_argument('--skip-integration', action='store_true')
+    reconcile_p.add_argument(
+        '--rebuild',
+        choices=['needed', 'all', 'none'],
+        default='needed',
+        help='which managed branches to rebuild before optional push',
+    )
+    reconcile_p.add_argument(
+        '--worktree-root',
+        help='directory where reconcile creates branch worktrees when no worktree already exists',
+    )
+    reconcile_p.add_argument(
+        '--in-place-integration',
+        action='store_true',
+        help='allow integration rebuild in the current clean integration checkout',
+    )
+    reconcile_p.add_argument(
+        '--no-update-manifest',
+        dest='update_manifest',
+        action='store_false',
+        help='do not refresh stack commit SHAs after stack rebuilds',
+    )
+    reconcile_p.set_defaults(func=command_reconcile, fetch=True, update_manifest=True)
 
     manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect and compare syncwheel manifests')
     manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)

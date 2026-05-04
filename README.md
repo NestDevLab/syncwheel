@@ -2,7 +2,7 @@
 
 Deterministic fork/upstream/integration maintenance for Git repositories.
 
-Current version: `0.8.2`
+Current version: `0.9.0`
 
 `syncwheel` is a small CLI plus a documentation model for teams that:
 - publish clean `pr/*` branches toward an original upstream repository
@@ -79,6 +79,10 @@ Practical meaning:
 - `int rebuild` rebuilds integration from ordered stacks.
 - `stack push` and `int push` wrap `git push`, with arbitrary Git arguments
   after `--`.
+- `reconcile` is the preferred multi-device maintenance entrypoint: it compares
+  manifest ownership, stack branches, integration, and remote tips; reports a
+  dry-run plan by default; and can rebuild, update manifest SHAs, and push when
+  explicitly run with `--apply` and `--push`.
 - `validate` and `plan` detect drift before branch mutation.
 - validation also reports non-merge commits on integration that are not
   declared in any stack, so integration-only work cannot hide silently.
@@ -369,8 +373,27 @@ python3 scripts/syncwheel.py int push -- --force-with-lease
 
 ### 7. Synchronize shared integration branch checkouts
 
-When two machines use the same configured integration branch, first inspect the
-local branch, remote branch, and manifest projection:
+When two machines use the same configured integration branch, prefer
+manifest-driven reconciliation over raw Git pull/merge:
+
+```bash
+python3 scripts/syncwheel.py reconcile
+python3 scripts/syncwheel.py reconcile --apply --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwheel-worktrees -- --force-with-lease
+```
+
+`reconcile` fetches by default, classifies stack and integration drift, rebuilds
+only branches that differ from the manifest projection unless `--rebuild all`
+is passed, refreshes stack commit SHAs after rebuilds, rebuilds integration from
+the current manifest, and uses Syncwheel push wrappers when `--push` is present.
+
+Use `--json` for automation, `--stack <id>` to limit stack work, `--remote` to
+override the publication remote, and `--in-place-integration` only when the
+current checkout is already on the clean integration branch and should be reset
+as part of the reconcile.
+
+For lower-level inspection, compare the local integration branch, remote branch,
+and manifest projection:
 
 ```bash
 python3 scripts/syncwheel.py int sync-status --json
@@ -544,6 +567,7 @@ python3 scripts/syncwheel.py check --help
 python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
 python3 scripts/syncwheel.py plan --help
+python3 scripts/syncwheel.py reconcile --help
 python3 scripts/syncwheel.py stack --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help
@@ -559,6 +583,7 @@ Common aliases:
 - `status` -> `st`
 - `validate` -> `v`
 - `plan` -> `pl`
+- `reconcile` -> `rec`
 - `stack` -> `s`
 - `int` -> `i`
 - `stack create` -> `s new`
@@ -572,14 +597,13 @@ Common aliases:
 Agents should not infer stack ownership from memory when the repository is meant to be maintained via `syncwheel`.
 
 Recommended sequence:
-1. `status --fetch`
-2. `validate`
-3. `plan --json`
-4. update the manifest if reality changed
-5. `stack sync`, `stack set`, or `stack add`
-6. `stack rebuild` and/or `int rebuild`
-7. rerun `validate`
-8. report remaining drift honestly
+1. `reconcile`
+2. update the manifest with `stack sync`, `stack set`, or `stack add` if the
+   dry-run report shows real ownership changes
+3. `reconcile --apply --worktree-root <path>`
+4. `reconcile --apply --push --worktree-root <path> -- --force-with-lease`
+   when the rebuilt managed branches should become the shared remote state
+5. rerun `reconcile` or `check` and report remaining drift honestly
 
 See [docs/ai-agents.md](docs/ai-agents.md).
 
