@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.12.0 - 2026-05-04
+
+- Add `reconcile --align-local-to-remote` for history normalization when local
+  and remote branches both match the manifest projection but still differ by Git
+  history.
+- Keep that normalization explicit so normal `reconcile` remains a content
+  no-op in the both-valid case.
+- Add regression coverage for stack and integration branches with diverged
+  history and identical projected trees.
+
 ## 0.11.1 - 2026-05-04
 
 - Fix `reconcile` no-op detection when rewritten local and remote histories

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.11.1`
+Current version: `0.12.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -59,6 +59,10 @@ Default behavior is conservative:
 - if a remote managed branch already matches the manifest projection,
   `reconcile --apply` aligns the local branch to that remote instead of
   rebuilding new replacement commits
+- pass `--align-local-to-remote` when local and remote both already match the
+  manifest projection but Git history still shows ahead/behind; this normalizes
+  the local branch to the published remote history without rebuilding or
+  touching the manifest
 
 Use `--no-force-with-lease` only when a normal push is intentionally required.
 
@@ -468,6 +472,10 @@ the current manifest, and uses Syncwheel push wrappers when `--push` is present.
 When the remote branch already matches the manifest projection, `reconcile`
 aligns the local branch to the remote and does not update the manifest or push
 new replacement commits.
+When both local and remote match the manifest projection but have different Git
+histories, `reconcile` reports no action by default. Pass
+`--align-local-to-remote` to normalize the local branch tip to the remote ref so
+plain Git status stops showing ahead/behind.
 `reconcile --push` uses `--force-with-lease` by default because rebuilt managed
 branches commonly replace older remote history in multi-device workflows. Pass
 `--no-force-with-lease` only when a normal push is intentionally required.

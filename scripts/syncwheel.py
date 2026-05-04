@@ -1715,6 +1715,24 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
                 'reason': 'remote_matches_manifest_projection',
             })
             continue
+        normalize_history_from_remote = (
+            args.align_local_to_remote
+            and args.rebuild != 'all'
+            and report['local_exists']
+            and report['remote_exists']
+            and report.get('local_matches_projection') is True
+            and report.get('remote_matches_projection') is True
+            and report['relation'] != 'aligned'
+        )
+        if normalize_history_from_remote:
+            actions.append({
+                'type': 'align_stack_to_remote',
+                'stack': stack['id'],
+                'branch': stack['branch'],
+                'remote_ref': report['remote_ref'],
+                'reason': 'local_and_remote_match_projection',
+            })
+            continue
         rebuild_needed = (
             args.rebuild == 'all'
             or not report['local_exists']
@@ -1787,6 +1805,25 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             'branch': manifest['integration']['branch'],
             'remote_ref': integration_report['remote_ref'],
             'reason': 'remote_matches_manifest_projection',
+        })
+        integration_rebuild_needed = False
+    integration_normalize_history_from_remote = (
+        not args.skip_integration
+        and args.align_local_to_remote
+        and args.rebuild != 'all'
+        and not integration_report.get('projection_error')
+        and integration_report['local_exists']
+        and integration_report['remote_exists']
+        and integration_report.get('local_matches_projection') is True
+        and integration_report.get('remote_matches_projection') is True
+        and integration_report['relation'] != 'aligned'
+    )
+    if integration_normalize_history_from_remote:
+        actions.append({
+            'type': 'align_integration_to_remote',
+            'branch': manifest['integration']['branch'],
+            'remote_ref': integration_report['remote_ref'],
+            'reason': 'local_and_remote_match_projection',
         })
         integration_rebuild_needed = False
     if integration_rebuild_needed and args.rebuild != 'none':
@@ -2323,6 +2360,11 @@ def build_parser():
     reconcile_p.add_argument('--remote', help='publication remote override for stack and integration pushes')
     reconcile_p.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
     reconcile_p.add_argument('--skip-integration', action='store_true')
+    reconcile_p.add_argument(
+        '--align-local-to-remote',
+        action='store_true',
+        help='when local and remote both match the manifest projection, move the local branch tip to the remote ref',
+    )
     reconcile_p.add_argument(
         '--rebuild',
         choices=['needed', 'all', 'none'],
