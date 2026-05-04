@@ -663,6 +663,63 @@ class SyncwheelFixtureTest(unittest.TestCase):
         )
         self.assertEqual(manifest_path.read_text(), before_manifest)
 
+    def test_reconcile_noops_when_rewritten_history_matches_projection(self):
+        beta = self.git('rev-parse', 'main')
+        base = self.git('rev-parse', 'main~1')
+        manifest_path = self.tmp / 'rewritten-manifest.json'
+        data = self.read_manifest()
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/reconcile',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-b',
+                'branch': 'pr/feature-b',
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/reconcile',
+                'commits': [beta],
+            }
+        ]
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        self.git('switch', '-q', '-c', 'rewritten-feature-b', base)
+        self.git('cherry-pick', beta)
+        self.git('commit', '--amend', '-m', 'feat: add beta rewritten')
+        self.git('branch', '-f', 'pr/feature-b', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/reconcile', base)
+        self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin', '--prune')
+
+        result = self.run_cli(
+            'reconcile',
+            '--manifest',
+            str(manifest_path),
+            '--no-fetch',
+            '--json',
+            expected=0,
+        )
+        report = json.loads(result.stdout)
+
+        self.assertEqual(report['actions'], [])
+        self.assertTrue(report['stacks'][0]['local_matches_projection'])
+        self.assertTrue(report['stacks'][0]['remote_matches_projection'])
+        self.assertEqual(report['stacks'][0]['relation'], 'aligned')
+        self.assertEqual(
+            self.git('rev-parse', 'pr/feature-b'),
+            self.git('rev-parse', 'origin/pr/feature-b'),
+        )
+        self.assertNotEqual(self.git('rev-parse', 'pr/feature-b'), beta)
+
     def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
         base = self.git('rev-parse', 'HEAD')
         script = self.repo / 'scripts' / 'demo.py'

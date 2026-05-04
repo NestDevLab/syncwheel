@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.11.1 - 2026-05-04
+
+- Fix `reconcile` no-op detection when rewritten local and remote histories
+  already match the manifest projection by tree but do not contain the exact
+  historical manifest SHAs.
+- Prevent validation SHA-containment drift from forcing rebuilds when
+  `local_matches_projection` is already true.
+- Add a regression test for diverged commit history with the same projected
+  tree.
+
 ## 0.11.0 - 2026-05-04
 
 - Make `reconcile` converge stale local managed branches to remote refs when

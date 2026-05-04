@@ -1719,9 +1719,12 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             args.rebuild == 'all'
             or not report['local_exists']
             or report.get('local_matches_projection') is False
-            or any(
-                item['id'] == stack['id'] and item['missing_from_branch']
-                for item in validation['details']['stacks']
+            or (
+                report.get('local_matches_projection') is not True
+                and any(
+                    item['id'] == stack['id'] and item['missing_from_branch']
+                    for item in validation['details']['stacks']
+                )
             )
         )
         if args.rebuild != 'none' and rebuild_needed:
@@ -1753,8 +1756,13 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             or stack_rebuild_planned
             or not integration_report['local_exists']
             or integration_report.get('local_matches_projection') is False
-            or 'refresh_integration_for_stack' in validation_action_types
-            or 'classify_integration_commits' in validation_action_types
+            or (
+                integration_report.get('local_matches_projection') is not True
+                and (
+                    'refresh_integration_for_stack' in validation_action_types
+                    or 'classify_integration_commits' in validation_action_types
+                )
+            )
         )
     )
     if not args.skip_integration and integration_report.get('projection_error'):
