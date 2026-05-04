@@ -5,6 +5,7 @@ import sys
 
 
 RELEASE_RELEVANT_PREFIXES = (
+    'githooks/',
     'scripts/',
     'tests/',
 )
@@ -23,7 +24,10 @@ def git(*args):
     return result.stdout
 
 
-def changed_files(base):
+def changed_files(base, staged=False):
+    if staged:
+        output = git('diff', '--cached', '--name-only')
+        return {line.strip() for line in output.splitlines() if line.strip()}
     output = git('diff', '--name-only', f'{base}...HEAD')
     return {line.strip() for line in output.splitlines() if line.strip()}
 
@@ -39,9 +43,14 @@ def main():
         default='origin/main',
         help='base ref to compare against; defaults to origin/main',
     )
+    parser.add_argument(
+        '--staged',
+        action='store_true',
+        help='check staged files for pre-commit usage instead of comparing against --base',
+    )
     args = parser.parse_args()
 
-    files = changed_files(args.base)
+    files = changed_files(args.base, staged=args.staged)
     relevant = sorted(path for path in files if is_release_relevant(path))
     if not relevant:
         print('No release-relevant changes detected.')

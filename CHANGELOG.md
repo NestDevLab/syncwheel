@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1 - 2026-05-04
+
+- Add a tracked pre-commit hook for the version-bump guard.
+- Add staged-file mode to `scripts/check-version-bump.py` so local hooks can
+  reject commits before they are created.
+
 ## 0.8.0 - 2026-05-04
 
 - Add `int sync-status` to compare local integration, remote integration, and

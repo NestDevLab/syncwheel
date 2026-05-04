@@ -459,6 +459,39 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertIn('Version bump check passed', result.stdout)
 
+    def test_version_bump_guard_checks_staged_files_for_hooks(self):
+        script = self.repo / 'scripts' / 'demo.py'
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('print("demo")\n')
+        self.git('add', 'scripts/demo.py')
+
+        result = self.run_script(
+            CLI.parent / 'check-version-bump.py',
+            '--staged',
+            expected=1,
+        )
+
+        self.assertIn('Release-relevant changes require a version bump', result.stdout)
+        self.assertIn('VERSION', result.stdout)
+
+    def test_pre_commit_hook_runs_version_bump_guard(self):
+        hook = REPO_ROOT / 'githooks' / 'pre-commit'
+        script = self.repo / 'scripts' / 'demo.py'
+        script.parent.mkdir(exist_ok=True)
+        script.write_text('print("demo")\n')
+        shutil.copy2(CLI.parent / 'check-version-bump.py', self.repo / 'scripts' / 'check-version-bump.py')
+        self.git('add', 'scripts/demo.py')
+
+        result = subprocess.run(
+            [str(hook)],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertIn('Release-relevant changes require a version bump', result.stdout)
+
     def test_int_sync_status_and_align_remote_with_local_git_remote(self):
         self.git('add', '.syncwheel/manifest.json')
         self.git('commit', '-q', '-m', 'test: add manifest')
