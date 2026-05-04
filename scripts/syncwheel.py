@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 import shlex
+import tempfile
 import subprocess
 import sys
 import time
@@ -533,6 +534,10 @@ def commit_patch_id(repo_root, commit):
     return line.split()[0]
 
 
+def ref_tree(repo_root, ref):
+    return git(repo_root, 'rev-parse', f'{ref}^{{tree}}').stdout.strip()
+
+
 def get_default_remote_head(repo_root, remote):
     symref = git(repo_root, 'symbolic-ref', '--quiet', '--short', f'refs/remotes/{remote}/HEAD', check=False)
     if symref.returncode == 0 and symref.stdout.strip():
@@ -1052,6 +1057,21 @@ def integration_stack_commands(manifest, worktree=None):
     raise SyncwheelError(f"unsupported integration strategy: {strategy}")
 
 
+def materialize_integration_projection(repo_root, manifest):
+    integration = manifest['integration']
+    with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
+        worktree = Path(tmp)
+        git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), integration['base'])
+        try:
+            git(worktree, 'config', 'user.name', 'Syncwheel')
+            git(worktree, 'config', 'user.email', 'syncwheel@example.com')
+            for command in integration_stack_commands(manifest, worktree):
+                run(command, cwd=repo_root)
+            return ref_tree(worktree, 'HEAD')
+        finally:
+            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+
+
 def materialize_integration_commands(repo_root, manifest, worktree=None, in_place=False, timestamp=None):
     integration = manifest['integration']
     timestamp = timestamp or syncwheel_timestamp()
@@ -1449,6 +1469,130 @@ def command_int_show(args):
     return 0
 
 
+def remote_integration_ref(manifest, remote=None):
+    integration = manifest['integration']
+    remote = remote or manifest['defaults']['publication_remote']
+    return f"{remote}/{integration['branch']}"
+
+
+def rev_left_right_count(repo_root, left, right):
+    result = git(repo_root, 'rev-list', '--left-right', '--count', f'{left}...{right}')
+    left_count, right_count = result.stdout.strip().split()
+    return int(left_count), int(right_count)
+
+
+def integration_sync_report(repo_root, manifest, remote=None):
+    integration = manifest['integration']
+    branch = integration['branch']
+    remote_ref = remote_integration_ref(manifest, remote)
+    local_exists = branch_exists(repo_root, branch)
+    remote_exists = ref_exists(repo_root, remote_ref)
+    report = {
+        'branch': branch,
+        'remote_ref': remote_ref,
+        'local_exists': local_exists,
+        'remote_exists': remote_exists,
+        'relation': 'missing',
+        'ahead': None,
+        'behind': None,
+        'local_tree': None,
+        'remote_tree': None,
+        'projected_tree': None,
+        'remote_matches_projection': None,
+        'local_matches_projection': None,
+    }
+    if local_exists:
+        report['local_tree'] = ref_tree(repo_root, branch)
+    if remote_exists:
+        report['remote_tree'] = ref_tree(repo_root, remote_ref)
+    if local_exists and remote_exists:
+        ahead, behind = rev_left_right_count(repo_root, branch, remote_ref)
+        report['ahead'] = ahead
+        report['behind'] = behind
+        if ahead == 0 and behind == 0:
+            report['relation'] = 'aligned'
+        elif ahead == 0:
+            report['relation'] = 'local_behind'
+        elif behind == 0:
+            report['relation'] = 'local_ahead'
+        else:
+            report['relation'] = 'diverged'
+    elif local_exists:
+        report['relation'] = 'local_only'
+    elif remote_exists:
+        report['relation'] = 'remote_only'
+
+    try:
+        projected_tree = materialize_integration_projection(repo_root, manifest)
+        report['projected_tree'] = projected_tree
+        if report['remote_tree']:
+            report['remote_matches_projection'] = report['remote_tree'] == projected_tree
+        if report['local_tree']:
+            report['local_matches_projection'] = report['local_tree'] == projected_tree
+    except SyncwheelError as exc:
+        report['projection_error'] = str(exc)
+    return report
+
+
+def command_int_sync_status(args):
+    repo_root = resolve_repo_root(args.repo)
+    if args.fetch:
+        git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    validation = validate_manifest(repo_root, manifest)
+    report = integration_sync_report(repo_root, manifest, args.remote)
+    output = {
+        'manifest_path': str(manifest_path),
+        'validation': validation,
+        'sync': report,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return 1 if validation['errors'] else 0
+    print(f"branch: {report['branch']}")
+    print(f"remote_ref: {report['remote_ref']}")
+    print(f"relation: {report['relation']}")
+    if report['ahead'] is not None:
+        print(f"ahead: {report['ahead']}")
+        print(f"behind: {report['behind']}")
+    if report.get('projection_error'):
+        print(f"projection_error: {report['projection_error']}")
+    else:
+        print(f"remote_matches_projection: {report['remote_matches_projection']}")
+        print(f"local_matches_projection: {report['local_matches_projection']}")
+    return 1 if validation['errors'] else 0
+
+
+def command_int_align_remote(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    integration = manifest['integration']
+    if args.fetch:
+        git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
+    ensure_in_place_target(repo_root, integration['branch'])
+    report = integration_sync_report(repo_root, manifest, args.remote)
+    if not report['remote_exists']:
+        raise SyncwheelError(f"remote integration ref does not exist: {report['remote_ref']}")
+    if report.get('projection_error'):
+        raise SyncwheelError(f"cannot project integration from manifest: {report['projection_error']}")
+    if not args.force and not report['remote_matches_projection']:
+        raise SyncwheelError(
+            f"remote integration ref {report['remote_ref']} does not match manifest projection; "
+            'use int rebuild or pass --force after manual review'
+        )
+    if report['relation'] == 'aligned':
+        print(f"{integration['branch']}: already aligned with {report['remote_ref']}")
+        return 0
+    timestamp = syncwheel_timestamp()
+    commands = []
+    backup = backup_branch_command(repo_root, integration['branch'], timestamp)
+    if backup:
+        commands.append(backup)
+    commands.append(['git', 'reset', '--hard', report['remote_ref']])
+    run_command_list(commands, repo_root, not args.dry_run)
+    return 0
+
+
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -1491,6 +1635,93 @@ def command_int_git(args):
     if result.stderr:
         print(result.stderr, end='', file=sys.stderr)
     return result.returncode
+
+
+def manifest_stack_summary(stack):
+    return {
+        'id': stack['id'],
+        'branch': stack['branch'],
+        'base': stack['base'],
+        'commits': stack['commits'],
+        'integration_branch': stack.get('integration_branch'),
+    }
+
+
+def load_other_manifest(repo_root, args):
+    if args.other_personal and args.other_manifest:
+        raise SyncwheelError('use either --other-personal or --other-manifest, not both')
+    if args.other_personal:
+        path = personal_manifest_path(repo_root, args.other_personal)
+    elif args.other_manifest:
+        path = Path(args.other_manifest).expanduser()
+    else:
+        raise SyncwheelError('manifest compare requires --other-manifest or --other-personal')
+    manifest, path = load_manifest(repo_root, path)
+    if not manifest:
+        raise SyncwheelError(f'manifest not found: {path}')
+    return manifest, path
+
+
+def compare_manifests(left, right):
+    left_stacks = stack_map(left)
+    right_stacks = stack_map(right)
+    left_ids = set(left_stacks)
+    right_ids = set(right_stacks)
+    shared = []
+    divergent = []
+    for stack_id in sorted(left_ids & right_ids):
+        left_stack = manifest_stack_summary(left_stacks[stack_id])
+        right_stack = manifest_stack_summary(right_stacks[stack_id])
+        same = (
+            left_stack['branch'] == right_stack['branch']
+            and left_stack['base'] == right_stack['base']
+            and left_stack['commits'] == right_stack['commits']
+        )
+        item = {
+            'id': stack_id,
+            'same': same,
+            'left': left_stack,
+            'right': right_stack,
+        }
+        shared.append(item)
+        if not same:
+            divergent.append(item)
+    return {
+        'left_integration': left['integration'],
+        'right_integration': right['integration'],
+        'shared': shared,
+        'divergent_shared': divergent,
+        'left_only': sorted(left_ids - right_ids),
+        'right_only': sorted(right_ids - left_ids),
+    }
+
+
+def command_manifest_compare(args):
+    repo_root = resolve_repo_root(args.repo)
+    left, left_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    right, right_path = load_other_manifest(repo_root, args)
+    comparison = compare_manifests(left, right)
+    output = {
+        'left_manifest': str(left_path),
+        'right_manifest': str(right_path),
+        **comparison,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2))
+        return 0
+    print(f"left_manifest: {left_path}")
+    print(f"right_manifest: {right_path}")
+    print(f"left_integration: {left['integration']['branch']}")
+    print(f"right_integration: {right['integration']['branch']}")
+    print(f"shared_stacks: {len(comparison['shared'])}")
+    print(f"divergent_shared_stacks: {len(comparison['divergent_shared'])}")
+    if comparison['left_only']:
+        print('left_only: ' + ', '.join(comparison['left_only']))
+    if comparison['right_only']:
+        print('right_only: ' + ', '.join(comparison['right_only']))
+    for item in comparison['divergent_shared']:
+        print(f"divergent: {item['id']}")
+    return 0
 
 
 def add_rebuild_args(parser):
@@ -1596,6 +1827,15 @@ def build_parser():
     check_p.add_argument('--json', action='store_true')
     check_p.set_defaults(func=command_check, fetch=True)
 
+    manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect and compare syncwheel manifests')
+    manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)
+
+    manifest_compare_p = manifest_sub.add_parser('compare', parents=[common])
+    manifest_compare_p.add_argument('--other-manifest')
+    manifest_compare_p.add_argument('--other-personal')
+    manifest_compare_p.add_argument('--json', action='store_true')
+    manifest_compare_p.set_defaults(func=command_manifest_compare)
+
     stack_p = sub.add_parser('stack', aliases=['s'], help='inspect, create, edit, rebuild, push, or run git for one stack')
     stack_sub = stack_p.add_subparsers(dest='stack_command', required=True)
 
@@ -1647,11 +1887,24 @@ def build_parser():
     add_git_args(stack_git_p)
     stack_git_p.set_defaults(func=command_stack_git)
 
-    int_p = sub.add_parser('int', aliases=['i'], help='inspect, rebuild, push, or run git for integration')
+    int_p = sub.add_parser('int', aliases=['i'], help='inspect, align, rebuild, push, or run git for integration')
     int_sub = int_p.add_subparsers(dest='int_command', required=True)
 
     int_show_p = int_sub.add_parser('show', aliases=['sh'], parents=[common])
     int_show_p.set_defaults(func=command_int_show)
+
+    int_sync_status_p = int_sub.add_parser('sync-status', parents=[common])
+    int_sync_status_p.add_argument('--remote')
+    int_sync_status_p.add_argument('--no-fetch', dest='fetch', action='store_false')
+    int_sync_status_p.add_argument('--json', action='store_true')
+    int_sync_status_p.set_defaults(func=command_int_sync_status, fetch=True)
+
+    int_align_remote_p = int_sub.add_parser('align-remote', parents=[common])
+    int_align_remote_p.add_argument('--remote')
+    int_align_remote_p.add_argument('--no-fetch', dest='fetch', action='store_false')
+    int_align_remote_p.add_argument('--dry-run', action='store_true')
+    int_align_remote_p.add_argument('--force', action='store_true')
+    int_align_remote_p.set_defaults(func=command_int_align_remote, fetch=True)
 
     int_rebuild_p = int_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     add_rebuild_args(int_rebuild_p)

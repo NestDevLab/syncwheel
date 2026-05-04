@@ -367,6 +367,40 @@ Add arbitrary Git push arguments after `--`:
 python3 scripts/syncwheel.py int push -- --force-with-lease
 ```
 
+### 7. Synchronize shared integration branch checkouts
+
+When two machines use the same configured integration branch, first inspect the
+local branch, remote branch, and manifest projection:
+
+```bash
+python3 scripts/syncwheel.py int sync-status --json
+```
+
+If the remote integration branch already matches the manifest projection and the
+local checkout is stale, align the current clean integration checkout to the
+remote. A backup branch is created before reset:
+
+```bash
+python3 scripts/syncwheel.py int align-remote
+```
+
+Use `--dry-run` to print the backup/reset commands. If the remote integration
+branch does not match the manifest projection, `align-remote` stops; use
+`int rebuild` and review before pushing instead.
+
+### 8. Compare different integration compositions
+
+When two devices or workstreams use different manifests and integration
+branches, compare the manifests instead of merging their integration branches:
+
+```bash
+python3 scripts/syncwheel.py manifest compare --other-personal laptop --json
+python3 scripts/syncwheel.py manifest compare --other-manifest ../other-manifest.json
+```
+
+The comparison reports shared stacks, stacks only present in one composition,
+and shared stacks whose branch/base/commit list diverges.
+
 For merge-shaped integration history, set:
 
 ```json

@@ -404,6 +404,102 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork main', result.stdout)
 
+    def test_int_sync_status_and_align_remote_with_local_git_remote(self):
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: add manifest')
+        self.git('switch', '-q', '-c', 'pr/feature-c', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+
+        manifest_path = self.tmp / 'integration-manifest.json'
+        data = json.loads((self.repo / '.syncwheel' / 'manifest.json').read_text())
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/shared',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-c'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-c',
+                'branch': 'pr/feature-c',
+                'base': 'main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/shared',
+                'commits': [gamma],
+            }
+        ]
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        self.git('switch', '-q', '-c', 'integration/shared', 'main')
+        self.git('merge', '--no-ff', 'pr/feature-c', '-m', "Merge stack 'feature-c' into integration/shared")
+
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('push', '-u', 'origin', 'main', 'pr/feature-c', 'integration/shared')
+
+        Path(self.repo / 'local-only.txt').write_text('local only\n')
+        self.git('add', 'local-only.txt')
+        self.git('commit', '-q', '-m', 'debug: local integration only')
+
+        result = self.run_cli(
+            'int',
+            'sync-status',
+            '--manifest',
+            str(manifest_path),
+            '--no-fetch',
+            '--json',
+            expected=0,
+        )
+        status = json.loads(result.stdout)
+
+        self.assertEqual(status['sync']['relation'], 'local_ahead')
+        self.assertEqual(status['sync']['ahead'], 1)
+        self.assertTrue(status['sync']['remote_matches_projection'])
+        self.assertFalse(status['sync']['local_matches_projection'])
+
+        self.run_cli('int', 'align-remote', '--manifest', str(manifest_path), '--no-fetch', expected=0)
+
+        self.assertFalse((self.repo / 'local-only.txt').exists())
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'origin/integration/shared'))
+        backups = self.git('branch', '--list', 'backup/integration/shared-before-syncwheel-*')
+        self.assertIn('backup/integration/shared-before-syncwheel-', backups)
+
+    def test_manifest_compare_reports_shared_and_divergent_stacks(self):
+        self.run_cli('init', '--personal', 'laptop', '--force', expected=0)
+        shared_manifest = self.read_manifest()
+        personal_path = self.repo / '.syncwheel' / 'manifests' / 'laptop.local.json'
+        personal = json.loads(personal_path.read_text())
+        personal['integration']['branch'] = 'integration/laptop/main'
+        personal['integration']['stacks'] = ['feature-a', 'feature-c']
+        personal['stacks'] = [
+            dict(shared_manifest['stacks'][0]),
+            {
+                'id': 'feature-c',
+                'branch': 'pr/laptop/feature-c',
+                'base': 'main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/laptop/main',
+                'commits': [self.git('rev-parse', 'HEAD')],
+            },
+        ]
+        personal['stacks'][0]['commits'] = [self.git('rev-parse', 'HEAD')]
+        personal_path.write_text(json.dumps(personal, indent=2) + '\n')
+
+        result = self.run_cli('manifest', 'compare', '--other-personal', 'laptop', '--json', expected=0)
+        comparison = json.loads(result.stdout)
+
+        self.assertEqual(comparison['left_only'], ['feature-b'])
+        self.assertEqual(comparison['right_only'], ['feature-c'])
+        self.assertEqual([item['id'] for item in comparison['divergent_shared']], ['feature-a'])
+        self.assertEqual(comparison['right_integration']['branch'], 'integration/laptop/main')
+
     def test_stack_git_runs_in_stack_worktree(self):
         self.git('worktree', 'add', '-q', str(self.tmp / 'wt-feature-a'), 'pr/feature-a')
         result = self.run_cli('stack', 'git', 'feature-a', '--', 'branch', '--show-current', expected=0)

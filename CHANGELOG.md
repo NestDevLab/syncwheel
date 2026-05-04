@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- Add `int sync-status` to compare local integration, remote integration, and
+  the manifest-projected integration tree.
+- Add `int align-remote` to backup and reset a clean shared integration checkout
+  to its remote only when the remote matches the manifest projection, unless
+  explicitly forced.
+- Add `manifest compare` to inspect different integration compositions and
+  identify shared, divergent, and composition-only stacks.
+- Add end-to-end Git tests covering shared-integration remote alignment and
+  multi-manifest comparison.
+
 ## 0.7.2 - 2026-05-02
 
 - Publish the detached-head update-detection fix as a new release version so pinned installs can verify the notifier behavior against a newer tagged version.
