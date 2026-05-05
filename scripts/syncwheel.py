@@ -29,6 +29,16 @@ UPDATE_MODES = {'off', 'notify', 'auto'}
 DEFAULT_UPDATE_MODE = 'notify'
 DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 SYNCWHEEL_HOOKS_PATH = 'githooks'
+FALLBACK_GIT_IDENTITY_CONFIG = [
+    '-c',
+    'user.name=Syncwheel',
+    '-c',
+    'user.email=syncwheel@example.com',
+]
+YELLOW = '\033[33m'
+RESET = '\033[0m'
+WARNED_GIT_IDENTITY_PATHS = set()
+COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'merge', 'revert'}
 
 
 def read_version_file(path):
@@ -42,21 +52,77 @@ INSTALL_ROOT = Path(__file__).resolve().parents[1]
 VERSION = read_version_file(INSTALL_ROOT / 'VERSION') or '0.6.0'
 
 
-def run(cmd, cwd=None, check=True, input_text=None):
+def run(cmd, cwd=None, check=True, input_text=None, env=None):
+    process_env = os.environ.copy()
+    if env:
+        process_env.update(env)
     result = subprocess.run(
         cmd,
         cwd=cwd,
         input=input_text,
         text=True,
         capture_output=True,
+        env=process_env,
     )
     if check and result.returncode != 0:
         raise SyncwheelError(result.stderr.strip() or result.stdout.strip() or f"command failed: {' '.join(cmd)}")
     return result
 
 
-def git(repo_root, *args, check=True, input_text=None):
-    return run(['git', *args], cwd=repo_root, check=check, input_text=input_text)
+def git(repo_root, *args, check=True, input_text=None, env=None):
+    return run(['git', *args], cwd=repo_root, check=check, input_text=input_text, env=env)
+
+
+def git_command_cwd(default_cwd, command):
+    if not command or command[0] != 'git':
+        return Path(default_cwd)
+    index = 1
+    while index < len(command):
+        if command[index] == '-C' and index + 1 < len(command):
+            return Path(command[index + 1])
+        index += 1
+    return Path(default_cwd)
+
+
+def git_command_creates_commit(command):
+    return bool(command and command[0] == 'git' and any(part in COMMIT_CREATING_GIT_ACTIONS for part in command[1:]))
+
+
+def git_identity(path):
+    name = git(path, 'config', '--get', 'user.name', check=False)
+    email = git(path, 'config', '--get', 'user.email', check=False)
+    name_value = name.stdout.strip() if name.returncode == 0 else ''
+    email_value = email.stdout.strip() if email.returncode == 0 else ''
+    return name_value, email_value
+
+
+def warn_missing_git_identity(path):
+    resolved = str(Path(path).resolve())
+    if resolved in WARNED_GIT_IDENTITY_PATHS:
+        return
+    WARNED_GIT_IDENTITY_PATHS.add(resolved)
+    print(
+        f"{YELLOW}WARN: Git user.name/user.email are not configured for {resolved}; "
+        "using Syncwheel fallback identity for generated commits. "
+        "Configure Git identity for this repository to avoid this warning."
+        f"{RESET}",
+        file=sys.stderr,
+    )
+
+
+def with_git_identity(default_cwd, command):
+    if not command or command[0] != 'git':
+        return command
+    if not git_command_creates_commit(command):
+        return command
+    command_cwd = git_command_cwd(default_cwd, command)
+    if not command_cwd.exists():
+        command_cwd = Path(default_cwd)
+    name, email = git_identity(command_cwd)
+    if name and email:
+        return command
+    warn_missing_git_identity(command_cwd)
+    return ['git', *FALLBACK_GIT_IDENTITY_CONFIG, *command[1:]]
 
 
 def get_repo_root(explicit=None):
@@ -1077,12 +1143,11 @@ def materialize_stack_projection(repo_root, stack):
         worktree = Path(tmp)
         git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), stack['base'])
         try:
-            git(worktree, 'config', 'user.name', 'Syncwheel')
-            git(worktree, 'config', 'user.email', 'syncwheel@example.com')
             for commit in stack['commits']:
                 if branch_contains(worktree, 'HEAD', commit):
                     continue
-                run(['git', '-C', str(worktree), 'cherry-pick', commit], cwd=repo_root)
+                command = ['git', '-C', str(worktree), 'cherry-pick', commit]
+                run(with_git_identity(repo_root, command), cwd=repo_root)
             return ref_tree(worktree, 'HEAD')
         finally:
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
@@ -1124,18 +1189,17 @@ def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=
         worktree = Path(tmp)
         git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), integration['base'])
         try:
-            git(worktree, 'config', 'user.name', 'Syncwheel')
-            git(worktree, 'config', 'user.email', 'syncwheel@example.com')
             if integration.get('strategy', 'cherry-pick') == 'cherry-pick':
                 stacks_by_id = stack_map(manifest)
                 for stack_id in integration['stacks']:
                     for commit in stacks_by_id[stack_id]['commits']:
                         if branch_contains(worktree, 'HEAD', commit):
                             continue
-                        run(['git', '-C', str(worktree), 'cherry-pick', commit], cwd=repo_root)
+                        command = ['git', '-C', str(worktree), 'cherry-pick', commit]
+                        run(with_git_identity(repo_root, command), cwd=repo_root)
             else:
                 for command in integration_stack_commands(manifest, worktree, stack_ref_overrides):
-                    run(command, cwd=repo_root)
+                    run(with_git_identity(repo_root, command), cwd=repo_root)
             return ref_tree(worktree, 'HEAD')
         finally:
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
@@ -1177,11 +1241,12 @@ def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=No
 def run_command_list(commands, repo_root, apply):
     if not apply:
         for command in commands:
-            print(quoted(command))
+            print(quoted(with_git_identity(repo_root, command)))
         return
     for command in commands:
-        run(command, cwd=repo_root)
-        print(quoted(command))
+        effective_command = with_git_identity(repo_root, command)
+        run(effective_command, cwd=repo_root)
+        print(quoted(effective_command))
 
 
 def ensure_non_in_place_target_clean(repo_root, branch, worktree):
@@ -1508,10 +1573,10 @@ def command_stack_absorb(args):
         raise SyncwheelError(apply_patch.stderr.strip() or apply_patch.stdout.strip() or 'failed to apply patch to stack worktree')
 
     if args.amend:
-        git(stack_worktree, 'commit', '--amend', '--no-edit')
+        run(with_git_identity(stack_worktree, ['git', 'commit', '--amend', '--no-edit']), cwd=stack_worktree)
     else:
         message = args.message or f"chore: absorb integration changes into {args.stack}"
-        git(stack_worktree, 'commit', '-m', message)
+        run(with_git_identity(stack_worktree, ['git', 'commit', '-m', message]), cwd=stack_worktree)
 
     reverse_args = ['apply', '--reverse']
     if args.staged:

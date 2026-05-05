@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.13.1 - 2026-05-05
+
+- Stop writing the fallback `Syncwheel <syncwheel@example.com>` identity into
+  target repository Git config during projection worktrees.
+- Respect normal Git identity resolution for commit-creating commands and emit
+  a yellow warning before using the Syncwheel fallback identity only when
+  `user.name` or `user.email` is missing.
+
 ## 0.13.0 - 2026-05-05
 
 - Add `stack absorb` for integration-first workflows where changes are made on

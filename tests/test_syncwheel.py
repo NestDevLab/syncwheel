@@ -624,7 +624,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         updated = json.loads(manifest_path.read_text())
         updated_commit = updated['stacks'][0]['commits'][0]
 
-        self.assertNotEqual(updated_commit, beta)
+        self.assertEqual(updated_commit, self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
