@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1 - 2026-05-05
+
+- Show `git status --short --branch` in `reconcile` output before validation
+  and drift sections so dirty working trees are explicit.
+- Include `working_tree_status` and `working_tree_dirty` in `reconcile --json`
+  output.
+
 ## 0.12.0 - 2026-05-04
 
 - Add `reconcile --align-local-to-remote` for history normalization when local

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.12.0`
+Current version: `0.12.1`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -374,6 +374,9 @@ python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwhe
 only branches that differ from the manifest projection unless `--rebuild all`
 is passed, refreshes stack commit SHAs after rebuilds, rebuilds integration from
 the current manifest, and uses Syncwheel push wrappers when `--push` is present.
+The report also prints the current working tree status, including uncommitted
+files, before validation and drift details so dirty checkouts are visible
+without running a separate `git status`.
 When the remote branch already matches the manifest projection, `reconcile`
 aligns the local branch to the remote and does not update the manifest or push
 new replacement commits.

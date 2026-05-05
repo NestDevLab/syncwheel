@@ -536,6 +536,20 @@ class SyncwheelFixtureTest(unittest.TestCase):
             ['rebuild_stack', 'rebuild_integration'],
         )
         self.assertEqual(report['actions'][0]['reason'], 'local_branch_differs_from_manifest_projection')
+        self.assertIn('working_tree_status', report['snapshot'])
+
+    def test_reconcile_reports_dirty_working_tree_status(self):
+        Path(self.repo / 'dirty.txt').write_text('dirty\n')
+
+        result = self.run_cli('reconcile', '--no-fetch', expected=0)
+
+        self.assertIn('working tree:', result.stdout)
+        self.assertIn('?? dirty.txt', result.stdout)
+
+        result = self.run_cli('reconcile', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        self.assertTrue(report['snapshot']['working_tree_dirty'])
+        self.assertIn('?? dirty.txt', report['snapshot']['working_tree_status'])
 
     def test_reconcile_apply_rebuilds_stack_updates_manifest_and_rebuilds_integration(self):
         beta = self.git('rev-parse', 'main')

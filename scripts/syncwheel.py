@@ -883,9 +883,12 @@ def collect_repo_snapshot(repo_root, manifest):
     worktrees = get_worktrees(repo_root)
     stashes = git(repo_root, 'stash', 'list', check=False).stdout.splitlines()
     remotes = git(repo_root, 'remote', '-v', check=False).stdout.splitlines()
+    status_short = git(repo_root, 'status', '--short', '--branch', check=False).stdout.splitlines()
     return {
         'repo_root': str(repo_root),
         'current_branch': current_branch,
+        'working_tree_status': status_short,
+        'working_tree_dirty': any(line and not line.startswith('## ') for line in status_short),
         'canonical_remote_head': get_default_remote_head(repo_root, canonical_remote),
         'base_ref': base_ref,
         'worktrees': worktrees,
@@ -1876,6 +1879,13 @@ def classify_integration_reconcile(report, validation_action_types):
 def print_reconcile_report(output):
     print(f"repo: {output['snapshot']['repo_root']}")
     print(f"manifest: {output['manifest_path']}")
+    print('\nworking tree:')
+    status_lines = output['snapshot'].get('working_tree_status') or []
+    if status_lines:
+        for line in status_lines:
+            print(f'  {line}')
+    else:
+        print('  clean')
     print('\nvalidation:')
     validation = output['validation']
     if validation['errors']:
