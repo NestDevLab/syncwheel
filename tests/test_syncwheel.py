@@ -93,6 +93,9 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def read_manifest(self):
         return json.loads((self.repo / '.syncwheel' / 'manifest.json').read_text())
 
+    def tracked_status(self):
+        return self.git('status', '--porcelain', '--untracked-files=no')
+
     def init_fixture_repo(self):
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.name', 'Syncwheel Fixture')
@@ -550,6 +553,30 @@ class SyncwheelFixtureTest(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertTrue(report['snapshot']['working_tree_dirty'])
         self.assertIn('?? dirty.txt', report['snapshot']['working_tree_status'])
+
+    def test_stack_absorb_moves_integration_changes_to_stack(self):
+        Path(self.repo / 'beta.txt').write_text('beta\nabsorbed\n')
+
+        result = self.run_cli('stack', 'absorb', 'feature-b', 'beta.txt', expected=0)
+
+        self.assertIn('feature-b: absorbed changes into pr/feature-b', result.stdout)
+        self.assertEqual(self.tracked_status(), '')
+        self.assertEqual(self.git('show', 'pr/feature-b:beta.txt'), 'beta\nabsorbed')
+        manifest = self.read_manifest()
+        feature_b = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
+        self.assertEqual(feature_b['commits'], self.git('rev-list', 'main..pr/feature-b').splitlines())
+
+    def test_stack_absorb_can_absorb_staged_hunks_only(self):
+        original = Path(self.repo / 'beta.txt').read_text()
+        Path(self.repo / 'beta.txt').write_text(original + 'staged\n')
+        self.git('add', 'beta.txt')
+        Path(self.repo / 'alpha.txt').write_text('alpha\nunstaged\n')
+
+        self.run_cli('stack', 'absorb', 'feature-b', '--staged', expected=0)
+
+        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), original)
+        self.assertEqual(Path(self.repo / 'alpha.txt').read_text(), 'alpha\nunstaged\n')
+        self.assertEqual(self.tracked_status(), 'M alpha.txt')
 
     def test_reconcile_apply_rebuilds_stack_updates_manifest_and_rebuilds_integration(self):
         beta = self.git('rev-parse', 'main')

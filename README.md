@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.12.1`
+Current version: `0.13.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -126,6 +126,9 @@ Practical meaning:
 - A **PR stack** is one logical change stream mapped to one `pr/*` branch with an explicit commit list.
 - `stack sync`, `stack set`, and `stack add` update commit ownership without
   hand-editing SHA lists.
+- `stack absorb` moves dirty or staged integration-branch changes into a stack
+  branch, updates the manifest, and removes the absorbed patch from the
+  integration checkout.
 - `stack rebuild` rebuilds one PR branch from the manifest.
 - `int rebuild` rebuilds integration from ordered stacks.
 - `stack push` and `int push` wrap `git push`, with arbitrary Git arguments
@@ -360,7 +363,23 @@ Use `stack sync` when the branch already represents the intended PR stack. Use
 `stack set` or `stack add` when you want to declare an explicit revision range
 or append a new commit.
 
-### 3. Reconcile managed branches
+### 3. Absorb integration-first work into stacks
+
+When the main checkout is on the integration branch, you can make and test
+changes there first, then assign those changes to the PR stack that owns them:
+
+```bash
+python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
+python3 scripts/syncwheel.py stack absorb feature-a --staged
+```
+
+By default, `stack absorb` amends the stack branch tip, refreshes that stack's
+manifest commits, and reverse-applies the absorbed patch from the integration
+checkout. Pass `--no-amend -m "message"` when the absorbed change should become
+a new stack commit. Use `--staged` after `git add -p` when one file contains
+changes for multiple PR stacks.
+
+### 4. Reconcile managed branches
 
 Use `reconcile` as the normal maintenance entrypoint:
 
@@ -399,7 +418,7 @@ override the publication remote, and `--in-place-integration` only when the
 current checkout is already on the clean integration branch and should be reset
 as part of the reconcile.
 
-### 4. Use lower-level commands when needed
+### 5. Use lower-level commands when needed
 
 `reconcile` is the preferred lifecycle command. The object/action commands are
 still useful for targeted repair and inspection:
@@ -407,6 +426,7 @@ still useful for targeted repair and inspection:
 ```bash
 python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
+python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
 python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
 python3 scripts/syncwheel.py stack push feature-a -- --force-with-lease
 python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
@@ -421,7 +441,7 @@ them. If the remote integration branch already matches the manifest projection
 and the local checkout is stale, `int align-remote` can align a clean local
 integration checkout to the remote with a backup branch first.
 
-### 5. Compare different integration compositions
+### 6. Compare different integration compositions
 
 When two devices or workstreams use different manifests and integration
 branches, compare the manifests instead of merging their integration branches:

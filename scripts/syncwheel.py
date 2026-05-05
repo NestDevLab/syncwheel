@@ -1473,6 +1473,80 @@ def command_stack_sync(args):
     return 0
 
 
+def command_stack_absorb(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    integration_branch = stack.get('integration_branch') or manifest['integration']['branch']
+    current_branch = get_current_branch(repo_root)
+    if current_branch != integration_branch and not args.force:
+        raise SyncwheelError(
+            f"stack absorb expects the integration branch {integration_branch!r}; "
+            f"current branch is {current_branch!r}. Pass --force to override."
+        )
+
+    pathspec = args.paths or []
+    separator = ['--', *pathspec] if pathspec else []
+    if not args.staged:
+        staged = git(repo_root, 'diff', '--cached', '--quiet', '--', *pathspec, check=False)
+        if staged.returncode == 1:
+            raise SyncwheelError('staged changes exist; pass --staged or unstage them before absorbing unstaged changes')
+
+    diff_args = ['diff', '--binary']
+    if args.staged:
+        diff_args.append('--cached')
+    diff_args.extend(separator)
+    patch = git(repo_root, *diff_args).stdout
+    if not patch.strip():
+        source = 'staged changes' if args.staged else 'working tree changes'
+        raise SyncwheelError(f'no {source} to absorb')
+
+    stack_worktree = resolve_stack_absorb_location(repo_root, stack, args)
+    ensure_clean_worktree(stack_worktree)
+    apply_patch = run(['git', '-C', str(stack_worktree), 'apply', '--index'], input_text=patch, check=False)
+    if apply_patch.returncode != 0:
+        raise SyncwheelError(apply_patch.stderr.strip() or apply_patch.stdout.strip() or 'failed to apply patch to stack worktree')
+
+    if args.amend:
+        git(stack_worktree, 'commit', '--amend', '--no-edit')
+    else:
+        message = args.message or f"chore: absorb integration changes into {args.stack}"
+        git(stack_worktree, 'commit', '-m', message)
+
+    reverse_args = ['apply', '--reverse']
+    if args.staged:
+        git(repo_root, *reverse_args, '--cached', input_text=patch)
+    git(repo_root, *reverse_args, input_text=patch)
+
+    stack['commits'] = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+    save_manifest(manifest_path, manifest)
+    print(f"{args.stack}: absorbed changes into {stack['branch']} and synced {len(stack['commits'])} commits")
+    return 0
+
+
+def resolve_stack_absorb_location(repo_root, stack, args):
+    branch = stack['branch']
+    existing = find_worktree_for_branch(repo_root, branch)
+    if args.worktree:
+        path = Path(args.worktree).expanduser().resolve()
+        if existing and existing != path:
+            raise SyncwheelError(
+                f"branch {branch!r} already has a worktree at {existing}; "
+                'reuse that worktree or pass its path with --worktree'
+            )
+        if not existing:
+            run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+        return path
+    if existing:
+        return existing
+    if args.worktree_root:
+        path = reconcile_worktree_path(repo_root, branch, args.worktree_root)
+    else:
+        path = default_worktree_path(repo_root, branch)
+    run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+    return path
+
+
 def command_stack_set(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -2432,6 +2506,17 @@ def build_parser():
     stack_sync_p = stack_sub.add_parser('sync', parents=[common])
     stack_sync_p.add_argument('stack')
     stack_sync_p.set_defaults(func=command_stack_sync)
+
+    stack_absorb_p = stack_sub.add_parser('absorb', parents=[common])
+    stack_absorb_p.add_argument('stack')
+    stack_absorb_p.add_argument('paths', nargs='*', help='optional pathspecs to absorb from the integration worktree')
+    stack_absorb_p.add_argument('--staged', action='store_true', help='absorb staged changes instead of unstaged working tree changes')
+    stack_absorb_p.add_argument('--no-amend', dest='amend', action='store_false', help='create a new stack commit instead of amending the stack tip')
+    stack_absorb_p.add_argument('-m', '--message', help='commit message used with --no-amend')
+    stack_absorb_p.add_argument('--worktree', help='stack branch worktree to reuse or create')
+    stack_absorb_p.add_argument('--worktree-root', help='directory where stack absorb creates a worktree when needed')
+    stack_absorb_p.add_argument('--force', action='store_true', help='allow absorbing when the current checkout is not the integration branch')
+    stack_absorb_p.set_defaults(func=command_stack_absorb, amend=True)
 
     stack_set_p = stack_sub.add_parser('set', parents=[common])
     stack_set_p.add_argument('stack')

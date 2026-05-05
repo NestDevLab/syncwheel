@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.13.0 - 2026-05-05
+
+- Add `stack absorb` for integration-first workflows where changes are made on
+  the integration branch and then moved into the owning stack branch.
+- Support pathspecs, `--staged`, default amend behavior, `--no-amend` with a
+  custom commit message, and worktree creation/reuse for the target stack.
+- After a successful absorb, update the manifest commit list and remove the
+  absorbed patch from the integration checkout.
+
 ## 0.12.1 - 2026-05-05
 
 - Show `git status --short --branch` in `reconcile` output before validation
