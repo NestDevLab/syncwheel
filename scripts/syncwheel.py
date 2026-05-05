@@ -622,6 +622,14 @@ def commit_parent_count(repo_root, commit):
     return max(0, len(parts) - 1)
 
 
+def commit_first_parent(repo_root, commit):
+    result = git(repo_root, 'rev-list', '--parents', '-n', '1', commit)
+    parts = result.stdout.strip().split()
+    if len(parts) < 2:
+        return None
+    return parts[1]
+
+
 def commit_patch_id(repo_root, commit):
     if commit_parent_count(repo_root, commit) != 1:
         return None
@@ -1625,14 +1633,57 @@ def command_stack_set(args):
     return 0
 
 
+def validate_stack_update(repo_root, manifest, stack, previous_commits):
+    report = stack_reconcile_report(repo_root, manifest, stack)
+    if report.get('projection_error'):
+        stack['commits'] = previous_commits
+        detail = report['projection_error']
+        raise SyncwheelError(
+            f"stack {stack['id']} projection failed after adding commits; "
+            f"the stack branch cannot be rebuilt cleanly from the manifest:\n{detail}"
+        )
+
+
+def validate_integration_first_base(repo_root, manifest, added_commits):
+    if not added_commits:
+        return
+    integration = manifest['integration']
+    integration_branch = integration['branch']
+    if get_current_branch(repo_root) != integration_branch:
+        return
+    first_added = added_commits[0]
+    if not branch_contains(repo_root, integration_branch, first_added):
+        return
+    parent = commit_first_parent(repo_root, first_added)
+    if not parent:
+        return
+    expected_tree = materialize_integration_projection(repo_root, manifest)
+    parent_tree = ref_tree(repo_root, parent)
+    if parent_tree != expected_tree:
+        raise SyncwheelError(
+            f"cannot add {first_added} from integration branch {integration_branch!r}: "
+            "the commit was not created on top of the current manifest projection. "
+            "Run `syncwheel reconcile` and apply the required integration rebuild before "
+            "creating or adding more integration-first commits."
+        )
+
+
 def command_stack_add(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
-    commits = list(stack['commits'])
+    previous_commits = list(stack['commits'])
+    commits = list(previous_commits)
+    previous_full_shas = {commit_full_sha(repo_root, commit) for commit in previous_commits if commit_exists(repo_root, commit)}
+    added_commits = []
     for spec in args.specs:
-        commits.extend(commit_list_for_spec(repo_root, spec))
+        for commit in commit_list_for_spec(repo_root, spec):
+            commits.append(commit)
+            if commit_full_sha(repo_root, commit) not in previous_full_shas:
+                added_commits.append(commit)
+    validate_integration_first_base(repo_root, manifest, added_commits)
     stack['commits'] = list(dict.fromkeys(commits))
+    validate_stack_update(repo_root, manifest, stack, previous_commits)
     save_manifest(manifest_path, manifest)
     print(f"{args.stack}: now has {len(stack['commits'])} commits")
     return 0

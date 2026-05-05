@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.2 - 2026-05-05
+
+- Make `stack add` validate integration-first commits immediately.
+- Reject commits made on top of a stale integration projection before mutating
+  the manifest, and validate the updated stack projection before saving.
+
 ## 0.13.1 - 2026-05-05
 
 - Stop writing the fallback `Syncwheel <syncwheel@example.com>` identity into

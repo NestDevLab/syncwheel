@@ -311,6 +311,60 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(feature_c['meta']['purpose'], 'Exercise stack creation')
         self.assertIn('feature-c', manifest['integration']['stacks'])
 
+    def test_stack_add_accepts_integration_first_commit_on_current_projection(self):
+        base = self.git('rev-parse', 'HEAD')
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        data = self.read_manifest()
+        data['defaults']['base_ref'] = base
+        data['integration']['base'] = base
+        for stack in data['stacks']:
+            stack['base'] = base
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+
+        result = self.run_cli('stack', 'add', 'feature-b', 'HEAD', expected=0)
+
+        self.assertIn('feature-b: now has 3 commits', result.stdout)
+        manifest = self.read_manifest()
+        feature_b = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
+        self.assertEqual(feature_b['commits'][-1], gamma)
+
+    def test_stack_add_rejects_integration_first_commit_on_stale_projection(self):
+        base = self.git('rev-parse', 'HEAD')
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        data = self.read_manifest()
+        data['defaults']['base_ref'] = base
+        data['integration']['base'] = base
+        for stack in data['stacks']:
+            stack['base'] = base
+
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add stack gamma')
+        stack_gamma = self.git('rev-parse', 'HEAD')
+        feature_b = next(stack for stack in data['stacks'] if stack['id'] == 'feature-b')
+        feature_b['commits'].append(stack_gamma)
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        self.git('switch', '-q', 'main')
+        Path(self.repo / 'delta.txt').write_text('delta\n')
+        self.git('add', 'delta.txt')
+        self.git('commit', '-q', '-m', 'feat: add delta from stale integration')
+        delta = self.git('rev-parse', 'HEAD')
+
+        result = self.run_cli('stack', 'add', 'feature-b', 'HEAD', expected=2)
+
+        self.assertIn('not created on top of the current manifest projection', result.stderr)
+        manifest = self.read_manifest()
+        feature_b = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
+        self.assertEqual(feature_b['commits'][-1], stack_gamma)
+        self.assertNotIn(delta, feature_b['commits'])
+
     def test_stack_rebuild_worktree_commands_are_emitted(self):
         worktree = self.tmp / 'wt-feature-a'
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--worktree', str(worktree), '--dry-run', expected=0)
