@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.0 - 2026-05-05
+
+- Add top-level `sync` and `publish` lifecycle commands.
+- Make safe local-to-remote alignment the default for `reconcile --apply`,
+  `sync`, and `publish` when local and remote both match the manifest
+  projection, with `--no-align-local-to-remote` as the escape hatch.
+- Improve reconcile plan wording for remote projection alignment, local
+  projection publishing, unassigned integration commits, and manual review
+  cases.
+
 ## 0.13.2 - 2026-05-05
 
 - Make `stack add` validate integration-first commits immediately.

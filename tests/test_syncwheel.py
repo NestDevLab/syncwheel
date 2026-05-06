@@ -513,6 +513,62 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertIn('git push --force-with-lease fork pr/publish', result.stdout)
 
+    def test_publish_uses_force_with_lease_by_default(self):
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'fork', str(origin))
+        self.git('branch', 'pr/publish', 'main')
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'publish',
+            'branch': 'pr/publish',
+            'base': 'main',
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'main',
+            'commits': [],
+        })
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli(
+            'publish',
+            '--no-fetch',
+            '--stack',
+            'publish',
+            '--skip-integration',
+            expected=0,
+        )
+
+        self.assertIn('git push --force-with-lease fork pr/publish', result.stdout)
+
+    def test_sync_never_pushes(self):
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'fork', str(origin))
+        self.git('branch', 'pr/publish', 'main')
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'publish',
+            'branch': 'pr/publish',
+            'base': 'main',
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'main',
+            'commits': [],
+        })
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli(
+            'sync',
+            '--no-fetch',
+            '--stack',
+            'publish',
+            '--skip-integration',
+            expected=0,
+        )
+
+        self.assertNotIn('git push', result.stdout)
+
     def test_reconcile_push_can_disable_default_force_with_lease(self):
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -681,6 +737,54 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(updated_commit, self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+
+    def test_sync_rebuilds_local_projection_without_push(self):
+        beta = self.git('rev-parse', 'main')
+        base = self.git('rev-parse', 'main~1')
+        self.git('branch', 'integration/reconcile', base)
+        self.git('switch', '-q', 'integration/reconcile')
+        self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        self.git('switch', '-q', 'main')
+
+        manifest_path = self.tmp / 'sync-manifest.json'
+        data = self.read_manifest()
+        data['integration'] = {
+            'branch': 'integration/reconcile',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-b',
+                'branch': 'pr/feature-b',
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/reconcile',
+                'commits': [beta],
+            }
+        ]
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli(
+            'sync',
+            '--manifest',
+            str(manifest_path),
+            '--no-fetch',
+            '--worktree-root',
+            str(self.tmp / 'worktrees'),
+            expected=0,
+        )
+        updated = json.loads(manifest_path.read_text())
+
+        self.assertNotIn('git push', result.stdout)
+        self.assertEqual(updated['stacks'][0]['commits'][0], self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
 
     def test_reconcile_aligns_local_to_remote_when_remote_matches_projection(self):
@@ -876,6 +980,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
             '--manifest',
             str(manifest_path),
             '--no-fetch',
+            '--no-align-local-to-remote',
             '--json',
             expected=0,
         )
@@ -893,7 +998,6 @@ class SyncwheelFixtureTest(unittest.TestCase):
             '--manifest',
             str(manifest_path),
             '--no-fetch',
-            '--align-local-to-remote',
             '--json',
             expected=0,
         )
@@ -910,7 +1014,6 @@ class SyncwheelFixtureTest(unittest.TestCase):
             '--manifest',
             str(manifest_path),
             '--no-fetch',
-            '--align-local-to-remote',
             '--apply',
             expected=0,
         )

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.13.2`
+Current version: `0.14.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -45,24 +45,24 @@ turning branch history into tribal knowledge.
 
 ```bash
 python3 scripts/syncwheel.py reconcile
-python3 scripts/syncwheel.py reconcile --apply --worktree-root ../syncwheel-worktrees
-python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
 ```
 
 Default behavior is conservative:
 
-- `reconcile` is dry-run by default
-- `--apply` is required before branches are rebuilt
-- `--push` is required before remote branches move
-- `reconcile --push` uses `--force-with-lease` by default, because managed
+- `reconcile` is the dry-run diagnostic entrypoint
+- `sync` applies the safe local lifecycle without pushing
+- `publish` applies the lifecycle and pushes managed branches
+- lower-level `reconcile --apply` and `reconcile --apply --push` remain
+  available for explicit scripting
+- `publish` and `reconcile --push` use `--force-with-lease` by default, because managed
   branches are often rewritten by deterministic rebuilds
 - if a remote managed branch already matches the manifest projection,
-  `reconcile --apply` aligns the local branch to that remote instead of
-  rebuilding new replacement commits
-- pass `--align-local-to-remote` when local and remote both already match the
-  manifest projection but Git history still shows ahead/behind; this normalizes
-  the local branch to the published remote history without rebuilding or
-  touching the manifest
+  `sync`, `publish`, and `reconcile --apply` align the local branch to that
+  remote instead of rebuilding new replacement commits
+- pass `--no-align-local-to-remote` when you intentionally want to preserve a
+  different local history for manual inspection
 
 Use `--no-force-with-lease` only when a normal push is intentionally required.
 
@@ -379,39 +379,53 @@ checkout. Pass `--no-amend -m "message"` when the absorbed change should become
 a new stack commit. Use `--staged` after `git add -p` when one file contains
 changes for multiple PR stacks.
 
+Example: two files belong to `feature-a`, one file belongs to `feature-b`, and
+one mixed file has hunks for both stacks:
+
+```bash
+python3 scripts/syncwheel.py stack absorb feature-a a1.ts a2.ts
+python3 scripts/syncwheel.py stack absorb feature-b b1.ts
+git add -p shared.ts
+python3 scripts/syncwheel.py stack absorb feature-a --staged
+git add -p shared.ts
+python3 scripts/syncwheel.py stack absorb feature-b --staged
+python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
+```
+
 ### 4. Reconcile managed branches
 
 Use `reconcile` as the normal maintenance entrypoint:
 
 ```bash
 python3 scripts/syncwheel.py reconcile
-python3 scripts/syncwheel.py reconcile --apply --worktree-root ../syncwheel-worktrees
-python3 scripts/syncwheel.py reconcile --apply --push --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
 ```
 
-`reconcile` fetches by default, classifies stack and integration drift, rebuilds
-only branches that differ from the manifest projection unless `--rebuild all`
-is passed, refreshes stack commit SHAs after rebuilds, rebuilds integration from
-the current manifest, and uses Syncwheel push wrappers when `--push` is present.
-The report also prints the current working tree status, including uncommitted
-files, before validation and drift details so dirty checkouts are visible
-without running a separate `git status`.
-When the remote branch already matches the manifest projection, `reconcile`
-aligns the local branch to the remote and does not update the manifest or push
-new replacement commits.
+`reconcile` fetches by default, classifies stack and integration drift, and
+prints a dry-run plan. `sync` runs the same lifecycle locally: it rebuilds only
+branches that differ from the manifest projection unless `--rebuild all` is
+passed, refreshes stack commit SHAs after rebuilds, and rebuilds integration
+from the current manifest. `publish` does the same local work and then uses
+Syncwheel push wrappers for managed branches. The report also prints the
+current working tree status, including uncommitted files, before validation and
+drift details so dirty checkouts are visible without running a separate
+`git status`.
 
-When both local and remote match the manifest projection but have different Git
-histories, `reconcile` reports no action by default. Pass
-`--align-local-to-remote` to normalize the local branch tip to the remote ref so
-plain Git status stops showing ahead/behind:
+When the remote branch already matches the manifest projection, `sync`,
+`publish`, and `reconcile --apply` align the local branch to the remote and do
+not update the manifest or push new replacement commits. Pass
+`--no-align-local-to-remote` when you intentionally want to preserve a different
+local history for manual inspection:
 
 ```bash
-python3 scripts/syncwheel.py reconcile --apply --align-local-to-remote
+python3 scripts/syncwheel.py sync --no-align-local-to-remote
 ```
 
-`reconcile --push` uses `--force-with-lease` by default because rebuilt managed
-branches commonly replace older remote history in multi-device workflows. Pass
-`--no-force-with-lease` only when a normal push is intentionally required.
+`publish` and `reconcile --push` use `--force-with-lease` by default because
+rebuilt managed branches commonly replace older remote history in multi-device
+workflows. Pass `--no-force-with-lease` only when a normal push is
+intentionally required.
 
 Use `--json` for automation, `--stack <id>` to limit stack work, `--remote` to
 override the publication remote, and `--in-place-integration` only when the
@@ -504,6 +518,8 @@ python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
 python3 scripts/syncwheel.py plan --help
 python3 scripts/syncwheel.py reconcile --help
+python3 scripts/syncwheel.py sync --help
+python3 scripts/syncwheel.py publish --help
 python3 scripts/syncwheel.py stack --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help
@@ -536,8 +552,8 @@ Recommended sequence:
 1. `reconcile`
 2. update the manifest with `stack sync`, `stack set`, or `stack add` if the
    dry-run report shows real ownership changes
-3. `reconcile --apply --worktree-root <path>`
-4. `reconcile --apply --push --worktree-root <path>`
+3. `sync --worktree-root <path>`
+4. `publish --worktree-root <path>`
    when the rebuilt managed branches should become the shared remote state
 5. rerun `reconcile` or `check` and report remaining drift honestly
 

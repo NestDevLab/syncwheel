@@ -2113,18 +2113,30 @@ def print_reconcile_report(output):
     print('\nreconcile plan:')
     if output['actions']:
         for action in output['actions']:
-            line = action['type']
-            if 'stack' in action:
-                line += f" stack={action['stack']}"
-            if 'branch' in action:
-                line += f" branch={action['branch']}"
-            if 'reason' in action:
-                line += f" reason={action['reason']}"
-            print(f'  - {line}')
+            print(f'  - {format_reconcile_action(action)}')
     else:
         print('  - no actions needed')
     if not output['applied']:
         print('\nmode: dry-run; pass --apply to execute branch rebuilds')
+
+
+def format_reconcile_action(action):
+    line = action['type']
+    if 'stack' in action:
+        line += f" stack={action['stack']}"
+    if 'branch' in action:
+        line += f" branch={action['branch']}"
+    if 'reason' in action:
+        line += f" reason={action['reason']}"
+    if action['type'] in ('align_stack_to_remote', 'align_integration_to_remote'):
+        line += ' detail=remote already has the manifest projection; aligning local history'
+    elif action['type'] in ('push_stack', 'push_integration'):
+        line += ' detail=local projection needs publishing'
+    elif action['type'] == 'manual_review':
+        line += ' detail=manual review required before applying'
+    elif action['type'] == 'rebuild_integration' and action.get('reason') == 'integration_contains_unmapped_commits':
+        line += ' detail=integration contains unassigned commits'
+    return line
 
 
 def command_reconcile(args):
@@ -2231,6 +2243,18 @@ def command_reconcile(args):
             run(command, cwd=repo_root)
             print(quoted(command))
     return 0
+
+
+def command_sync(args):
+    args.apply = True
+    args.push = False
+    return command_reconcile(args)
+
+
+def command_publish(args):
+    args.apply = True
+    args.push = True
+    return command_reconcile(args)
 
 
 def command_int_sync_status(args):
@@ -2445,6 +2469,64 @@ def add_git_args(parser):
     return parser
 
 
+def add_reconcile_args(parser, include_apply_push=True, include_push_options=True):
+    parser.add_argument('--no-fetch', dest='fetch', action='store_false')
+    parser.add_argument('--json', action='store_true')
+    if include_apply_push:
+        parser.add_argument('--apply', action='store_true', help='execute the reported rebuild/push plan')
+        parser.add_argument('--push', action='store_true', help='push rebuilt or drifted managed branches')
+    if include_push_options:
+        parser.add_argument(
+            '--force-with-lease',
+            action='store_true',
+            default=True,
+            help='pass --force-with-lease to reconcile-managed git pushes (default)',
+        )
+        parser.add_argument(
+            '--no-force-with-lease',
+            dest='force_with_lease',
+            action='store_false',
+            help='use normal git push for reconcile-managed pushes',
+        )
+    parser.add_argument('--remote', help='remote override for managed branch comparisons and publication')
+    parser.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
+    parser.add_argument('--skip-integration', action='store_true')
+    parser.add_argument(
+        '--align-local-to-remote',
+        dest='align_local_to_remote',
+        action='store_true',
+        default=True,
+        help='align local branch tips to remote refs when both match the manifest projection (default)',
+    )
+    parser.add_argument(
+        '--no-align-local-to-remote',
+        dest='align_local_to_remote',
+        action='store_false',
+        help='do not normalize local history to remote even when both match the manifest projection',
+    )
+    parser.add_argument(
+        '--rebuild',
+        choices=['needed', 'all', 'none'],
+        default='needed',
+        help='which managed branches to rebuild before optional push',
+    )
+    parser.add_argument(
+        '--worktree-root',
+        help='directory where reconcile creates branch worktrees when no worktree already exists',
+    )
+    parser.add_argument(
+        '--in-place-integration',
+        action='store_true',
+        help='allow integration rebuild in the current clean integration checkout',
+    )
+    parser.add_argument(
+        '--no-update-manifest',
+        dest='update_manifest',
+        action='store_false',
+        help='do not refresh stack commit SHAs after stack rebuilds',
+    )
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description='Deterministic syncwheel helper for fork/upstream/integration repos.')
     parser.add_argument('--version', action='version', version=f'syncwheel {VERSION}')
@@ -2541,52 +2623,31 @@ def build_parser():
         help='reconcile manifest, stack branches, integration, and remote tips',
         parents=[common],
     )
-    reconcile_p.add_argument('--no-fetch', dest='fetch', action='store_false')
-    reconcile_p.add_argument('--json', action='store_true')
-    reconcile_p.add_argument('--apply', action='store_true', help='execute the reported rebuild/push plan')
-    reconcile_p.add_argument('--push', action='store_true', help='push rebuilt or drifted managed branches')
-    reconcile_p.add_argument(
-        '--force-with-lease',
-        action='store_true',
-        default=True,
-        help='pass --force-with-lease to reconcile-managed git pushes (default)',
-    )
-    reconcile_p.add_argument(
-        '--no-force-with-lease',
-        dest='force_with_lease',
-        action='store_false',
-        help='use normal git push for reconcile-managed pushes',
-    )
-    reconcile_p.add_argument('--remote', help='publication remote override for stack and integration pushes')
-    reconcile_p.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
-    reconcile_p.add_argument('--skip-integration', action='store_true')
-    reconcile_p.add_argument(
-        '--align-local-to-remote',
-        action='store_true',
-        help='when local and remote both match the manifest projection, move the local branch tip to the remote ref',
-    )
-    reconcile_p.add_argument(
-        '--rebuild',
-        choices=['needed', 'all', 'none'],
-        default='needed',
-        help='which managed branches to rebuild before optional push',
-    )
-    reconcile_p.add_argument(
-        '--worktree-root',
-        help='directory where reconcile creates branch worktrees when no worktree already exists',
-    )
-    reconcile_p.add_argument(
-        '--in-place-integration',
-        action='store_true',
-        help='allow integration rebuild in the current clean integration checkout',
-    )
-    reconcile_p.add_argument(
-        '--no-update-manifest',
-        dest='update_manifest',
-        action='store_false',
-        help='do not refresh stack commit SHAs after stack rebuilds',
-    )
+    add_reconcile_args(reconcile_p, include_apply_push=True)
     reconcile_p.set_defaults(func=command_reconcile, fetch=True, update_manifest=True)
+
+    sync_p = sub.add_parser(
+        'sync',
+        help='apply the safe local reconcile lifecycle without pushing remotes',
+        parents=[common],
+    )
+    add_reconcile_args(sync_p, include_apply_push=False, include_push_options=False)
+    sync_p.set_defaults(
+        func=command_sync,
+        fetch=True,
+        update_manifest=True,
+        apply=True,
+        push=False,
+        force_with_lease=True,
+    )
+
+    publish_p = sub.add_parser(
+        'publish',
+        help='apply the reconcile lifecycle and push managed branches',
+        parents=[common],
+    )
+    add_reconcile_args(publish_p, include_apply_push=False)
+    publish_p.set_defaults(func=command_publish, fetch=True, update_manifest=True, apply=True, push=True)
 
     manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect and compare syncwheel manifests')
     manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)
