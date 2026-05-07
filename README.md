@@ -412,6 +412,14 @@ current working tree status, including uncommitted files, before validation and
 drift details so dirty checkouts are visible without running a separate
 `git status`.
 
+When integration contains non-merge commits that are not declared in any stack,
+`check` and `reconcile` print commit-level guidance: short SHA, subject, touched
+files, local and remote branches containing the commit, likely stack owners, and
+suggested next commands such as `syncwheel stack add <stack> <sha>` followed by
+`syncwheel reconcile`. This keeps the common integration-first repair path
+inside Syncwheel instead of requiring separate `git log`, `git show`, and
+`git branch --contains` commands.
+
 When the remote branch already matches the manifest projection, `sync`,
 `publish`, and `reconcile --apply` align the local branch to the remote and do
 not update the manifest or push new replacement commits. Pass

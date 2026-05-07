@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.15.0 - 2026-05-07
+
+- Add commit-level guidance for unmapped integration commits in `check` and
+  `reconcile` output.
+- Include changed files, containing branches, likely stack owners, related
+  declared commits with matching subjects, and suggested next commands.
+- Add JSON diagnostics under `diagnostics.unmapped_integration_commits` for
+  automation and tests.
+
 ## 0.14.0 - 2026-05-05
 
 - Add top-level `sync` and `publish` lifecycle commands.

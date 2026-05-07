@@ -641,6 +641,37 @@ def commit_patch_id(repo_root, commit):
     return line.split()[0]
 
 
+def commit_short_sha(repo_root, commit):
+    return git(repo_root, 'rev-parse', '--short', f'{commit}^{{commit}}').stdout.strip()
+
+
+def commit_subject(repo_root, commit):
+    return git(repo_root, 'show', '-s', '--format=%s', commit).stdout.strip()
+
+
+def commit_changed_files(repo_root, commit, limit=None):
+    result = git(repo_root, 'show', '--format=', '--name-only', '--no-renames', commit, check=False)
+    if result.returncode != 0:
+        return []
+    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    return files[:limit] if limit else files
+
+
+def branches_containing_commit(repo_root, commit, remotes=False):
+    args = ['branch', '--format=%(refname:short)', '--contains', commit]
+    if remotes:
+        args.insert(1, '--remotes')
+    result = git(repo_root, *args, check=False)
+    if result.returncode != 0:
+        return []
+    branches = []
+    for line in result.stdout.splitlines():
+        branch = line.strip()
+        if branch and branch != 'HEAD':
+            branches.append(branch)
+    return branches
+
+
 def ref_tree(repo_root, ref):
     return git(repo_root, 'rev-parse', f'{ref}^{{tree}}').stdout.strip()
 
@@ -1105,6 +1136,143 @@ def build_plan(repo_root, manifest, validation):
     return actions
 
 
+def stack_hint_reasons(repo_root, manifest, stack, commit, subject, local_branches, remote_branches):
+    reasons = []
+    if stack['branch'] in local_branches:
+        reasons.append('local_branch_contains_commit')
+    remote_ref = stack_remote_ref(manifest, stack)
+    if remote_ref in remote_branches:
+        reasons.append('remote_branch_contains_commit')
+    subject_lower = subject.lower()
+    if stack['id'].lower() in subject_lower or stack['branch'].lower() in subject_lower:
+        reasons.append('stack_name_matches_subject')
+    jira = str(stack.get('meta', {}).get('jira') or '').strip()
+    if jira and jira.lower() in subject_lower:
+        reasons.append('jira_key_matches_subject')
+    return reasons
+
+
+def related_declared_stack_commits(repo_root, manifest, subject):
+    related = []
+    subject_lower = subject.lower()
+    for stack in manifest['stacks']:
+        for declared in stack['commits']:
+            if not commit_exists(repo_root, declared):
+                continue
+            declared_subject = commit_subject(repo_root, declared)
+            if declared_subject.lower() == subject_lower:
+                related.append({
+                    'stack': stack['id'],
+                    'branch': stack['branch'],
+                    'commit': commit_full_sha(repo_root, declared),
+                    'short': commit_short_sha(repo_root, declared),
+                    'subject': declared_subject,
+                    'reason': 'same_subject_declared_in_manifest',
+                })
+    return related
+
+
+def integration_commit_diagnostics(repo_root, manifest, validation):
+    unmapped = validation['details']['integration'].get('unmapped_commits') or []
+    diagnostics = []
+    for commit in unmapped:
+        subject = commit_subject(repo_root, commit)
+        local_branches = branches_containing_commit(repo_root, commit)
+        remote_branches = branches_containing_commit(repo_root, commit, remotes=True)
+        related_declared = related_declared_stack_commits(repo_root, manifest, subject)
+        likely_stacks = []
+        for stack in manifest['stacks']:
+            reasons = stack_hint_reasons(
+                repo_root,
+                manifest,
+                stack,
+                commit,
+                subject,
+                local_branches,
+                remote_branches,
+            )
+            if reasons:
+                likely_stacks.append({
+                    'id': stack['id'],
+                    'branch': stack['branch'],
+                    'reasons': reasons,
+                })
+        suggested_commands = []
+        notes = []
+        if related_declared:
+            notes.append(
+                'A declared stack commit has the same subject; inspect before adding this local-only SHA.'
+            )
+            suggested_commands.append('syncwheel reconcile')
+        elif len(likely_stacks) == 1:
+            stack_id = likely_stacks[0]['id']
+            suggested_commands.append(f'syncwheel stack add {stack_id} {commit_short_sha(repo_root, commit)}')
+            suggested_commands.append('syncwheel reconcile')
+        elif likely_stacks:
+            for item in likely_stacks:
+                suggested_commands.append(
+                    f"syncwheel stack add {item['id']} {commit_short_sha(repo_root, commit)}"
+                )
+            suggested_commands.append('syncwheel reconcile')
+        else:
+            suggested_commands.append('syncwheel stack add <stack-id> ' + commit_short_sha(repo_root, commit))
+            suggested_commands.append('syncwheel reconcile')
+        diagnostics.append({
+            'commit': commit,
+            'short': commit_short_sha(repo_root, commit),
+            'subject': subject,
+            'files': commit_changed_files(repo_root, commit, limit=8),
+            'local_branches': local_branches,
+            'remote_branches': remote_branches,
+            'likely_stacks': likely_stacks,
+            'related_declared_commits': related_declared,
+            'notes': notes,
+            'suggested_commands': suggested_commands,
+        })
+    return diagnostics
+
+
+def print_integration_commit_diagnostics(diagnostics):
+    if not diagnostics:
+        return
+    print('\nunmapped integration commits:')
+    for item in diagnostics:
+        print(f"  - {item['short']} {item['subject']}")
+        if item['files']:
+            print('    files:')
+            for path in item['files']:
+                print(f'      - {path}')
+        if item['local_branches']:
+            print('    local branches containing commit:')
+            for branch in item['local_branches']:
+                print(f'      - {branch}')
+        if item['remote_branches']:
+            print('    remote branches containing commit:')
+            for branch in item['remote_branches']:
+                print(f'      - {branch}')
+        if item['likely_stacks']:
+            print('    likely stack owners:')
+            for stack in item['likely_stacks']:
+                reasons = ', '.join(stack['reasons'])
+                print(f"      - {stack['id']} ({reasons})")
+        else:
+            print('    likely stack owners: none detected')
+        if item.get('related_declared_commits'):
+            print('    related declared commits:')
+            for related in item['related_declared_commits']:
+                print(
+                    f"      - {related['short']} stack={related['stack']} "
+                    f"reason={related['reason']}"
+                )
+        if item.get('notes'):
+            print('    notes:')
+            for note in item['notes']:
+                print(f'      - {note}')
+        print('    suggested commands:')
+        for command in item['suggested_commands']:
+            print(f'      - {command}')
+
+
 def quoted(parts):
     return ' '.join(shlex.quote(part) for part in parts)
 
@@ -1452,11 +1620,15 @@ def command_check(args):
     snapshot = collect_repo_snapshot(repo_root, manifest)
     validation = validate_manifest(repo_root, manifest)
     plan = build_plan(repo_root, manifest, validation)
+    diagnostics = integration_commit_diagnostics(repo_root, manifest, validation)
     output = {
         'snapshot': snapshot,
         'manifest_path': str(manifest_path),
         'validation': validation,
         'plan': plan,
+        'diagnostics': {
+            'unmapped_integration_commits': diagnostics,
+        },
     }
     if args.json:
         print(json.dumps(output, indent=2))
@@ -1475,6 +1647,7 @@ def command_check(args):
             print(f'  - WARN: {line}')
     if not validation['errors'] and not validation['warnings']:
         print('\nvalidation: OK')
+    print_integration_commit_diagnostics(diagnostics)
     print('\nplan:')
     if not plan:
         print('  - no actions needed')
@@ -2110,6 +2283,9 @@ def print_reconcile_report(output):
         parts.append(f"local_matches_projection={integration['local_matches_projection']}")
         parts.append(f"remote_matches_projection={integration['remote_matches_projection']}")
     print('  - ' + ', '.join(parts))
+    print_integration_commit_diagnostics(
+        output.get('diagnostics', {}).get('unmapped_integration_commits') or []
+    )
     print('\nreconcile plan:')
     if output['actions']:
         for action in output['actions']:
@@ -2163,6 +2339,7 @@ def command_reconcile(args):
     }
     integration_report = integration_sync_report(repo_root, manifest, args.remote, stack_ref_overrides)
     actions = reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args)
+    diagnostics = integration_commit_diagnostics(repo_root, manifest, validation)
     output = {
         'snapshot': collect_repo_snapshot(repo_root, manifest),
         'manifest_path': str(manifest_path),
@@ -2170,6 +2347,9 @@ def command_reconcile(args):
         'stacks': list(stack_reports.values()),
         'integration': integration_report,
         'actions': actions,
+        'diagnostics': {
+            'unmapped_integration_commits': diagnostics,
+        },
         'applied': args.apply,
         'push': args.push,
     }

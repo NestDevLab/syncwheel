@@ -1278,6 +1278,70 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(plan[-1]['type'], 'classify_integration_commits')
         self.assertEqual(len(plan[-1]['commits']), 1)
 
+    def test_check_reports_unmapped_integration_commit_guidance(self):
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'integration/test', 'HEAD')
+        self.git('switch', '-q', 'integration/test')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('check', '--no-fetch', expected=0)
+
+        self.assertIn('unmapped integration commits:', result.stdout)
+        self.assertIn('feat: add gamma', result.stdout)
+        self.assertIn('gamma.txt', result.stdout)
+        self.assertIn('pr/feature-b', result.stdout)
+        self.assertIn('likely stack owners:', result.stdout)
+        self.assertIn('feature-b', result.stdout)
+        self.assertIn('syncwheel stack add feature-b', result.stdout)
+
+        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        diagnostics = report['diagnostics']['unmapped_integration_commits']
+        self.assertEqual(len(diagnostics), 1)
+        self.assertEqual(diagnostics[0]['commit'], gamma)
+        self.assertEqual(diagnostics[0]['likely_stacks'][0]['id'], 'feature-b')
+
+    def test_check_warns_before_adding_same_subject_unmapped_commit(self):
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma remote\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        declared = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma local\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['stacks'][1]['commits'].append(declared)
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('check', '--no-fetch', expected=0)
+
+        self.assertIn('related declared commits:', result.stdout)
+        self.assertIn('same_subject_declared_in_manifest', result.stdout)
+        self.assertIn('inspect before adding this local-only SHA', result.stdout)
+        self.assertNotIn('syncwheel stack add feature-b', result.stdout)
+
+        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        diagnostics = report['diagnostics']['unmapped_integration_commits']
+        self.assertEqual(diagnostics[0]['related_declared_commits'][0]['commit'], declared)
+        self.assertEqual(diagnostics[0]['suggested_commands'], ['syncwheel reconcile'])
+
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         data = json.loads(manifest.read_text())
