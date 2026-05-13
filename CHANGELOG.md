@@ -1,11 +1,28 @@
 # Changelog
 
+## 0.17.0 - 2026-05-13
+
+- Add a segmented append-only ledger under `.syncwheel/ledger/` with a replayed
+  checkpoint for cross-machine recovery state.
+- Record manifest saves, stack rebuilds/pushes, and integration rebuilds/
+  alignments/pushes into the ledger.
+- Add `ledger show` to inspect the current replayed ledger state.
+- Teach `resume` to restore previously known historical stacks from the ledger
+  when ownership is deterministic and the historical branch still exists.
+
+## 0.16.1 - 2026-05-13
+
+- Remove Jira-specific stack auto-creation from `resume` so the recovery flow
+  stays tracker-agnostic.
+- Keep `resume` conservative: it now auto-registers only commits with exactly
+  one already-detected owner and leaves all other cases in manual review.
+
 ## 0.16.0 - 2026-05-13
 
 - Add `reconcile --mode resume` and the top-level `resume` command for
   cross-device recovery flows.
 - Let `resume` auto-register unmapped integration commits on a deterministic
-  owning stack, or auto-create a new stack from a Jira-style subject key.
+  owning stack.
 - Allow integration rebuild/alignment to proceed from the primary checkout when
   that checkout is dirty only because of untracked `.syncwheel/` metadata.
 

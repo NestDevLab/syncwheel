@@ -55,6 +55,8 @@ Default behavior is conservative:
 - `reconcile` is the dry-run diagnostic entrypoint
 - `resume` is the dry-run recovery entrypoint for cross-device resume when
   integration contains unmapped commits that can be classified deterministically
+- `ledger show` exposes Syncwheel's append-only event ledger and the current
+  replayed state used for cross-machine recovery
 - `sync` applies the safe local lifecycle without pushing
 - `publish` applies the lifecycle and pushes managed branches
 - lower-level `reconcile --apply` and `reconcile --apply --push` remain
@@ -90,6 +92,8 @@ syncwheel has four pieces:
 - **PR stacks** mapped to `pr/*` branches
 - **manifest** (`.syncwheel/manifest.json`) as source of truth
 - **integration branch** (`main-integration` by default) for combined testing
+- **ledger** (`.syncwheel/ledger/`) as append-only operational history plus
+  a replay checkpoint for cross-machine recovery
 
 ```mermaid
 flowchart LR
@@ -429,9 +433,21 @@ In `resume` mode Syncwheel can:
 
 - add an unmapped integration commit to an existing owning stack when exactly
   one owner is detected
-- create a new stack from a Jira-like subject key such as `DIGIT-17765`, using
-  `digit-17765` / `pr/digit-17765`
+- restore a previously known historical stack from the ledger when the branch
+  still exists locally or remotely and ownership is unambiguous
 - leave the commit in manual review when ownership is ambiguous
+
+The ledger lives under `.syncwheel/ledger/`:
+
+- `events/000001.jsonl`, `000002.jsonl`, ... contain append-only event segments
+- `checkpoints/latest.json` contains the replayed current state for fast reads
+
+Use this to inspect the current replayed ledger state:
+
+```bash
+python3 scripts/syncwheel.py ledger show
+python3 scripts/syncwheel.py ledger show --json
+```
 
 When integration contains non-merge commits that are not declared in any stack,
 `check` and `reconcile` print commit-level guidance: short SHA, subject, touched
@@ -547,6 +563,7 @@ python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
 python3 scripts/syncwheel.py plan --help
 python3 scripts/syncwheel.py reconcile --help
+python3 scripts/syncwheel.py ledger show --help
 python3 scripts/syncwheel.py resume --help
 python3 scripts/syncwheel.py sync --help
 python3 scripts/syncwheel.py publish --help
