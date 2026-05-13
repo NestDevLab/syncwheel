@@ -93,6 +93,10 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def read_manifest(self):
         return json.loads((self.repo / '.syncwheel' / 'manifest.json').read_text())
 
+    def read_ledger_state(self):
+        result = self.run_cli('ledger', 'show', '--json', expected=0)
+        return json.loads(result.stdout)
+
     def tracked_status(self):
         return self.git('status', '--porcelain', '--untracked-files=no')
 
@@ -310,6 +314,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(feature_c['commits'], [gamma])
         self.assertEqual(feature_c['meta']['purpose'], 'Exercise stack creation')
         self.assertIn('feature-c', manifest['integration']['stacks'])
+
+        ledger = self.read_ledger_state()
+        self.assertEqual(ledger['last_seq'], 1)
+        self.assertIn('feature-c', ledger['manifest']['active_stacks'])
+        self.assertEqual(ledger['stacks']['feature-c']['branch'], 'pr/alice/feature-c')
 
     def test_stack_add_accepts_integration_first_commit_on_current_projection(self):
         base = self.git('rev-parse', 'HEAD')
@@ -1251,6 +1260,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = json.loads(manifest.read_text())
         data['integration']['branch'] = 'integration/test'
         data['integration']['base'] = 'main'
+        data['integration']['stacks'] = ['feature-b']
+        data['stacks'] = [data['stacks'][1]]
         manifest.write_text(json.dumps(data, indent=2) + '\n')
 
         result = self.run_cli('validate', '--json', expected=0)
@@ -1270,6 +1281,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = json.loads(manifest.read_text())
         data['integration']['branch'] = 'integration/test'
         data['integration']['base'] = 'main'
+        data['integration']['stacks'] = ['feature-b']
+        data['stacks'] = [data['stacks'][1]]
         manifest.write_text(json.dumps(data, indent=2) + '\n')
 
         result = self.run_cli('plan', '--json', expected=0)
@@ -1333,14 +1346,114 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertIn('related declared commits:', result.stdout)
         self.assertIn('same_subject_declared_in_manifest', result.stdout)
-        self.assertIn('inspect before adding this local-only SHA', result.stdout)
-        self.assertNotIn('syncwheel stack add feature-b', result.stdout)
 
-        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+    def test_reconcile_resume_mode_registers_single_likely_stack(self):
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'integration/test', 'HEAD')
+        self.git('switch', '-q', 'integration/test')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['integration']['stacks'] = ['feature-b']
+        data['stacks'] = [data['stacks'][1]]
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('reconcile', '--mode', 'resume', '--no-fetch', '--json', expected=0)
         report = json.loads(result.stdout)
-        diagnostics = report['diagnostics']['unmapped_integration_commits']
-        self.assertEqual(diagnostics[0]['related_declared_commits'][0]['commit'], declared)
-        self.assertEqual(diagnostics[0]['suggested_commands'], ['syncwheel reconcile'])
+
+        self.assertEqual(report['mode'], 'resume')
+        self.assertEqual(report['actions'][0]['type'], 'resume_add_commit')
+        self.assertEqual(report['actions'][0]['stack'], 'feature-b')
+        self.assertEqual(report['actions'][0]['commit'], gamma)
+        updated = json.loads(manifest.read_text())
+        self.assertNotIn(gamma, updated['stacks'][0]['commits'])
+
+        self.run_cli('reconcile', '--mode', 'resume', '--no-fetch', '--apply', expected=0)
+        updated = json.loads(manifest.read_text())
+        self.assertIn(gamma, updated['stacks'][0]['commits'])
+
+    def test_resume_alias_requires_manual_review_without_detected_owner(self):
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat(DIGIT-17765): add gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['integration']['stacks'] = []
+        data['stacks'] = []
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('resume', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+
+        self.assertEqual(report['mode'], 'resume')
+        self.assertEqual(report['actions'][0]['type'], 'resume_manual_review')
+        self.assertEqual(report['actions'][0]['reason'], 'owner_not_detected')
+        self.assertEqual(report['actions'][0]['commit'], gamma)
+
+        self.run_cli('resume', '--no-fetch', '--apply', expected=2)
+        updated = json.loads(manifest.read_text())
+        self.assertEqual(updated['integration']['stacks'], [])
+        self.assertEqual(updated['stacks'], [])
+
+    def test_resume_restores_historical_stack_from_ledger(self):
+        self.git('switch', '-q', '-c', 'pr/feature-c', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'integration/test', 'HEAD')
+        self.git('switch', '-q', 'main')
+
+        self.run_cli(
+            'stack',
+            'create',
+            'feature-c',
+            gamma,
+            '--branch',
+            'pr/feature-c',
+            '--include-in-integration',
+            expected=0,
+        )
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['integration']['stacks'] = []
+        data['stacks'] = []
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        check = self.run_cli('check', '--no-fetch', '--json', expected=0)
+        check_report = json.loads(check.stdout)
+        check_diagnostics = check_report['diagnostics']['unmapped_integration_commits']
+        self.assertEqual(check_diagnostics[0]['historical_stacks'][0]['id'], 'feature-c')
+
+        result = self.run_cli('resume', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+
+        self.assertEqual(report['mode'], 'resume')
+        self.assertEqual(report['actions'][0]['type'], 'resume_restore_stack')
+        self.assertEqual(report['actions'][0]['stack'], 'feature-c')
+        self.assertEqual(report['actions'][1]['type'], 'resume_add_commit')
+        self.assertEqual(report['actions'][1]['stack'], 'feature-c')
+
+        self.run_cli('resume', '--no-fetch', '--apply', expected=0)
+        updated = json.loads(manifest.read_text())
+        self.assertEqual(updated['integration']['stacks'], ['feature-c'])
+        self.assertEqual(updated['stacks'][0]['id'], 'feature-c')
+        self.assertEqual(updated['stacks'][0]['branch'], 'pr/feature-c')
+        self.assertEqual(updated['stacks'][0]['commits'], [gamma])
 
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
