@@ -45,6 +45,7 @@ turning branch history into tribal knowledge.
 
 ```bash
 python3 scripts/syncwheel.py reconcile
+python3 scripts/syncwheel.py resume
 python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
 python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
 ```
@@ -52,6 +53,8 @@ python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
 Default behavior is conservative:
 
 - `reconcile` is the dry-run diagnostic entrypoint
+- `resume` is the dry-run recovery entrypoint for cross-device resume when
+  integration contains unmapped commits that can be classified deterministically
 - `sync` applies the safe local lifecycle without pushing
 - `publish` applies the lifecycle and pushes managed branches
 - lower-level `reconcile --apply` and `reconcile --apply --push` remain
@@ -398,6 +401,7 @@ Use `reconcile` as the normal maintenance entrypoint:
 
 ```bash
 python3 scripts/syncwheel.py reconcile
+python3 scripts/syncwheel.py resume
 python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
 python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
 ```
@@ -411,6 +415,23 @@ Syncwheel push wrappers for managed branches. The report also prints the
 current working tree status, including uncommitted files, before validation and
 drift details so dirty checkouts are visible without running a separate
 `git status`.
+
+`resume` is a thin recovery layer on top of `reconcile`. It pre-classifies
+unmapped integration commits when ownership is deterministic, then runs the
+normal reconcile planner on the resulting manifest. Use either form:
+
+```bash
+python3 scripts/syncwheel.py reconcile --mode resume
+python3 scripts/syncwheel.py resume
+```
+
+In `resume` mode Syncwheel can:
+
+- add an unmapped integration commit to an existing owning stack when exactly
+  one owner is detected
+- create a new stack from a Jira-like subject key such as `DIGIT-17765`, using
+  `digit-17765` / `pr/digit-17765`
+- leave the commit in manual review when ownership is ambiguous
 
 When integration contains non-merge commits that are not declared in any stack,
 `check` and `reconcile` print commit-level guidance: short SHA, subject, touched
@@ -526,6 +547,7 @@ python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
 python3 scripts/syncwheel.py plan --help
 python3 scripts/syncwheel.py reconcile --help
+python3 scripts/syncwheel.py resume --help
 python3 scripts/syncwheel.py sync --help
 python3 scripts/syncwheel.py publish --help
 python3 scripts/syncwheel.py stack --help

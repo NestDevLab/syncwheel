@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.16.0 - 2026-05-13
+
+- Add `reconcile --mode resume` and the top-level `resume` command for
+  cross-device recovery flows.
+- Let `resume` auto-register unmapped integration commits on a deterministic
+  owning stack, or auto-create a new stack from a Jira-style subject key.
+- Allow integration rebuild/alignment to proceed from the primary checkout when
+  that checkout is dirty only because of untracked `.syncwheel/` metadata.
+
 ## 0.15.0 - 2026-05-07
 
 - Add commit-level guidance for unmapped integration commits in `check` and

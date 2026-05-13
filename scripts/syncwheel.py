@@ -3,6 +3,7 @@ import argparse
 import datetime
 import json
 import os
+import re
 import shlex
 import tempfile
 import subprocess
@@ -26,6 +27,7 @@ PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 DEFAULT_INTEGRATION_BRANCH = 'main-integration'
 UPDATE_MODES = {'off', 'notify', 'auto'}
+RECONCILE_MODES = {'standard', 'resume'}
 DEFAULT_UPDATE_MODE = 'notify'
 DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 SYNCWHEEL_HOOKS_PATH = 'githooks'
@@ -39,6 +41,7 @@ YELLOW = '\033[33m'
 RESET = '\033[0m'
 WARNED_GIT_IDENTITY_PATHS = set()
 COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'merge', 'revert'}
+JIRA_KEY_RE = re.compile(r'(?<![A-Z0-9])([A-Z][A-Z0-9]+-\d+)(?![A-Z0-9])')
 
 
 def read_version_file(path):
@@ -649,6 +652,11 @@ def commit_subject(repo_root, commit):
     return git(repo_root, 'show', '-s', '--format=%s', commit).stdout.strip()
 
 
+def first_jira_key(text):
+    match = JIRA_KEY_RE.search(text or '')
+    return match.group(1) if match else None
+
+
 def commit_changed_files(repo_root, commit, limit=None):
     result = git(repo_root, 'show', '--format=', '--name-only', '--no-renames', commit, check=False)
     if result.returncode != 0:
@@ -714,11 +722,20 @@ def get_worktrees(repo_root):
     return blocks
 
 
-def ensure_clean_worktree(path):
+def ensure_clean_worktree(path, allowed_status_prefixes=None):
     result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
     if result.returncode != 0:
         raise SyncwheelError(f'{path} is not a git worktree')
-    if result.stdout.strip():
+    allowed_status_prefixes = tuple(allowed_status_prefixes or [])
+    remaining = []
+    for line in result.stdout.splitlines():
+        entry = line.strip()
+        if not entry:
+            continue
+        if allowed_status_prefixes and any(entry.startswith(prefix) for prefix in allowed_status_prefixes):
+            continue
+        remaining.append(entry)
+    if remaining:
         raise SyncwheelError(f'{path} is not clean')
 
 
@@ -1172,6 +1189,146 @@ def related_declared_stack_commits(repo_root, manifest, subject):
     return related
 
 
+def stack_matches_jira_key(stack, jira_key):
+    if not jira_key:
+        return False
+    jira_lower = jira_key.lower()
+    if stack['id'].lower() == jira_lower:
+        return True
+    if jira_lower in stack['branch'].lower():
+        return True
+    stack_jira = str(stack.get('meta', {}).get('jira') or '').strip().lower()
+    return stack_jira == jira_lower
+
+
+def build_resume_stack(stack_id, manifest, jira_key=None):
+    stack = {
+        'id': stack_id,
+        'branch': f"pr/{safe_ref_segment(stack_id)}",
+        'base': manifest['defaults']['base_ref'],
+        'target_remote': manifest['defaults']['canonical_remote'],
+        'target_branch': manifest['defaults']['base_branch'],
+        'integration_branch': manifest['integration']['branch'],
+        'commits': [],
+    }
+    if jira_key:
+        stack['meta'] = {'jira': jira_key}
+    return stack
+
+
+def plan_resume_mutations(repo_root, manifest, diagnostics, selected_stack_ids=None):
+    manifest_copy = json.loads(json.dumps(manifest))
+    actions = []
+    stacks = stack_map(manifest_copy)
+    selected = set(selected_stack_ids or [])
+    branch_to_stack = {stack['branch']: stack['id'] for stack in manifest_copy['stacks']}
+
+    for item in diagnostics:
+        if item.get('related_declared_commits'):
+            actions.append({
+                'type': 'resume_manual_review',
+                'commit': item['commit'],
+                'short': item['short'],
+                'subject': item['subject'],
+                'reason': 'same_subject_declared_in_manifest',
+            })
+            continue
+
+        jira_key = first_jira_key(item['subject'])
+        matched_existing = [
+            stack['id']
+            for stack in manifest_copy['stacks']
+            if stack_matches_jira_key(stack, jira_key)
+            and (not selected or stack['id'] in selected)
+        ]
+        likely_stacks = [
+            candidate['id']
+            for candidate in item.get('likely_stacks') or []
+            if not selected or candidate['id'] in selected
+        ]
+
+        stack_id = None
+        reason = None
+        if len(matched_existing) == 1:
+            stack_id = matched_existing[0]
+            reason = 'jira_key_matches_existing_stack'
+        elif len(matched_existing) > 1:
+            actions.append({
+                'type': 'resume_manual_review',
+                'commit': item['commit'],
+                'short': item['short'],
+                'subject': item['subject'],
+                'reason': 'ambiguous_jira_key_match',
+                'jira': jira_key,
+                'stacks': matched_existing,
+            })
+            continue
+        elif len(set(likely_stacks)) == 1:
+            stack_id = likely_stacks[0]
+            reason = 'single_likely_stack'
+        elif likely_stacks:
+            actions.append({
+                'type': 'resume_manual_review',
+                'commit': item['commit'],
+                'short': item['short'],
+                'subject': item['subject'],
+                'reason': 'ambiguous_likely_stack',
+                'stacks': sorted(set(likely_stacks)),
+            })
+            continue
+        elif jira_key and not selected:
+            stack_id = jira_key.lower()
+            if stack_id not in stacks:
+                new_stack = build_resume_stack(stack_id, manifest_copy, jira_key=jira_key)
+                if new_stack['branch'] in branch_to_stack:
+                    actions.append({
+                        'type': 'resume_manual_review',
+                        'commit': item['commit'],
+                        'short': item['short'],
+                        'subject': item['subject'],
+                        'reason': 'branch_collision',
+                        'branch': new_stack['branch'],
+                    })
+                    continue
+                manifest_copy['stacks'].append(new_stack)
+                stacks[stack_id] = new_stack
+                branch_to_stack[new_stack['branch']] = stack_id
+                if stack_id not in manifest_copy['integration']['stacks']:
+                    manifest_copy['integration']['stacks'].append(stack_id)
+                actions.append({
+                    'type': 'resume_create_stack',
+                    'stack': stack_id,
+                    'branch': new_stack['branch'],
+                    'jira': jira_key,
+                    'reason': 'jira_key_detected',
+                })
+            reason = 'jira_key_detected'
+        else:
+            actions.append({
+                'type': 'resume_manual_review',
+                'commit': item['commit'],
+                'short': item['short'],
+                'subject': item['subject'],
+                'reason': 'owner_not_detected',
+            })
+            continue
+
+        stack = stacks[stack_id]
+        if item['commit'] not in stack['commits']:
+            stack['commits'].append(item['commit'])
+            actions.append({
+                'type': 'resume_add_commit',
+                'stack': stack_id,
+                'branch': stack['branch'],
+                'commit': item['commit'],
+                'short': item['short'],
+                'subject': item['subject'],
+                'reason': reason,
+            })
+
+    return actions, manifest_copy
+
+
 def integration_commit_diagnostics(repo_root, manifest, validation):
     unmapped = validation['details']['integration'].get('unmapped_commits') or []
     diagnostics = []
@@ -1407,6 +1564,9 @@ def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=No
     backup = backup_branch_command(repo_root, branch, timestamp)
     if backup:
         commands.append(backup)
+    if worktree is None:
+        commands.append(['git', 'reset', '--hard', remote_ref])
+        return commands
     if worktree_matches_branch(repo_root, branch, worktree):
         commands.append(['git', '-C', str(worktree), 'reset', '--hard', remote_ref])
         return commands
@@ -2040,7 +2200,9 @@ def stack_reconcile_report(repo_root, manifest, stack, remote=None):
 def reconcile_worktree_path(repo_root, branch, worktree_root):
     existing = find_worktree_for_branch(repo_root, branch)
     if existing:
-        return existing
+        existing_path = Path(existing).resolve()
+        if existing_path != Path(repo_root).resolve():
+            return existing_path
     if worktree_root:
         safe = branch.replace('/', '-').replace('\\', '-')
         return Path(worktree_root).expanduser().resolve() / safe
@@ -2302,6 +2464,8 @@ def format_reconcile_action(action):
         line += f" stack={action['stack']}"
     if 'branch' in action:
         line += f" branch={action['branch']}"
+    if 'short' in action:
+        line += f" commit={action['short']}"
     if 'reason' in action:
         line += f" reason={action['reason']}"
     if action['type'] in ('align_stack_to_remote', 'align_integration_to_remote'):
@@ -2310,6 +2474,12 @@ def format_reconcile_action(action):
         line += ' detail=local projection needs publishing'
     elif action['type'] == 'manual_review':
         line += ' detail=manual review required before applying'
+    elif action['type'] == 'resume_create_stack':
+        line += ' detail=create manifest stack entry before reconciling branches'
+    elif action['type'] == 'resume_add_commit':
+        line += ' detail=register integration commit on detected owning stack'
+    elif action['type'] == 'resume_manual_review':
+        line += ' detail=resume mode could not classify this integration commit safely'
     elif action['type'] == 'rebuild_integration' and action.get('reason') == 'integration_contains_unmapped_commits':
         line += ' detail=integration contains unassigned commits'
     return line
@@ -2320,6 +2490,21 @@ def command_reconcile(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    resume_actions = []
+    resume_manifest_changed = False
+    if args.mode == 'resume':
+        original_manifest = json.loads(json.dumps(manifest))
+        initial_validation = validate_manifest(repo_root, manifest)
+        initial_diagnostics = integration_commit_diagnostics(repo_root, manifest, initial_validation)
+        selected_stack_ids = args.stack or None
+        resume_actions, effective_manifest = plan_resume_mutations(
+            repo_root,
+            manifest,
+            initial_diagnostics,
+            selected_stack_ids=selected_stack_ids,
+        )
+        manifest = effective_manifest
+        resume_manifest_changed = manifest != original_manifest
     if args.stack:
         known = stack_map(manifest)
         for stack_id in args.stack:
@@ -2346,12 +2531,13 @@ def command_reconcile(args):
         'validation': validation,
         'stacks': list(stack_reports.values()),
         'integration': integration_report,
-        'actions': actions,
+        'actions': [*resume_actions, *actions],
         'diagnostics': {
             'unmapped_integration_commits': diagnostics,
         },
         'applied': args.apply,
         'push': args.push,
+        'mode': args.mode,
     }
     if args.json and not args.apply:
         print(json.dumps(output, indent=2))
@@ -2396,8 +2582,14 @@ def command_reconcile(args):
             print(quoted(command))
         elif action['type'] == 'rebuild_integration':
             integration = manifest['integration']
-            if args.in_place_integration:
-                ensure_in_place_target(repo_root, integration['branch'])
+            use_primary_checkout = get_current_branch(repo_root) == integration['branch']
+            if args.in_place_integration or use_primary_checkout:
+                if get_current_branch(repo_root) != integration['branch']:
+                    raise SyncwheelError(
+                        f"in-place materialization requires current branch {integration['branch']!r}; "
+                        f"current branch is {get_current_branch(repo_root)!r}"
+                    )
+                ensure_clean_worktree(repo_root, allowed_status_prefixes=['?? .syncwheel/'])
                 worktree = None
                 in_place = True
             else:
@@ -2408,8 +2600,13 @@ def command_reconcile(args):
             run_command_list(commands, repo_root, True)
         elif action['type'] == 'align_integration_to_remote':
             integration = manifest['integration']
-            worktree = reconcile_worktree_path(repo_root, integration['branch'], args.worktree_root)
-            ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
+            use_primary_checkout = get_current_branch(repo_root) == integration['branch']
+            if use_primary_checkout:
+                ensure_clean_worktree(repo_root, allowed_status_prefixes=['?? .syncwheel/'])
+                worktree = None
+            else:
+                worktree = reconcile_worktree_path(repo_root, integration['branch'], args.worktree_root)
+                ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
             commands = materialize_remote_align_commands(
                 repo_root,
                 integration['branch'],
@@ -2422,6 +2619,8 @@ def command_reconcile(args):
             command = ['git', 'push', *push_args, remote, manifest['integration']['branch']]
             run(command, cwd=repo_root)
             print(quoted(command))
+    if args.apply and resume_manifest_changed:
+        save_manifest(manifest_path, manifest)
     return 0
 
 
@@ -2434,6 +2633,11 @@ def command_sync(args):
 def command_publish(args):
     args.apply = True
     args.push = True
+    return command_reconcile(args)
+
+
+def command_resume(args):
+    args.mode = 'resume'
     return command_reconcile(args)
 
 
@@ -2669,6 +2873,13 @@ def add_reconcile_args(parser, include_apply_push=True, include_push_options=Tru
             help='use normal git push for reconcile-managed pushes',
         )
     parser.add_argument('--remote', help='remote override for managed branch comparisons and publication')
+    parser.add_argument(
+        '-m',
+        '--mode',
+        choices=sorted(RECONCILE_MODES),
+        default='standard',
+        help='reconcile mode: standard or resume',
+    )
     parser.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
     parser.add_argument('--skip-integration', action='store_true')
     parser.add_argument(
@@ -2804,7 +3015,15 @@ def build_parser():
         parents=[common],
     )
     add_reconcile_args(reconcile_p, include_apply_push=True)
-    reconcile_p.set_defaults(func=command_reconcile, fetch=True, update_manifest=True)
+    reconcile_p.set_defaults(func=command_reconcile, fetch=True, update_manifest=True, mode='standard')
+
+    resume_p = sub.add_parser(
+        'resume',
+        help='resume reconcile from a shared remote state on a new machine',
+        parents=[common],
+    )
+    add_reconcile_args(resume_p, include_apply_push=True)
+    resume_p.set_defaults(func=command_resume, fetch=True, update_manifest=True, mode='resume')
 
     sync_p = sub.add_parser(
         'sync',
@@ -2819,6 +3038,7 @@ def build_parser():
         apply=True,
         push=False,
         force_with_lease=True,
+        mode='standard',
     )
 
     publish_p = sub.add_parser(
@@ -2827,7 +3047,7 @@ def build_parser():
         parents=[common],
     )
     add_reconcile_args(publish_p, include_apply_push=False)
-    publish_p.set_defaults(func=command_publish, fetch=True, update_manifest=True, apply=True, push=True)
+    publish_p.set_defaults(func=command_publish, fetch=True, update_manifest=True, apply=True, push=True, mode='standard')
 
     manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect and compare syncwheel manifests')
     manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)
