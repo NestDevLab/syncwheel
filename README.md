@@ -92,8 +92,9 @@ syncwheel has four pieces:
 - **PR stacks** mapped to `pr/*` branches
 - **manifest** (`.syncwheel/manifest.json`) as source of truth
 - **integration branch** (`main-integration` by default) for combined testing
-- **ledger** (`.syncwheel/ledger/`) as append-only operational history plus
-  a replay checkpoint for cross-machine recovery
+- **ledger** (`.syncwheel/ledger/` by default, or a sibling `<manifest-name>-ledger/`
+  directory when the manifest lives outside the repo) as append-only
+  operational history plus a replay checkpoint for cross-machine recovery
 
 ```mermaid
 flowchart LR
@@ -437,7 +438,13 @@ In `resume` mode Syncwheel can:
   still exists locally or remotely and ownership is unambiguous
 - leave the commit in manual review when ownership is ambiguous
 
-The ledger lives under `.syncwheel/ledger/`:
+The ledger lives under `.syncwheel/ledger/` when the manifest is repo-local.
+When `--manifest` points outside the repository, Syncwheel stores the ledger in
+a sibling directory next to that manifest, derived from its filename. For
+example, `docs/syncwheel/glow-portals-manifest.json` uses
+`docs/syncwheel/glow-portals-ledger/`.
+
+Each ledger root contains:
 
 - `events/000001.jsonl`, `000002.jsonl`, ... contain append-only event segments
 - `checkpoints/latest.json` contains the replayed current state for fast reads

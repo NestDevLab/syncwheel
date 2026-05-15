@@ -30,6 +30,8 @@ UPDATE_MODES = {'off', 'notify', 'auto'}
 RECONCILE_MODES = {'standard', 'resume'}
 LEDGER_SCHEMA_VERSION = 1
 LEDGER_SEGMENT_MAX_EVENTS = 256
+SYNCWHEEL_LOCAL_EXCLUDE_PATTERN = '.syncwheel/'
+SYNCWHEEL_LOCAL_EXCLUDE_MARKER = '# syncwheel local metadata'
 DEFAULT_UPDATE_MODE = 'notify'
 DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 SYNCWHEEL_HOOKS_PATH = 'githooks'
@@ -735,6 +737,27 @@ def ensure_clean_worktree(path, allowed_status_prefixes=None):
         raise SyncwheelError(f'{path} is not clean')
 
 
+def ensure_syncwheel_metadata_excluded(repo_root):
+    result = git(repo_root, 'rev-parse', '--git-path', 'info/exclude', check=False)
+    if result.returncode != 0:
+        return
+    path = Path(result.stdout.strip())
+    try:
+        existing = path.read_text()
+    except OSError:
+        existing = ''
+    if any(line.strip() == SYNCWHEEL_LOCAL_EXCLUDE_PATTERN for line in existing.splitlines()):
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    updated = existing
+    if updated and not updated.endswith('\n'):
+        updated += '\n'
+    if SYNCWHEEL_LOCAL_EXCLUDE_MARKER not in existing:
+        updated += f'{SYNCWHEEL_LOCAL_EXCLUDE_MARKER}\n'
+    updated += f'{SYNCWHEEL_LOCAL_EXCLUDE_PATTERN}\n'
+    path.write_text(updated)
+
+
 def syncwheel_timestamp():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
 
@@ -831,16 +854,43 @@ def ledger_root(repo_root):
     return repo_root / '.syncwheel' / 'ledger'
 
 
-def ledger_events_dir(repo_root):
-    return ledger_root(repo_root) / 'events'
+def external_ledger_root(manifest_path):
+    path = Path(manifest_path).expanduser()
+    stem = path.stem
+    if stem.endswith('-manifest'):
+        trimmed = stem[:-len('-manifest')]
+        stem = trimmed or stem
+    return path.parent / f'{stem}-ledger'
 
 
-def ledger_checkpoints_dir(repo_root):
-    return ledger_root(repo_root) / 'checkpoints'
+def is_external_manifest_path(repo_root, manifest_path):
+    if manifest_path is None:
+        return False
+    repo_root_path = Path(repo_root).expanduser().resolve(strict=False)
+    manifest_root = Path(manifest_path).expanduser().resolve(strict=False)
+    try:
+        manifest_root.relative_to(repo_root_path)
+        return False
+    except ValueError:
+        return True
 
 
-def ledger_checkpoint_path(repo_root):
-    return ledger_checkpoints_dir(repo_root) / 'latest.json'
+def ledger_root(repo_root, manifest_path=None):
+    if is_external_manifest_path(repo_root, manifest_path):
+        return external_ledger_root(manifest_path)
+    return repo_root / '.syncwheel' / 'ledger'
+
+
+def ledger_events_dir(repo_root, manifest_path=None):
+    return ledger_root(repo_root, manifest_path) / 'events'
+
+
+def ledger_checkpoints_dir(repo_root, manifest_path=None):
+    return ledger_root(repo_root, manifest_path) / 'checkpoints'
+
+
+def ledger_checkpoint_path(repo_root, manifest_path=None):
+    return ledger_checkpoints_dir(repo_root, manifest_path) / 'latest.json'
 
 
 def manifest_stack_history_summary(stack):
@@ -889,8 +939,8 @@ def default_ledger_state():
     }
 
 
-def load_ledger_events(repo_root):
-    directory = ledger_events_dir(repo_root)
+def load_ledger_events(repo_root, manifest_path=None):
+    directory = ledger_events_dir(repo_root, manifest_path)
     if not directory.exists():
         return []
     events = []
@@ -989,23 +1039,23 @@ def reduce_ledger_state(events):
     return state
 
 
-def load_ledger_state(repo_root):
-    path = ledger_checkpoint_path(repo_root)
+def load_ledger_state(repo_root, manifest_path=None):
+    path = ledger_checkpoint_path(repo_root, manifest_path)
     if path.exists():
         data = json.loads(path.read_text())
         if isinstance(data, dict):
             return data
-    return reduce_ledger_state(load_ledger_events(repo_root))
+    return reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
 
 
-def write_ledger_checkpoint(repo_root, state):
-    path = ledger_checkpoint_path(repo_root)
+def write_ledger_checkpoint(repo_root, state, manifest_path=None):
+    path = ledger_checkpoint_path(repo_root, manifest_path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n')
 
 
-def next_ledger_segment_path(repo_root):
-    directory = ledger_events_dir(repo_root)
+def next_ledger_segment_path(repo_root, manifest_path=None):
+    directory = ledger_events_dir(repo_root, manifest_path)
     directory.mkdir(parents=True, exist_ok=True)
     segments = sorted(directory.glob('*.jsonl'))
     if not segments:
@@ -1018,8 +1068,10 @@ def next_ledger_segment_path(repo_root):
     return directory / f'{next_index:06d}.jsonl'
 
 
-def append_ledger_event(repo_root, event_type, payload):
-    current = load_ledger_state(repo_root)
+def append_ledger_event(repo_root, event_type, payload, manifest_path=None):
+    if not is_external_manifest_path(repo_root, manifest_path):
+        ensure_syncwheel_metadata_excluded(repo_root)
+    current = load_ledger_state(repo_root, manifest_path)
     event = {
         'schema_version': LEDGER_SCHEMA_VERSION,
         'seq': current['last_seq'] + 1,
@@ -1027,17 +1079,17 @@ def append_ledger_event(repo_root, event_type, payload):
         'type': event_type,
         'payload': payload,
     }
-    path = next_ledger_segment_path(repo_root)
+    path = next_ledger_segment_path(repo_root, manifest_path)
     with path.open('a', encoding='utf-8') as handle:
         handle.write(json.dumps(event, sort_keys=True) + '\n')
-    state = reduce_ledger_state(load_ledger_events(repo_root))
-    write_ledger_checkpoint(repo_root, state)
+    state = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
+    write_ledger_checkpoint(repo_root, state, manifest_path)
     return event
 
 
 def save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, context=None, event_type='manifest_saved'):
     save_manifest(manifest_path, manifest)
-    append_ledger_event(repo_root, event_type, manifest_event_payload(manifest_path, manifest, reason, context))
+    append_ledger_event(repo_root, event_type, manifest_event_payload(manifest_path, manifest, reason, context), manifest_path)
 
 
 def ref_tip(repo_root, ref):
@@ -1123,6 +1175,7 @@ def load_repo_profile(repo_root):
 
 
 def save_repo_profile(repo_root, profile):
+    ensure_syncwheel_metadata_excluded(repo_root)
     path = repo_profile_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(profile, indent=2, sort_keys=True) + '\n')
@@ -1550,8 +1603,8 @@ def plan_resume_mutations(repo_root, manifest, diagnostics, selected_stack_ids=N
     return actions, manifest_copy
 
 
-def integration_commit_diagnostics(repo_root, manifest, validation):
-    ledger_state = load_ledger_state(repo_root)
+def integration_commit_diagnostics(repo_root, manifest, validation, manifest_path=None):
+    ledger_state = load_ledger_state(repo_root, manifest_path)
     unmapped = validation['details']['integration'].get('unmapped_commits') or []
     diagnostics = []
     for commit in unmapped:
@@ -1871,7 +1924,7 @@ def command_init(args):
     if manifest_path.exists() and not args.force:
         raise SyncwheelError(f'manifest already exists: {manifest_path}')
     manifest_path.write_text(output)
-    append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'))
+    append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
     return 0
 
@@ -2291,7 +2344,7 @@ def command_stack_add(args):
 
 def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     before_tip = ref_tip(repo_root, stack['branch'])
     worktree, in_place = resolve_stack_rebuild_location(repo_root, stack, args)
@@ -2313,13 +2366,14 @@ def command_stack_rebuild(args):
                 'before_tip': before_tip,
                 'after_tip': ref_tip(repo_root, stack['branch']),
             },
+            manifest_path,
         )
     return 0
 
 
 def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
     push_args = push_args_with_options(args)
@@ -2338,6 +2392,7 @@ def command_stack_push(args):
             'remote': remote,
             'tip': ref_tip(repo_root, stack['branch']),
         },
+        manifest_path,
     )
     return 0
 
@@ -2778,7 +2833,8 @@ def format_reconcile_action(action):
 
 def command_ledger_show(args):
     repo_root = resolve_repo_root(args.repo)
-    state = load_ledger_state(repo_root)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    state = load_ledger_state(repo_root, manifest_path)
     if args.json:
         print(json.dumps(state, indent=2))
         return 0
@@ -2820,7 +2876,7 @@ def command_reconcile(args):
     if args.mode == 'resume':
         original_manifest = json.loads(json.dumps(manifest))
         initial_validation = validate_manifest(repo_root, manifest)
-        initial_diagnostics = integration_commit_diagnostics(repo_root, manifest, initial_validation)
+        initial_diagnostics = integration_commit_diagnostics(repo_root, manifest, initial_validation, manifest_path)
         selected_stack_ids = args.stack or None
         resume_actions, effective_manifest = plan_resume_mutations(
             repo_root,
@@ -2849,7 +2905,7 @@ def command_reconcile(args):
     }
     integration_report = integration_sync_report(repo_root, manifest, args.remote, stack_ref_overrides)
     actions = reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args)
-    diagnostics = integration_commit_diagnostics(repo_root, manifest, validation)
+    diagnostics = integration_commit_diagnostics(repo_root, manifest, validation, manifest_path)
     output = {
         'snapshot': collect_repo_snapshot(repo_root, manifest),
         'manifest_path': str(manifest_path),
@@ -2899,6 +2955,7 @@ def command_reconcile(args):
                     'before_tip': before_tip,
                     'after_tip': ref_tip(repo_root, stack['branch']),
                 },
+                manifest_path,
             )
             if args.update_manifest:
                 stack['commits'] = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
@@ -2933,6 +2990,7 @@ def command_reconcile(args):
                     'before_tip': before_tip,
                     'after_tip': ref_tip(repo_root, stack['branch']),
                 },
+                manifest_path,
             )
         elif action['type'] == 'push_stack':
             stack = require_stack(manifest, action['stack'])
@@ -2949,6 +3007,7 @@ def command_reconcile(args):
                     'remote': remote,
                     'tip': ref_tip(repo_root, stack['branch']),
                 },
+                manifest_path,
             )
         elif action['type'] == 'rebuild_integration':
             integration = manifest['integration']
@@ -2978,6 +3037,7 @@ def command_reconcile(args):
                     'after_tip': ref_tip(repo_root, integration['branch']),
                     'stacks': list(integration.get('stacks', [])),
                 },
+                manifest_path,
             )
         elif action['type'] == 'align_integration_to_remote':
             integration = manifest['integration']
@@ -3005,6 +3065,7 @@ def command_reconcile(args):
                     'before_tip': before_tip,
                     'after_tip': ref_tip(repo_root, integration['branch']),
                 },
+                manifest_path,
             )
         elif action['type'] == 'push_integration':
             remote = args.remote or manifest['defaults']['publication_remote']
@@ -3019,6 +3080,7 @@ def command_reconcile(args):
                     'remote': remote,
                     'tip': ref_tip(repo_root, manifest['integration']['branch']),
                 },
+                manifest_path,
             )
     if args.apply and resume_manifest_changed:
         save_manifest_with_ledger(repo_root, manifest_path, manifest, 'resume_manifest_update')
@@ -3073,7 +3135,7 @@ def command_int_sync_status(args):
 
 def command_int_align_remote(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
@@ -3109,13 +3171,14 @@ def command_int_align_remote(args):
                 'before_tip': before_tip,
                 'after_tip': ref_tip(repo_root, integration['branch']),
             },
+            manifest_path,
         )
     return 0
 
 
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     before_tip = ref_tip(repo_root, manifest['integration']['branch'])
     worktree, in_place = resolve_int_rebuild_location(repo_root, manifest, args)
     if not args.dry_run and in_place:
@@ -3134,13 +3197,14 @@ def command_int_rebuild(args):
                 'after_tip': ref_tip(repo_root, manifest['integration']['branch']),
                 'stacks': list(manifest['integration'].get('stacks', [])),
             },
+            manifest_path,
         )
     return 0
 
 
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
     remote = args.remote or manifest['defaults']['publication_remote']
     push_args = push_args_with_options(args)
@@ -3158,6 +3222,7 @@ def command_int_push(args):
             'remote': remote,
             'tip': ref_tip(repo_root, integration['branch']),
         },
+        manifest_path,
     )
     return 0
 

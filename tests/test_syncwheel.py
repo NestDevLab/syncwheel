@@ -97,6 +97,22 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('ledger', 'show', '--json', expected=0)
         return json.loads(result.stdout)
 
+    def repo_exclude_path(self):
+        path = Path(self.git('rev-parse', '--git-path', 'info/exclude'))
+        if not path.is_absolute():
+            path = self.repo / path
+        return path
+
+    def expected_external_ledger_root(self, manifest_path):
+        stem = manifest_path.stem
+        if stem.endswith('-manifest'):
+            trimmed = stem[:-len('-manifest')]
+            stem = trimmed or stem
+        return manifest_path.parent / f'{stem}-ledger'
+
+    def assert_path_equal(self, left, right):
+        self.assertEqual(Path(left).resolve(), Path(right).resolve())
+
     def tracked_status(self):
         return self.git('status', '--porcelain', '--untracked-files=no')
 
@@ -263,10 +279,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('st', '-p', 'alice', '--json', expected=0)
         data = json.loads(result.stdout)
 
-        self.assertEqual(
-            data['manifest_path'],
-            str(self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'),
-        )
+        self.assert_path_equal(data['manifest_path'], self.repo / '.syncwheel' / 'manifests' / 'alice.local.json')
         self.assertEqual(data['validation']['details']['stacks'][0]['id'], 'feature-c')
 
     def test_use_sets_repo_local_default_personal_manifest(self):
@@ -276,10 +289,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('check', '--no-fetch', '--json', expected=1)
         data = json.loads(result.stdout)
 
-        self.assertEqual(
-            data['manifest_path'],
-            str(self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'),
-        )
+        self.assert_path_equal(data['manifest_path'], self.repo / '.syncwheel' / 'manifests' / 'alice.local.json')
 
     def test_use_shared_clears_repo_local_profile(self):
         self.run_cli('init', '--personal', 'alice', '--force', expected=0)
@@ -289,7 +299,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('check', '--no-fetch', '--json', expected=0)
         data = json.loads(result.stdout)
 
-        self.assertEqual(data['manifest_path'], str(self.repo / '.syncwheel' / 'manifest.json'))
+        self.assert_path_equal(data['manifest_path'], self.repo / '.syncwheel' / 'manifest.json')
 
     def test_stack_create_adds_stack_without_hand_editing_manifest(self):
         gamma = self.git('rev-parse', 'HEAD')
@@ -791,10 +801,17 @@ class SyncwheelFixtureTest(unittest.TestCase):
             expected=0,
         )
         updated = json.loads(manifest_path.read_text())
+        ledger_root = self.expected_external_ledger_root(manifest_path)
+        ledger_state = self.run_cli('ledger', 'show', '--manifest', str(manifest_path), '--json', expected=0)
 
         self.assertNotIn('git push', result.stdout)
         self.assertEqual(updated['stacks'][0]['commits'][0], self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+        self.assertTrue((ledger_root / 'events').exists())
+        self.assertFalse((self.repo / '.syncwheel' / 'ledger').exists())
+        self.assertNotIn('.syncwheel/', self.repo_exclude_path().read_text())
+        self.assertEqual(self.git('status', '--short', '--untracked-files=all', '--', '.syncwheel/ledger'), '')
+        self.assertGreater(json.loads(ledger_state.stdout)['last_seq'], 0)
 
     def test_reconcile_aligns_local_to_remote_when_remote_matches_projection(self):
         beta = self.git('rev-parse', 'main')
@@ -1490,7 +1507,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.run_cli('repo', 'add', 'fixture2', str(self.repo), '--manifest', str(custom_manifest), expected=0)
         result = self.run_cli('status', '-r', 'fixture2', '--json', expected=0)
         data = json.loads(result.stdout)
-        self.assertEqual(data['manifest_path'], str(custom_manifest))
+        self.assert_path_equal(data['manifest_path'], custom_manifest)
 
     def test_self_check_update_reports_newer_version_after_fetch(self):
         fixture = self.init_syncwheel_install_fixture()
