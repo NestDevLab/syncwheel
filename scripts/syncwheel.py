@@ -1030,13 +1030,15 @@ def apply_ledger_event(state, event):
         return state
 
     if event['type'] == 'stack_closed':
-        stack = state['stacks'].setdefault(payload['stack'], {'id': payload['stack']})
-        stack.update({
-            'branch': payload.get('branch') or stack.get('branch'),
-            'active_in_manifest': False,
-            'closed_reason': payload.get('reason', 'merged'),
-            'last_closed_seq': event['seq'],
-        })
+        stack_id = payload.get('stack')
+        if stack_id:
+            stack = state['stacks'].setdefault(stack_id, {'id': stack_id})
+            stack.update({
+                'branch': payload.get('branch') or stack.get('branch'),
+                'active_in_manifest': False,
+                'closed_reason': payload.get('reason', 'merged'),
+                'last_closed_seq': event['seq'],
+            })
         return state
 
     return state
