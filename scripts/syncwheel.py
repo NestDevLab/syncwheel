@@ -1029,6 +1029,16 @@ def apply_ledger_event(state, event):
         })
         return state
 
+    if event['type'] == 'stack_closed':
+        stack = state['stacks'].setdefault(payload['stack'], {'id': payload['stack']})
+        stack.update({
+            'branch': payload.get('branch') or stack.get('branch'),
+            'active_in_manifest': False,
+            'closed_reason': payload.get('reason', 'merged'),
+            'last_closed_seq': event['seq'],
+        })
+        return state
+
     return state
 
 
@@ -2124,6 +2134,65 @@ def command_stack_show(args):
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     print(json.dumps(stack, indent=2))
+    return 0
+
+
+def command_stack_close(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    branch = stack['branch']
+    base_ref = stack.get('base') or manifest['defaults']['base_ref']
+
+    # Check whether every commit in the stack is already reachable from base_ref.
+    unmerged = []
+    for sha in stack.get('commits') or []:
+        result = git(repo_root, 'merge-base', '--is-ancestor', sha, base_ref, check=False)
+        if result.returncode != 0:
+            unmerged.append(sha)
+
+    if unmerged and not args.force:
+        short = [commit_short_sha(repo_root, sha) for sha in unmerged[:5]]
+        extra = f' (and {len(unmerged) - 5} more)' if len(unmerged) > 5 else ''
+        raise SyncwheelError(
+            f"{args.stack}: {len(unmerged)} commit(s) are NOT yet reachable from {base_ref}: "
+            f"{', '.join(short)}{extra}\n"
+            f"Pass --force to close the stack anyway."
+        )
+
+    merged_note = '' if unmerged else f' (all commits confirmed in {base_ref})'
+
+    # Remove from stacks list.
+    manifest['stacks'] = [s for s in manifest['stacks'] if s['id'] != args.stack]
+    # Remove from integration stacks list.
+    if args.stack in manifest['integration'].get('stacks', []):
+        manifest['integration']['stacks'] = [
+            s for s in manifest['integration']['stacks'] if s != args.stack
+        ]
+
+    reason = args.reason or ('merged' if not unmerged else 'closed')
+    save_manifest(manifest_path, manifest)
+    append_ledger_event(
+        repo_root,
+        'stack_closed',
+        {'stack': args.stack, 'branch': branch, 'reason': reason},
+        manifest_path,
+    )
+
+    print(f"{args.stack}: closed{merged_note}")
+    print(f"  branch : {branch}")
+    print(f"  reason : {reason}")
+    print(f"  removed from integration: {manifest['integration']['branch']}")
+
+    if args.delete_branch:
+        if branch_exists(repo_root, branch):
+            git(repo_root, 'branch', '-d', branch, check=False)
+            print(f"  local branch deleted: {branch}")
+        else:
+            print(f"  local branch already absent: {branch}")
+    else:
+        print(f"  tip: run 'git branch -d {branch}' to delete the local branch when ready")
+
     return 0
 
 
@@ -3620,6 +3689,31 @@ def build_parser():
     stack_push_p.add_argument('stack')
     add_push_args(stack_push_p)
     stack_push_p.set_defaults(func=command_stack_push)
+
+    stack_close_p = stack_sub.add_parser(
+        'close',
+        aliases=['cl'],
+        parents=[common],
+        help='remove a merged (or abandoned) stack from the manifest and integration',
+    )
+    stack_close_p.add_argument('stack', help='stack id to close')
+    stack_close_p.add_argument(
+        '--reason',
+        default=None,
+        help='reason for closing: merged (default when all commits are in base), abandoned, or custom string',
+    )
+    stack_close_p.add_argument(
+        '-d', '--delete-branch',
+        dest='delete_branch',
+        action='store_true',
+        help='also delete the local branch after closing',
+    )
+    stack_close_p.add_argument(
+        '--force',
+        action='store_true',
+        help='close even if not all commits are reachable from the base ref',
+    )
+    stack_close_p.set_defaults(func=command_stack_close, delete_branch=False)
 
     stack_git_p = stack_sub.add_parser('git', aliases=['g'], parents=[common])
     stack_git_p.add_argument('stack')
