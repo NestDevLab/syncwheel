@@ -33,17 +33,18 @@ project-specific validation after a rebuild, and safe execution.
 
 ## Locate the CLI
 
-In the Syncwheel repo it still runs as `python3 scripts/syncwheel.py`; uv installs
-also provide `syncwheel` on PATH. When this skill is installed into a runtime,
-resolve the CLI in this order:
+Syncwheel is available as the PATH `syncwheel` command. Install it with:
 
 ```bash
-# 1. PATH executable from a uv tool install
-SW="syncwheel"
-# 2. Explicit pointer (preferred for checkout-pinned skills)
+uv tool install "git+https://github.com/NestDevLab/syncwheel"   # production
+uv tool install --editable <local-clone>                          # development
+syncwheel self update                                             # keep current
+```
+
+If the PATH binary is not available (legacy host or vendored install), fall back to the checkout pointer:
+
+```bash
 SW="python3 ${SYNCWHEEL_REPO:?set SYNCWHEEL_REPO to the syncwheel checkout}/scripts/syncwheel.py"
-# 3. A repo-vendored wrapper (e.g. scripts/sw -> deps/syncwheel/scripts/syncwheel.py)
-# 4. A checkout on disk you can point SYNCWHEEL_REPO at
 $SW --version
 ```
 
@@ -53,13 +54,13 @@ or run from inside the target repo's worktree.
 ## Safe lifecycle (always dry-run first)
 
 ```bash
-$SW status --fetch          # discover real Git state
-$SW validate                # manifest vs Git
-$SW plan --json             # deterministic action plan
-$SW reconcile               # dry-run reconcile (no writes)
-$SW reconcile --apply --worktree-root <path>   # apply, only after the plan is understood
-$SW reconcile --apply --worktree-root <path> --push   # publish shared branches
-$SW check                   # re-verify
+syncwheel status --fetch          # discover real Git state
+syncwheel validate                # manifest vs Git
+syncwheel plan --json             # deterministic action plan
+syncwheel reconcile               # dry-run reconcile (no writes)
+syncwheel reconcile --apply --worktree-root <path>   # apply, only after the plan is understood
+syncwheel reconcile --apply --worktree-root <path> --push   # publish shared branches
+syncwheel check                   # re-verify
 ```
 
 Never mutate branches from a dirty worktree. Prefer a dedicated worktree for
@@ -67,20 +68,31 @@ every rebuild. Use `--dry-run` on rebuild/push commands. If the manifest and Git
 disagree, fix the manifest or call out the conflict — do not claim a repo is
 aligned while integration and PR branches still differ.
 
+> ⚠️ **Rebuilds can silently revert already-applied work.** A `stack rebuild` /
+> `int rebuild` reconstructs the branch from the **manifest's commit projection,
+> not from the branch's current remote tip**. If the manifest points at a
+> pre-cleanup commit (or a range that misses a later fix), the rebuild force-pushes
+> the branch back to that older state and the cleanup/fix **disappears** — a real
+> regression mode (observed in practice: a cleaned-up file came back after a rebuild
+> off a stale projection). **Always:** before rebuilding, update the manifest with
+> `syncwheel stack set <id> <rev-or-range>` so the projection includes the latest commit;
+> and after every rebuild/sync/publish, diff the rebuilt branch against the expected
+> post-fix state to confirm earlier cleanups did not regress.
+
 ## Authoring a new PR stack
 
 ```bash
 # 1. Ensure a manifest exists (see the tracking decision below)
-$SW init                                  # shared manifest (.syncwheel/manifest.json)
+syncwheel init                                  # shared manifest (.syncwheel/manifest.json)
 # 2. Declare the stack
-$SW stack create feature-a --branch pr/feature-a --base origin/main --include-in-integration
+syncwheel stack create feature-a --branch pr/feature-a --base origin/main --include-in-integration
 # 3. Author in a dedicated worktree (fresh work uses plain git worktree add)
 git worktree add -b pr/feature-a ../repo-wt-feature-a origin/main
 #    ... make and commit your changes in that worktree ...
 # 4. Record the commits into the manifest, then validate and push
-$SW stack set feature-a origin/main..HEAD
-$SW validate && $SW plan --json
-$SW stack push feature-a
+syncwheel stack set feature-a origin/main..HEAD
+syncwheel validate && syncwheel plan --json
+syncwheel stack push feature-a
 ```
 
 ## Decision: commit the manifest, or keep it untracked?
@@ -126,7 +138,7 @@ Benefits:
 
 A shared, committed manifest plus the append-only ledger is what lets many agents
 coordinate deterministically. On a fresh machine or a new agent, recover shared
-state with `$SW resume` instead of improvising branch ownership.
+state with `syncwheel resume` instead of improvising branch ownership.
 
 ## More
 
