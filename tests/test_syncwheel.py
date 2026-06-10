@@ -1,9 +1,11 @@
+import importlib.util
 import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -76,6 +78,12 @@ class SyncwheelFixtureTest(unittest.TestCase):
                 f"STDERR:\n{result.stderr}"
             )
         return result
+
+    def load_syncwheel_module(self):
+        spec = importlib.util.spec_from_file_location('syncwheel_under_test', CLI)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
 
     def git(self, *args):
         result = subprocess.run(
@@ -1508,6 +1516,120 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('status', '-r', 'fixture2', '--json', expected=0)
         data = json.loads(result.stdout)
         self.assert_path_equal(data['manifest_path'], custom_manifest)
+
+    def test_legacy_script_entrypoint_still_reports_version(self):
+        result = self.run_custom_cli(CLI, '--version', expected=0, cwd=REPO_ROOT)
+
+        self.assertIn('syncwheel 0.18.0', result.stdout)
+
+    def test_install_kind_detection_identifies_git_checkout(self):
+        fixture = self.init_syncwheel_install_fixture()
+        syncwheel = self.load_syncwheel_module()
+
+        detected = syncwheel.detect_syncwheel_install(root=fixture['install'], source_path=fixture['cli'])
+
+        self.assertEqual(detected['kind'], 'git-clone')
+        self.assertTrue(detected['git_repo'])
+        self.assertEqual(detected['install_root'], fixture['install'])
+
+    def test_install_kind_detection_identifies_plain_script_without_git(self):
+        syncwheel = self.load_syncwheel_module()
+        script_root = self.tmp / 'standalone-syncwheel'
+        script_path = script_root / 'scripts' / 'syncwheel.py'
+        script_path.parent.mkdir(parents=True)
+        script_path.write_text('# placeholder\n')
+
+        detected = syncwheel.detect_syncwheel_install(
+            source_path=script_path,
+            prefix=self.tmp / 'not-a-tool-venv',
+            env={},
+        )
+
+        self.assertEqual(detected['kind'], 'script')
+        self.assertFalse(detected['git_repo'])
+        self.assertEqual(detected['install_root'], script_root)
+
+    def test_install_kind_detection_identifies_uv_tool_environment(self):
+        syncwheel = self.load_syncwheel_module()
+        tool_dir = self.tmp / 'uv-tools'
+        prefix = tool_dir / 'syncwheel'
+        source_path = prefix / 'lib' / 'python3.12' / 'site-packages' / 'syncwheel.py'
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text('# placeholder\n')
+        (prefix / 'pyvenv.cfg').write_text('home = /usr/bin\n')
+
+        detected = syncwheel.detect_syncwheel_install(
+            source_path=source_path,
+            prefix=prefix,
+            env={'UV_TOOL_DIR': str(tool_dir)},
+        )
+
+        self.assertEqual(detected['kind'], 'uv-tool')
+        self.assertFalse(detected['git_repo'])
+        self.assertEqual(detected['install_root'], prefix)
+
+    def test_self_update_command_selection_per_install_kind(self):
+        syncwheel = self.load_syncwheel_module()
+
+        self.assertEqual(
+            syncwheel.build_self_update_commands({'install_kind': 'uv-tool'}),
+            [['uv', 'tool', 'upgrade', 'syncwheel']],
+        )
+        self.assertEqual(
+            syncwheel.build_self_update_commands({'install_kind': 'git-clone', 'upstream': 'origin/main'}),
+            [['git', 'fetch', '--quiet', 'origin', '--tags'], ['git', 'merge', '--ff-only', 'origin/main']],
+        )
+        self.assertEqual(
+            syncwheel.build_self_update_commands(
+                {'install_kind': 'git-clone', 'upstream': 'origin/main'},
+                fetch=False,
+            ),
+            [['git', 'merge', '--ff-only', 'origin/main']],
+        )
+
+    def test_remote_version_fetch_parses_version_without_network(self):
+        syncwheel = self.load_syncwheel_module()
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def read(self, _size):
+                return b'\n  0.18.0\n'
+
+        with mock.patch.object(syncwheel.urllib.request, 'urlopen', return_value=FakeResponse()) as urlopen:
+            version = syncwheel.fetch_remote_version('https://example.invalid/VERSION')
+
+        self.assertEqual(version, '0.18.0')
+        urlopen.assert_called_once()
+
+    def test_self_status_reports_script_install_kind_for_non_git_copy(self):
+        standalone = self.tmp / 'standalone-syncwheel'
+        cli = standalone / 'scripts' / 'syncwheel.py'
+        cli.parent.mkdir(parents=True)
+        shutil.copy2(CLI, cli)
+        (standalone / 'VERSION').write_text('0.18.0\n')
+
+        result = self.run_custom_cli(
+            cli,
+            'self',
+            'status',
+            '--json',
+            expected=0,
+            extra_env={
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(self.tmp / 'standalone-update-state.json'),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(self.tmp / 'standalone-settings.json'),
+            },
+            cwd=standalone,
+        )
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data['status']['install_kind'], 'script')
+        self.assertFalse(data['status']['can_self_update'])
+        self.assertIn('not a git checkout', data['status']['reason'])
 
     def test_self_check_update_reports_newer_version_after_fetch(self):
         fixture = self.init_syncwheel_install_fixture()

@@ -2,6 +2,7 @@
 import argparse
 import datetime
 import hashlib
+import importlib.metadata
 import json
 import os
 import shlex
@@ -9,6 +10,8 @@ import tempfile
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 
@@ -23,6 +26,8 @@ ENV_UPDATE_MODE = 'SYNCWHEEL_UPDATE_MODE'
 ENV_UPDATE_INTERVAL_SECONDS = 'SYNCWHEEL_UPDATE_INTERVAL_SECONDS'
 ENV_UPDATE_STATE_PATH = 'SYNCWHEEL_UPDATE_STATE_PATH'
 ENV_UPDATE_SETTINGS_PATH = 'SYNCWHEEL_UPDATE_SETTINGS_PATH'
+ENV_REMOTE_VERSION_URL = 'SYNCWHEEL_REMOTE_VERSION_URL'
+ENV_UV_TOOL_SOURCE = 'SYNCWHEEL_UV_TOOL_SOURCE'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 DEFAULT_INTEGRATION_BRANCH = 'main-integration'
@@ -34,6 +39,9 @@ SYNCWHEEL_LOCAL_EXCLUDE_PATTERN = '.syncwheel/'
 SYNCWHEEL_LOCAL_EXCLUDE_MARKER = '# syncwheel local metadata'
 DEFAULT_UPDATE_MODE = 'notify'
 DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
+UPSTREAM_REPO_URL = 'https://github.com/NestDevLab/syncwheel'
+UPSTREAM_DEFAULT_BRANCH = 'main'
+UV_TOOL_NAME = 'syncwheel'
 SYNCWHEEL_HOOKS_PATH = 'githooks'
 FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
@@ -54,8 +62,35 @@ def read_version_file(path):
         return None
 
 
-INSTALL_ROOT = Path(__file__).resolve().parents[1]
-VERSION = read_version_file(INSTALL_ROOT / 'VERSION') or '0.6.0'
+def source_checkout_root(source_path=None):
+    source = Path(source_path or __file__).resolve()
+    if source.name == 'syncwheel.py' and source.parent.name == 'scripts':
+        return source.parents[1]
+    return None
+
+
+SOURCE_ROOT = source_checkout_root() or Path(__file__).resolve().parent
+
+
+def package_metadata_version():
+    try:
+        return importlib.metadata.version(UV_TOOL_NAME)
+    except importlib.metadata.PackageNotFoundError:
+        return None
+
+
+def resolve_runtime_version(root=None):
+    if root:
+        version = read_version_file(Path(root) / 'VERSION')
+        if version:
+            return version
+    version = read_version_file(SOURCE_ROOT / 'VERSION')
+    if version:
+        return version
+    return package_metadata_version() or '0.6.0'
+
+
+VERSION = resolve_runtime_version()
 
 
 def run(cmd, cwd=None, check=True, input_text=None, env=None):
@@ -254,8 +289,114 @@ def save_update_state(data, path=None):
     return save_json_file(path or get_update_state_path(), data)
 
 
+def path_is_relative_to(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def default_remote_version_url(repo_url=None):
+    repo = (repo_url or UPSTREAM_REPO_URL).rstrip('/')
+    github_prefix = 'https://github.com/'
+    if repo.startswith(github_prefix):
+        return (
+            'https://raw.githubusercontent.com/'
+            f'{repo[len(github_prefix):]}/{UPSTREAM_DEFAULT_BRANCH}/VERSION'
+        )
+    return f'{repo}/raw/{UPSTREAM_DEFAULT_BRANCH}/VERSION'
+
+
+def remote_version_url():
+    return os.environ.get(ENV_REMOTE_VERSION_URL) or default_remote_version_url()
+
+
+def uv_tool_source():
+    return os.environ.get(ENV_UV_TOOL_SOURCE) or f'git+{UPSTREAM_REPO_URL}'
+
+
+def parse_remote_version_text(text):
+    for line in str(text or '').splitlines():
+        version = line.strip()
+        if version:
+            return version
+    raise SyncwheelError('remote VERSION file is empty')
+
+
+def fetch_remote_version(url=None, timeout=10):
+    target = url or remote_version_url()
+    try:
+        with urllib.request.urlopen(target, timeout=timeout) as response:
+            body = response.read(4096).decode('utf-8')
+    except (OSError, urllib.error.URLError) as exc:
+        raise SyncwheelError(f'could not fetch remote syncwheel version from {target}: {exc}') from exc
+    return parse_remote_version_text(body)
+
+
+def detect_uv_tool_prefix(source_path=None, prefix=None, env=None):
+    source = Path(source_path or __file__).resolve()
+    active_prefix = Path(prefix or sys.prefix).resolve()
+    values = env if env is not None else os.environ
+    if not path_is_relative_to(source, active_prefix):
+        return None
+    if not (active_prefix / 'pyvenv.cfg').exists():
+        return None
+
+    uv_tool_dir = values.get('UV_TOOL_DIR')
+    if uv_tool_dir and path_is_relative_to(active_prefix, Path(uv_tool_dir).expanduser()):
+        return active_prefix
+
+    # uv 0.10.x creates one virtualenv per tool under a tools directory. Editable
+    # uv installs import from the source checkout, so the source file is not under
+    # sys.prefix and this heuristic intentionally does not classify them as uv-tool.
+    if active_prefix.name == UV_TOOL_NAME and active_prefix.parent.name == 'tools':
+        return active_prefix
+
+    receipt_candidates = (
+        active_prefix / 'uv-receipt.toml',
+        active_prefix / 'uv-receipt.json',
+    )
+    if any(path.exists() for path in receipt_candidates):
+        return active_prefix
+    return None
+
+
+def detect_syncwheel_install(root=None, source_path=None, prefix=None, env=None):
+    source = Path(source_path or __file__).resolve()
+    explicit_root = Path(root).resolve() if root else None
+    checkout_root = explicit_root or source_checkout_root(source)
+
+    if checkout_root and install_is_git_checkout(checkout_root):
+        return {
+            'kind': 'git-clone',
+            'install_root': checkout_root,
+            'source_path': source,
+            'git_repo': True,
+            'uv_tool_prefix': None,
+        }
+
+    uv_prefix = detect_uv_tool_prefix(source_path=source, prefix=prefix, env=env)
+    if uv_prefix:
+        return {
+            'kind': 'uv-tool',
+            'install_root': uv_prefix,
+            'source_path': source,
+            'git_repo': False,
+            'uv_tool_prefix': uv_prefix,
+        }
+
+    return {
+        'kind': 'script',
+        'install_root': checkout_root or source.parent,
+        'source_path': source,
+        'git_repo': False,
+        'uv_tool_prefix': None,
+    }
+
+
 def install_root():
-    return INSTALL_ROOT
+    return detect_syncwheel_install()['install_root']
 
 
 def install_is_git_checkout(root):
@@ -360,14 +501,61 @@ def install_syncwheel_hooks(root=None, dry_run=False):
     return install_hooks_status(root)
 
 
+def current_install_version(install):
+    root = Path(install['install_root'])
+    if install['kind'] == 'uv-tool':
+        return package_metadata_version() or VERSION
+    return read_version_file(root / 'VERSION') or VERSION
+
+
+def script_self_update_path(install=None):
+    detected = install or detect_syncwheel_install()
+    root = Path(detected['install_root'])
+    legacy_path = root / 'scripts' / 'syncwheel.py'
+    if legacy_path.exists():
+        return legacy_path
+    return Path(detected['source_path'])
+
+
+def recommended_self_update_command(install=None):
+    detected = install or detect_syncwheel_install()
+    if detected['kind'] == 'uv-tool':
+        return 'syncwheel self update'
+    return f'python3 {shlex.quote(str(script_self_update_path(detected)))} self update'
+
+
+def uv_self_update_command():
+    return ['uv', 'tool', 'upgrade', UV_TOOL_NAME]
+
+
+def build_self_update_commands(status, fetch=True):
+    if status.get('install_kind') == 'uv-tool':
+        return [uv_self_update_command()]
+    upstream = status.get('upstream')
+    if not upstream:
+        return []
+    remote = upstream.split('/', 1)[0]
+    commands = []
+    if fetch:
+        commands.append(['git', 'fetch', '--quiet', remote, '--tags'])
+    commands.append(['git', 'merge', '--ff-only', upstream])
+    return commands
+
+
 def collect_self_update_status(root=None, fetch=False):
-    root = Path(root or install_root()).resolve()
-    current_version = read_version_file(root / 'VERSION') or VERSION
+    install = detect_syncwheel_install(root)
+    root = Path(install['install_root']).resolve()
+    current_version = current_install_version(install)
     status = {
         'install_root': str(root),
+        'install_kind': install['kind'],
         'current_version': current_version,
         'latest_version': current_version,
         'git_repo': False,
+        'uv_tool': install['kind'] == 'uv-tool',
+        'uv_tool_source': None,
+        'remote_version_url': None,
+        'recommended_command': recommended_self_update_command(install),
         'branch': None,
         'upstream': None,
         'clean': None,
@@ -378,7 +566,21 @@ def collect_self_update_status(root=None, fetch=False):
         'reason': None,
         'checked_at': iso_utc_now(),
     }
-    if not install_is_git_checkout(root):
+
+    if install['kind'] == 'uv-tool':
+        status['can_self_update'] = True
+        status['uv_tool_source'] = uv_tool_source()
+        status['remote_version_url'] = remote_version_url()
+        try:
+            remote_version = fetch_remote_version(status['remote_version_url'])
+        except SyncwheelError as exc:
+            status['reason'] = str(exc)
+            return status
+        status['latest_version'] = remote_version
+        status['update_available'] = compare_versions(remote_version, current_version) > 0
+        return status
+
+    if not install['git_repo']:
         status['reason'] = 'syncwheel install is not a git checkout'
         return status
 
@@ -416,17 +618,25 @@ def collect_self_update_status(root=None, fetch=False):
     return status
 
 
-def recommended_self_update_command():
-    return f'python3 {shlex.quote(str(Path(__file__).resolve()))} self update'
-
-
 def refresh_cached_self_update_status(force=False):
     settings = load_update_settings()
     state, state_path = load_update_state()
     now = int(time.time())
     last_checked_epoch = parse_int(state.get('last_checked_epoch'), 0)
     cached = state.get('status') if isinstance(state.get('status'), dict) else None
-    stale = force or not cached or (now - last_checked_epoch) >= settings['check_interval_seconds']
+    current_install = detect_syncwheel_install()
+    current_install_root = str(Path(current_install['install_root']).resolve())
+    cache_matches_install = (
+        cached
+        and cached.get('install_root') == current_install_root
+        and cached.get('install_kind') == current_install['kind']
+    )
+    stale = (
+        force
+        or not cached
+        or not cache_matches_install
+        or (now - last_checked_epoch) >= settings['check_interval_seconds']
+    )
     if stale:
         cached = collect_self_update_status(fetch=True)
         state['status'] = cached
@@ -439,27 +649,26 @@ def refresh_cached_self_update_status(force=False):
 def perform_self_update(root=None, dry_run=False, fetch=True):
     root = Path(root or install_root()).resolve()
     before = collect_self_update_status(root, fetch=fetch)
-    if not before['git_repo']:
-        raise SyncwheelError(before['reason'] or 'syncwheel install is not a git checkout')
-    if not before['upstream']:
-        raise SyncwheelError(before['reason'] or 'syncwheel checkout has no upstream tracking branch')
-    if before['branch'] == 'DETACHED':
-        raise SyncwheelError('syncwheel checkout is detached; self-update requires a branch checkout')
-    if not before['clean']:
-        raise SyncwheelError('syncwheel checkout is not clean; commit or stash local changes before self-update')
+    if before['install_kind'] == 'uv-tool':
+        commands = build_self_update_commands(before, fetch=fetch)
+    else:
+        if not before['git_repo']:
+            raise SyncwheelError(before['reason'] or 'syncwheel install is not a git checkout')
+        if not before['upstream']:
+            raise SyncwheelError(before['reason'] or 'syncwheel checkout has no upstream tracking branch')
+        if before['branch'] == 'DETACHED':
+            raise SyncwheelError('syncwheel checkout is detached; self-update requires a branch checkout')
+        if not before['clean']:
+            raise SyncwheelError('syncwheel checkout is not clean; commit or stash local changes before self-update')
+        commands = build_self_update_commands(before, fetch=fetch)
 
-    remote = before['upstream'].split('/', 1)[0]
-    commands = []
-    if fetch:
-        commands.append(['git', 'fetch', '--quiet', remote, '--tags'])
-    commands.append(['git', 'merge', '--ff-only', before['upstream']])
     if dry_run:
         for command in commands:
             print(quoted(command))
         return before, before, commands
 
     for command in commands:
-        run(command, cwd=root)
+        run(command, cwd=root if before['git_repo'] else None)
     after = collect_self_update_status(root, fetch=False)
     state, state_path = load_update_state()
     state['status'] = after
@@ -492,13 +701,13 @@ def maybe_handle_startup_update_policy(args):
             print(
                 'NOTICE: syncwheel update available '
                 f'({current_version} -> {latest_version}) but auto-update was blocked: {exc}. '
-                f'Run: {recommended_self_update_command()}',
+                f'Run: {status.get("recommended_command") or recommended_self_update_command()}',
                 file=sys.stderr,
             )
             return
     print(
         f'NOTICE: syncwheel update available ({current_version} -> {latest_version}). '
-        f'Run: {recommended_self_update_command()}',
+        f'Run: {status.get("recommended_command") or recommended_self_update_command()}',
         file=sys.stderr,
     )
 
@@ -3533,7 +3742,7 @@ def build_parser():
     self_check_p.add_argument('--json', action='store_true')
     self_check_p.set_defaults(func=command_self_check_update)
 
-    self_update_p = self_sub.add_parser('update', help='fast-forward this syncwheel checkout to its upstream branch')
+    self_update_p = self_sub.add_parser('update', help='update this syncwheel install')
     self_update_p.add_argument('--dry-run', action='store_true')
     self_update_p.add_argument('--no-fetch', action='store_true')
     self_update_p.set_defaults(func=command_self_update)
@@ -3848,6 +4057,7 @@ def command_self_status(args):
         print(json.dumps(output, indent=2))
         return 0
     print(f"install_root: {status['install_root']}")
+    print(f"install_kind: {status['install_kind']}")
     print(f"current_version: {status['current_version']}")
     print(f"update_mode: {settings['mode']}")
     print(f"check_interval_seconds: {settings['check_interval_seconds']}")
@@ -3859,11 +4069,15 @@ def command_self_status(args):
         print(f"behind_commits: {status['behind_commits']}")
     else:
         print('git_repo: no')
+    if status.get('uv_tool'):
+        print('uv_tool: yes')
+        print(f"uv_tool_source: {status['uv_tool_source']}")
+        print(f"remote_version_url: {status['remote_version_url']}")
     if status.get('reason'):
         print(f"note: {status['reason']}")
     if status['update_available']:
         print(f"update: available ({status['current_version']} -> {status['latest_version']})")
-        print(f"recommended: {recommended_self_update_command()}")
+        print(f"recommended: {status['recommended_command']}")
     else:
         print('update: none')
     print(f"hooks_active: {'yes' if hooks['active'] else 'no'}")
@@ -3880,7 +4094,7 @@ def command_self_check_update(args):
         return 0
     if status['update_available']:
         print(f"update available: {status['current_version']} -> {status['latest_version']}")
-        print(recommended_self_update_command())
+        print(status['recommended_command'])
     else:
         print(f"up to date: {status['current_version']}")
     if status.get('reason'):

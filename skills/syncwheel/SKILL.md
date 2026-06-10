@@ -33,14 +33,17 @@ project-specific validation after a rebuild, and safe execution.
 
 ## Locate the CLI
 
-In the Syncwheel repo it runs as `python3 scripts/syncwheel.py`. When this skill
-is installed into a runtime, resolve the CLI in this order:
+In the Syncwheel repo it still runs as `python3 scripts/syncwheel.py`; uv installs
+also provide `syncwheel` on PATH. When this skill is installed into a runtime,
+resolve the CLI in this order:
 
 ```bash
-# 1. Explicit pointer (preferred for installed skills)
+# 1. PATH executable from a uv tool install
+SW="syncwheel"
+# 2. Explicit pointer (preferred for checkout-pinned skills)
 SW="python3 ${SYNCWHEEL_REPO:?set SYNCWHEEL_REPO to the syncwheel checkout}/scripts/syncwheel.py"
-# 2. A repo-vendored wrapper (e.g. scripts/sw -> deps/syncwheel/scripts/syncwheel.py)
-# 3. A checkout on disk you can point SYNCWHEEL_REPO at
+# 3. A repo-vendored wrapper (e.g. scripts/sw -> deps/syncwheel/scripts/syncwheel.py)
+# 4. A checkout on disk you can point SYNCWHEEL_REPO at
 $SW --version
 ```
 

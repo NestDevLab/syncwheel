@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "syncwheel"
+dynamic = ["version"]
+description = "Deterministic helper for maintaining long-lived PR stacks."
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+authors = [
+  {name = "NestDevLab"},
+]
+dependencies = []
+
+[project.scripts]
+syncwheel = "syncwheel:main"
+
+[tool.setuptools]
+py-modules = ["syncwheel"]
+package-dir = {"" = "scripts"}
+
+[tool.setuptools.dynamic]
+version = {file = ["VERSION"]}
