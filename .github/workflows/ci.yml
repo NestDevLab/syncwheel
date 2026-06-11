@@ -56,3 +56,85 @@ jobs:
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
+
+  install-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+        with:
+          version: '0.10.7'
+
+      - name: Test editable install mode
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          expected_version="$(cat VERSION)"
+
+          uv tool install --editable .
+          test "$(syncwheel --version)" = "syncwheel ${expected_version}"
+
+          git remote remove origin || true
+          state_dir="$(mktemp -d)"
+          SYNCWHEEL_UPDATE_STATE_PATH="${state_dir}/state.json" \
+            SYNCWHEEL_UPDATE_SETTINGS_PATH="${state_dir}/settings.json" \
+            syncwheel self status --json > "${state_dir}/editable-status.json"
+
+          python - "${state_dir}/editable-status.json" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          assert data["status"]["install_kind"] == "git-clone", data
+          PY
+
+      - name: Test uv-tool install mode
+        run: |
+          set -euo pipefail
+          expected_version="$(cat VERSION)"
+          tool_root="$(mktemp -d)"
+          export UV_TOOL_DIR="${tool_root}/tools"
+          export UV_TOOL_BIN_DIR="${tool_root}/bin"
+          mkdir -p "$UV_TOOL_BIN_DIR"
+
+          uv tool install "git+file://$PWD"
+          test "$("$UV_TOOL_BIN_DIR/syncwheel" --version)" = "syncwheel ${expected_version}"
+
+          status_env=(
+            "SYNCWHEEL_UPDATE_STATE_PATH=${tool_root}/state.json"
+            "SYNCWHEEL_UPDATE_SETTINGS_PATH=${tool_root}/settings.json"
+            "SYNCWHEEL_REMOTE_VERSION_URL=file://$PWD/VERSION"
+            "SYNCWHEEL_UV_TOOL_SOURCE=git+file://$PWD"
+          )
+
+          env "${status_env[@]}" "$UV_TOOL_BIN_DIR/syncwheel" self status --json > "${tool_root}/uv-status.json"
+          python - "${tool_root}/uv-status.json" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          assert data["status"]["install_kind"] == "uv-tool", data
+          PY
+
+          env "${status_env[@]}" "$UV_TOOL_BIN_DIR/syncwheel" self check-update --fetch --json > "${tool_root}/check-update.json"
+          python - "${tool_root}/check-update.json" "$expected_version" <<'PY'
+          import json
+          import sys
+
+          data = json.load(open(sys.argv[1]))
+          expected = sys.argv[2]
+          assert data["current_version"] == expected, data
+          assert data["latest_version"] == expected, data
+          assert data["update_available"] is False, data
+          assert data["remote_version_url"].startswith("file://"), data
+          PY

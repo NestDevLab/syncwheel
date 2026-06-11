@@ -10,6 +10,7 @@
   git checkouts, uv tool installs, and plain script execution.
 - Teach uv tool installs to check the upstream `VERSION` file directly and
   update with uv.
+- Add CI coverage for editable and git-sourced uv tool install modes.
 
 ## 0.17.0 - 2026-05-13
 
