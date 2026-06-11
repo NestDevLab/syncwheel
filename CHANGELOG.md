@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.18.0 - 2026-06-10
+
+- Add uv packaging with a `syncwheel` console script while preserving direct
+  `python3 scripts/syncwheel.py ...` execution.
+- Add an idempotent `scripts/install.sh` for production uv installs and
+  editable development installs.
+- Extend `self status`, `self check-update`, and `self update` to distinguish
+  git checkouts, uv tool installs, and plain script execution.
+- Teach uv tool installs to check the upstream `VERSION` file directly and
+  update with uv.
+- Add CI coverage for editable and git-sourced uv tool install modes.
+
 ## 0.17.0 - 2026-05-13
 
 - Add a segmented append-only ledger under `.syncwheel/ledger/` with a replayed

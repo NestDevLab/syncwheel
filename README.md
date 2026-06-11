@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.14.0`
+Current version: `0.18.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -193,11 +193,40 @@ Practical meaning:
 
 ## Install
 
-No package install is required. The tool is a single Python script.
-
 Requirements:
 - Python 3.11+
 - Git
+- uv 0.10+ for PATH-based installs
+
+Recommended production install:
+
+```bash
+uv tool install "git+https://github.com/NestDevLab/syncwheel"
+```
+
+Development editable install from a local checkout:
+
+```bash
+uv tool install --editable .
+```
+
+Installer script:
+
+```bash
+scripts/install.sh
+scripts/install.sh --editable /path/to/syncwheel
+```
+
+If `uv` is not installed, `scripts/install.sh` exits with instructions by
+default. To explicitly let the installer bootstrap uv with the official
+astral.sh installer, pass `--with-uv`.
+
+Legacy checkout execution remains supported for pinned submodules, vendored
+checkouts, and existing scripts:
+
+```bash
+python3 scripts/syncwheel.py --help
+```
 
 ## Self update, notifications, and AI-safe visibility
 
@@ -205,19 +234,22 @@ Syncwheel now includes a built-in install/update channel so humans and AI agents
 can notice new releases instead of silently drifting.
 
 - default mode: `notify`
-- automatic notice is emitted on normal syncwheel usage when the local install is
-  behind its upstream branch
+- automatic notice is emitted on normal syncwheel usage when the local install
+  is behind the configured update source
+- git-checkout installs update with the existing `git fetch` plus fast-forward
+  merge flow
+- uv tool installs update with `uv tool upgrade syncwheel`
 - manual inspection:
 
 ```bash
-python3 scripts/syncwheel.py self status
-python3 scripts/syncwheel.py self check-update --fetch
+syncwheel self status
+syncwheel self check-update --fetch
 ```
 
 - manual update:
 
 ```bash
-python3 scripts/syncwheel.py self update
+syncwheel self update
 ```
 
 - update policy:
@@ -229,23 +261,42 @@ python3 scripts/syncwheel.py self mode off
 ```
 
 `auto` tries a safe fast-forward self-update when a newer upstream version is
-detected. If the syncwheel checkout is dirty or detached, syncwheel falls back
-to a visible notice instead of mutating it unsafely.
+detected for git-checkout installs and runs the uv tool updater for uv installs.
+If a git checkout is dirty or detached, syncwheel falls back to a visible notice
+instead of mutating it unsafely.
+
+For uv installs, `self check-update` reads the upstream `VERSION` file directly
+instead of requiring a local git checkout. Advanced wrappers can override the
+version source with `SYNCWHEEL_REMOTE_VERSION_URL` and the installer/update
+source label with `SYNCWHEEL_UV_TOOL_SOURCE`.
 
 ## Installation and adoption modes
 
-1. **Global toolkit (recommended)**
-   - Clone `syncwheel` once in a stable location.
-   - Run it against target repos via `-r/--repo` using either paths or aliases.
-   - Best when you want one central install to keep updated.
+1. **uv production tool (recommended for normal hosts)**
+   - Run `uv tool install "git+https://github.com/NestDevLab/syncwheel"`.
+   - The `syncwheel` executable is placed on PATH when uv's tool bin directory
+     is configured in the shell.
+   - `syncwheel self update` uses uv to upgrade the installed tool.
 
-2. **Git submodule**
+2. **uv editable development tool (recommended for syncwheel development)**
+   - Clone `syncwheel` once in a stable location.
+   - Run `uv tool install --editable /path/to/syncwheel`.
+   - The `syncwheel` executable reflects local source edits immediately.
+   - `syncwheel self update` treats the checkout as a git install and uses the
+     existing fast-forward flow against the clone's upstream.
+
+3. **Git submodule**
    - Add `syncwheel` as a submodule inside each target repo.
    - Good when each project must pin an explicit syncwheel version.
+   - Invoke it with `python3 path/to/syncwheel/scripts/syncwheel.py ...`.
+   - Self-update status works for detached submodule-style checkouts; updating
+     remains controlled by the parent repository's submodule policy.
 
-3. **Vendored script**
+4. **Vendored checkout or script**
    - Copy `scripts/syncwheel.py` into a project.
    - Fastest for experiments, but updates are manual.
+   - `self status` reports `install_kind: script` when no git checkout or uv
+     tool environment is detected.
 
 ## Repo aliases
 

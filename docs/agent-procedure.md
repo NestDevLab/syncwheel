@@ -57,6 +57,15 @@ Given one of those prompts, the agent should:
   is used.
 - If the repo uses GitHub, validate publication state after branch rebuilds.
 - If the manifest and Git disagree, fix the manifest or name the conflict explicitly.
+- **A rebuild reconstructs a branch from the manifest's commit projection, NOT from the
+  branch's current remote tip.** If the manifest points at a pre-cleanup commit (or a
+  range that misses a later fix), `stack rebuild` / `int rebuild` will silently **revert
+  that work** — the rebuilt branch force-pushes back to the older state and the cleanup
+  disappears. This is a real regression mode, not hypothetical. **Guard against it:**
+  after every rebuild/sync/publish, diff the rebuilt branch against the expected
+  post-cleanup state and confirm earlier fixes did not regress; keep the manifest current
+  with `stack set <id> <rev-or-range>` pointing at the post-cleanup commit BEFORE rebuilding,
+  so the projection includes the latest work.
 
 ## Suggested human/AI split
 
