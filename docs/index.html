@@ -1,0 +1,1792 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Work from one branch; syncwheel projects it into many clean, rebuildable PR branches from one manifest — deterministic, multi-device, multi-agent-safe.">
+  <title>syncwheel — One branch. Many PRs.</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='none' stroke='%2310b981' stroke-width='6'/%3E%3Ccircle cx='32' cy='32' r='8' fill='%2338bdf8'/%3E%3Cpath d='M32 6v18M32 40v18M6 32h18M40 32h18' stroke='%2310b981' stroke-width='5'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1117;
+      --panel: #111827;
+      --panel-2: #151b26;
+      --text: #f8fafc;
+      --muted: #9ca3af;
+      --line: rgba(148, 163, 184, 0.2);
+      --emerald: #10b981;
+      --teal: #14b8a6;
+      --mint: #34d399;
+      --sky: #38bdf8;
+      --amber: #f59e0b;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.36);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 12%, rgba(16, 185, 129, 0.16), transparent 28rem),
+        radial-gradient(circle at 82% 18%, rgba(56, 189, 248, 0.14), transparent 26rem),
+        linear-gradient(180deg, #0d1117 0%, #0b0f16 100%);
+      color: var(--text);
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    [hidden] {
+      display: none !important;
+    }
+
+    .wrap {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      padding: 20px 0;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .brand svg {
+      width: 38px;
+      height: 38px;
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .hero {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+      padding: 34px 0 36px;
+    }
+
+    .hero-logo {
+      width: clamp(96px, 14vw, 124px);
+      height: auto;
+      margin: 0 0 16px;
+      filter: drop-shadow(0 18px 48px rgba(16, 185, 129, 0.22));
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(17, 24, 39, 0.72);
+      color: #cbd5e1;
+      font-size: 13px;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--emerald);
+      box-shadow: 0 0 24px var(--emerald);
+    }
+
+    h1 {
+      max-width: 920px;
+      margin: 16px 0 14px;
+      font-size: clamp(44px, 5.2vw, 72px);
+      line-height: 1.04;
+      letter-spacing: 0;
+      text-wrap: balance;
+    }
+
+    .title-line {
+      display: block;
+      line-height: 1.12;
+      white-space: nowrap;
+    }
+
+    .accent {
+      display: inline-block;
+      padding-bottom: 0.18em;
+      margin-bottom: -0.08em;
+      color: #34d399;
+    }
+
+    .accent-sky {
+      color: #38bdf8;
+    }
+
+    .subhead {
+      max-width: 680px;
+      margin: 0 auto;
+      color: #cbd5e1;
+      font-size: clamp(18px, 2.2vw, 22px);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 14px;
+      margin-top: 24px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 46px;
+      padding: 0 18px;
+      border-radius: 8px;
+      border: 1px solid transparent;
+      font-weight: 700;
+      font-size: 15px;
+    }
+
+    .button.primary {
+      background: linear-gradient(135deg, var(--emerald), var(--teal));
+      color: #04211a;
+      box-shadow: 0 14px 38px rgba(16, 185, 129, 0.32);
+    }
+
+    .button.secondary {
+      border-color: var(--line);
+      background: rgba(17, 24, 39, 0.72);
+      color: #e5e7eb;
+    }
+
+    /* ---------- diagrams: shared ---------- */
+
+    svg text {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .diagram-scroller {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(2, 6, 23, 0.55);
+      box-shadow: var(--shadow);
+    }
+
+    .diagram-scroller svg {
+      display: block;
+      width: 100%;
+      min-width: 640px;
+      height: auto;
+    }
+
+    .diagram-caption {
+      margin: 14px auto 0;
+      max-width: 680px;
+      text-align: center;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .hero-diagram {
+      margin: 0 0 64px;
+    }
+
+    .hero-diagram svg {
+      aspect-ratio: 960 / 400;
+    }
+
+    section {
+      padding: 36px 0;
+    }
+
+    .section-title {
+      max-width: 760px;
+      margin: 0 0 10px;
+      font-size: clamp(28px, 4vw, 42px);
+      line-height: 1.08;
+      letter-spacing: 0;
+    }
+
+    .section-lead {
+      max-width: 720px;
+      margin: 0 0 26px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .section-lead a {
+      color: #6ee7b7;
+    }
+
+    /* ---------- hero diagram animation ---------- */
+
+    .spoke {
+      stroke-dasharray: 5 7;
+      animation: spoke-flow 2.6s linear infinite;
+    }
+
+    @keyframes spoke-flow {
+      to { stroke-dashoffset: -48; }
+    }
+
+    .hub-pulse {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: hub-pulse 9s ease-in-out infinite;
+    }
+
+    @keyframes hub-pulse {
+      0%, 30%, 60%, 100% { transform: scale(1); }
+      42% { transform: scale(1.05); }
+      52% { transform: scale(1); }
+    }
+
+    .int-new { opacity: 0; animation: pop-early 9s ease-out infinite; }
+    .up-new-1 { opacity: 0; animation: pop-mid 9s ease-out infinite; }
+    .up-new-2 { opacity: 0; animation: pop-late 9s ease-out infinite; }
+    .pr-new { opacity: 0; animation: pop-rebuild 9s ease-out infinite; }
+
+    @keyframes pop-early {
+      0%, 4% { opacity: 0; }
+      10%, 100% { opacity: 1; }
+    }
+
+    @keyframes pop-mid {
+      0%, 16% { opacity: 0; }
+      22%, 100% { opacity: 1; }
+    }
+
+    @keyframes pop-late {
+      0%, 50% { opacity: 0; }
+      56%, 100% { opacity: 1; }
+    }
+
+    @keyframes pop-rebuild {
+      0%, 56% { opacity: 0; }
+      64%, 96% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    .drift {
+      opacity: 0;
+      animation: drift-blink 9s ease-in-out infinite;
+    }
+
+    @keyframes drift-blink {
+      0%, 8% { opacity: 0; }
+      16%, 40% { opacity: 1; }
+      52%, 100% { opacity: 0; }
+    }
+
+    .lane-dots {
+      animation: rebase 9s ease-in-out infinite;
+    }
+
+    @keyframes rebase {
+      0%, 46% { transform: translateX(0); }
+      58%, 94% { transform: translateX(26px); }
+      100% { transform: translateX(0); }
+    }
+
+    .remote-check {
+      opacity: 0;
+      animation: remote-tick 9s ease-in-out infinite;
+    }
+
+    @keyframes remote-tick {
+      0%, 66% { opacity: 0; }
+      74%, 94% { opacity: 1; }
+      100% { opacity: 0; }
+    }
+
+    /* ---------- story: before / after ---------- */
+
+    .story-flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr;
+      gap: 14px;
+      align-items: center;
+      margin-top: 18px;
+    }
+
+    .story-panel {
+      margin: 0;
+      padding: 16px 16px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(17, 24, 39, 0.72);
+    }
+
+    .story-panel svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 420 / 260;
+    }
+
+    .story-panel figcaption {
+      margin-top: 10px;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .story-panel figcaption strong {
+      display: block;
+      color: #f8fafc;
+      font-size: 15px;
+      margin-bottom: 2px;
+    }
+
+    .story-arrow {
+      color: var(--emerald);
+      font: 700 15px/1.2 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .tangle {
+      animation: jitter 1.9s steps(2, end) infinite;
+    }
+
+    @keyframes jitter {
+      0%, 100% { transform: translate(0, 0); }
+      25% { transform: translate(0.8px, -0.6px); }
+      50% { transform: translate(-0.6px, 0.8px); }
+      75% { transform: translate(0.5px, 0.5px); }
+    }
+
+    /* ---------- lifecycle stepper ---------- */
+
+    .stepper {
+      display: grid;
+      grid-template-columns: minmax(0, 0.82fr) minmax(0, 1.18fr);
+      gap: 12px;
+      margin: 4px 0 18px;
+    }
+
+    .step-group {
+      position: relative;
+      min-width: 0;
+      padding: 30px 12px 12px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(17, 24, 39, 0.58);
+      transition: border-color 0.25s, background 0.25s, box-shadow 0.25s;
+    }
+
+    .stepper[data-phase="setup"] .setup-group,
+    .stepper[data-phase="loop"] .loop-group {
+      border-color: rgba(16, 185, 129, 0.58);
+      background: linear-gradient(180deg, rgba(16, 185, 129, 0.12), rgba(17, 24, 39, 0.62));
+      box-shadow: 0 0 28px rgba(16, 185, 129, 0.12);
+    }
+
+    .stepper-label {
+      position: absolute;
+      top: 10px;
+      left: 12px;
+      color: #7dd3fc;
+      font: 800 11px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: 0;
+      text-transform: uppercase;
+    }
+
+    .step-tabs {
+      display: grid;
+      gap: 8px;
+    }
+
+    .setup-tabs {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+
+    .loop-tabs {
+      position: relative;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    .loop-tabs::before {
+      content: "";
+      position: absolute;
+      z-index: 0;
+      top: 50%;
+      left: 8%;
+      right: 8%;
+      height: 2px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(16, 185, 129, 0.18), rgba(52, 211, 153, 0.78), rgba(56, 189, 248, 0.2));
+      opacity: 0.48;
+      transform: translateY(-50%);
+      transition: opacity 0.25s;
+    }
+
+    .stepper[data-phase="loop"] .loop-tabs::before {
+      opacity: 0.82;
+    }
+
+    .stepper button {
+      appearance: none;
+      cursor: pointer;
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      min-height: 42px;
+      padding: 0 10px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: rgba(17, 24, 39, 0.72);
+      color: #cbd5e1;
+      font: 700 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+      transition: border-color 0.25s, color 0.25s, background 0.25s, box-shadow 0.25s;
+    }
+
+    .stepper button:hover {
+      border-color: rgba(16, 185, 129, 0.45);
+      color: #e5e7eb;
+    }
+
+    .stepper button:focus-visible {
+      outline: 2px solid var(--sky);
+      outline-offset: 2px;
+    }
+
+    .stepper button[aria-selected="true"] {
+      border-color: rgba(16, 185, 129, 0.65);
+      background: rgba(16, 185, 129, 0.12);
+      color: #a7f3d0;
+      box-shadow: 0 0 24px rgba(16, 185, 129, 0.18);
+    }
+
+    .loop-return {
+      display: block;
+      width: 100%;
+      height: 36px;
+      margin-top: 5px;
+      overflow: visible;
+      pointer-events: none;
+    }
+
+    .loop-return .return-line,
+    .loop-return .return-head {
+      fill: none;
+      stroke: rgba(148, 163, 184, 0.62);
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      transition: stroke 0.25s, opacity 0.25s;
+    }
+
+    .loop-return .return-line {
+      stroke-width: 2;
+      stroke-dasharray: 8 9;
+    }
+
+    .loop-return .return-head {
+      stroke-width: 2.4;
+    }
+
+    .stepper[data-phase="loop"] .loop-return .return-line,
+    .stepper[data-phase="loop"] .loop-return .return-head {
+      stroke: #34d399;
+      opacity: 0.92;
+    }
+
+    .stepper.is-wrapping .loop-return .return-line {
+      animation: loop-return-flow 0.9s ease;
+    }
+
+    .stepper.is-wrapping .loop-return .return-head {
+      animation: loop-return-pop 0.9s ease;
+    }
+
+    @keyframes loop-return-flow {
+      0% { stroke-dashoffset: 34; opacity: 0.28; }
+      45% { stroke-dashoffset: 0; opacity: 1; filter: drop-shadow(0 0 10px rgba(52, 211, 153, 0.62)); }
+      100% { stroke-dashoffset: -10; opacity: 0.92; }
+    }
+
+    @keyframes loop-return-pop {
+      0%, 20% { opacity: 0.35; transform: translateY(0); }
+      45% { opacity: 1; transform: translateY(-1px); filter: drop-shadow(0 0 8px rgba(52, 211, 153, 0.62)); }
+      100% { opacity: 0.92; transform: translateY(0); }
+    }
+
+    @media (max-width: 1100px) {
+      .stepper {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .step-group {
+        padding: 30px 10px 10px;
+      }
+
+      .setup-tabs,
+      .loop-tabs {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .stepper button {
+        min-height: 40px;
+        padding: 0 8px;
+        font-size: 12.5px;
+      }
+
+      .loop-return {
+        height: 30px;
+      }
+    }
+
+    .stage svg {
+      aspect-ratio: 960 / 400;
+      min-width: 640px;
+    }
+
+    .stage .g {
+      opacity: 0;
+      transition: opacity 0.45s ease;
+    }
+
+    .stage[data-step="declare"] .g-declare,
+    .stage[data-step="integrate"] .g-integrate,
+    .stage[data-step="absorb"] .g-absorb,
+    .stage[data-step="reconcile"] .g-reconcile,
+    .stage[data-step="sync"] .g-sync,
+    .stage[data-step="publish"] .g-publish,
+    .stage[data-step="resume"] .g-resume {
+      opacity: 1;
+    }
+
+    .manifest-wheel-rim {
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+
+    .stage[data-step="reconcile"] .manifest-wheel-rim,
+    .stage[data-step="sync"] .manifest-wheel-rim,
+    .stage[data-step="publish"] .manifest-wheel-rim,
+    .stage[data-step="resume"] .manifest-wheel-rim {
+      animation: manifest-wheel-spin 3.6s linear infinite;
+    }
+
+    @keyframes manifest-wheel-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .stage[data-step="reconcile"] .scanbeam {
+      animation: scan 4s linear infinite;
+    }
+
+    @keyframes scan {
+      from { transform: translateX(0); }
+      to { transform: translateX(620px); }
+    }
+
+    .stage[data-step="publish"] .remote-mini {
+      opacity: 1;
+    }
+
+    .cast-dots {
+      transition: opacity 0.45s ease;
+    }
+
+    .stage[data-step="sync"] .cast-dots {
+      opacity: 0.25;
+    }
+
+    .g-int-fill {
+      transition: opacity 0.45s ease;
+    }
+
+    .stage[data-step="declare"] .g-int-fill {
+      opacity: 0.12;
+    }
+
+    .remote-mini {
+      opacity: 0.35;
+      transition: opacity 0.45s ease;
+    }
+
+    .lifecycle-panels {
+      margin-top: 16px;
+      min-height: 96px;
+    }
+
+    .lifecycle-panels [role="tabpanel"] {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 12px 18px;
+    }
+
+    .lifecycle-panels + .lifecycle-panels,
+    .lifecycle-panels [role="tabpanel"] + [role="tabpanel"] {
+      margin-top: 10px;
+    }
+
+    .cmd {
+      display: inline-block;
+      padding: 8px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(2, 6, 23, 0.72);
+      color: #d1fae5;
+      font: 13.5px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      white-space: nowrap;
+    }
+
+    .cmd .prompt {
+      color: var(--emerald);
+    }
+
+    .lifecycle-panels p {
+      margin: 0;
+      color: #cbd5e1;
+      font-size: 15px;
+      max-width: 560px;
+    }
+
+    .lifecycle-panels p code {
+      color: #d1fae5;
+      font-size: 0.92em;
+    }
+
+    /* ---------- concept cards ---------- */
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: linear-gradient(180deg, rgba(17, 24, 39, 0.88), rgba(15, 23, 42, 0.66));
+      transition: transform 0.25s ease, border-color 0.25s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: rgba(16, 185, 129, 0.4);
+    }
+
+    .card svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 220 / 120;
+      margin-bottom: 14px;
+      border-radius: 8px;
+      background: rgba(2, 6, 23, 0.5);
+    }
+
+    .card h3 {
+      margin: 0 0 6px;
+      font-size: 16.5px;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    /* concept hover micro-interactions */
+
+    .c-aligned { opacity: 0.3; transition: opacity 0.5s ease; }
+    .c-scatter { opacity: 1; transition: opacity 0.5s ease; }
+    .card:hover .c-aligned { opacity: 1; }
+    .card:hover .c-scatter { opacity: 0.2; }
+
+    .c-spin {
+      transform-box: fill-box;
+      transform-origin: center;
+      transition: transform 0.9s ease;
+    }
+    .card:hover .c-spin { transform: rotate(360deg); }
+    .c2-int { transition: opacity 0.5s ease; }
+    .card:hover .c2-int { animation: rebuild-pulse 1.3s ease; }
+
+    @keyframes rebuild-pulse {
+      0% { opacity: 1; }
+      35% { opacity: 0.1; }
+      100% { opacity: 1; }
+    }
+
+    .c3-hunk { transition: transform 0.55s cubic-bezier(0.22, 0.9, 0.36, 1); }
+    .card:hover .c3-h1 { transform: translateY(-66px); }
+    .card:hover .c3-h2 { transform: translateY(-38px); }
+    .card:hover .c3-h3 { transform: translateY(-66px); }
+
+    .c4-new { opacity: 0; transition: opacity 0.45s ease 0.15s; }
+    .card:hover .c4-new { opacity: 1; }
+
+    /* ---------- agents strip ---------- */
+
+    .agents-strip {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 18px 26px;
+      padding: 20px 22px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: rgba(17, 24, 39, 0.72);
+    }
+
+    .agents-strip svg {
+      width: 150px;
+      height: auto;
+      flex: none;
+    }
+
+    .agents-strip p {
+      margin: 0;
+      flex: 1 1 320px;
+      color: #cbd5e1;
+      font-size: 16px;
+    }
+
+    .agents-links {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      font-weight: 700;
+      font-size: 14px;
+    }
+
+    .agents-links a {
+      color: #6ee7b7;
+    }
+
+    /* ---------- docs ---------- */
+
+    .docs-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 10px;
+    }
+
+    .doc-link {
+      min-height: 108px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(17, 24, 39, 0.72);
+      transition: border-color 0.25s ease, transform 0.25s ease;
+    }
+
+    .doc-link:hover {
+      border-color: rgba(16, 185, 129, 0.4);
+      transform: translateY(-2px);
+    }
+
+    .doc-link strong {
+      display: block;
+      margin-bottom: 8px;
+      color: #f8fafc;
+    }
+
+    .doc-link span {
+      display: block;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    /* ---------- get started ---------- */
+
+    .code {
+      margin: 0 0 26px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(2, 6, 23, 0.7);
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .codebar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 13px 16px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .light {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #334155;
+    }
+
+    pre {
+      margin: 0;
+      padding: 22px;
+      overflow-x: auto;
+      color: #d1fae5;
+      font: 14px/1.7 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      text-align: left;
+      white-space: pre;
+    }
+
+    pre .prompt {
+      color: var(--emerald);
+    }
+
+    .muted {
+      color: #94a3b8;
+    }
+
+    .inline-note {
+      max-width: 780px;
+      margin: 4px 0 0;
+      color: #cbd5e1;
+      font-size: 15px;
+    }
+
+    .inline-note code {
+      color: #d1fae5;
+      background: rgba(2, 6, 23, 0.72);
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 2px 5px;
+    }
+
+    .inline-note a {
+      color: #6ee7b7;
+    }
+
+    footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      padding: 48px 0 38px;
+      color: var(--muted);
+      font-size: 14px;
+      border-top: 1px solid var(--line);
+      margin-top: 48px;
+    }
+
+    footer a {
+      color: #cbd5e1;
+    }
+
+    /* ---------- responsive ---------- */
+
+    @media (max-width: 1000px) {
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 900px) {
+      .hero {
+        padding-top: 30px;
+      }
+
+      .nav {
+        flex-wrap: wrap;
+        row-gap: 10px;
+      }
+
+      .hero-logo {
+        width: 100px;
+      }
+
+      .docs-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .story-flow {
+        grid-template-columns: 1fr;
+      }
+
+      .story-arrow {
+        transform: rotate(90deg);
+        justify-self: center;
+        padding: 6px 0;
+      }
+    }
+
+    @media (max-width: 560px) {
+      .wrap {
+        width: min(100% - 28px, 1120px);
+      }
+
+      header,
+      footer {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .nav {
+        flex-wrap: wrap;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      h1 {
+        font-size: clamp(34px, 10.5vw, 48px);
+      }
+
+      .docs-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    /* ---------- reduced motion: calm, final-state frames ---------- */
+
+    @media (prefers-reduced-motion: reduce) {
+      .hero-diagram *,
+      .story-panel *,
+      .stage *,
+      .stepper *,
+      .stepper,
+      .card *,
+      .card {
+        animation: none !important;
+        transition: none !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <a class="brand" href="./" aria-label="syncwheel home">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <circle cx="32" cy="32" r="26" fill="none" stroke="#10b981" stroke-width="6"/>
+          <circle cx="32" cy="32" r="8" fill="#38bdf8"/>
+          <path d="M32 6v18M32 40v18M6 32h18M40 32h18" stroke="#10b981" stroke-width="5"/>
+        </svg>
+        <span>syncwheel</span>
+      </a>
+      <nav class="nav" aria-label="Primary">
+        <a href="#story">Story</a>
+        <a href="#lifecycle">Lifecycle</a>
+        <a href="#concepts">Concepts</a>
+        <a href="#agents">Agents</a>
+        <a href="#docs">Docs</a>
+        <a href="#get-started">Get started</a>
+        <a href="https://github.com/NestDevLab/syncwheel">GitHub</a>
+      </nav>
+    </header>
+
+    <main>
+      <section class="hero">
+        <svg class="hero-logo" viewBox="0 0 64 64" aria-hidden="true">
+          <circle cx="32" cy="32" r="26" fill="none" stroke="#10b981" stroke-width="5"/>
+          <circle cx="32" cy="32" r="8" fill="#38bdf8"/>
+          <path d="M32 6v18M32 40v18M6 32h18M40 32h18M14 14l13 13M37 37l13 13M50 14L37 27M27 37L14 50" stroke="#10b981" stroke-width="4"/>
+        </svg>
+        <div>
+          <span class="eyebrow"><span class="dot"></span> v0.18 — reconcile · resume · ledger</span>
+          <h1><span class="title-line">One branch.</span><span class="title-line accent"><span class="accent-sky">Many</span> PRs.</span></h1>
+          <p class="subhead">Hack in one place. Syncwheel rebuilds, reconciles, and publishes every PR branch from one declared manifest.</p>
+          <div class="actions">
+            <a class="button primary" href="#get-started">Get started</a>
+            <a class="button secondary" href="https://github.com/NestDevLab/syncwheel">GitHub repo</a>
+            <a class="button secondary" href="#docs">Read the docs</a>
+          </div>
+        </div>
+      </section>
+
+      <div class="hero-diagram">
+        <div class="diagram-scroller">
+          <svg viewBox="0 0 960 400" role="img" aria-labelledby="hero-d-title hero-d-desc">
+            <title id="hero-d-title">How syncwheel works</title>
+            <desc id="hero-d-desc">You commit on one working branch. The syncwheel manifest, drawn as a wheel hub, projects that work into three clean pr branches that are pushed to the remote, while upstream keeps moving.</desc>
+
+            <!-- upstream lane -->
+            <text x="46" y="32" font-size="13" fill="#7dd3fc">upstream/main</text>
+            <line x1="40" y1="52" x2="920" y2="52" stroke="#38bdf8" stroke-width="3" stroke-linecap="round" opacity="0.85"/>
+            <g fill="#38bdf8">
+              <circle cx="110" cy="52" r="6.5"/>
+              <circle cx="230" cy="52" r="6.5"/>
+              <circle cx="350" cy="52" r="6.5"/>
+              <circle cx="470" cy="52" r="6.5"/>
+              <circle cx="590" cy="52" r="6.5"/>
+              <circle cx="700" cy="52" r="6.5"/>
+              <circle class="up-new-1" cx="790" cy="52" r="6.5"/>
+              <circle class="up-new-2" cx="860" cy="52" r="6.5"/>
+            </g>
+
+            <!-- working lane: main-integration -->
+            <text x="46" y="190" font-size="13" fill="#a7f3d0">main-integration</text>
+            <line x1="40" y1="215" x2="252" y2="215" stroke="#34d399" stroke-width="4" stroke-linecap="round"/>
+            <text x="46" y="248" font-size="11.5" fill="#64748b">where you work · all PRs together</text>
+            <circle cx="78" cy="215" r="6.5" fill="#10b981"/>
+            <circle cx="126" cy="215" r="6.5" fill="#14b8a6"/>
+            <circle cx="174" cy="215" r="6.5" fill="#34d399"/>
+            <circle class="int-new" cx="222" cy="215" r="6.5" fill="#10b981"/>
+            <line x1="252" y1="215" x2="278" y2="215" stroke="#34d399" stroke-width="2" stroke-dasharray="3 5"/>
+
+            <!-- manifest hub -->
+            <g class="hub-pulse">
+              <circle cx="332" cy="215" r="50" fill="rgba(16,185,129,0.06)" stroke="#10b981" stroke-width="5"/>
+              <path d="M332 165v100M282 215h100M296.6 179.6l70.8 70.8M296.6 250.4l70.8-70.8" stroke="#10b981" stroke-width="4"/>
+              <circle cx="332" cy="215" r="13" fill="#38bdf8"/>
+            </g>
+            <text x="318" y="316" font-size="12.5" fill="#6ee7b7" text-anchor="middle">.syncwheel/manifest.json</text>
+
+            <!-- spokes hub -> pr lanes -->
+            <path class="spoke" d="M378 198 C414 188 406 130 442 130" fill="none" stroke="#14b8a6" stroke-width="2"/>
+            <path class="spoke" d="M382 215 L442 215" fill="none" stroke="#14b8a6" stroke-width="2"/>
+            <path class="spoke" d="M378 232 C414 242 406 300 442 300" fill="none" stroke="#14b8a6" stroke-width="2"/>
+
+            <!-- pr/feature-a -->
+            <text x="446" y="110" font-size="12.5" fill="#6ee7b7">pr/feature-a</text>
+            <line x1="442" y1="130" x2="830" y2="130" stroke="#10b981" stroke-width="3" stroke-linecap="round"/>
+            <g class="lane-dots" fill="#10b981">
+              <circle cx="500" cy="130" r="6.5"/>
+              <circle cx="560" cy="130" r="6.5"/>
+              <circle cx="620" cy="130" r="6.5"/>
+              <circle cx="680" cy="130" r="6.5"/>
+              <circle class="pr-new" cx="740" cy="130" r="6.5"/>
+            </g>
+
+            <!-- pr/feature-b -->
+            <text x="446" y="195" font-size="12.5" fill="#5eead4">pr/feature-b</text>
+            <line x1="442" y1="215" x2="830" y2="215" stroke="#14b8a6" stroke-width="3" stroke-linecap="round"/>
+            <g class="lane-dots" fill="#14b8a6">
+              <circle cx="510" cy="215" r="6.5"/>
+              <circle cx="575" cy="215" r="6.5"/>
+              <circle cx="640" cy="215" r="6.5"/>
+              <circle class="pr-new" cx="705" cy="215" r="6.5"/>
+            </g>
+
+            <!-- pr/hotfix-c -->
+            <text x="446" y="280" font-size="12.5" fill="#a7f3d0">pr/hotfix-c</text>
+            <line x1="442" y1="300" x2="830" y2="300" stroke="#34d399" stroke-width="3" stroke-linecap="round"/>
+            <g class="lane-dots" fill="#34d399">
+              <circle cx="505" cy="300" r="6.5"/>
+              <circle cx="570" cy="300" r="6.5"/>
+              <circle cx="635" cy="300" r="6.5"/>
+            </g>
+
+            <!-- drift badges (appear only mid-animation) -->
+            <g class="drift">
+              <path d="M800 102 l9 16 h-18 z" fill="rgba(245,158,11,0.18)" stroke="#f59e0b" stroke-width="1.5"/>
+              <text x="800" y="116" font-size="11" font-weight="700" fill="#fbbf24" text-anchor="middle">!</text>
+            </g>
+            <g class="drift" style="animation-delay: 0.35s">
+              <path d="M775 187 l9 16 h-18 z" fill="rgba(245,158,11,0.18)" stroke="#f59e0b" stroke-width="1.5"/>
+              <text x="775" y="201" font-size="11" font-weight="700" fill="#fbbf24" text-anchor="middle">!</text>
+            </g>
+
+            <!-- remote chip -->
+            <path d="M830 130 C842 130 840 198 852 198" fill="none" stroke="rgba(148,163,184,0.45)" stroke-width="1.5"/>
+            <path d="M830 215 L852 215" fill="none" stroke="rgba(148,163,184,0.45)" stroke-width="1.5"/>
+            <path d="M830 300 C842 300 840 232 852 232" fill="none" stroke="rgba(148,163,184,0.45)" stroke-width="1.5"/>
+            <rect x="852" y="172" width="88" height="86" rx="10" fill="rgba(2,6,23,0.7)" stroke="rgba(148,163,184,0.3)"/>
+            <text x="896" y="196" font-size="12.5" fill="#cbd5e1" text-anchor="middle">origin</text>
+            <line x1="866" y1="212" x2="926" y2="212" stroke="#10b981" stroke-width="2" opacity="0.6"/>
+            <line x1="866" y1="226" x2="926" y2="226" stroke="#14b8a6" stroke-width="2" opacity="0.6"/>
+            <line x1="866" y1="240" x2="926" y2="240" stroke="#34d399" stroke-width="2" opacity="0.6"/>
+            <g class="remote-check">
+              <circle cx="924" cy="186" r="9" fill="rgba(16,185,129,0.18)" stroke="#10b981" stroke-width="1.5"/>
+              <path d="M919.5 186 l3 3.5 6-7" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </g>
+          </svg>
+        </div>
+        <p class="diagram-caption">You work in one place. Syncwheel projects it into clean PRs.</p>
+      </div>
+
+      <section id="story">
+        <h2 class="section-title">Stop remembering. Start declaring.</h2>
+        <div class="story-flow">
+          <figure class="story-panel">
+            <svg viewBox="0 0 420 260" role="img" aria-label="Hand-maintained branches: tangled lanes, mystery commits, unknown integration state">
+              <g class="tangle">
+                <path d="M30 50 C120 50 150 110 240 110 C300 110 330 70 390 70" fill="none" stroke="#10b981" stroke-width="2.5" opacity="0.75"/>
+                <path d="M30 110 C110 110 140 55 230 55 C300 55 320 130 390 130" fill="none" stroke="#14b8a6" stroke-width="2.5" opacity="0.75"/>
+                <path d="M30 170 C130 170 150 118 250 118 C320 118 340 180 390 180" fill="none" stroke="#34d399" stroke-width="2.5" opacity="0.75"/>
+                <!-- commits on the wrong lanes -->
+                <circle cx="92" cy="51" r="5.5" fill="#14b8a6"/>
+                <circle cx="205" cy="107" r="5.5" fill="#34d399"/>
+                <circle cx="320" cy="78" r="5.5" fill="#10b981"/>
+                <circle cx="120" cy="103" r="5.5" fill="#34d399"/>
+                <circle cx="262" cy="62" r="5.5" fill="#10b981"/>
+                <circle cx="345" cy="140" r="5.5" fill="#14b8a6"/>
+                <circle cx="105" cy="168" r="5.5" fill="#10b981"/>
+                <circle cx="295" cy="124" r="5.5" fill="#14b8a6"/>
+                <circle cx="362" cy="172" r="5.5" fill="#34d399"/>
+              </g>
+              <!-- doubt badges -->
+              <g>
+                <circle cx="237" cy="34" r="10" fill="rgba(245,158,11,0.14)" stroke="#f59e0b" stroke-width="1.5"/>
+                <text x="237" y="39" font-size="12" font-weight="700" fill="#fbbf24" text-anchor="middle">?</text>
+                <circle cx="330" cy="200" r="10" fill="rgba(245,158,11,0.14)" stroke="#f59e0b" stroke-width="1.5"/>
+                <text x="330" y="205" font-size="12" font-weight="700" fill="#fbbf24" text-anchor="middle">?</text>
+              </g>
+              <g>
+                <rect x="44" y="20" width="108" height="22" rx="6" fill="rgba(248,113,113,0.08)" stroke="#f87171"/>
+                <text x="98" y="35" font-size="11" fill="#fca5a5" text-anchor="middle">force-pushed?</text>
+              </g>
+              <!-- mystery integration -->
+              <line x1="30" y1="225" x2="390" y2="225" stroke="#64748b" stroke-width="2.5" stroke-dasharray="6 6" opacity="0.8"/>
+              <circle cx="90" cy="225" r="5.5" fill="#64748b"/>
+              <circle cx="150" cy="225" r="5.5" fill="#64748b"/>
+              <circle cx="230" cy="225" r="5.5" fill="#64748b"/>
+              <circle cx="300" cy="225" r="5.5" fill="#64748b"/>
+              <text x="352" y="230" font-size="13" fill="#94a3b8">???</text>
+            </svg>
+            <figcaption><strong>By hand</strong>Drifted PRs, mystery commits, tribal knowledge.</figcaption>
+          </figure>
+
+          <div class="story-arrow" aria-hidden="true">reconcile →</div>
+
+          <figure class="story-panel">
+            <svg viewBox="0 0 420 260" role="img" aria-label="With syncwheel: a manifest hub feeding three clean parallel branches and a rebuildable integration lane">
+              <!-- mini hub -->
+              <circle cx="52" cy="128" r="22" fill="rgba(16,185,129,0.06)" stroke="#10b981" stroke-width="4"/>
+              <path d="M52 106v44M30 128h44M36.4 112.4l31.2 31.2M36.4 143.6l31.2-31.2" stroke="#10b981" stroke-width="3"/>
+              <circle cx="52" cy="128" r="7" fill="#38bdf8"/>
+              <!-- spokes -->
+              <path d="M70 116 C84 106 84 58 96 58" fill="none" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 5"/>
+              <path d="M74 128 L96 128" fill="none" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 5"/>
+              <path d="M70 140 C84 150 84 198 96 198" fill="none" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 5"/>
+              <!-- clean lanes -->
+              <line x1="96" y1="58" x2="330" y2="58" stroke="#10b981" stroke-width="2.5"/>
+              <circle cx="130" cy="58" r="5.5" fill="#10b981"/>
+              <circle cx="180" cy="58" r="5.5" fill="#10b981"/>
+              <circle cx="230" cy="58" r="5.5" fill="#10b981"/>
+              <circle cx="280" cy="58" r="5.5" fill="#10b981"/>
+              <line x1="96" y1="128" x2="330" y2="128" stroke="#14b8a6" stroke-width="2.5"/>
+              <circle cx="130" cy="128" r="5.5" fill="#14b8a6"/>
+              <circle cx="180" cy="128" r="5.5" fill="#14b8a6"/>
+              <circle cx="230" cy="128" r="5.5" fill="#14b8a6"/>
+              <line x1="96" y1="198" x2="330" y2="198" stroke="#34d399" stroke-width="2.5"/>
+              <circle cx="130" cy="198" r="5.5" fill="#34d399"/>
+              <circle cx="180" cy="198" r="5.5" fill="#34d399"/>
+              <circle cx="230" cy="198" r="5.5" fill="#34d399"/>
+              <!-- green checks -->
+              <g>
+                <circle cx="356" cy="58" r="10" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M351 58 l3.5 4 6.5-8" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="356" cy="128" r="10" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M351 128 l3.5 4 6.5-8" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="356" cy="198" r="10" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M351 198 l3.5 4 6.5-8" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+              <!-- ordered integration: every PR replayed, stack by stack -->
+              <line x1="96" y1="238" x2="330" y2="238" stroke="#475569" stroke-width="2" stroke-dasharray="6 6"/>
+              <line x1="118" y1="238" x2="177" y2="238" stroke="#10b981" stroke-width="9" stroke-linecap="round" opacity="0.3"/>
+              <line x1="188" y1="238" x2="247" y2="238" stroke="#14b8a6" stroke-width="9" stroke-linecap="round" opacity="0.3"/>
+              <line x1="258" y1="238" x2="282" y2="238" stroke="#34d399" stroke-width="9" stroke-linecap="round" opacity="0.3"/>
+              <circle cx="130" cy="238" r="5" fill="#10b981"/>
+              <circle cx="165" cy="238" r="5" fill="#10b981"/>
+              <circle cx="200" cy="238" r="5" fill="#14b8a6"/>
+              <circle cx="235" cy="238" r="5" fill="#14b8a6"/>
+              <circle cx="270" cy="238" r="5" fill="#34d399"/>
+              <text x="213" y="257" font-size="10.5" fill="#64748b" text-anchor="middle">= every PR, in order</text>
+              <text x="344" y="242" font-size="11" fill="#64748b">rebuilt</text>
+              <path d="M403 234 a6 6 0 1 1 -4 10 M403 234 l-4 -3 M403 234 l-4.5 2.5" fill="none" stroke="#64748b" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            <figcaption><strong>With syncwheel</strong>Declared stacks, rebuildable branches, one truth.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section id="lifecycle">
+        <h2 class="section-title">Seven moves. One wheel.</h2>
+        <p class="section-lead">Three to set up, four that loop forever — click through, or just watch.</p>
+
+        <div class="stepper" role="tablist" aria-label="Syncwheel lifecycle steps" data-step="declare" data-phase="setup">
+          <div class="step-group setup-group" role="presentation">
+            <span class="stepper-label" aria-hidden="true">setup · once</span>
+            <div class="step-tabs setup-tabs" role="presentation">
+              <button type="button" role="tab" id="tab-declare" aria-controls="panel-declare" aria-selected="true">1 · declare</button>
+              <button type="button" role="tab" id="tab-integrate" aria-controls="panel-integrate" aria-selected="false" tabindex="-1">2 · integrate</button>
+              <button type="button" role="tab" id="tab-absorb" aria-controls="panel-absorb" aria-selected="false" tabindex="-1">3 · absorb</button>
+            </div>
+          </div>
+          <div class="step-group loop-group" role="presentation">
+            <span class="stepper-label" aria-hidden="true">loop · forever</span>
+            <div class="step-tabs loop-tabs" role="presentation">
+              <button type="button" role="tab" id="tab-reconcile" aria-controls="panel-reconcile" aria-selected="false" tabindex="-1">4 · reconcile</button>
+              <button type="button" role="tab" id="tab-sync" aria-controls="panel-sync" aria-selected="false" tabindex="-1">5 · sync</button>
+              <button type="button" role="tab" id="tab-publish" aria-controls="panel-publish" aria-selected="false" tabindex="-1">6 · publish</button>
+              <button type="button" role="tab" id="tab-resume" aria-controls="panel-resume" aria-selected="false" tabindex="-1">7 · resume</button>
+            </div>
+            <svg class="loop-return" viewBox="0 0 240 40" aria-hidden="true" focusable="false">
+              <path class="return-line" d="M214 8 C214 32 26 32 26 8"/>
+              <path class="return-head" d="M26 8 l-7 8 M26 8 l7 8"/>
+            </svg>
+          </div>
+        </div>
+
+        <div class="stage diagram-scroller" data-step="declare" id="lifecycle-stage">
+          <svg viewBox="0 0 960 400" role="img" aria-label="One repository diagram changing state across declare, integrate, absorb, reconcile, sync, publish, and resume">
+            <defs>
+              <marker id="arr" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0 0 L10 5 L0 10 z" fill="#34d399"/>
+              </marker>
+            </defs>
+
+            <!-- cast: manifest hub -->
+            <g class="manifest-wheel-rim">
+              <circle cx="66" cy="200" r="26" fill="rgba(16,185,129,0.06)" stroke="#10b981" stroke-width="4"/>
+              <path d="M66 174v52M40 200h52M47.6 181.6l36.8 36.8M47.6 218.4l36.8-36.8" stroke="#10b981" stroke-width="3"/>
+            </g>
+            <circle cx="66" cy="200" r="8" fill="#38bdf8"/>
+            <text x="66" y="246" font-size="11.5" fill="#6ee7b7" text-anchor="middle">manifest</text>
+
+            <!-- cast: upstream -->
+            <text x="134" y="26" font-size="12" fill="#7dd3fc">upstream/main</text>
+            <line x1="130" y1="44" x2="780" y2="44" stroke="#38bdf8" stroke-width="2.5" stroke-linecap="round" opacity="0.8"/>
+            <g fill="#38bdf8">
+              <circle cx="180" cy="44" r="5.5"/>
+              <circle cx="300" cy="44" r="5.5"/>
+              <circle cx="420" cy="44" r="5.5"/>
+              <circle cx="540" cy="44" r="5.5"/>
+              <circle cx="660" cy="44" r="5.5"/>
+            </g>
+
+            <!-- cast: pr lanes -->
+            <text x="134" y="98" font-size="12" fill="#6ee7b7">pr/feature-a</text>
+            <line x1="130" y1="116" x2="780" y2="116" stroke="#10b981" stroke-width="2.5" stroke-linecap="round"/>
+            <g fill="#10b981" class="cast-dots">
+              <circle cx="210" cy="116" r="5.5"/>
+              <circle cx="290" cy="116" r="5.5"/>
+              <circle cx="370" cy="116" r="5.5"/>
+            </g>
+
+            <text x="134" y="166" font-size="12" fill="#5eead4">pr/feature-b</text>
+            <line x1="130" y1="184" x2="780" y2="184" stroke="#14b8a6" stroke-width="2.5" stroke-linecap="round"/>
+            <g fill="#14b8a6" class="cast-dots">
+              <circle cx="220" cy="184" r="5.5"/>
+              <circle cx="300" cy="184" r="5.5"/>
+              <circle cx="380" cy="184" r="5.5"/>
+            </g>
+
+            <text x="134" y="234" font-size="12" fill="#a7f3d0">pr/feature-c</text>
+            <line x1="130" y1="252" x2="780" y2="252" stroke="#34d399" stroke-width="2.5" stroke-linecap="round"/>
+            <g fill="#34d399">
+              <circle cx="240" cy="252" r="5.5"/>
+              <circle cx="310" cy="252" r="5.5"/>
+            </g>
+
+            <!-- cast: integration -->
+            <text x="134" y="302" font-size="12" fill="#94a3b8">main-integration</text>
+            <text x="264" y="302" font-size="10.5" fill="#475569">· every PR in one branch</text>
+            <line x1="130" y1="324" x2="780" y2="324" stroke="#64748b" stroke-width="2.5" stroke-dasharray="7 6"/>
+            <g class="g-int-fill">
+              <line x1="186" y1="324" x2="274" y2="324" stroke="#10b981" stroke-width="10" stroke-linecap="round" opacity="0.2"/>
+              <line x1="306" y1="324" x2="394" y2="324" stroke="#14b8a6" stroke-width="10" stroke-linecap="round" opacity="0.2"/>
+              <line x1="426" y1="324" x2="454" y2="324" stroke="#34d399" stroke-width="10" stroke-linecap="round" opacity="0.2"/>
+              <circle cx="200" cy="324" r="5.5" fill="#10b981"/>
+              <circle cx="260" cy="324" r="5.5" fill="#10b981"/>
+              <circle cx="320" cy="324" r="5.5" fill="#14b8a6"/>
+              <circle cx="380" cy="324" r="5.5" fill="#14b8a6"/>
+              <circle cx="440" cy="324" r="5.5" fill="#34d399"/>
+            </g>
+
+            <!-- cast: remote -->
+            <rect x="820" y="110" width="116" height="180" rx="10" fill="rgba(2,6,23,0.7)" stroke="rgba(148,163,184,0.3)"/>
+            <text x="878" y="134" font-size="12.5" fill="#cbd5e1" text-anchor="middle">origin</text>
+            <g class="remote-mini">
+              <line x1="838" y1="162" x2="918" y2="162" stroke="#10b981" stroke-width="2"/>
+              <circle cx="858" cy="162" r="4" fill="#10b981"/>
+              <circle cx="884" cy="162" r="4" fill="#10b981"/>
+              <line x1="838" y1="196" x2="918" y2="196" stroke="#14b8a6" stroke-width="2"/>
+              <circle cx="858" cy="196" r="4" fill="#14b8a6"/>
+              <circle cx="884" cy="196" r="4" fill="#14b8a6"/>
+              <line x1="838" y1="230" x2="918" y2="230" stroke="#34d399" stroke-width="2"/>
+              <circle cx="858" cy="230" r="4" fill="#34d399"/>
+              <line x1="838" y1="264" x2="918" y2="264" stroke="#64748b" stroke-width="2" stroke-dasharray="4 4"/>
+              <circle cx="858" cy="264" r="4" fill="#64748b"/>
+            </g>
+
+            <!-- step: declare -->
+            <g class="g g-declare">
+              <path d="M88 188 C112 156 112 116 130 116" fill="none" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 5"/>
+              <path d="M92 198 C112 192 112 184 130 184" fill="none" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 5"/>
+              <path d="M88 212 C112 244 112 252 130 252" fill="none" stroke="#14b8a6" stroke-width="1.5" stroke-dasharray="4 5"/>
+              <rect x="640" y="86" width="152" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
+              <text x="648" y="100" font-size="10.5" fill="#94a3b8">existing PR · adopted</text>
+              <rect x="640" y="154" width="152" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
+              <text x="648" y="168" font-size="10.5" fill="#94a3b8">existing PR · adopted</text>
+              <rect x="640" y="222" width="148" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(16,185,129,0.45)"/>
+              <text x="648" y="236" font-size="10.5" fill="#6ee7b7">created by syncwheel</text>
+            </g>
+
+            <!-- step: integrate -->
+            <g class="g g-integrate">
+              <path d="M210 124 C210 220 226 264 229 312" fill="none" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+              <path d="M300 192 C300 250 348 268 350 312" fill="none" stroke="#5eead4" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+              <path d="M310 260 C330 290 432 288 438 312" fill="none" stroke="#a7f3d0" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+              <text x="490" y="306" font-size="10.5" fill="#64748b">replayed in manifest order</text>
+            </g>
+
+            <!-- step: absorb -->
+            <g class="g g-absorb">
+              <circle cx="480" cy="324" r="5.5" fill="#34d399"/>
+              <circle cx="480" cy="324" r="9.5" fill="none" stroke="#a7f3d0" stroke-width="1.5"/>
+              <circle cx="540" cy="324" r="5.5" fill="#14b8a6"/>
+              <circle cx="540" cy="324" r="9.5" fill="none" stroke="#5eead4" stroke-width="1.5"/>
+              <path d="M480 312 C488 292 494 276 498 260" fill="none" stroke="#a7f3d0" stroke-width="1.8" marker-end="url(#arr)"/>
+              <path d="M540 312 C560 270 590 230 600 192" fill="none" stroke="#5eead4" stroke-width="1.8" marker-end="url(#arr)"/>
+              <text x="608" y="288" font-size="10.5" fill="#5eead4">absorb · to the PR that owns it</text>
+              <circle cx="510" cy="252" r="9.5" fill="none" stroke="#a7f3d0" stroke-width="1.5" stroke-dasharray="3 3"/>
+              <circle cx="612" cy="184" r="9.5" fill="none" stroke="#5eead4" stroke-width="1.5" stroke-dasharray="3 3"/>
+            </g>
+
+            <!-- step: reconcile -->
+            <g class="g g-reconcile">
+              <rect class="scanbeam" x="130" y="66" width="26" height="300" rx="6" fill="rgba(56,189,248,0.10)"/>
+              <g>
+                <path d="M740 88 l9 16 h-18 z" fill="rgba(245,158,11,0.18)" stroke="#f59e0b" stroke-width="1.5"/>
+                <text x="740" y="102" font-size="11" font-weight="700" fill="#fbbf24" text-anchor="middle">!</text>
+                <path d="M740 296 l9 16 h-18 z" fill="rgba(245,158,11,0.18)" stroke="#f59e0b" stroke-width="1.5"/>
+                <text x="740" y="310" font-size="11" font-weight="700" fill="#fbbf24" text-anchor="middle">!</text>
+              </g>
+              <rect x="134" y="356" width="328" height="26" rx="6" fill="rgba(2,6,23,0.72)" stroke="rgba(245,158,11,0.4)"/>
+              <text x="146" y="373" font-size="12" fill="#fcd34d">plan: 2 branches drifted · nothing mutated</text>
+            </g>
+
+            <!-- step: sync -->
+            <g class="g g-sync">
+              <rect x="180" y="54" width="256" height="22" rx="6" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
+              <text x="190" y="69" font-size="11" fill="#94a3b8">backup/pr-feature-a-before-syncwheel</text>
+              <!-- the new base: latest upstream tip -->
+              <line x1="660" y1="52" x2="660" y2="352" stroke="#38bdf8" stroke-width="1.5" stroke-dasharray="5 6" opacity="0.55"/>
+              <text x="668" y="74" font-size="10.5" fill="#7dd3fc">new base</text>
+              <!-- old commits replayed onto the new base, same changes, new SHAs -->
+              <path d="M380 106 C480 56 580 56 678 106" fill="none" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+              <g>
+                <circle cx="694" cy="116" r="5.5" fill="#10b981"/>
+                <circle cx="694" cy="116" r="9.5" fill="none" stroke="#6ee7b7" stroke-width="1.5"/>
+                <circle cx="737" cy="116" r="5.5" fill="#10b981"/>
+                <circle cx="737" cy="116" r="9.5" fill="none" stroke="#6ee7b7" stroke-width="1.5"/>
+                <circle cx="780" cy="116" r="5.5" fill="#10b981"/>
+                <circle cx="780" cy="116" r="9.5" fill="none" stroke="#6ee7b7" stroke-width="1.5"/>
+              </g>
+              <path d="M390 178 C490 148 588 148 682 178" fill="none" stroke="#5eead4" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arr)"/>
+              <g>
+                <circle cx="694" cy="184" r="5.5" fill="#14b8a6"/>
+                <circle cx="694" cy="184" r="9.5" fill="none" stroke="#5eead4" stroke-width="1.5"/>
+                <circle cx="737" cy="184" r="5.5" fill="#14b8a6"/>
+                <circle cx="737" cy="184" r="9.5" fill="none" stroke="#5eead4" stroke-width="1.5"/>
+                <circle cx="780" cy="184" r="5.5" fill="#14b8a6"/>
+                <circle cx="780" cy="184" r="9.5" fill="none" stroke="#5eead4" stroke-width="1.5"/>
+              </g>
+              <!-- worktree chips -->
+              <rect x="420" y="126" width="190" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
+              <text x="430" y="140" font-size="10.5" fill="#94a3b8">worktree ../wt/pr-feature-a</text>
+              <rect x="420" y="194" width="190" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
+              <text x="430" y="208" font-size="10.5" fill="#94a3b8">worktree ../wt/pr-feature-b</text>
+            </g>
+
+            <!-- step: publish -->
+            <g class="g g-publish">
+              <path d="M780 116 C800 116 802 152 816 158" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arr)"/>
+              <path d="M780 184 C800 184 802 192 816 194" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arr)"/>
+              <path d="M780 252 C800 252 802 236 816 232" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arr)"/>
+              <path d="M780 324 C800 324 806 274 816 268" fill="none" stroke="#34d399" stroke-width="2" marker-end="url(#arr)"/>
+              <!-- lease shields -->
+              <g transform="translate(796,104)">
+                <path d="M0 -6 L5.5 -3 V2 C5.5 5.5 0 8 0 8 C0 8 -5.5 5.5 -5.5 2 V-3 Z" fill="rgba(16,185,129,0.16)" stroke="#10b981" stroke-width="1.4"/>
+              </g>
+              <g transform="translate(796,172)">
+                <path d="M0 -6 L5.5 -3 V2 C5.5 5.5 0 8 0 8 C0 8 -5.5 5.5 -5.5 2 V-3 Z" fill="rgba(16,185,129,0.16)" stroke="#10b981" stroke-width="1.4"/>
+              </g>
+              <g transform="translate(796,240)">
+                <path d="M0 -6 L5.5 -3 V2 C5.5 5.5 0 8 0 8 C0 8 -5.5 5.5 -5.5 2 V-3 Z" fill="rgba(16,185,129,0.16)" stroke="#10b981" stroke-width="1.4"/>
+              </g>
+              <g transform="translate(796,312)">
+                <path d="M0 -6 L5.5 -3 V2 C5.5 5.5 0 8 0 8 C0 8 -5.5 5.5 -5.5 2 V-3 Z" fill="rgba(16,185,129,0.16)" stroke="#10b981" stroke-width="1.4"/>
+              </g>
+              <text x="878" y="308" font-size="10.5" fill="#6ee7b7" text-anchor="middle">--force-with-lease</text>
+            </g>
+
+            <!-- step: resume -->
+            <g class="g g-resume">
+              <rect x="700" y="6" width="178" height="32" rx="8" fill="rgba(2,6,23,0.72)" stroke="rgba(56,189,248,0.45)"/>
+              <text x="789" y="27" font-size="11.5" fill="#7dd3fc" text-anchor="middle">second device · agent</text>
+              <path d="M760 40 C700 140 600 260 564 350" fill="none" stroke="#7dd3fc" stroke-width="1.5" stroke-dasharray="4 5" marker-end="url(#arr)"/>
+              <!-- ledger strip -->
+              <rect x="440" y="350" width="180" height="28" rx="6" fill="rgba(2,6,23,0.72)" stroke="rgba(16,185,129,0.4)"/>
+              <text x="452" y="369" font-size="11" fill="#6ee7b7">ledger</text>
+              <line x1="510" y1="356" x2="510" y2="372" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="528" y1="356" x2="528" y2="372" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="546" y1="356" x2="546" y2="372" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="564" y1="356" x2="564" y2="372" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="582" y1="356" x2="582" y2="372" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="600" y1="356" x2="600" y2="372" stroke="#34d399" stroke-width="2"/>
+              <path d="M440 364 C300 364 160 300 92 234" fill="none" stroke="#6ee7b7" stroke-width="1.5" stroke-dasharray="4 5" marker-end="url(#arr)"/>
+              <!-- converged checks -->
+              <g>
+                <circle cx="768" cy="96" r="9" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M763.5 96 l3 3.5 6-7" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="768" cy="164" r="9" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M763.5 164 l3 3.5 6-7" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="768" cy="232" r="9" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M763.5 232 l3 3.5 6-7" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <circle cx="768" cy="300" r="9" fill="rgba(16,185,129,0.12)" stroke="#10b981" stroke-width="1.5"/>
+                <path d="M763.5 300 l3 3.5 6-7" fill="none" stroke="#34d399" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </g>
+            </g>
+          </svg>
+        </div>
+
+        <div class="lifecycle-panels">
+          <div role="tabpanel" id="panel-declare" aria-labelledby="tab-declare">
+            <code class="cmd"><span class="prompt">$</span> syncwheel stack sync feature-a</code>
+            <code class="cmd"><span class="prompt">$</span> syncwheel stack create feature-c</code>
+            <p>Two PRs existed already — declare them in the manifest. The third is born managed.</p>
+          </div>
+          <div role="tabpanel" id="panel-integrate" aria-labelledby="tab-integrate">
+            <code class="cmd"><span class="prompt">$</span> syncwheel int rebuild</code>
+            <p>Every declared commit lands in one integration branch — grouped stack by stack, in manifest order.</p>
+          </div>
+          <div role="tabpanel" id="panel-absorb" aria-labelledby="tab-absorb">
+            <code class="cmd"><span class="prompt">$</span> syncwheel stack absorb feature-b --staged</code>
+            <p>New work lands on integration first — absorb sends each change to the PR that owns it, file by file or hunk by hunk.</p>
+          </div>
+          <div role="tabpanel" id="panel-reconcile" aria-labelledby="tab-reconcile">
+            <code class="cmd"><span class="prompt">$</span> syncwheel reconcile</code>
+            <p>Dry-run: compare manifest, branches, and remote tips. Nothing mutates.</p>
+          </div>
+          <div role="tabpanel" id="panel-sync" aria-labelledby="tab-sync">
+            <code class="cmd"><span class="prompt">$</span> syncwheel sync --worktree-root ../wt</code>
+            <p>Same changes, new commits: each drifted branch is replayed onto the new base — in a worktree, backup first.</p>
+          </div>
+          <div role="tabpanel" id="panel-publish" aria-labelledby="tab-publish">
+            <code class="cmd"><span class="prompt">$</span> syncwheel publish --worktree-root ../wt</code>
+            <p>Push managed branches with <code>--force-with-lease</code>.</p>
+          </div>
+          <div role="tabpanel" id="panel-resume" aria-labelledby="tab-resume">
+            <code class="cmd"><span class="prompt">$</span> syncwheel resume</code>
+            <p>Another device or agent worked? Converge from the ledger.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="concepts">
+        <h2 class="section-title">Four ideas. No magic.</h2>
+        <div class="grid">
+          <article class="card">
+            <svg viewBox="0 0 220 120" aria-hidden="true">
+              <g class="c-scatter" fill="#64748b">
+                <circle cx="20" cy="28" r="5"/>
+                <circle cx="38" cy="72" r="5"/>
+                <circle cx="26" cy="98" r="5"/>
+                <circle cx="52" cy="46" r="5"/>
+                <circle cx="44" cy="16" r="5"/>
+                <circle cx="58" cy="90" r="5"/>
+              </g>
+              <rect x="84" y="36" width="44" height="48" rx="9" fill="rgba(16,185,129,0.08)" stroke="#10b981" stroke-width="2"/>
+              <text x="106" y="67" font-size="17" font-weight="700" fill="#6ee7b7" text-anchor="middle">{ }</text>
+              <g class="c-aligned">
+                <line x1="142" y1="44" x2="208" y2="44" stroke="#10b981" stroke-width="2"/>
+                <circle cx="156" cy="44" r="5" fill="#10b981"/>
+                <circle cx="176" cy="44" r="5" fill="#10b981"/>
+                <circle cx="196" cy="44" r="5" fill="#10b981"/>
+                <line x1="142" y1="76" x2="208" y2="76" stroke="#14b8a6" stroke-width="2"/>
+                <circle cx="156" cy="76" r="5" fill="#14b8a6"/>
+                <circle cx="176" cy="76" r="5" fill="#14b8a6"/>
+                <circle cx="196" cy="76" r="5" fill="#14b8a6"/>
+              </g>
+            </svg>
+            <h3>Manifest is the lens</h3>
+            <p>One JSON file declares which commits belong to which PR.</p>
+          </article>
+
+          <article class="card">
+            <svg viewBox="0 0 220 120" aria-hidden="true">
+              <line x1="16" y1="26" x2="96" y2="26" stroke="#10b981" stroke-width="2.5"/>
+              <circle cx="40" cy="26" r="4.5" fill="#10b981"/>
+              <circle cx="68" cy="26" r="4.5" fill="#10b981"/>
+              <line x1="16" y1="50" x2="96" y2="50" stroke="#14b8a6" stroke-width="2.5"/>
+              <circle cx="40" cy="50" r="4.5" fill="#14b8a6"/>
+              <circle cx="68" cy="50" r="4.5" fill="#14b8a6"/>
+              <line x1="16" y1="74" x2="96" y2="74" stroke="#34d399" stroke-width="2.5"/>
+              <circle cx="40" cy="74" r="4.5" fill="#34d399"/>
+              <path d="M100 26 C130 26 130 100 150 102" fill="none" stroke="rgba(148,163,184,0.4)" stroke-width="1.5" stroke-dasharray="3 4"/>
+              <path d="M100 50 C126 50 128 100 146 102" fill="none" stroke="rgba(148,163,184,0.4)" stroke-width="1.5" stroke-dasharray="3 4"/>
+              <path d="M100 74 C122 74 124 98 142 101" fill="none" stroke="rgba(148,163,184,0.4)" stroke-width="1.5" stroke-dasharray="3 4"/>
+              <line x1="16" y1="103" x2="204" y2="103" stroke="#64748b" stroke-width="2" stroke-dasharray="5 5"/>
+              <g class="c2-int">
+                <circle cx="60" cy="103" r="4.5" fill="#10b981"/>
+                <circle cx="92" cy="103" r="4.5" fill="#10b981"/>
+                <circle cx="124" cy="103" r="4.5" fill="#14b8a6"/>
+                <circle cx="156" cy="103" r="4.5" fill="#14b8a6"/>
+                <circle cx="184" cy="103" r="4.5" fill="#34d399"/>
+              </g>
+              <text class="c-spin" x="192" y="42" font-size="26" fill="#6ee7b7" text-anchor="middle">↻</text>
+            </svg>
+            <h3>Integration is disposable</h3>
+            <p>Test everything together. Throw it away. Rebuild it identically.</p>
+          </article>
+
+          <article class="card">
+            <svg viewBox="0 0 220 120" aria-hidden="true">
+              <line x1="16" y1="30" x2="204" y2="30" stroke="#10b981" stroke-width="2" opacity="0.8"/>
+              <line x1="16" y1="58" x2="204" y2="58" stroke="#14b8a6" stroke-width="2" opacity="0.8"/>
+              <rect x="58" y="18" width="14" height="14" rx="3" fill="none" stroke="rgba(110,231,183,0.5)" stroke-dasharray="3 3"/>
+              <rect x="102" y="46" width="14" height="14" rx="3" fill="none" stroke="rgba(94,234,212,0.5)" stroke-dasharray="3 3"/>
+              <rect x="146" y="18" width="14" height="14" rx="3" fill="none" stroke="rgba(110,231,183,0.5)" stroke-dasharray="3 3"/>
+              <line x1="16" y1="98" x2="204" y2="98" stroke="#34d399" stroke-width="2.5"/>
+              <text x="18" y="116" font-size="10.5" fill="#64748b">main-integration</text>
+              <rect class="c3-hunk c3-h1" x="58" y="84" width="14" height="14" rx="3" fill="rgba(16,185,129,0.35)" stroke="#10b981"/>
+              <rect class="c3-hunk c3-h2" x="102" y="84" width="14" height="14" rx="3" fill="rgba(20,184,166,0.35)" stroke="#14b8a6"/>
+              <rect class="c3-hunk c3-h3" x="146" y="84" width="14" height="14" rx="3" fill="rgba(16,185,129,0.35)" stroke="#10b981"/>
+            </svg>
+            <h3>Absorb sorts your hacking</h3>
+            <p>Edits on integration get assigned — per file or per hunk — to their stack.</p>
+          </article>
+
+          <article class="card">
+            <svg viewBox="0 0 220 120" aria-hidden="true">
+              <!-- left device -->
+              <rect x="20" y="38" width="40" height="28" rx="4" fill="rgba(2,6,23,0.6)" stroke="#94a3b8" stroke-width="1.5"/>
+              <line x1="14" y1="72" x2="66" y2="72" stroke="#94a3b8" stroke-width="2" stroke-linecap="round"/>
+              <text x="40" y="91" font-size="10.5" fill="#64748b" text-anchor="middle">you</text>
+              <!-- right device -->
+              <rect x="160" y="38" width="40" height="28" rx="4" fill="rgba(2,6,23,0.6)" stroke="#94a3b8" stroke-width="1.5"/>
+              <line x1="154" y1="72" x2="206" y2="72" stroke="#94a3b8" stroke-width="2" stroke-linecap="round"/>
+              <text x="180" y="91" font-size="10.5" fill="#64748b" text-anchor="middle">agent</text>
+              <!-- ledger strip -->
+              <rect x="94" y="22" width="32" height="76" rx="7" fill="rgba(16,185,129,0.05)" stroke="#10b981" stroke-width="2"/>
+              <line x1="102" y1="36" x2="118" y2="36" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="102" y1="50" x2="118" y2="50" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="102" y1="64" x2="118" y2="64" stroke="#6ee7b7" stroke-width="2"/>
+              <line x1="102" y1="78" x2="118" y2="78" stroke="#6ee7b7" stroke-width="2"/>
+              <line class="c4-new" x1="102" y1="92" x2="118" y2="92" stroke="#34d399" stroke-width="2.5"/>
+              <path d="M62 52 L90 52" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
+              <path d="M158 52 L130 52" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
+            </svg>
+            <h3>The ledger remembers</h3>
+            <p>Append-only history. Any machine resumes where the last stopped.</p>
+          </article>
+        </div>
+      </section>
+
+      <section id="agents">
+        <div class="agents-strip">
+          <svg viewBox="0 0 150 72" aria-hidden="true">
+            <rect x="4" y="6" width="52" height="26" rx="7" fill="rgba(2,6,23,0.6)" stroke="rgba(148,163,184,0.4)"/>
+            <text x="30" y="23" font-size="11.5" fill="#cbd5e1" text-anchor="middle">you</text>
+            <rect x="4" y="40" width="52" height="26" rx="7" fill="rgba(2,6,23,0.6)" stroke="rgba(56,189,248,0.45)"/>
+            <text x="30" y="57" font-size="11.5" fill="#7dd3fc" text-anchor="middle">agent</text>
+            <path d="M58 19 C84 19 86 32 102 34" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
+            <path d="M58 53 C84 53 86 40 102 38" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
+            <circle cx="122" cy="36" r="17" fill="rgba(16,185,129,0.06)" stroke="#10b981" stroke-width="3"/>
+            <path d="M122 19v34M105 36h34M110 24l24 24M110 48l24-24" stroke="#10b981" stroke-width="2.2"/>
+            <circle cx="122" cy="36" r="5" fill="#38bdf8"/>
+          </svg>
+          <p>Built for AI agents: no checkout is authoritative — agents follow the manifest, not memory.</p>
+          <span class="agents-links">
+            <a href="https://github.com/NestDevLab/syncwheel/blob/main/docs/ai-agents.md">Agent contract →</a>
+            <a href="https://github.com/NestDevLab/syncwheel/blob/main/docs/agent-procedure.md">Agent procedure →</a>
+          </span>
+        </div>
+      </section>
+
+      <section id="docs">
+        <h2 class="section-title">Go deeper.</h2>
+        <p class="section-lead">Everything advanced lives in the docs.</p>
+        <div class="docs-grid">
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel#readme">
+            <strong>README</strong>
+            <span>Quick start and CLI summary.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/workflow.md">
+            <strong>Workflow model</strong>
+            <span>Stacks, manifest, integration, lifecycle.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/deterministic-model.md">
+            <strong>Deterministic model</strong>
+            <span>Manifest semantics and validation contract.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/branch-model.md">
+            <strong>Branch model</strong>
+            <span>Branch roles and safety defaults.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/core-procedure.md">
+            <strong>Core procedure</strong>
+            <span>Deterministic recovery, step by step.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/manual-git-flow.md">
+            <strong>Manual Git flow</strong>
+            <span>The raw Git equivalent.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/ai-agents.md">
+            <strong>AI agents</strong>
+            <span>Behavior contract and agent procedure.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/public-article.md">
+            <strong>The article</strong>
+            <span>The narrative version, for everyone.</span>
+          </a>
+        </div>
+      </section>
+
+      <section id="get-started">
+        <h2 class="section-title">Get started</h2>
+        <p class="section-lead">Python 3.11+, Git, uv.</p>
+
+        <div class="code" aria-label="Install syncwheel">
+          <div class="codebar">
+            <span class="light"></span><span class="light"></span><span class="light"></span>
+            <span>1 · install</span>
+          </div>
+          <pre><code><span class="prompt">$</span> uv tool install "git+https://github.com/NestDevLab/syncwheel"
+<span class="prompt">$</span> syncwheel --help
+<span class="muted"># developing syncwheel itself? `uv tool install --editable /path/to/syncwheel`</span></code></pre>
+        </div>
+
+        <div class="code" aria-label="Your first wheel">
+          <div class="codebar">
+            <span class="light"></span><span class="light"></span><span class="light"></span>
+            <span>2 · your first wheel</span>
+          </div>
+          <pre><code><span class="prompt">$</span> syncwheel init                               <span class="muted"># writes .syncwheel/manifest.json</span>
+<span class="prompt">$</span> syncwheel stack create feature-a --branch pr/feature-a --include-in-integration
+<span class="prompt">$</span> syncwheel stack set feature-a origin/main..HEAD
+<span class="prompt">$</span> syncwheel reconcile                          <span class="muted"># dry-run plan first, always</span>
+<span class="prompt">$</span> syncwheel sync --worktree-root ../wt
+<span class="prompt">$</span> syncwheel publish --worktree-root ../wt</code></pre>
+        </div>
+
+        <p class="inline-note">Shorthands (<code>rec</code>, <code>s</code>, <code>i</code>, <code>-p</code>), repo aliases, and <code>self update</code> live in the
+        <a href="https://github.com/NestDevLab/syncwheel#readme">README</a>.</p>
+      </section>
+    </main>
+
+    <footer>
+      <span>syncwheel v0.18 · MIT · a NestDevLab project</span>
+      <a href="https://github.com/NestDevLab/syncwheel">github.com/NestDevLab/syncwheel</a>
+    </footer>
+  </div>
+
+  <script>
+    (() => {
+      const STEPS = ['declare', 'integrate', 'absorb', 'reconcile', 'sync', 'publish', 'resume'];
+      const stage = document.getElementById('lifecycle-stage');
+      const stepper = document.querySelector('.stepper');
+      const tabs = STEPS.map((id) => document.getElementById('tab-' + id));
+      const panels = STEPS.map((id) => document.getElementById('panel-' + id));
+      const section = document.getElementById('lifecycle');
+      if (!stage || !stepper || tabs.some((t) => !t)) return;
+
+      let current = 0;
+      let timer = null;
+      let wrapPulse = null;
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const LOOP_START = STEPS.indexOf('reconcile');
+
+      function select(index, focusTab) {
+        current = (index + STEPS.length) % STEPS.length;
+        stage.dataset.step = STEPS[current];
+        stepper.dataset.step = STEPS[current];
+        stepper.dataset.phase = current >= LOOP_START ? 'loop' : 'setup';
+        tabs.forEach((tab, i) => {
+          const active = i === current;
+          tab.setAttribute('aria-selected', String(active));
+          tab.tabIndex = active ? 0 : -1;
+        });
+        panels.forEach((panel, i) => {
+          panel.hidden = i !== current;
+        });
+        if (focusTab) tabs[current].focus();
+      }
+
+      function stopAutoplay() {
+        if (timer) {
+          clearInterval(timer);
+          timer = null;
+        }
+        if (wrapPulse) {
+          clearTimeout(wrapPulse);
+          wrapPulse = null;
+        }
+        stepper.classList.remove('is-wrapping');
+      }
+
+      let autoplayActive = !reduceMotion;
+
+      function pulseLoopReturn() {
+        stepper.classList.remove('is-wrapping');
+        void stepper.offsetWidth;
+        stepper.classList.add('is-wrapping');
+        wrapPulse = setTimeout(() => {
+          stepper.classList.remove('is-wrapping');
+          wrapPulse = null;
+        }, 900);
+      }
+
+      function advance() {
+        // setup plays once; the loop (reconcile → resume) repeats forever
+        const wrapsToLoopStart = current === STEPS.length - 1;
+        select(wrapsToLoopStart ? LOOP_START : current + 1, false);
+        if (wrapsToLoopStart) pulseLoopReturn();
+      }
+
+      tabs.forEach((tab, i) => {
+        tab.addEventListener('click', () => {
+          autoplayActive = false;
+          stopAutoplay();
+          select(i, false);
+        });
+        tab.addEventListener('keydown', (event) => {
+          let target = null;
+          if (event.key === 'ArrowRight' || event.key === 'ArrowDown') target = current + 1;
+          else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') target = current - 1;
+          else if (event.key === 'Home') target = 0;
+          else if (event.key === 'End') target = STEPS.length - 1;
+          if (target !== null) {
+            event.preventDefault();
+            autoplayActive = false;
+            stopAutoplay();
+            select(target, true);
+          }
+        });
+      });
+
+      // pause while the reader is engaging with the section, resume on leave
+      section.addEventListener('pointerenter', stopAutoplay);
+      section.addEventListener('pointerleave', () => {
+        if (autoplayActive && !timer) timer = setInterval(advance, 4000);
+      });
+      section.addEventListener('focusin', stopAutoplay);
+
+      select(0, false);
+      if (autoplayActive) timer = setInterval(advance, 4000);
+    })();
+  </script>
+</body>
+</html>
