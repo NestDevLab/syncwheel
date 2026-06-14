@@ -107,8 +107,10 @@ PR, or recovery work, run:
 syncwheel repo tracking status
 ```
 
-If `syncwheel_tracking` is missing, ask the maintainer/user whether this repo
-should be `git-tracked` or `local-only`, then persist it:
+If `syncwheel_tracking` is missing, stop before branch, push, PR, stack,
+worktree, or recovery work. Do not guess, do not default silently, and do not
+continue with a provisional policy. Ask the maintainer/user whether this repo
+should be `git-tracked` or `local-only`, then persist the answer:
 
 ```bash
 syncwheel repo tracking set git-tracked --apply
