@@ -29,9 +29,11 @@ Prefer syncwheel commands over manual JSON edits:
 ```bash
 python3 scripts/syncwheel.py init
 python3 scripts/syncwheel.py init --personal alice
-python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a --include-in-integration
+python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a -u
 python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
+
+`-u` is the short form of `--include-in-integration`.
 
 ## Prompt-friendly workflow
 

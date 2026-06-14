@@ -104,7 +104,7 @@ syncwheel init                                  # shared manifest (.syncwheel/ma
 syncwheel repo tracking status
 syncwheel repo tracking set git-tracked --apply # or local-only
 # 3. Declare the stack
-syncwheel stack create feature-a --branch pr/feature-a --base origin/main --include-in-integration
+syncwheel stack create feature-a --branch pr/feature-a --base origin/main -u
 # 4. Author in a dedicated worktree (fresh work uses plain git worktree add)
 git worktree add -b pr/feature-a ../repo-wt-feature-a origin/main
 #    ... make and commit your changes in that worktree ...
@@ -113,6 +113,8 @@ syncwheel stack set feature-a origin/main..HEAD
 syncwheel validate && syncwheel plan --json
 syncwheel stack push feature-a
 ```
+
+`-u` is the short form of `--include-in-integration`.
 
 ## Decision: Syncwheel tracking policy
 

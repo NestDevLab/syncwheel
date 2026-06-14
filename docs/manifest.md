@@ -90,9 +90,11 @@ python3 scripts/syncwheel.py use --shared
 Create stack entries through the CLI:
 
 ```bash
-python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a -u
 python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 ```
+
+`-u` is the short form of `--include-in-integration`.
 
 ## Rules
 

@@ -386,11 +386,12 @@ when you want to target that personal manifest:
 
 ```bash
 python3 scripts/syncwheel.py check -p alice
-python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a --include-in-integration
+python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a -u
 python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
 
-Long names are still available: `stack create --personal alice` is equivalent.
+Long names are still available: `stack create --personal alice` is equivalent,
+and `-u` is the short form of `--include-in-integration`.
 
 To make a personal manifest the default for the current clone:
 
@@ -446,7 +447,7 @@ writing it to `.syncwheel/manifest.json`.
 ### 2. Declare stack ownership
 
 ```bash
-python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a --include-in-integration
+python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a -u
 python3 scripts/syncwheel.py stack sync feature-a
 python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 python3 scripts/syncwheel.py stack add feature-a HEAD
