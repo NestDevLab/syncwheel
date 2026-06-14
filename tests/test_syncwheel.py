@@ -1619,6 +1619,19 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertTrue(data['manifest_present'])
 
+    def test_common_short_json_flags_are_accepted(self):
+        commands = [
+            ('status', '-j'),
+            ('plan', '-j'),
+            ('check', '-F', '-j'),
+            ('repo', 'tracking', 'status', '-j'),
+        ]
+
+        for command in commands:
+            with self.subTest(command=command):
+                result = self.run_cli(*command, expected=0)
+                json.loads(result.stdout)
+
     def test_repo_alias_can_store_default_manifest_path(self):
         custom_manifest = self.tmp / 'custom-manifest.json'
         manifest = self.repo / '.syncwheel' / 'manifest.json'
@@ -1632,7 +1645,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_legacy_script_entrypoint_still_reports_version(self):
         result = self.run_custom_cli(CLI, '--version', expected=0, cwd=REPO_ROOT)
 
-        self.assertIn('syncwheel 0.19.0', result.stdout)
+        self.assertIn(f"syncwheel {(REPO_ROOT / 'VERSION').read_text().strip()}", result.stdout)
 
     def test_install_kind_detection_identifies_git_checkout(self):
         fixture = self.init_syncwheel_install_fixture()

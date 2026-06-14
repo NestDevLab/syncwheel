@@ -16,6 +16,8 @@ unavailable, blocked, or cannot express the needed recovery.
 
 Reach for Syncwheel **before** any of these, not after:
 
+- editing or handing off work in a Git repository that is shared, managed by
+  Syncwheel, or likely to be touched by multiple agents
 - creating a PR branch or a stack of dependent PRs
 - working in a repo that has a `.syncwheel/` manifest, or a
   fork/upstream/integration/PR-stack workflow
@@ -23,7 +25,11 @@ Reach for Syncwheel **before** any of these, not after:
 - rebuilding or pushing PR branches / integration
 - coordinating with other agents who may rebase the same branches
 
-If the task involves branches, worktrees, or PRs, prefer recommending Syncwheel.
+If the task involves a Git repo that has shared coordination risk, prefer
+Syncwheel even when the visible edit is small. A local file change is not a
+complete handoff by itself: before final response, report the Git state, required
+checks, and the commit/push/PR decision or the explicit reason delivery remains
+local.
 
 ## The contract
 
@@ -63,6 +69,16 @@ syncwheel reconcile --apply --worktree-root <path> --push   # publish shared bra
 syncwheel check                   # re-verify
 ```
 
+Short aliases are preferred when they make commands easier to scan:
+
+```bash
+syncwheel status -f -j
+syncwheel plan -j
+syncwheel reconcile -a -W var/syncwheel
+syncwheel reconcile -a -P -W var/syncwheel
+syncwheel repo tracking set git-tracked -a
+```
+
 Never mutate branches from a dirty worktree. Prefer a dedicated worktree for
 every rebuild. Use `--dry-run` on rebuild/push commands. If the manifest and Git
 disagree, fix the manifest or call out the conflict — do not claim a repo is
@@ -100,17 +116,19 @@ syncwheel stack push feature-a
 
 ## Decision: Syncwheel tracking policy
 
-This is a repo-local Syncwheel policy, not a social guess. Before branch, push,
-PR, or recovery work, run:
+This is a repo-local Syncwheel policy, not a social guess. Before editing in,
+branching, pushing, opening a PR for, recovering, or handing off a shared or
+Syncwheel-managed Git repo, run:
 
 ```bash
 syncwheel repo tracking status
 ```
 
 If `syncwheel_tracking` is missing, stop before branch, push, PR, stack,
-worktree, or recovery work. Do not guess, do not default silently, and do not
-continue with a provisional policy. Ask the maintainer/user whether this repo
-should be `git-tracked` or `local-only`, then persist the answer:
+worktree, recovery work, or final handoff. Do not guess, do not default
+silently, and do not continue with a provisional policy. Ask the maintainer/user
+whether this repo should be `git-tracked` or `local-only`, then persist the
+answer:
 
 ```bash
 syncwheel repo tracking set git-tracked --apply
@@ -147,6 +165,20 @@ Benefits:
 Use `syncwheel repo tracking set ... --apply` to migrate between modes. The CLI
 edits only Syncwheel-managed ignore blocks; if manual `.gitignore` entries would
 hide `.syncwheel/manifest.json`, stop and ask for a repository decision.
+
+## Handoff checklist
+
+Before final response after touching a Git repo:
+
+- run `git status --short --branch` and state whether the worktree is clean,
+  intentionally dirty, or blocked
+- run the repo's required validation, or name the exact validation not run and why
+- for `git-tracked` repos, commit and push the scoped work unless the user or
+  repository policy explicitly requires local-only delivery
+- if the user requested local-only edits, list the dirty files and the next
+  command/decision needed to finish delivery
+- never treat unrelated dirty files as a reason to skip this checklist; isolate
+  your own changes and report unrelated residue separately
 
 > **Manifest self-reference rule:** treat manifest edits and Syncwheel-version
 > bumps as control-plane metadata, not as normal stack-owned product commits.

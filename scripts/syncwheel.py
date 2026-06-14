@@ -4063,15 +4063,16 @@ def command_repo_tracking_set(args):
 
 
 def add_rebuild_args(parser):
-    parser.add_argument('--worktree')
-    parser.add_argument('--in-place', action='store_true')
-    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('-w', '--worktree')
+    parser.add_argument('-i', '--in-place', action='store_true')
+    parser.add_argument('-n', '--dry-run', action='store_true')
 
 
 def add_push_args(parser):
-    parser.add_argument('--remote')
-    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('-R', '--remote')
+    parser.add_argument('-n', '--dry-run', action='store_true')
     parser.add_argument(
+        '-l',
         '--force-with-lease',
         action='store_true',
         help='pass --force-with-lease to git push',
@@ -4079,31 +4080,33 @@ def add_push_args(parser):
 
 
 def add_git_args(parser):
-    parser.add_argument('--worktree', help='create/use this worktree path when the branch has no worktree')
-    parser.add_argument('--auto-worktree', action='store_true', help='create the default worktree when missing')
+    parser.add_argument('-w', '--worktree', help='create/use this worktree path when the branch has no worktree')
+    parser.add_argument('-a', '--auto-worktree', action='store_true', help='create the default worktree when missing')
     return parser
 
 
 def add_reconcile_args(parser, include_apply_push=True, include_push_options=True):
-    parser.add_argument('--no-fetch', dest='fetch', action='store_false')
-    parser.add_argument('--json', action='store_true')
+    parser.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    parser.add_argument('-j', '--json', action='store_true')
     if include_apply_push:
-        parser.add_argument('--apply', action='store_true', help='execute the reported rebuild/push plan')
-        parser.add_argument('--push', action='store_true', help='push rebuilt or drifted managed branches')
+        parser.add_argument('-a', '--apply', action='store_true', help='execute the reported rebuild/push plan')
+        parser.add_argument('-P', '--push', action='store_true', help='push rebuilt or drifted managed branches')
     if include_push_options:
         parser.add_argument(
+            '-l',
             '--force-with-lease',
             action='store_true',
             default=True,
             help='pass --force-with-lease to reconcile-managed git pushes (default)',
         )
         parser.add_argument(
+            '-L',
             '--no-force-with-lease',
             dest='force_with_lease',
             action='store_false',
             help='use normal git push for reconcile-managed pushes',
         )
-    parser.add_argument('--remote', help='remote override for managed branch comparisons and publication')
+    parser.add_argument('-R', '--remote', help='remote override for managed branch comparisons and publication')
     parser.add_argument(
         '-m',
         '--mode',
@@ -4111,9 +4114,10 @@ def add_reconcile_args(parser, include_apply_push=True, include_push_options=Tru
         default='standard',
         help='reconcile mode: standard or resume',
     )
-    parser.add_argument('--stack', action='append', help='limit reconciliation to one stack; may be repeated')
-    parser.add_argument('--skip-integration', action='store_true')
+    parser.add_argument('-s', '--stack', action='append', help='limit reconciliation to one stack; may be repeated')
+    parser.add_argument('-I', '--skip-integration', action='store_true')
     parser.add_argument(
+        '-A',
         '--align-local-to-remote',
         dest='align_local_to_remote',
         action='store_true',
@@ -4127,21 +4131,25 @@ def add_reconcile_args(parser, include_apply_push=True, include_push_options=Tru
         help='do not normalize local history to remote even when both match the manifest projection',
     )
     parser.add_argument(
+        '-b',
         '--rebuild',
         choices=['needed', 'all', 'none'],
         default='needed',
         help='which managed branches to rebuild before optional push',
     )
     parser.add_argument(
+        '-W',
         '--worktree-root',
         help='directory where reconcile creates branch worktrees when no worktree already exists',
     )
     parser.add_argument(
+        '-i',
         '--in-place-integration',
         action='store_true',
         help='allow integration rebuild in the current clean integration checkout',
     )
     parser.add_argument(
+        '-U',
         '--no-update-manifest',
         dest='update_manifest',
         action='store_false',
@@ -4154,7 +4162,7 @@ def build_parser():
     parser.add_argument('--version', action='version', version=f'syncwheel {VERSION}')
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument('-r', '--repo', help='target repo path or registered alias')
-    common.add_argument('--manifest', help='path to a syncwheel manifest JSON file')
+    common.add_argument('-M', '--manifest', help='path to a syncwheel manifest JSON file')
     common.add_argument('-p', '--personal', help='use .syncwheel/manifests/<name>.local.json')
     sub = parser.add_subparsers(dest='command', required=True)
 
@@ -4164,13 +4172,13 @@ def build_parser():
     repo_add_p = repo_sub.add_parser('add', help='add/update one repo alias')
     repo_add_p.add_argument('alias')
     repo_add_p.add_argument('path')
-    repo_add_p.add_argument('--manifest', help='optional default manifest path for this alias')
+    repo_add_p.add_argument('-M', '--manifest', help='optional default manifest path for this alias')
     repo_add_p.set_defaults(func=command_repo_add)
 
     repo_manifest_p = repo_sub.add_parser('set-manifest', help='set/clear default manifest path for one alias')
     repo_manifest_p.add_argument('alias')
     repo_manifest_p.add_argument('manifest', nargs='?', help='manifest path; omit with --clear to remove')
-    repo_manifest_p.add_argument('--clear', action='store_true')
+    repo_manifest_p.add_argument('-c', '--clear', action='store_true')
     repo_manifest_p.set_defaults(func=command_repo_set_manifest)
 
     repo_rm_p = repo_sub.add_parser('rm', help='remove one repo alias')
@@ -4178,43 +4186,43 @@ def build_parser():
     repo_rm_p.set_defaults(func=command_repo_rm)
 
     repo_ls_p = repo_sub.add_parser('ls', help='list repo aliases')
-    repo_ls_p.add_argument('--json', action='store_true')
+    repo_ls_p.add_argument('-j', '--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
 
     repo_tracking_p = repo_sub.add_parser('tracking', help='inspect or set repo-local syncwheel tracking policy')
     repo_tracking_sub = repo_tracking_p.add_subparsers(dest='tracking_command', required=True)
 
     repo_tracking_status_p = repo_tracking_sub.add_parser('status', parents=[common])
-    repo_tracking_status_p.add_argument('--json', action='store_true')
+    repo_tracking_status_p.add_argument('-j', '--json', action='store_true')
     repo_tracking_status_p.set_defaults(func=command_repo_tracking_status)
 
     repo_tracking_set_p = repo_tracking_sub.add_parser('set', parents=[common])
     repo_tracking_set_p.add_argument('tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
-    repo_tracking_set_p.add_argument('--worktree-root', help='default repo-relative syncwheel worktree/cache root')
-    repo_tracking_set_p.add_argument('--apply', action='store_true')
-    repo_tracking_set_p.add_argument('--json', action='store_true')
+    repo_tracking_set_p.add_argument('-W', '--worktree-root', help='default repo-relative syncwheel worktree/cache root')
+    repo_tracking_set_p.add_argument('-a', '--apply', action='store_true')
+    repo_tracking_set_p.add_argument('-j', '--json', action='store_true')
     repo_tracking_set_p.set_defaults(func=command_repo_tracking_set)
 
     self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
     self_sub = self_p.add_subparsers(dest='self_command', required=True)
 
     self_status_p = self_sub.add_parser('status', help='show syncwheel install/update status')
-    self_status_p.add_argument('--fetch', action='store_true', help='refresh remote tracking info before reporting')
-    self_status_p.add_argument('--json', action='store_true')
+    self_status_p.add_argument('-f', '--fetch', action='store_true', help='refresh remote tracking info before reporting')
+    self_status_p.add_argument('-j', '--json', action='store_true')
     self_status_p.set_defaults(func=command_self_status)
 
     self_check_p = self_sub.add_parser('check-update', help='check whether a newer syncwheel version exists')
-    self_check_p.add_argument('--fetch', action='store_true', help='refresh remote tracking info before checking')
-    self_check_p.add_argument('--json', action='store_true')
+    self_check_p.add_argument('-f', '--fetch', action='store_true', help='refresh remote tracking info before checking')
+    self_check_p.add_argument('-j', '--json', action='store_true')
     self_check_p.set_defaults(func=command_self_check_update)
 
     self_update_p = self_sub.add_parser('update', help='update this syncwheel install')
-    self_update_p.add_argument('--dry-run', action='store_true')
-    self_update_p.add_argument('--no-fetch', action='store_true')
+    self_update_p.add_argument('-n', '--dry-run', action='store_true')
+    self_update_p.add_argument('-F', '--no-fetch', action='store_true')
     self_update_p.set_defaults(func=command_self_update)
 
     self_hooks_p = self_sub.add_parser('install-hooks', help='install syncwheel Git hooks in this syncwheel checkout')
-    self_hooks_p.add_argument('--dry-run', action='store_true')
+    self_hooks_p.add_argument('-n', '--dry-run', action='store_true')
     self_hooks_p.set_defaults(func=command_self_install_hooks)
 
     self_mode_p = self_sub.add_parser('mode', help='show or set automatic update policy: off, notify, auto')
@@ -4223,43 +4231,43 @@ def build_parser():
 
     use_p = sub.add_parser('use', help='show or set the repo-local default syncwheel profile', parents=[common])
     use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
-    use_p.add_argument('--shared', action='store_true', help='clear the local profile and use the shared manifest')
+    use_p.add_argument('-s', '--shared', action='store_true', help='clear the local profile and use the shared manifest')
     use_p.set_defaults(func=command_use)
 
     init_p = sub.add_parser('init', aliases=['in'], help='create a starter manifest', parents=[common])
-    init_p.add_argument('--canonical-remote', default='origin')
-    init_p.add_argument('--publication-remote', default='fork')
-    init_p.add_argument('--base-branch', default='main')
-    init_p.add_argument('--integration-branch')
-    init_p.add_argument('--syncwheel-tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
-    init_p.add_argument('--worktree-root', help='default repo-relative syncwheel worktree/cache root')
-    init_p.add_argument('--force', action='store_true')
-    init_p.add_argument('--stdout', action='store_true')
+    init_p.add_argument('-C', '--canonical-remote', default='origin')
+    init_p.add_argument('-P', '--publication-remote', default='fork')
+    init_p.add_argument('-B', '--base-branch', default='main')
+    init_p.add_argument('-I', '--integration-branch')
+    init_p.add_argument('-T', '--syncwheel-tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
+    init_p.add_argument('-W', '--worktree-root', help='default repo-relative syncwheel worktree/cache root')
+    init_p.add_argument('-f', '--force', action='store_true')
+    init_p.add_argument('-o', '--stdout', action='store_true')
     init_p.set_defaults(func=command_init)
 
     status_p = sub.add_parser('status', aliases=['st'], help='show repo and manifest state', parents=[common])
-    status_p.add_argument('--fetch', action='store_true')
-    status_p.add_argument('--json', action='store_true')
+    status_p.add_argument('-f', '--fetch', action='store_true')
+    status_p.add_argument('-j', '--json', action='store_true')
     status_p.set_defaults(func=command_status)
 
     validate_p = sub.add_parser('validate', aliases=['v'], help='validate the manifest against local git state', parents=[common])
-    validate_p.add_argument('--json', action='store_true')
+    validate_p.add_argument('-j', '--json', action='store_true')
     validate_p.set_defaults(func=command_validate)
 
     plan_p = sub.add_parser('plan', aliases=['pl'], help='emit a deterministic action plan from the manifest', parents=[common])
-    plan_p.add_argument('--json', action='store_true')
+    plan_p.add_argument('-j', '--json', action='store_true')
     plan_p.set_defaults(func=command_plan)
 
     check_p = sub.add_parser('check', aliases=['ck'], help='fetch, validate, and print the current action plan', parents=[common])
-    check_p.add_argument('--no-fetch', dest='fetch', action='store_false')
-    check_p.add_argument('--json', action='store_true')
+    check_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    check_p.add_argument('-j', '--json', action='store_true')
     check_p.set_defaults(func=command_check, fetch=True)
 
     ledger_p = sub.add_parser('ledger', help='inspect the append-only syncwheel ledger', parents=[common])
     ledger_sub = ledger_p.add_subparsers(dest='ledger_command', required=True)
 
     ledger_show_p = ledger_sub.add_parser('show', aliases=['sh'], parents=[common])
-    ledger_show_p.add_argument('--json', action='store_true')
+    ledger_show_p.add_argument('-j', '--json', action='store_true')
     ledger_show_p.set_defaults(func=command_ledger_show)
 
     reconcile_p = sub.add_parser(
@@ -4307,9 +4315,9 @@ def build_parser():
     manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)
 
     manifest_compare_p = manifest_sub.add_parser('compare', parents=[common])
-    manifest_compare_p.add_argument('--other-manifest')
-    manifest_compare_p.add_argument('--other-personal')
-    manifest_compare_p.add_argument('--json', action='store_true')
+    manifest_compare_p.add_argument('-O', '--other-manifest')
+    manifest_compare_p.add_argument('-P', '--other-personal')
+    manifest_compare_p.add_argument('-j', '--json', action='store_true')
     manifest_compare_p.set_defaults(func=command_manifest_compare)
 
     stack_p = sub.add_parser('stack', aliases=['s'], help='inspect, create, edit, rebuild, push, or run git for one stack')
@@ -4325,13 +4333,13 @@ def build_parser():
     stack_create_p = stack_sub.add_parser('create', aliases=['new'], parents=[common])
     stack_create_p.add_argument('stack')
     stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
-    stack_create_p.add_argument('--branch')
-    stack_create_p.add_argument('--base')
-    stack_create_p.add_argument('--target-remote')
-    stack_create_p.add_argument('--target-branch')
-    stack_create_p.add_argument('--integration-branch')
-    stack_create_p.add_argument('--purpose')
-    stack_create_p.add_argument('--include-in-integration', action='store_true')
+    stack_create_p.add_argument('-b', '--branch')
+    stack_create_p.add_argument('-B', '--base')
+    stack_create_p.add_argument('-R', '--target-remote')
+    stack_create_p.add_argument('-T', '--target-branch')
+    stack_create_p.add_argument('-I', '--integration-branch')
+    stack_create_p.add_argument('-P', '--purpose')
+    stack_create_p.add_argument('-u', '--include-in-integration', action='store_true')
     stack_create_p.set_defaults(func=command_stack_create)
 
     stack_sync_p = stack_sub.add_parser('sync', parents=[common])
@@ -4341,12 +4349,12 @@ def build_parser():
     stack_absorb_p = stack_sub.add_parser('absorb', parents=[common])
     stack_absorb_p.add_argument('stack')
     stack_absorb_p.add_argument('paths', nargs='*', help='optional pathspecs to absorb from the integration worktree')
-    stack_absorb_p.add_argument('--staged', action='store_true', help='absorb staged changes instead of unstaged working tree changes')
-    stack_absorb_p.add_argument('--no-amend', dest='amend', action='store_false', help='create a new stack commit instead of amending the stack tip')
+    stack_absorb_p.add_argument('-s', '--staged', action='store_true', help='absorb staged changes instead of unstaged working tree changes')
+    stack_absorb_p.add_argument('-N', '--no-amend', dest='amend', action='store_false', help='create a new stack commit instead of amending the stack tip')
     stack_absorb_p.add_argument('-m', '--message', help='commit message used with --no-amend')
-    stack_absorb_p.add_argument('--worktree', help='stack branch worktree to reuse or create')
-    stack_absorb_p.add_argument('--worktree-root', help='directory where stack absorb creates a worktree when needed')
-    stack_absorb_p.add_argument('--force', action='store_true', help='allow absorbing when the current checkout is not the integration branch')
+    stack_absorb_p.add_argument('-w', '--worktree', help='stack branch worktree to reuse or create')
+    stack_absorb_p.add_argument('-W', '--worktree-root', help='directory where stack absorb creates a worktree when needed')
+    stack_absorb_p.add_argument('-f', '--force', action='store_true', help='allow absorbing when the current checkout is not the integration branch')
     stack_absorb_p.set_defaults(func=command_stack_absorb, amend=True)
 
     stack_set_p = stack_sub.add_parser('set', parents=[common])
@@ -4377,6 +4385,7 @@ def build_parser():
     )
     stack_close_p.add_argument('stack', help='stack id to close')
     stack_close_p.add_argument(
+        '-R',
         '--reason',
         default=None,
         help='reason for closing: merged (default when all commits are in base), abandoned, or custom string',
@@ -4388,6 +4397,7 @@ def build_parser():
         help='also delete the local branch after closing',
     )
     stack_close_p.add_argument(
+        '-f',
         '--force',
         action='store_true',
         help='close even if not all commits are reachable from the base ref',
@@ -4406,16 +4416,16 @@ def build_parser():
     int_show_p.set_defaults(func=command_int_show)
 
     int_sync_status_p = int_sub.add_parser('sync-status', parents=[common])
-    int_sync_status_p.add_argument('--remote')
-    int_sync_status_p.add_argument('--no-fetch', dest='fetch', action='store_false')
-    int_sync_status_p.add_argument('--json', action='store_true')
+    int_sync_status_p.add_argument('-R', '--remote')
+    int_sync_status_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    int_sync_status_p.add_argument('-j', '--json', action='store_true')
     int_sync_status_p.set_defaults(func=command_int_sync_status, fetch=True)
 
     int_align_remote_p = int_sub.add_parser('align-remote', parents=[common])
-    int_align_remote_p.add_argument('--remote')
-    int_align_remote_p.add_argument('--no-fetch', dest='fetch', action='store_false')
-    int_align_remote_p.add_argument('--dry-run', action='store_true')
-    int_align_remote_p.add_argument('--force', action='store_true')
+    int_align_remote_p.add_argument('-R', '--remote')
+    int_align_remote_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    int_align_remote_p.add_argument('-n', '--dry-run', action='store_true')
+    int_align_remote_p.add_argument('-f', '--force', action='store_true')
     int_align_remote_p.set_defaults(func=command_int_align_remote, fetch=True)
 
     int_rebuild_p = int_sub.add_parser('rebuild', aliases=['rb'], parents=[common])

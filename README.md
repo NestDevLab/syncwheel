@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.19.0`
+Current version: `0.20.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -78,6 +78,32 @@ Use `--no-force-with-lease` only when a normal push is intentionally required.
 tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
 through `.git/info/exclude`. New managed worktrees default to repo-relative
 `var/syncwheel/`.
+
+## Common Short Flags
+
+Long options remain stable; short flags are available for daily workflows:
+
+| Short | Long | Where |
+|---|---|---|
+| `-r` | `--repo` | most repo commands |
+| `-M` | `--manifest` | most repo commands |
+| `-p` | `--personal` | most repo commands |
+| `-j` | `--json` | status, plan, check, ledger, reconcile |
+| `-F` | `--no-fetch` | check, reconcile, update/alignment flows |
+| `-n` | `--dry-run` | rebuild, push, self update/hooks, align-remote |
+| `-a` | `--apply` | reconcile and repo tracking set |
+| `-P` | `--push` | reconcile |
+| `-R` | `--remote` | reconcile, push, integration remote flows |
+| `-W` | `--worktree-root` | init, reconcile, stack absorb |
+
+Examples:
+
+```bash
+syncwheel status -f -j
+syncwheel repo tracking set git-tracked -a
+syncwheel reconcile -a -P -W var/syncwheel
+syncwheel stack rebuild feature-a -n
+```
 
 ## Worktree-first model
 

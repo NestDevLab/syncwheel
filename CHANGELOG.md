@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.20.0 - 2026-06-14
+
+- Add short CLI aliases for common repo, manifest, JSON, dry-run, reconcile,
+  push, remote, worktree, tracking, stack, integration, and self-update options.
+- Document the short-flag map for agent and human workflows.
+
 ## 0.19.0 - 2026-06-13
 
 - Add repo-local `syncwheel_tracking` policy for `git-tracked` and
