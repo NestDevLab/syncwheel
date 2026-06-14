@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.0 - 2026-06-13
+
+- Add repo-local `syncwheel_tracking` policy for `git-tracked` and
+  `local-only` Syncwheel manifest setup.
+- Add `syncwheel repo tracking status` and `syncwheel repo tracking set` for
+  inspecting and migrating manifest tracking modes.
+- Default Syncwheel-managed worktrees to repo-relative `var/syncwheel/` through
+  `syncwheel_worktree_root`.
+
 ## 0.18.0 - 2026-06-10
 
 - Add uv packaging with a `syncwheel` console script while preserving direct

@@ -267,6 +267,80 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertEqual(data['integration']['branch'], 'main-integration')
 
+    def test_init_can_persist_syncwheel_tracking_policy(self):
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        manifest.unlink()
+
+        self.run_cli(
+            'init',
+            '--syncwheel-tracking',
+            'git-tracked',
+            '--worktree-root',
+            'var/syncwheel',
+            expected=0,
+        )
+        data = self.read_manifest()
+
+        self.assertEqual(data['syncwheel_tracking'], 'git-tracked')
+        self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
+
+    def test_repo_tracking_status_reports_missing_policy(self):
+        result = self.run_cli('repo', 'tracking', 'status', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertIsNone(data['syncwheel_tracking'])
+        self.assertFalse(data['syncwheel_tracking_present'])
+        self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
+        self.assertIn('syncwheel_tracking is not set', data['warnings'][0])
+
+    def test_repo_tracking_set_git_tracked_stages_manifest_and_gitignore(self):
+        result = self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        manifest = self.read_manifest()
+        gitignore = (self.repo / '.gitignore').read_text()
+        exclude = self.repo_exclude_path().read_text()
+        tracked = self.git('ls-files', '.syncwheel/manifest.json', '.gitignore')
+
+        self.assertEqual(manifest['syncwheel_tracking'], 'git-tracked')
+        self.assertEqual(manifest['syncwheel_worktree_root'], 'var/syncwheel')
+        self.assertTrue(data['manifest_tracked'])
+        self.assertIn('.syncwheel/manifest.json', tracked)
+        self.assertIn('.gitignore', tracked)
+        self.assertIn('# syncwheel managed metadata', gitignore)
+        self.assertIn('.syncwheel/ledger/', gitignore)
+        self.assertIn('var/syncwheel/', gitignore)
+        self.assertNotIn('.syncwheel/', exclude)
+
+    def test_repo_tracking_set_local_only_uses_info_exclude_without_gitignore(self):
+        result = self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        manifest = self.read_manifest()
+        exclude = self.repo_exclude_path().read_text()
+
+        self.assertEqual(manifest['syncwheel_tracking'], 'local-only')
+        self.assertFalse(data['manifest_tracked'])
+        self.assertFalse((self.repo / '.gitignore').exists())
+        self.assertIn('# syncwheel local metadata', exclude)
+        self.assertIn('.syncwheel/', exclude)
+        self.assertIn('var/syncwheel/', exclude)
+
+    def test_repo_tracking_migrates_git_tracked_to_local_only(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-q', '-m', 'test: track syncwheel manifest')
+
+        result = self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', '--json', expected=0)
+        data = json.loads(result.stdout)
+        exclude = self.repo_exclude_path().read_text()
+        gitignore = (self.repo / '.gitignore').read_text() if (self.repo / '.gitignore').exists() else ''
+
+        self.assertFalse(data['manifest_tracked'])
+        self.assertEqual(self.git('ls-files', '.syncwheel/manifest.json'), '')
+        self.assertIn('.syncwheel/', exclude)
+        self.assertIn('var/syncwheel/', exclude)
+        self.assertNotIn('# syncwheel managed metadata', gitignore)
+
     def test_personal_flag_selects_local_manifest_for_commands(self):
         self.run_cli('init', '--personal', 'alice', '--force', expected=0)
         gamma = self.git('rev-parse', 'HEAD')
@@ -765,6 +839,44 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+
+    def test_reconcile_apply_uses_manifest_worktree_root_by_default(self):
+        beta = self.git('rev-parse', 'main')
+        base = self.git('rev-parse', 'main~1')
+        self.git('branch', 'integration/reconcile', base)
+        self.git('switch', '-q', 'integration/reconcile')
+        self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.git('switch', '-q', 'pr/feature-b')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        self.git('switch', '-q', 'main')
+
+        data = self.read_manifest()
+        data['syncwheel_tracking'] = 'local-only'
+        data['syncwheel_worktree_root'] = 'var/syncwheel'
+        data['integration'] = {
+            'branch': 'integration/reconcile',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        data['stacks'] = [
+            {
+                'id': 'feature-b',
+                'branch': 'pr/feature-b',
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/reconcile',
+                'commits': [beta],
+            }
+        ]
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+
+        self.run_cli('reconcile', '--no-fetch', '--apply', '--skip-integration', expected=0)
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
 
     def test_sync_rebuilds_local_projection_without_push(self):
         beta = self.git('rev-parse', 'main')
@@ -1520,7 +1632,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_legacy_script_entrypoint_still_reports_version(self):
         result = self.run_custom_cli(CLI, '--version', expected=0, cwd=REPO_ROOT)
 
-        self.assertIn('syncwheel 0.18.0', result.stdout)
+        self.assertIn('syncwheel 0.19.0', result.stdout)
 
     def test_install_kind_detection_identifies_git_checkout(self):
         fixture = self.init_syncwheel_install_fixture()

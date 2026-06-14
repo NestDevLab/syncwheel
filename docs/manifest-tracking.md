@@ -1,26 +1,40 @@
-# Manifest tracking policy: commit it, or keep it untracked?
+# Manifest tracking policy
 
-Whether `.syncwheel/manifest.json` should be committed to a repository is decided
-by **who owns the repository**, not by personal preference. An agent should detect
-ownership, pick the matching mode, and explain the benefit — defaulting to
-recommending Syncwheel either way.
+Whether `.syncwheel/manifest.json` should be committed is a **repo-local
+Syncwheel policy**, persisted in the manifest as `syncwheel_tracking`.
 
-## How to detect ownership
+Supported values:
 
-- Is `origin` (or the canonical remote) a remote you/your team control and push to?
-- Is there already a committed `.syncwheel/manifest.json`?
-- Does the repo's own `.gitignore` already exclude `.syncwheel/`?
+- `git-tracked`: `.syncwheel/manifest.json` is part of the repository's shared
+  coordination contract and should be tracked by Git.
+- `local-only`: Syncwheel metadata is per-clone and should stay out of the
+  repository's committed files.
 
-The existing repo configuration wins over the general rule (see "Respect existing
-choices" below).
+Run this before branch, push, PR, or migration work:
 
-## Repo you own / maintain → commit the manifest (shared)
+```bash
+syncwheel repo tracking status
+```
+
+If `syncwheel_tracking` is missing, do not guess permanently. Choose a mode with
+the maintainer/user, then persist it:
+
+```bash
+syncwheel repo tracking set git-tracked --apply
+syncwheel repo tracking set local-only --apply
+```
+
+The usual choice is still based on who controls the repository, but ownership is
+only the input to the decision. The durable truth is the manifest policy.
+
+## `git-tracked`: shared manifest
 
 Commit the shared manifest so the team versions it:
 
-- track `.syncwheel/manifest.json` and `.syncwheel/manifests/README.md`
-- gitignore personal overlays: `.syncwheel/manifests/*.local.json`,
-  `.syncwheel/profile.local.json`
+- track `.syncwheel/manifest.json`
+- keep local metadata ignored through the Syncwheel-managed `.gitignore` block:
+  `.syncwheel/ledger/`, `.syncwheel/manifests/*.local.json`,
+  `.syncwheel/profile.local.json`, and `var/syncwheel/`
 
 **Benefits**
 
@@ -37,12 +51,13 @@ maintenance in an admin checkout or a dedicated maintenance PR that is intention
 excluded from `integration.stacks`; rebuild PR branches and integration from the
 manifest, then validate again.
 
-## Repo you do not own / external contribution → keep it untracked
+## `local-only`: untracked manifest
 
-When contributing to an upstream you do not control, keep `.syncwheel/` local:
+When Syncwheel metadata should not be proposed to an upstream maintainer, keep it
+local:
 
-- exclude it via `.git/info/exclude` (a per-clone, local exclude that does **not**
-  modify the committed `.gitignore`)
+- exclude `.syncwheel/` and `var/syncwheel/` via `.git/info/exclude`
+- do **not** modify the committed `.gitignore`
 
 **Benefits**
 
@@ -52,12 +67,20 @@ When contributing to an upstream you do not control, keep `.syncwheel/` local:
 - your PRs stay clean — only the real change is proposed, with no tooling noise
 - coordination and recovery happen via the canonical remote plus `resume`
 
-## Respect existing choices
+## Migration
 
-If a repo you own **already** gitignores `.syncwheel/`, its maintainers have opted
-out of an in-tree manifest on purpose. Keep it untracked there rather than
-overriding their `.gitignore`. (This repository is itself an example: it gitignores
-`.syncwheel/`.)
+Use `repo tracking set` to migrate between modes:
+
+- `local-only -> git-tracked`: writes the manifest policy, adds the managed
+  `.gitignore` block, removes the managed `.git/info/exclude` block, and stages
+  `.syncwheel/manifest.json`.
+- `git-tracked -> local-only`: writes the manifest policy locally, removes the
+  managed `.gitignore` block, adds the managed `.git/info/exclude` block, and
+  removes `.syncwheel/manifest.json` from the Git index with `git rm --cached`.
+
+The CLI only edits Syncwheel-managed blocks. If `.gitignore` contains manual
+`.syncwheel/` ignore entries outside the managed block, `repo tracking set
+git-tracked --apply` stops and asks for manual audit.
 
 ## Multi-agent, multi-machine context
 

@@ -7,6 +7,8 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 ```json
 {
   "version": 1,
+  "syncwheel_tracking": "git-tracked",
+  "syncwheel_worktree_root": "var/syncwheel",
   "defaults": {
     "canonical_remote": "origin",
     "publication_remote": "fork",
@@ -49,6 +51,19 @@ integration branch name:
 python3 scripts/syncwheel.py init --integration-branch integration/team-stack
 ```
 
+Persist the repo's Syncwheel tracking policy:
+
+```bash
+python3 scripts/syncwheel.py repo tracking status
+python3 scripts/syncwheel.py repo tracking set git-tracked --apply
+python3 scripts/syncwheel.py repo tracking set local-only --apply
+```
+
+Use `git-tracked` when `.syncwheel/manifest.json` is meant to be committed as
+the repo's shared coordination contract. Use `local-only` when Syncwheel metadata
+must stay out of Git; this mode writes local excludes through `.git/info/exclude`,
+not `.gitignore`.
+
 Create a personal local manifest:
 
 ```bash
@@ -82,6 +97,8 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 ## Rules
 
 - `version` is currently `1`
+- `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
+- `syncwheel_worktree_root` defaults to repo-relative `var/syncwheel`
 - every stack id must be unique
 - every stack branch must be unique
 - every declared commit must exist in Git

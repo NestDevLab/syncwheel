@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.18.0`
+Current version: `0.19.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -44,10 +44,11 @@ turning branch history into tribal knowledge.
 ## 30-Second Workflow
 
 ```bash
+python3 scripts/syncwheel.py repo tracking status
 python3 scripts/syncwheel.py reconcile
 python3 scripts/syncwheel.py resume
-python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
-python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py sync
+python3 scripts/syncwheel.py publish
 ```
 
 Default behavior is conservative:
@@ -63,6 +64,8 @@ Default behavior is conservative:
   available for explicit scripting
 - `publish` and `reconcile --push` use `--force-with-lease` by default, because managed
   branches are often rewritten by deterministic rebuilds
+- `repo tracking status` shows whether the manifest is `git-tracked`,
+  `local-only`, or missing a persisted policy
 - if a remote managed branch already matches the manifest projection,
   `sync`, `publish`, and `reconcile --apply` align the local branch to that
   remote instead of rebuilding new replacement commits
@@ -70,6 +73,11 @@ Default behavior is conservative:
   different local history for manual inspection
 
 Use `--no-force-with-lease` only when a normal push is intentionally required.
+
+`syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` should be
+tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
+through `.git/info/exclude`. New managed worktrees default to repo-relative
+`var/syncwheel/`.
 
 ## Worktree-first model
 
@@ -448,7 +456,7 @@ git add -p shared.ts
 python3 scripts/syncwheel.py stack absorb feature-a --staged
 git add -p shared.ts
 python3 scripts/syncwheel.py stack absorb feature-b --staged
-python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py sync
 ```
 
 ### 4. Reconcile managed branches
@@ -456,10 +464,11 @@ python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
 Use `reconcile` as the normal maintenance entrypoint:
 
 ```bash
+python3 scripts/syncwheel.py repo tracking status
 python3 scripts/syncwheel.py reconcile
 python3 scripts/syncwheel.py resume
-python3 scripts/syncwheel.py sync --worktree-root ../syncwheel-worktrees
-python3 scripts/syncwheel.py publish --worktree-root ../syncwheel-worktrees
+python3 scripts/syncwheel.py sync
+python3 scripts/syncwheel.py publish
 ```
 
 `reconcile` fetches by default, classifies stack and integration drift, and
@@ -654,13 +663,14 @@ Common aliases:
 Agents should not infer stack ownership from memory when the repository is meant to be maintained via `syncwheel`.
 
 Recommended sequence:
-1. `reconcile`
-2. update the manifest with `stack sync`, `stack set`, or `stack add` if the
+1. `repo tracking status`
+2. `reconcile`
+3. update the manifest with `stack sync`, `stack set`, or `stack add` if the
    dry-run report shows real ownership changes
-3. `sync --worktree-root <path>`
-4. `publish --worktree-root <path>`
+4. `sync`
+5. `publish`
    when the rebuilt managed branches should become the shared remote state
-5. rerun `reconcile` or `check` and report remaining drift honestly
+6. rerun `reconcile` or `check` and report remaining drift honestly
 
 See [docs/ai-agents.md](docs/ai-agents.md).
 

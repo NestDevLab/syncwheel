@@ -44,11 +44,18 @@ An AI agent should then:
 - if manifest and Git disagree, fix the manifest or call out the conflict explicitly
 - do not claim a repo is aligned if integration and PR branches still disagree
 
-## Manifest tracking (commit vs untracked)
+## Manifest tracking
 
-Whether to commit `.syncwheel/manifest.json` depends on **who owns the repo**:
-commit it for repos you own (shared, versioned coordination contract), keep it
-untracked via `.git/info/exclude` when contributing to an upstream you do not
-control. See [`manifest-tracking.md`](manifest-tracking.md) for the full policy
-and benefits. An installable agent skill that encodes this lives in
-[`skills/syncwheel/SKILL.md`](../skills/syncwheel/SKILL.md).
+Before branch, push, PR, or recovery work, inspect the repo-local tracking policy:
+
+```bash
+syncwheel repo tracking status
+```
+
+`syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` is part of the
+shared Git contract. `syncwheel_tracking=local-only` means Syncwheel metadata
+must stay local through `.git/info/exclude`. If the policy is missing, ask for
+the intended mode and persist it with `syncwheel repo tracking set ... --apply`
+before continuing. See [`manifest-tracking.md`](manifest-tracking.md) for the
+full policy and migration behavior. An installable agent skill that encodes this
+lives in [`skills/syncwheel/SKILL.md`](../skills/syncwheel/SKILL.md).

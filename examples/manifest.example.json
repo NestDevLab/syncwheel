@@ -1,5 +1,7 @@
 {
   "version": 1,
+  "syncwheel_tracking": "git-tracked",
+  "syncwheel_worktree_root": "var/syncwheel",
   "defaults": {
     "canonical_remote": "origin",
     "publication_remote": "fork",

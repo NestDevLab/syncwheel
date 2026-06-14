@@ -84,25 +84,38 @@ aligned while integration and PR branches still differ.
 ```bash
 # 1. Ensure a manifest exists (see the tracking decision below)
 syncwheel init                                  # shared manifest (.syncwheel/manifest.json)
-# 2. Declare the stack
+# 2. Persist the repo tracking policy before branch/push/PR work
+syncwheel repo tracking status
+syncwheel repo tracking set git-tracked --apply # or local-only
+# 3. Declare the stack
 syncwheel stack create feature-a --branch pr/feature-a --base origin/main --include-in-integration
-# 3. Author in a dedicated worktree (fresh work uses plain git worktree add)
+# 4. Author in a dedicated worktree (fresh work uses plain git worktree add)
 git worktree add -b pr/feature-a ../repo-wt-feature-a origin/main
 #    ... make and commit your changes in that worktree ...
-# 4. Record the commits into the manifest, then validate and push
+# 5. Record the commits into the manifest, then validate and push
 syncwheel stack set feature-a origin/main..HEAD
 syncwheel validate && syncwheel plan --json
 syncwheel stack push feature-a
 ```
 
-## Decision: commit the manifest, or keep it untracked?
+## Decision: Syncwheel tracking policy
 
-This is determined by **who owns the repo**, not by preference. Detect ownership
-first (is `origin` a remote you control? is there already a committed
-`.syncwheel/manifest.json`? does the repo's `.gitignore` already exclude
-`.syncwheel/`?), then recommend the matching mode and explain the benefit.
+This is a repo-local Syncwheel policy, not a social guess. Before branch, push,
+PR, or recovery work, run:
 
-### Repo you own / maintain → commit the manifest (shared)
+```bash
+syncwheel repo tracking status
+```
+
+If `syncwheel_tracking` is missing, ask the maintainer/user whether this repo
+should be `git-tracked` or `local-only`, then persist it:
+
+```bash
+syncwheel repo tracking set git-tracked --apply
+syncwheel repo tracking set local-only --apply
+```
+
+### `git-tracked` → commit the manifest
 
 Commit `.syncwheel/manifest.json` (and `.syncwheel/manifests/README.md`). Keep
 personal overlays (`*.local.json`, `profile.local.json`) gitignored.
@@ -113,14 +126,14 @@ Benefits:
 - reproducible across machines without out-of-band setup
 - the manifest is the team's **coordination contract**
 
-Respect an existing choice: if a repo you own already gitignores `.syncwheel/`,
-its maintainers opted out in-tree — keep it untracked there rather than
-overriding their `.gitignore`.
+Use this when the repo wants Syncwheel itself tracked under Git. Syncwheel writes
+a managed `.gitignore` block for local-only metadata and repo-local worktrees
+under `var/syncwheel/`.
 
-### Repo you do not own / external contribution → keep it untracked
+### `local-only` → keep Syncwheel untracked
 
-Exclude `.syncwheel/` via `.git/info/exclude` (local, does not touch the
-committed `.gitignore`).
+Exclude `.syncwheel/` and `var/syncwheel/` via `.git/info/exclude` (local, does
+not touch the committed `.gitignore`).
 
 Benefits:
 - you still get worktree isolation, stacks, deterministic reconcile, and the
@@ -128,6 +141,10 @@ Benefits:
 - you do **not** impose Syncwheel config on a maintainer who may not use it
 - your PRs stay clean — only the real change is proposed
 - coordination/recovery happens via the canonical remote + `resume`
+
+Use `syncwheel repo tracking set ... --apply` to migrate between modes. The CLI
+edits only Syncwheel-managed ignore blocks; if manual `.gitignore` entries would
+hide `.syncwheel/manifest.json`, stop and ask for a repository decision.
 
 > **Manifest self-reference rule:** treat manifest edits and Syncwheel-version
 > bumps as control-plane metadata, not as normal stack-owned product commits.

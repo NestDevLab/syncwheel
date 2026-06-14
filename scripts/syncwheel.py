@@ -31,12 +31,19 @@ ENV_UV_TOOL_SOURCE = 'SYNCWHEEL_UV_TOOL_SOURCE'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 DEFAULT_INTEGRATION_BRANCH = 'main-integration'
+SYNCWHEEL_TRACKING_VALUES = {'git-tracked', 'local-only'}
+SYNCWHEEL_TRACKING_GIT_TRACKED = 'git-tracked'
+SYNCWHEEL_TRACKING_LOCAL_ONLY = 'local-only'
+DEFAULT_SYNCWHEEL_WORKTREE_ROOT = 'var/syncwheel'
 UPDATE_MODES = {'off', 'notify', 'auto'}
 RECONCILE_MODES = {'standard', 'resume'}
 LEDGER_SCHEMA_VERSION = 1
 LEDGER_SEGMENT_MAX_EVENTS = 256
 SYNCWHEEL_LOCAL_EXCLUDE_PATTERN = '.syncwheel/'
 SYNCWHEEL_LOCAL_EXCLUDE_MARKER = '# syncwheel local metadata'
+SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER = '# end syncwheel local metadata'
+SYNCWHEEL_GITIGNORE_MARKER = '# syncwheel managed metadata'
+SYNCWHEEL_GITIGNORE_END_MARKER = '# end syncwheel managed metadata'
 DEFAULT_UPDATE_MODE = 'notify'
 DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 UPSTREAM_REPO_URL = 'https://github.com/NestDevLab/syncwheel'
@@ -946,25 +953,197 @@ def ensure_clean_worktree(path, allowed_status_prefixes=None):
         raise SyncwheelError(f'{path} is not clean')
 
 
-def ensure_syncwheel_metadata_excluded(repo_root):
+def normalize_syncwheel_tracking(value, path='manifest'):
+    if value is None:
+        return None
+    if value not in SYNCWHEEL_TRACKING_VALUES:
+        allowed = ', '.join(sorted(SYNCWHEEL_TRACKING_VALUES))
+        raise SyncwheelError(f'{path} syncwheel_tracking must be one of: {allowed}')
+    return value
+
+
+def normalize_syncwheel_worktree_root(value, path='manifest'):
+    if value is None:
+        return DEFAULT_SYNCWHEEL_WORKTREE_ROOT
+    if not isinstance(value, str) or not value.strip():
+        raise SyncwheelError(f'{path} syncwheel_worktree_root must be a non-empty string')
+    return value.strip()
+
+
+def syncwheel_worktree_root(manifest):
+    if not manifest:
+        return DEFAULT_SYNCWHEEL_WORKTREE_ROOT
+    return normalize_syncwheel_worktree_root(manifest.get('syncwheel_worktree_root'))
+
+
+def resolve_worktree_root_path(repo_root, worktree_root):
+    root = Path(worktree_root or DEFAULT_SYNCWHEEL_WORKTREE_ROOT).expanduser()
+    if not root.is_absolute():
+        root = repo_root / root
+    return root.resolve()
+
+
+def syncwheel_ignore_pattern(value):
+    normalized = value.replace('\\', '/').strip()
+    if not normalized:
+        return DEFAULT_SYNCWHEEL_WORKTREE_ROOT + '/'
+    return normalized.rstrip('/') + '/'
+
+
+def syncwheel_gitignore_patterns(worktree_root):
+    return [
+        '.syncwheel/ledger/',
+        '.syncwheel/profile.local.json',
+        '.syncwheel/manifests/*.local.json',
+        syncwheel_ignore_pattern(worktree_root),
+    ]
+
+
+def syncwheel_local_exclude_patterns(worktree_root):
+    return [
+        '.syncwheel/',
+        syncwheel_ignore_pattern(worktree_root),
+    ]
+
+
+def all_syncwheel_managed_patterns(worktree_root):
+    patterns = set(syncwheel_gitignore_patterns(worktree_root))
+    patterns.update(syncwheel_local_exclude_patterns(worktree_root))
+    patterns.add(SYNCWHEEL_LOCAL_EXCLUDE_PATTERN)
+    return patterns
+
+
+def read_text_if_exists(path):
+    try:
+        return path.read_text()
+    except OSError:
+        return ''
+
+
+def replace_managed_block(text, start_marker, end_marker, patterns, legacy_patterns=None):
+    lines = text.splitlines()
+    output = []
+    index = 0
+    legacy_patterns = set(legacy_patterns or [])
+    found = False
+    while index < len(lines):
+        if lines[index].strip() != start_marker:
+            output.append(lines[index])
+            index += 1
+            continue
+        found = True
+        index += 1
+        while index < len(lines):
+            stripped = lines[index].strip()
+            if stripped == end_marker:
+                index += 1
+                break
+            if end_marker not in lines and stripped not in legacy_patterns:
+                break
+            index += 1
+    while output and not output[-1].strip():
+        output.pop()
+    if patterns:
+        if output:
+            output.append('')
+        output.append(start_marker)
+        output.extend(patterns)
+        output.append(end_marker)
+    updated = '\n'.join(output)
+    if updated:
+        updated += '\n'
+    return updated, found
+
+
+def write_managed_block(path, start_marker, end_marker, patterns, legacy_patterns=None):
+    existing = read_text_if_exists(path)
+    updated, _ = replace_managed_block(existing, start_marker, end_marker, patterns, legacy_patterns)
+    if updated == existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated)
+    return True
+
+
+def git_info_exclude_path(repo_root):
     result = git(repo_root, 'rev-parse', '--git-path', 'info/exclude', check=False)
     if result.returncode != 0:
-        return
+        return None
     path = Path(result.stdout.strip())
-    try:
-        existing = path.read_text()
-    except OSError:
-        existing = ''
-    if any(line.strip() == SYNCWHEEL_LOCAL_EXCLUDE_PATTERN for line in existing.splitlines()):
+    if not path.is_absolute():
+        path = repo_root / path
+    return path
+
+
+def ensure_syncwheel_metadata_excluded(repo_root, tracking=None, worktree_root=None):
+    tracking = normalize_syncwheel_tracking(tracking) or SYNCWHEEL_TRACKING_LOCAL_ONLY
+    worktree_root = normalize_syncwheel_worktree_root(worktree_root)
+    legacy_patterns = all_syncwheel_managed_patterns(worktree_root)
+    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        write_managed_block(
+            repo_root / '.gitignore',
+            SYNCWHEEL_GITIGNORE_MARKER,
+            SYNCWHEEL_GITIGNORE_END_MARKER,
+            syncwheel_gitignore_patterns(worktree_root),
+            legacy_patterns,
+        )
+        path = git_info_exclude_path(repo_root)
+        if path:
+            write_managed_block(
+                path,
+                SYNCWHEEL_LOCAL_EXCLUDE_MARKER,
+                SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER,
+                [],
+                legacy_patterns,
+            )
         return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    updated = existing
-    if updated and not updated.endswith('\n'):
-        updated += '\n'
-    if SYNCWHEEL_LOCAL_EXCLUDE_MARKER not in existing:
-        updated += f'{SYNCWHEEL_LOCAL_EXCLUDE_MARKER}\n'
-    updated += f'{SYNCWHEEL_LOCAL_EXCLUDE_PATTERN}\n'
-    path.write_text(updated)
+    path = git_info_exclude_path(repo_root)
+    if not path:
+        return
+    write_managed_block(
+        path,
+        SYNCWHEEL_LOCAL_EXCLUDE_MARKER,
+        SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER,
+        syncwheel_local_exclude_patterns(worktree_root),
+        legacy_patterns,
+    )
+
+
+def repo_local_worktree_exclude_pattern(repo_root, worktree_root):
+    root = resolve_worktree_root_path(repo_root, worktree_root)
+    try:
+        relative = root.relative_to(Path(repo_root).resolve())
+    except ValueError:
+        return None
+    return syncwheel_ignore_pattern(relative.as_posix())
+
+
+def ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root):
+    pattern = repo_local_worktree_exclude_pattern(repo_root, worktree_root)
+    if not pattern:
+        return
+    path = git_info_exclude_path(repo_root)
+    if not path:
+        return
+    write_managed_block(
+        path,
+        SYNCWHEEL_LOCAL_EXCLUDE_MARKER,
+        SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER,
+        [pattern],
+        all_syncwheel_managed_patterns(worktree_root),
+    )
+
+
+def manifest_policy_from_file(manifest_path):
+    try:
+        data = json.loads(Path(manifest_path).read_text())
+    except (OSError, json.JSONDecodeError):
+        return None, DEFAULT_SYNCWHEEL_WORKTREE_ROOT
+    if not isinstance(data, dict):
+        return None, DEFAULT_SYNCWHEEL_WORKTREE_ROOT
+    tracking = normalize_syncwheel_tracking(data.get('syncwheel_tracking'), str(manifest_path))
+    worktree_root = normalize_syncwheel_worktree_root(data.get('syncwheel_worktree_root'), str(manifest_path))
+    return tracking, worktree_root
 
 
 def syncwheel_timestamp():
@@ -1003,6 +1182,11 @@ def load_manifest(repo_root, manifest_path=None):
         raise SyncwheelError('manifest root must be an object')
     if data.get('version') != 1:
         raise SyncwheelError('manifest version must be 1')
+    if 'syncwheel_tracking' in data:
+        normalize_syncwheel_tracking(data.get('syncwheel_tracking'))
+    data['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(
+        data.get('syncwheel_worktree_root')
+    )
 
     defaults = data.setdefault('defaults', {})
     canonical_remote = defaults.setdefault('canonical_remote', 'origin')
@@ -1291,7 +1475,8 @@ def next_ledger_segment_path(repo_root, manifest_path=None):
 
 def append_ledger_event(repo_root, event_type, payload, manifest_path=None):
     if not is_external_manifest_path(repo_root, manifest_path):
-        ensure_syncwheel_metadata_excluded(repo_root)
+        tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
+        ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
     current = load_ledger_state(repo_root, manifest_path)
     event = {
         'schema_version': LEDGER_SCHEMA_VERSION,
@@ -1396,7 +1581,8 @@ def load_repo_profile(repo_root):
 
 
 def save_repo_profile(repo_root, profile):
-    ensure_syncwheel_metadata_excluded(repo_root)
+    tracking, worktree_root = manifest_policy_from_file(repo_root / '.syncwheel' / 'manifest.json')
+    ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
     path = repo_profile_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(profile, indent=2, sort_keys=True) + '\n')
@@ -1406,6 +1592,10 @@ def save_repo_profile(repo_root, profile):
 def default_worktree_path(repo_root, branch):
     safe = branch.replace('/', '-').replace('\\', '-')
     return repo_root.parent / f'{repo_root.name}-wt-{safe}'
+
+
+def effective_worktree_root(manifest, override=None):
+    return override or syncwheel_worktree_root(manifest)
 
 
 def find_worktree_for_branch(repo_root, branch):
@@ -2137,6 +2327,10 @@ def command_init(args):
         },
         'stacks': [],
     }
+    if args.syncwheel_tracking:
+        manifest['syncwheel_tracking'] = normalize_syncwheel_tracking(args.syncwheel_tracking)
+    if args.worktree_root:
+        manifest['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(args.worktree_root)
     output = json.dumps(manifest, indent=2) + '\n'
     if args.stdout:
         print(output, end='')
@@ -2489,7 +2683,7 @@ def command_stack_absorb(args):
         source = 'staged changes' if args.staged else 'working tree changes'
         raise SyncwheelError(f'no {source} to absorb')
 
-    stack_worktree = resolve_stack_absorb_location(repo_root, stack, args)
+    stack_worktree = resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, args)
     ensure_clean_worktree(stack_worktree)
     apply_patch = run(['git', '-C', str(stack_worktree), 'apply', '--index'], input_text=patch, check=False)
     if apply_patch.returncode != 0:
@@ -2518,7 +2712,7 @@ def command_stack_absorb(args):
     return 0
 
 
-def resolve_stack_absorb_location(repo_root, stack, args):
+def resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, args):
     branch = stack['branch']
     existing = find_worktree_for_branch(repo_root, branch)
     if args.worktree:
@@ -2533,10 +2727,12 @@ def resolve_stack_absorb_location(repo_root, stack, args):
         return path
     if existing:
         return existing
-    if args.worktree_root:
-        path = reconcile_worktree_path(repo_root, branch, args.worktree_root)
+    path = reconcile_worktree_path(repo_root, branch, effective_worktree_root(manifest, args.worktree_root))
+    worktree_root = effective_worktree_root(manifest, args.worktree_root)
+    if is_external_manifest_path(repo_root, manifest_path):
+        ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
     else:
-        path = default_worktree_path(repo_root, branch)
+        ensure_syncwheel_metadata_excluded(repo_root, manifest.get('syncwheel_tracking'), worktree_root)
     run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
     return path
 
@@ -2831,7 +3027,7 @@ def reconcile_worktree_path(repo_root, branch, worktree_root):
             return existing_path
     if worktree_root:
         safe = branch.replace('/', '-').replace('\\', '-')
-        return Path(worktree_root).expanduser().resolve() / safe
+        return resolve_worktree_root_path(repo_root, worktree_root) / safe
     return default_worktree_path(repo_root, branch)
 
 
@@ -3172,6 +3368,7 @@ def command_reconcile(args):
             if stack_id not in known:
                 raise SyncwheelError(f'unknown stack: {stack_id}')
     validation = validate_manifest(repo_root, manifest)
+    worktree_root = effective_worktree_root(manifest, args.worktree_root)
     stack_ids = set(args.stack or [stack['id'] for stack in manifest['stacks']])
     stack_reports = {
         stack['id']: stack_reconcile_report(repo_root, manifest, stack, args.remote)
@@ -3215,12 +3412,17 @@ def command_reconcile(args):
     if manual_actions:
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
 
+    if is_external_manifest_path(repo_root, manifest_path):
+        ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
+    else:
+        ensure_syncwheel_metadata_excluded(repo_root, manifest.get('syncwheel_tracking'), worktree_root)
+
     push_args = push_args_with_options(args)
     for action in actions:
         if action['type'] == 'rebuild_stack':
             stack = require_stack(manifest, action['stack'])
             before_tip = ref_tip(repo_root, stack['branch'])
-            worktree = reconcile_worktree_path(repo_root, stack['branch'], args.worktree_root)
+            worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
             ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
             commands = materialize_pr_commands(repo_root, manifest, stack, worktree, False)
             run_command_list(commands, repo_root, True)
@@ -3250,7 +3452,7 @@ def command_reconcile(args):
         elif action['type'] == 'align_stack_to_remote':
             stack = require_stack(manifest, action['stack'])
             before_tip = ref_tip(repo_root, stack['branch'])
-            worktree = reconcile_worktree_path(repo_root, stack['branch'], args.worktree_root)
+            worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
             ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
             commands = materialize_remote_align_commands(
                 repo_root,
@@ -3303,7 +3505,7 @@ def command_reconcile(args):
                 worktree = None
                 in_place = True
             else:
-                worktree = reconcile_worktree_path(repo_root, integration['branch'], args.worktree_root)
+                worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
                 in_place = False
             commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
@@ -3327,7 +3529,7 @@ def command_reconcile(args):
                 ensure_clean_worktree(repo_root, allowed_status_prefixes=['?? .syncwheel/'])
                 worktree = None
             else:
-                worktree = reconcile_worktree_path(repo_root, integration['branch'], args.worktree_root)
+                worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
             commands = materialize_remote_align_commands(
                 repo_root,
@@ -3610,6 +3812,256 @@ def command_manifest_compare(args):
     return 0
 
 
+def repo_relative_path(repo_root, path):
+    try:
+        return Path(path).resolve().relative_to(Path(repo_root).resolve()).as_posix()
+    except ValueError:
+        return None
+
+
+def git_path_is_tracked(repo_root, path):
+    relative = repo_relative_path(repo_root, path)
+    if not relative:
+        return False
+    return git(repo_root, 'ls-files', '--error-unmatch', '--', relative, check=False).returncode == 0
+
+
+def gitignore_manual_syncwheel_conflicts(repo_root):
+    path = repo_root / '.gitignore'
+    text = read_text_if_exists(path)
+    if not text:
+        return []
+    scrubbed, _ = replace_managed_block(
+        text,
+        SYNCWHEEL_GITIGNORE_MARKER,
+        SYNCWHEEL_GITIGNORE_END_MARKER,
+        [],
+        all_syncwheel_managed_patterns(DEFAULT_SYNCWHEEL_WORKTREE_ROOT),
+    )
+    conflicts = []
+    for line in scrubbed.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#'):
+            continue
+        if stripped == '.syncwheel/' or stripped == '.syncwheel':
+            conflicts.append(stripped)
+    return conflicts
+
+
+def managed_block_exists(path, marker):
+    if not path:
+        return False
+    return any(line.strip() == marker for line in read_text_if_exists(path).splitlines())
+
+
+def syncwheel_tracking_report(repo_root, manifest_path):
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest_present = manifest is not None
+    tracking = manifest.get('syncwheel_tracking') if manifest else None
+    worktree_root = syncwheel_worktree_root(manifest)
+    effective_root = resolve_worktree_root_path(repo_root, worktree_root)
+    info_exclude = git_info_exclude_path(repo_root)
+    gitignore = repo_root / '.gitignore'
+    manifest_relative = repo_relative_path(repo_root, manifest_path)
+    manifest_tracked = git_path_is_tracked(repo_root, manifest_path)
+    warnings = []
+    actions = []
+
+    if not manifest_present:
+        actions.append('create a manifest with syncwheel init, then set syncwheel_tracking')
+    elif tracking is None:
+        warnings.append('syncwheel_tracking is not set; choose git-tracked or local-only before branch/push/PR work')
+        actions.append('run syncwheel repo tracking set git-tracked|local-only --apply')
+    elif tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        conflicts = gitignore_manual_syncwheel_conflicts(repo_root)
+        if conflicts:
+            warnings.append('.gitignore contains manual .syncwheel ignore entries outside the Syncwheel managed block')
+        if not manifest_tracked and manifest_relative:
+            actions.append('git add -f .syncwheel/manifest.json')
+        if not managed_block_exists(gitignore, SYNCWHEEL_GITIGNORE_MARKER):
+            actions.append('add Syncwheel managed .gitignore block')
+        if managed_block_exists(info_exclude, SYNCWHEEL_LOCAL_EXCLUDE_MARKER):
+            actions.append('remove Syncwheel managed .git/info/exclude block')
+    elif tracking == SYNCWHEEL_TRACKING_LOCAL_ONLY:
+        if manifest_tracked and manifest_relative:
+            actions.append('git rm --cached .syncwheel/manifest.json')
+        if not managed_block_exists(info_exclude, SYNCWHEEL_LOCAL_EXCLUDE_MARKER):
+            actions.append('add Syncwheel managed .git/info/exclude block')
+        if managed_block_exists(gitignore, SYNCWHEEL_GITIGNORE_MARKER):
+            actions.append('remove Syncwheel managed .gitignore block')
+
+    return {
+        'repo_root': str(repo_root),
+        'manifest_path': str(manifest_path),
+        'manifest_present': manifest_present,
+        'manifest_in_repo': manifest_relative is not None,
+        'manifest_tracked': manifest_tracked,
+        'syncwheel_tracking': tracking,
+        'syncwheel_tracking_present': tracking is not None,
+        'syncwheel_worktree_root': worktree_root,
+        'effective_worktree_root': str(effective_root),
+        'gitignore_path': str(gitignore),
+        'gitignore_managed': managed_block_exists(gitignore, SYNCWHEEL_GITIGNORE_MARKER),
+        'info_exclude_path': str(info_exclude) if info_exclude else None,
+        'info_exclude_managed': managed_block_exists(info_exclude, SYNCWHEEL_LOCAL_EXCLUDE_MARKER),
+        'warnings': warnings,
+        'actions': actions,
+    }
+
+
+def print_syncwheel_tracking_report(report):
+    print(f"repo: {report['repo_root']}")
+    print(f"manifest: {report['manifest_path'] if report['manifest_present'] else 'missing'}")
+    print(f"syncwheel_tracking: {report['syncwheel_tracking'] or 'missing'}")
+    print(f"syncwheel_worktree_root: {report['syncwheel_worktree_root']}")
+    print(f"effective_worktree_root: {report['effective_worktree_root']}")
+    print(f"manifest_tracked: {'yes' if report['manifest_tracked'] else 'no'}")
+    if report['warnings']:
+        print('warnings:')
+        for warning in report['warnings']:
+            print(f'  - {warning}')
+    if report['actions']:
+        print('actions:')
+        for action in report['actions']:
+            print(f'  - {action}')
+    else:
+        print('actions: none')
+
+
+def command_repo_tracking_status(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    report = syncwheel_tracking_report(repo_root, manifest_path)
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print_syncwheel_tracking_report(report)
+    return 0
+
+
+def ensure_manifest_in_repo(repo_root, manifest_path):
+    relative = repo_relative_path(repo_root, manifest_path)
+    if not relative:
+        raise SyncwheelError('syncwheel_tracking setup requires a manifest path inside the target repo')
+    return relative
+
+
+def ensure_manifests_readme(repo_root):
+    path = repo_root / '.syncwheel' / 'manifests' / 'README.md'
+    if not path.exists():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            '# Syncwheel Manifests\n\n'
+            'Personal `*.local.json` manifests are per-clone overlays and should not be committed.\n'
+        )
+    return path
+
+
+def git_add_paths(repo_root, paths, force_paths=None):
+    normal = []
+    force = []
+    force_paths = {Path(path).resolve() for path in (force_paths or [])}
+    for path in paths:
+        resolved = Path(path).resolve()
+        relative = repo_relative_path(repo_root, resolved)
+        if not relative or not resolved.exists():
+            continue
+        if resolved in force_paths:
+            force.append(relative)
+        else:
+            normal.append(relative)
+    if normal:
+        git(repo_root, 'add', '--', *normal)
+    if force:
+        git(repo_root, 'add', '-f', '--', *force)
+
+
+def git_rm_cached_paths(repo_root, paths):
+    relatives = []
+    for path in paths:
+        relative = repo_relative_path(repo_root, path)
+        if relative:
+            relatives.append(relative)
+    if relatives:
+        git(repo_root, 'rm', '--cached', '--ignore-unmatch', '--', *relatives)
+
+
+def command_repo_tracking_set(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    if not manifest:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    ensure_manifest_in_repo(repo_root, manifest_path)
+    tracking = normalize_syncwheel_tracking(args.tracking)
+    worktree_root = normalize_syncwheel_worktree_root(args.worktree_root or syncwheel_worktree_root(manifest))
+    manifest['syncwheel_tracking'] = tracking
+    manifest['syncwheel_worktree_root'] = worktree_root
+
+    warnings = []
+    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        conflicts = gitignore_manual_syncwheel_conflicts(repo_root)
+        if conflicts:
+            warnings.append(
+                '.gitignore contains manual .syncwheel ignore entries outside the Syncwheel managed block; '
+                'remove or audit them before applying git-tracked setup'
+            )
+    if warnings and args.apply:
+        raise SyncwheelError('; '.join(warnings))
+
+    if not args.apply:
+        report = syncwheel_tracking_report(repo_root, manifest_path)
+        report['syncwheel_tracking'] = tracking
+        report['syncwheel_tracking_present'] = True
+        report['syncwheel_worktree_root'] = worktree_root
+        report['effective_worktree_root'] = str(resolve_worktree_root_path(repo_root, worktree_root))
+        report['warnings'].extend(warnings)
+        report['actions'].append(f'apply syncwheel_tracking={tracking}')
+        print_syncwheel_tracking_report(report)
+        print('dry_run: pass --apply to write this setup')
+        return 0
+
+    readme_path = repo_root / '.syncwheel' / 'manifests' / 'README.md'
+    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        readme_path = ensure_manifests_readme(repo_root)
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            manifest,
+            'repo_tracking_set',
+            {'syncwheel_tracking': tracking, 'syncwheel_worktree_root': worktree_root},
+        )
+        git_add_paths(
+            repo_root,
+            [manifest_path, repo_root / '.gitignore', readme_path],
+            force_paths=[manifest_path],
+        )
+    else:
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            manifest,
+            'repo_tracking_set',
+            {'syncwheel_tracking': tracking, 'syncwheel_worktree_root': worktree_root},
+        )
+        write_managed_block(
+            repo_root / '.gitignore',
+            SYNCWHEEL_GITIGNORE_MARKER,
+            SYNCWHEEL_GITIGNORE_END_MARKER,
+            [],
+            all_syncwheel_managed_patterns(worktree_root),
+        )
+        git_add_paths(repo_root, [repo_root / '.gitignore'])
+        git_rm_cached_paths(repo_root, [manifest_path, readme_path])
+
+    report = syncwheel_tracking_report(repo_root, manifest_path)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print_syncwheel_tracking_report(report)
+    return 0
+
+
 def add_rebuild_args(parser):
     parser.add_argument('--worktree')
     parser.add_argument('--in-place', action='store_true')
@@ -3729,6 +4181,20 @@ def build_parser():
     repo_ls_p.add_argument('--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
 
+    repo_tracking_p = repo_sub.add_parser('tracking', help='inspect or set repo-local syncwheel tracking policy')
+    repo_tracking_sub = repo_tracking_p.add_subparsers(dest='tracking_command', required=True)
+
+    repo_tracking_status_p = repo_tracking_sub.add_parser('status', parents=[common])
+    repo_tracking_status_p.add_argument('--json', action='store_true')
+    repo_tracking_status_p.set_defaults(func=command_repo_tracking_status)
+
+    repo_tracking_set_p = repo_tracking_sub.add_parser('set', parents=[common])
+    repo_tracking_set_p.add_argument('tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
+    repo_tracking_set_p.add_argument('--worktree-root', help='default repo-relative syncwheel worktree/cache root')
+    repo_tracking_set_p.add_argument('--apply', action='store_true')
+    repo_tracking_set_p.add_argument('--json', action='store_true')
+    repo_tracking_set_p.set_defaults(func=command_repo_tracking_set)
+
     self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
     self_sub = self_p.add_subparsers(dest='self_command', required=True)
 
@@ -3765,6 +4231,8 @@ def build_parser():
     init_p.add_argument('--publication-remote', default='fork')
     init_p.add_argument('--base-branch', default='main')
     init_p.add_argument('--integration-branch')
+    init_p.add_argument('--syncwheel-tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
+    init_p.add_argument('--worktree-root', help='default repo-relative syncwheel worktree/cache root')
     init_p.add_argument('--force', action='store_true')
     init_p.add_argument('--stdout', action='store_true')
     init_p.set_defaults(func=command_init)
