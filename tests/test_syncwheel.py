@@ -412,6 +412,15 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('feature-c', ledger['manifest']['active_stacks'])
         self.assertEqual(ledger['stacks']['feature-c']['branch'], 'pr/alice/feature-c')
 
+    def test_spoke_alias_maps_to_stack_commands(self):
+        list_result = self.run_cli('spoke', 'list', expected=0)
+        self.assertIn('feature-a\tpr/feature-a\tcommits=1', list_result.stdout)
+
+        show_result = self.run_cli('spoke', 'show', 'feature-b', expected=0)
+        data = json.loads(show_result.stdout)
+        self.assertEqual(data['id'], 'feature-b')
+        self.assertEqual(data['branch'], 'pr/feature-b')
+
     def test_stack_add_accepts_integration_first_commit_on_current_projection(self):
         base = self.git('rev-parse', 'HEAD')
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'

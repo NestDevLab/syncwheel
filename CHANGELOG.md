@@ -4,6 +4,7 @@
 
 - Add short CLI aliases for common repo, manifest, JSON, dry-run, reconcile,
   push, remote, worktree, tracking, stack, integration, and self-update options.
+- Add `spoke` as a readable CLI alias for `stack`.
 - Document the short-flag map for agent and human workflows.
 
 ## 0.19.0 - 2026-06-13

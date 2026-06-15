@@ -79,6 +79,9 @@ syncwheel reconcile -a -P -W var/syncwheel
 syncwheel repo tracking set git-tracked -a
 ```
 
+`syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
+wheel metaphor helps, but the manifest field remains `stacks`.
+
 Never mutate branches from a dirty worktree. Prefer a dedicated worktree for
 every rebuild. Use `--dry-run` on rebuild/push commands. If the manifest and Git
 disagree, fix the manifest or call out the conflict — do not claim a repo is

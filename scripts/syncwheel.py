@@ -4320,7 +4320,11 @@ def build_parser():
     manifest_compare_p.add_argument('-j', '--json', action='store_true')
     manifest_compare_p.set_defaults(func=command_manifest_compare)
 
-    stack_p = sub.add_parser('stack', aliases=['s'], help='inspect, create, edit, rebuild, push, or run git for one stack')
+    stack_p = sub.add_parser(
+        'stack',
+        aliases=['s', 'spoke'],
+        help='inspect, create, edit, rebuild, push, or run git for one stack/spoke',
+    )
     stack_sub = stack_p.add_subparsers(dest='stack_command', required=True)
 
     stack_list_p = stack_sub.add_parser('list', aliases=['ls'], parents=[common])

@@ -391,7 +391,8 @@ python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
 
 Long names are still available: `stack create --personal alice` is equivalent,
-and `-u` is the short form of `--include-in-integration`.
+`spoke` is a readable alias for `stack`, and `-u` is the short form of
+`--include-in-integration`.
 
 To make a personal manifest the default for the current clone:
 
@@ -677,7 +678,7 @@ Common aliases:
 - `validate` -> `v`
 - `plan` -> `pl`
 - `reconcile` -> `rec`
-- `stack` -> `s`
+- `stack` -> `s`, `spoke`
 - `int` -> `i`
 - `stack create` -> `s new`
 - `stack rebuild` -> `s rb`
