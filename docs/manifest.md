@@ -8,7 +8,7 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 {
   "version": 1,
   "syncwheel_tracking": "git-tracked",
-  "syncwheel_worktree_root": "var/syncwheel",
+  "syncwheel_worktree_root": ".syncwheel/wt",
   "defaults": {
     "canonical_remote": "origin",
     "publication_remote": "fork",
@@ -100,7 +100,7 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 
 - `version` is currently `1`
 - `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
-- `syncwheel_worktree_root` defaults to repo-relative `var/syncwheel`
+- `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
 - every stack id must be unique
 - every stack branch must be unique
 - every declared commit must exist in Git

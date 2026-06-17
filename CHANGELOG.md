@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Default Syncwheel-managed worktrees to repo-relative `.syncwheel/wt/` while
+  preserving explicit `var/syncwheel` manifest settings.
+
 ## 0.20.0 - 2026-06-14
 
 - Add short CLI aliases for common repo, manifest, JSON, dry-run, reconcile,

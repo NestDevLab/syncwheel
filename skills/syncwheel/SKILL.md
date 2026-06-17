@@ -74,8 +74,8 @@ Short aliases are preferred when they make commands easier to scan:
 ```bash
 syncwheel status -f -j
 syncwheel plan -j
-syncwheel reconcile -a -W var/syncwheel
-syncwheel reconcile -a -P -W var/syncwheel
+syncwheel reconcile -a -W .syncwheel/wt
+syncwheel reconcile -a -P -W .syncwheel/wt
 syncwheel repo tracking set git-tracked -a
 ```
 
@@ -153,11 +153,11 @@ Benefits:
 
 Use this when the repo wants Syncwheel itself tracked under Git. Syncwheel writes
 a managed `.gitignore` block for local-only metadata and repo-local worktrees
-under `var/syncwheel/`.
+under `.syncwheel/wt/`.
 
 ### `local-only` → keep Syncwheel untracked
 
-Exclude `.syncwheel/` and `var/syncwheel/` via `.git/info/exclude` (local, does
+Exclude `.syncwheel/` via `.git/info/exclude` (local, does
 not touch the committed `.gitignore`).
 
 Benefits:

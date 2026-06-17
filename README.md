@@ -77,7 +77,7 @@ Use `--no-force-with-lease` only when a normal push is intentionally required.
 `syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` should be
 tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
 through `.git/info/exclude`. New managed worktrees default to repo-relative
-`var/syncwheel/`.
+`.syncwheel/wt/`.
 
 ## Common Short Flags
 
@@ -101,7 +101,7 @@ Examples:
 ```bash
 syncwheel status -f -j
 syncwheel repo tracking set git-tracked -a
-syncwheel reconcile -a -P -W var/syncwheel
+syncwheel reconcile -a -P -W .syncwheel/wt
 syncwheel stack rebuild feature-a -n
 ```
 

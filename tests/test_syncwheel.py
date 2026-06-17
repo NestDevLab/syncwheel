@@ -290,7 +290,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertIsNone(data['syncwheel_tracking'])
         self.assertFalse(data['syncwheel_tracking_present'])
-        self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
+        self.assertEqual(data['syncwheel_worktree_root'], '.syncwheel/wt')
         self.assertIn('syncwheel_tracking is not set', data['warnings'][0])
 
     def test_repo_tracking_set_git_tracked_stages_manifest_and_gitignore(self):
@@ -303,14 +303,31 @@ class SyncwheelFixtureTest(unittest.TestCase):
         tracked = self.git('ls-files', '.syncwheel/manifest.json', '.gitignore')
 
         self.assertEqual(manifest['syncwheel_tracking'], 'git-tracked')
-        self.assertEqual(manifest['syncwheel_worktree_root'], 'var/syncwheel')
+        self.assertEqual(manifest['syncwheel_worktree_root'], '.syncwheel/wt')
         self.assertTrue(data['manifest_tracked'])
         self.assertIn('.syncwheel/manifest.json', tracked)
         self.assertIn('.gitignore', tracked)
         self.assertIn('# syncwheel managed metadata', gitignore)
         self.assertIn('.syncwheel/ledger/', gitignore)
-        self.assertIn('var/syncwheel/', gitignore)
+        self.assertIn('.syncwheel/wt/', gitignore)
+        self.assertNotIn('var/syncwheel/', gitignore)
         self.assertNotIn('.syncwheel/', exclude)
+
+    def test_repo_tracking_set_git_tracked_cleans_legacy_worktree_root_from_managed_block(self):
+        (self.repo / '.gitignore').write_text(
+            '# syncwheel managed metadata\n'
+            '.syncwheel/ledger/\n'
+            '.syncwheel/profile.local.json\n'
+            '.syncwheel/manifests/*.local.json\n'
+            'var/syncwheel/\n'
+        )
+
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', '--json', expected=0)
+        gitignore = (self.repo / '.gitignore').read_text()
+
+        self.assertIn('.syncwheel/wt/', gitignore)
+        self.assertNotIn('var/syncwheel/', gitignore)
+        self.assertIn('# end syncwheel managed metadata', gitignore)
 
     def test_repo_tracking_set_local_only_uses_info_exclude_without_gitignore(self):
         result = self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', '--json', expected=0)
@@ -324,7 +341,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertFalse((self.repo / '.gitignore').exists())
         self.assertIn('# syncwheel local metadata', exclude)
         self.assertIn('.syncwheel/', exclude)
-        self.assertIn('var/syncwheel/', exclude)
+        self.assertNotIn('var/syncwheel/', exclude)
 
     def test_repo_tracking_migrates_git_tracked_to_local_only(self):
         self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
@@ -338,8 +355,29 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertFalse(data['manifest_tracked'])
         self.assertEqual(self.git('ls-files', '.syncwheel/manifest.json'), '')
         self.assertIn('.syncwheel/', exclude)
-        self.assertIn('var/syncwheel/', exclude)
+        self.assertNotIn('var/syncwheel/', exclude)
         self.assertNotIn('# syncwheel managed metadata', gitignore)
+
+    def test_explicit_legacy_worktree_root_is_preserved(self):
+        result = self.run_cli(
+            'repo',
+            'tracking',
+            'set',
+            'git-tracked',
+            '--worktree-root',
+            'var/syncwheel',
+            '--apply',
+            '--json',
+            expected=0,
+        )
+        data = json.loads(result.stdout)
+        manifest = self.read_manifest()
+        gitignore = (self.repo / '.gitignore').read_text()
+
+        self.assertEqual(manifest['syncwheel_worktree_root'], 'var/syncwheel')
+        self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
+        self.assertTrue(data['effective_worktree_root'].endswith('/var/syncwheel'))
+        self.assertIn('var/syncwheel/', gitignore)
 
     def test_personal_flag_selects_local_manifest_for_commands(self):
         self.run_cli('init', '--personal', 'alice', '--force', expected=0)
@@ -849,7 +887,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
 
-    def test_reconcile_apply_uses_manifest_worktree_root_by_default(self):
+    def prepare_reconcile_apply_worktree_scenario(self, worktree_root=None):
         beta = self.git('rev-parse', 'main')
         base = self.git('rev-parse', 'main~1')
         self.git('branch', 'integration/reconcile', base)
@@ -863,7 +901,10 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         data = self.read_manifest()
         data['syncwheel_tracking'] = 'local-only'
-        data['syncwheel_worktree_root'] = 'var/syncwheel'
+        if worktree_root is not None:
+            data['syncwheel_worktree_root'] = worktree_root
+        else:
+            data.pop('syncwheel_worktree_root', None)
         data['integration'] = {
             'branch': 'integration/reconcile',
             'base': base,
@@ -882,6 +923,16 @@ class SyncwheelFixtureTest(unittest.TestCase):
             }
         ]
         (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+
+    def test_reconcile_apply_uses_default_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario()
+
+        self.run_cli('reconcile', '--no-fetch', '--apply', '--skip-integration', expected=0)
+
+        self.assertTrue((self.repo / '.syncwheel' / 'wt' / 'pr-feature-b').exists())
+
+    def test_reconcile_apply_preserves_explicit_legacy_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
 
         self.run_cli('reconcile', '--no-fetch', '--apply', '--skip-integration', expected=0)
 

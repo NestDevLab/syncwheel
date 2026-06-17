@@ -34,7 +34,8 @@ DEFAULT_INTEGRATION_BRANCH = 'main-integration'
 SYNCWHEEL_TRACKING_VALUES = {'git-tracked', 'local-only'}
 SYNCWHEEL_TRACKING_GIT_TRACKED = 'git-tracked'
 SYNCWHEEL_TRACKING_LOCAL_ONLY = 'local-only'
-DEFAULT_SYNCWHEEL_WORKTREE_ROOT = 'var/syncwheel'
+DEFAULT_SYNCWHEEL_WORKTREE_ROOT = '.syncwheel/wt'
+LEGACY_SYNCWHEEL_WORKTREE_ROOTS = ('var/syncwheel',)
 UPDATE_MODES = {'off', 'notify', 'auto'}
 RECONCILE_MODES = {'standard', 'resume'}
 LEDGER_SCHEMA_VERSION = 1
@@ -1000,15 +1001,19 @@ def syncwheel_gitignore_patterns(worktree_root):
 
 
 def syncwheel_local_exclude_patterns(worktree_root):
-    return [
-        '.syncwheel/',
-        syncwheel_ignore_pattern(worktree_root),
-    ]
+    patterns = ['.syncwheel/']
+    worktree_pattern = syncwheel_ignore_pattern(worktree_root)
+    if not worktree_pattern.startswith('.syncwheel/'):
+        patterns.append(worktree_pattern)
+    return patterns
 
 
 def all_syncwheel_managed_patterns(worktree_root):
     patterns = set(syncwheel_gitignore_patterns(worktree_root))
     patterns.update(syncwheel_local_exclude_patterns(worktree_root))
+    patterns.add(syncwheel_ignore_pattern(DEFAULT_SYNCWHEEL_WORKTREE_ROOT))
+    for legacy_root in LEGACY_SYNCWHEEL_WORKTREE_ROOTS:
+        patterns.add(syncwheel_ignore_pattern(legacy_root))
     patterns.add(SYNCWHEEL_LOCAL_EXCLUDE_PATTERN)
     return patterns
 

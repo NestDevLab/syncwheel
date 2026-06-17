@@ -34,7 +34,7 @@ Commit the shared manifest so the team versions it:
 - track `.syncwheel/manifest.json`
 - keep local metadata ignored through the Syncwheel-managed `.gitignore` block:
   `.syncwheel/ledger/`, `.syncwheel/manifests/*.local.json`,
-  `.syncwheel/profile.local.json`, and `var/syncwheel/`
+  `.syncwheel/profile.local.json`, and `.syncwheel/wt/`
 
 **Benefits**
 
@@ -56,7 +56,9 @@ manifest, then validate again.
 When Syncwheel metadata should not be proposed to an upstream maintainer, keep it
 local:
 
-- exclude `.syncwheel/` and `var/syncwheel/` via `.git/info/exclude`
+- exclude `.syncwheel/` via `.git/info/exclude`
+- default worktrees live under `.syncwheel/wt/`, covered by that `.syncwheel/`
+  exclude
 - do **not** modify the committed `.gitignore`
 
 **Benefits**
