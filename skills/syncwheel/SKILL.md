@@ -180,6 +180,8 @@ Before final response after touching a Git repo:
 - run the repo's required validation, or name the exact validation not run and why
 - for `git-tracked` repos, commit and push the scoped work unless the user or
   repository policy explicitly requires local-only delivery
+- treat Syncwheel manifest changes from stack create/set/close or integration bookkeeping as
+  scoped work: commit and push them before handoff, or explicitly report the approved reason they remain local
 - if the user requested local-only edits, list the dirty files and the next
   command/decision needed to finish delivery
 - never treat unrelated dirty files as a reason to skip this checklist; isolate
