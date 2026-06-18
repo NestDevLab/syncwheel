@@ -4,6 +4,8 @@
 
 - Default Syncwheel-managed worktrees to repo-relative `.syncwheel/wt/` while
   preserving explicit `var/syncwheel` manifest settings.
+- Clarify that feature PRs deliver to their intended branch, never to
+  `main-integration`, and document the post-merge stack cleanup flow.
 
 ## 0.20.0 - 2026-06-14
 

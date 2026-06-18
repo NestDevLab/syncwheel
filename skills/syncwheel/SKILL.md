@@ -119,6 +119,20 @@ syncwheel stack push feature-a
 
 `-u` is the short form of `--include-in-integration`.
 
+## Delivery lifecycle
+
+Feature stacks are delivered through PRs into the intended delivery branch for
+that repo or fork. That target may be `main`, an upstream/default branch, or a
+release branch, but it must not be `main-integration`.
+
+`main-integration` is a coordination branch for assembling and testing stacks
+before delivery. Do not treat it as a PR target or deployment branch.
+
+After the PR merges, fetch the remote, verify the stack commits are reachable
+from the delivery branch, align or rebuild `main-integration` from the updated
+base, then close the stack with `syncwheel stack close <id>` and remove the
+dedicated PR worktree or branch when safe.
+
 ## Decision: Syncwheel tracking policy
 
 This is a repo-local Syncwheel policy, not a social guess. Before editing in,
