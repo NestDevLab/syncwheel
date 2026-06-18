@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Harden the Syncwheel skill with managed-repo detection, post-merge
+  housekeeping guidance, squash-merge verification, and a housekeeping design
+  spec.
 - Default Syncwheel-managed worktrees to repo-relative `.syncwheel/wt/` while
   preserving explicit `var/syncwheel` manifest settings.
 - Clarify that feature PRs deliver to their intended branch, never to

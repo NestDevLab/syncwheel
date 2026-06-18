@@ -1,6 +1,6 @@
 ---
 name: syncwheel
-description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, dedicated worktrees, stacked PRs, and integration branches. Use whenever you are about to create a PR branch, manage a fork/upstream/integration or PR-stack workflow, prepare or rebuild a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
+description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, dedicated worktrees, stacked PRs, and integration branches. Use whenever you are about to create a PR branch, manage a fork/upstream/integration or PR-stack workflow, prepare or rebuild a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
 allowed-tools: [Bash]
 ---
 
@@ -13,6 +13,13 @@ described in a manifest; Syncwheel reconciles Git to match it. Plain manual
 unavailable, blocked, or cannot express the needed recovery.
 
 ## When to use (Syncwheel-first)
+
+**First, detect the regime.** Before branch, worktree, integration, PR, recovery,
+or handoff work in any Git repo, check whether it is Syncwheel-managed: a
+`.syncwheel/` directory or manifest is present, or a workspace/project guide says
+so. When unsure, run `syncwheel status`. If it is managed — or the repo is shared,
+fork/upstream, or touched by multiple agents — it is Syncwheel-first: do not reach
+for manual `git` branch/worktree/integration surgery as the default path.
 
 Reach for Syncwheel **before** any of these, not after:
 
@@ -128,10 +135,39 @@ release branch, but it must not be `main-integration`.
 `main-integration` is a coordination branch for assembling and testing stacks
 before delivery. Do not treat it as a PR target or deployment branch.
 
-After the PR merges, fetch the remote, verify the stack commits are reachable
-from the delivery branch, align or rebuild `main-integration` from the updated
-base, then close the stack with `syncwheel stack close <id>` and remove the
-dedicated PR worktree or branch when safe.
+After the PR merges, fetch the remote and confirm the stack's content landed in
+the delivery branch — by SHA, or, for a squash/rebase merge, by an empty
+`git diff <delivery_ref> <branch>`. Align or rebuild `main-integration` from the
+updated base, then run the housekeeping below to close the stack and reap its
+worktree and branch.
+
+## Housekeeping: when and how to clean up
+
+Worktrees, PR branches, and `backup/*` branches do not reap themselves — close the
+loop or they accumulate. Clean up when any of these holds:
+
+- a stack's PR has merged
+- `syncwheel status` shows a worktree or local branch not backing an **active**
+  manifest stack (orphans — common after an integration-scheme change)
+- `backup/*` branches have piled up
+- before handing off a managed repo: leave only the active stacks' worktrees plus
+  the integration worktree
+
+Procedure (never destroy unmerged or uncommitted work):
+
+```bash
+git fetch --all --prune
+git diff --quiet <delivery_ref> <branch> && echo "content merged"   # empty diff also covers squash/rebase
+git worktree remove <worktree-path>          # refuses if dirty/conflicted — resolve or stash first, never blind --force
+syncwheel stack close <id> -R merged --force # a squash merge is not ancestor-reachable, so --force is expected
+git branch -d <branch>                       # use -D only for a squash-merged branch -d won't recognize, after the check above
+git worktree prune                           # drop stale worktree admin entries
+```
+
+Prune `backup/*` branches that are no longer a useful safety net, keeping the one
+or two most recent. Never delete a branch that still carries unique unmerged
+commits, and never force-remove a worktree with uncommitted or conflicted changes
+— report it instead.
 
 ## Decision: Syncwheel tracking policy
 
@@ -216,4 +252,5 @@ state with `syncwheel resume` instead of improvising branch ownership.
 
 See `docs/manifest-tracking.md` for the full tracking policy, `docs/ai-agents.md`
 and `docs/agent-procedure.md` for the agent contract, and `docs/core-procedure.md`
-for the canonical recovery procedure.
+for the canonical recovery procedure. An automated post-merge cleanup path is
+specified in `docs/design/housekeeping-after-merge.md`.
