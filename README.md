@@ -280,6 +280,22 @@ syncwheel self status
 syncwheel self check-update --fetch
 ```
 
+When Agentwheel is on PATH, `self status` also checks whether the local Codex
+runtime has the Syncwheel agent skill installed for the current repo. Install it
+with:
+
+```bash
+agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root /path/to/repo --skill syncwheel
+```
+
+If the `syncwheel` executable is not installed yet, run the same status checks
+through the checkout script:
+
+```bash
+python3 /path/to/syncwheel/scripts/syncwheel.py self status
+python3 /path/to/syncwheel/scripts/syncwheel.py self check-update --fetch
+```
+
 - manual update:
 
 ```bash

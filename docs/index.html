@@ -1717,6 +1717,16 @@
 <span class="muted"># developing syncwheel itself? `uv tool install --editable /path/to/syncwheel`</span></code></pre>
         </div>
 
+        <div class="code" aria-label="Install the Syncwheel agent skill">
+          <div class="codebar">
+            <span class="light"></span><span class="light"></span><span class="light"></span>
+            <span>agent skill</span>
+          </div>
+          <pre><code><span class="prompt">$</span> agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root /path/to/repo --skill syncwheel
+<span class="prompt">$</span> syncwheel self status
+<span class="muted"># no syncwheel binary yet? `python3 /path/to/syncwheel/scripts/syncwheel.py self status`</span></code></pre>
+        </div>
+
         <div class="code" aria-label="Your first wheel">
           <div class="codebar">
             <span class="light"></span><span class="light"></span><span class="light"></span>

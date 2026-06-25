@@ -1816,6 +1816,117 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertFalse(data['status']['can_self_update'])
         self.assertIn('not a git checkout', data['status']['reason'])
 
+    def test_agentwheel_skill_status_skips_when_agentwheel_is_absent(self):
+        syncwheel = self.load_syncwheel_module()
+
+        with mock.patch.object(syncwheel.shutil, 'which', return_value=None):
+            status = syncwheel.collect_agentwheel_syncwheel_skill_status(target_root=self.repo)
+
+        self.assertFalse(status['available'])
+        self.assertFalse(status['checked'])
+        self.assertEqual(status['status'], 'unavailable')
+        self.assertIsNone(status['installed'])
+        self.assertIn('agentwheel not found', status['note'])
+
+    def test_agentwheel_skill_status_treats_doctor_failure_as_nonfatal(self):
+        syncwheel = self.load_syncwheel_module()
+        result = subprocess.CompletedProcess(
+            args=['agentwheel', 'doctor'],
+            returncode=2,
+            stdout='',
+            stderr='unknown option: --json\n',
+        )
+
+        with mock.patch.object(syncwheel.shutil, 'which', return_value='/usr/bin/agentwheel'):
+            with mock.patch.object(syncwheel.subprocess, 'run', return_value=result) as run_mock:
+                status = syncwheel.collect_agentwheel_syncwheel_skill_status(target_root=self.repo)
+
+        self.assertTrue(status['available'])
+        self.assertFalse(status['checked'])
+        self.assertEqual(status['status'], 'unknown')
+        self.assertIn('unknown option', status['note'])
+        run_mock.assert_called_once()
+
+    def test_agentwheel_skill_status_reads_agentwheel_doctor_skills_array(self):
+        syncwheel = self.load_syncwheel_module()
+        result = subprocess.CompletedProcess(
+            args=['agentwheel', 'doctor'],
+            returncode=0,
+            stdout=json.dumps({
+                'skills': [
+                    {'name': 'agentwheel', 'status': 'managed', 'present': True},
+                    {'name': 'syncwheel', 'status': 'missing', 'present': False},
+                ],
+            }),
+            stderr='',
+        )
+
+        with mock.patch.object(syncwheel.shutil, 'which', return_value='/usr/bin/agentwheel'):
+            with mock.patch.object(syncwheel.subprocess, 'run', return_value=result):
+                status = syncwheel.collect_agentwheel_syncwheel_skill_status(target_root=self.repo)
+
+        self.assertTrue(status['available'])
+        self.assertTrue(status['checked'])
+        self.assertEqual(status['status'], 'missing')
+        self.assertFalse(status['installed'])
+        self.assertTrue(status['missing'])
+
+    def test_self_status_reports_missing_agentwheel_skill(self):
+        standalone = self.tmp / 'standalone-syncwheel'
+        cli = standalone / 'scripts' / 'syncwheel.py'
+        cli.parent.mkdir(parents=True)
+        shutil.copy2(CLI, cli)
+        (standalone / 'VERSION').write_text('0.18.0\n')
+
+        fake_bin = self.tmp / 'fake-bin'
+        fake_bin.mkdir()
+        args_path = self.tmp / 'agentwheel-args.json'
+        payload = json.dumps({'skill': {'name': 'syncwheel', 'installed': False}})
+        fake_agentwheel = fake_bin / 'agentwheel'
+        fake_agentwheel.write_text(
+            '#!/usr/bin/env python3\n'
+            'import json\n'
+            'import sys\n'
+            'from pathlib import Path\n'
+            f'Path({str(args_path)!r}).write_text(json.dumps(sys.argv[1:]))\n'
+            f'print({payload!r})\n'
+        )
+        fake_agentwheel.chmod(0o755)
+        env = {
+            'PATH': f'{fake_bin}{os.pathsep}{os.environ["PATH"]}',
+            'SYNCWHEEL_UPDATE_STATE_PATH': str(self.tmp / 'standalone-update-state.json'),
+            'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(self.tmp / 'standalone-settings.json'),
+        }
+
+        result = self.run_custom_cli(cli, 'self', 'status', '--json', expected=0, extra_env=env, cwd=standalone)
+        data = json.loads(result.stdout)
+        target_root = str(standalone.resolve())
+
+        self.assertEqual(data['agentwheel_skill']['status'], 'missing')
+        self.assertTrue(data['agentwheel_skill']['missing'])
+        self.assertEqual(data['agentwheel_skill']['target_root'], target_root)
+        self.assertIn('agentwheel install github:NestDevLab/syncwheel', data['agentwheel_skill']['install_command'])
+        self.assertEqual(
+            json.loads(args_path.read_text()),
+            [
+                'doctor',
+                '--adapter',
+                'codex',
+                '--local',
+                '--target-root',
+                target_root,
+                '--skill',
+                'syncwheel',
+                '--source',
+                'github:NestDevLab/syncwheel',
+                '--json',
+            ],
+        )
+
+        human = self.run_custom_cli(cli, 'self', 'status', expected=0, extra_env=env, cwd=standalone)
+        self.assertIn('agentwheel_skill: missing', human.stdout)
+        self.assertIn('recommended: agentwheel install github:NestDevLab/syncwheel', human.stdout)
+
     def test_self_check_update_reports_newer_version_after_fetch(self):
         fixture = self.init_syncwheel_install_fixture()
         result = self.run_custom_cli(

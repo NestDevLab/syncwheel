@@ -59,3 +59,20 @@ the intended mode and persist it with `syncwheel repo tracking set ... --apply`
 before continuing. See [`manifest-tracking.md`](manifest-tracking.md) for the
 full policy and migration behavior. An installable agent skill that encodes this
 lives in [`skills/syncwheel/SKILL.md`](../skills/syncwheel/SKILL.md).
+
+## Agentwheel installable skill
+
+When Agentwheel is available, install the Syncwheel agent skill into the local
+Codex runtime for the repo:
+
+```bash
+agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root /path/to/repo --skill syncwheel
+```
+
+`syncwheel self status` reports a missing-skill recommendation when Agentwheel is
+installed and the skill is absent. If the `syncwheel` executable is not on PATH
+yet, use the checkout script directly:
+
+```bash
+python3 /path/to/syncwheel/scripts/syncwheel.py self status
+```
