@@ -5,6 +5,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import shutil
 import shlex
 import tempfile
 import subprocess
@@ -50,6 +51,11 @@ DEFAULT_UPDATE_INTERVAL_SECONDS = 6 * 60 * 60
 UPSTREAM_REPO_URL = 'https://github.com/NestDevLab/syncwheel'
 UPSTREAM_DEFAULT_BRANCH = 'main'
 UV_TOOL_NAME = 'syncwheel'
+AGENTWHEEL_SYNCWHEEL_SKILL_SOURCE = 'github:NestDevLab/syncwheel'
+AGENTWHEEL_SYNCWHEEL_SKILL_NAME = 'syncwheel'
+AGENTWHEEL_SYNCWHEEL_ADAPTER = 'codex'
+AGENTWHEEL_SYNCWHEEL_INSTALLATION_TYPE = 'local'
+AGENTWHEEL_DOCTOR_TIMEOUT_SECONDS = 10
 SYNCWHEEL_HOOKS_PATH = 'githooks'
 FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
@@ -507,6 +513,186 @@ def install_syncwheel_hooks(root=None, dry_run=False):
         return status
     run(command, cwd=root)
     return install_hooks_status(root)
+
+
+def shell_command(command):
+    return ' '.join(shlex.quote(str(part)) for part in command)
+
+
+def repo_root_or_cwd(cwd=None):
+    path = Path(cwd or os.getcwd()).resolve()
+    result = run(['git', 'rev-parse', '--show-toplevel'], cwd=path, check=False)
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip()).resolve()
+    return path
+
+
+def agentwheel_syncwheel_skill_doctor_argv(target_root):
+    return [
+        'agentwheel',
+        'doctor',
+        '--adapter',
+        AGENTWHEEL_SYNCWHEEL_ADAPTER,
+        '--local',
+        '--target-root',
+        str(target_root),
+        '--skill',
+        AGENTWHEEL_SYNCWHEEL_SKILL_NAME,
+        '--source',
+        AGENTWHEEL_SYNCWHEEL_SKILL_SOURCE,
+        '--json',
+    ]
+
+
+def agentwheel_syncwheel_skill_install_argv(target_root, dry_run=False):
+    command = [
+        'agentwheel',
+        'install',
+        AGENTWHEEL_SYNCWHEEL_SKILL_SOURCE,
+        '--adapter',
+        AGENTWHEEL_SYNCWHEEL_ADAPTER,
+        '--local',
+        '--target-root',
+        str(target_root),
+        '--skill',
+        AGENTWHEEL_SYNCWHEEL_SKILL_NAME,
+    ]
+    if dry_run:
+        command.append('--dry-run')
+    return command
+
+
+def bool_from_json_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace('-', '_').replace(' ', '_')
+        if normalized in {'true', 'yes', 'installed', 'present', 'ok', 'ready', 'active'}:
+            return True
+        if normalized in {'false', 'no', 'missing', 'absent', 'not_installed', 'not_found', 'needs_install'}:
+            return False
+    return None
+
+
+def iter_agentwheel_skill_status_objects(payload):
+    if not isinstance(payload, dict):
+        return
+    yield payload
+    for key in ('skill', 'agent_skill', 'companion_skill', 'requested_skill', 'result', 'status'):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            yield value
+    skills = payload.get('skills')
+    if isinstance(skills, list):
+        for item in skills:
+            if not isinstance(item, dict):
+                continue
+            if item.get('name') == AGENTWHEEL_SYNCWHEEL_SKILL_NAME or item.get('skill') == AGENTWHEEL_SYNCWHEEL_SKILL_NAME:
+                yield item
+    checks = payload.get('checks')
+    if isinstance(checks, list):
+        for item in checks:
+            if not isinstance(item, dict):
+                continue
+            label = ' '.join(
+                str(item.get(key) or '')
+                for key in ('id', 'name', 'kind', 'type', 'skill')
+            ).lower()
+            if AGENTWHEEL_SYNCWHEEL_SKILL_NAME in label:
+                yield item
+
+
+def parse_agentwheel_skill_installed(payload):
+    for item in iter_agentwheel_skill_status_objects(payload):
+        for key in ('installed', 'is_installed', 'present', 'exists'):
+            parsed = bool_from_json_value(item.get(key))
+            if parsed is not None:
+                return parsed
+        for key in ('missing', 'absent'):
+            parsed = bool_from_json_value(item.get(key))
+            if parsed is not None:
+                return not parsed
+    for item in iter_agentwheel_skill_status_objects(payload):
+        for key in ('status', 'state', 'result'):
+            parsed = bool_from_json_value(item.get(key))
+            if parsed is not None:
+                return parsed
+    for item in iter_agentwheel_skill_status_objects(payload):
+        if item is payload:
+            continue
+        parsed = bool_from_json_value(item.get('ok'))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def collect_agentwheel_syncwheel_skill_status(target_root=None):
+    root = Path(target_root or repo_root_or_cwd()).resolve()
+    doctor_argv = agentwheel_syncwheel_skill_doctor_argv(root)
+    install_argv = agentwheel_syncwheel_skill_install_argv(root)
+    status = {
+        'available': False,
+        'path': None,
+        'checked': False,
+        'status': 'unavailable',
+        'installed': None,
+        'missing': None,
+        'adapter': AGENTWHEEL_SYNCWHEEL_ADAPTER,
+        'installation_type': AGENTWHEEL_SYNCWHEEL_INSTALLATION_TYPE,
+        'target_root': str(root),
+        'skill': AGENTWHEEL_SYNCWHEEL_SKILL_NAME,
+        'source': AGENTWHEEL_SYNCWHEEL_SKILL_SOURCE,
+        'doctor_command': shell_command(doctor_argv),
+        'install_command': shell_command(install_argv),
+        'dry_run_command': shell_command(agentwheel_syncwheel_skill_install_argv(root, dry_run=True)),
+        'note': None,
+    }
+    agentwheel_path = shutil.which('agentwheel')
+    if not agentwheel_path:
+        status['note'] = 'agentwheel not found on PATH'
+        return status
+
+    status['available'] = True
+    status['path'] = agentwheel_path
+    try:
+        result = subprocess.run(
+            [agentwheel_path, *doctor_argv[1:]],
+            text=True,
+            capture_output=True,
+            timeout=AGENTWHEEL_DOCTOR_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        status['status'] = 'unknown'
+        status['note'] = f'agentwheel doctor could not run: {exc}'
+        return status
+
+    if result.returncode != 0:
+        status['status'] = 'unknown'
+        detail = (result.stderr or result.stdout or '').strip().splitlines()
+        status['note'] = detail[0] if detail else f'agentwheel doctor exited {result.returncode}'
+        return status
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        status['status'] = 'unknown'
+        status['note'] = f'agentwheel doctor did not return valid JSON: {exc}'
+        return status
+
+    status['checked'] = True
+    installed = parse_agentwheel_skill_installed(payload)
+    if installed is True:
+        status['status'] = 'installed'
+        status['installed'] = True
+        status['missing'] = False
+    elif installed is False:
+        status['status'] = 'missing'
+        status['installed'] = False
+        status['missing'] = True
+    else:
+        status['status'] = 'unknown'
+        status['note'] = 'agentwheel doctor JSON did not include a recognizable skill status'
+    return status
 
 
 def current_install_version(install):
@@ -4532,6 +4718,7 @@ def command_repo_ls(args):
 def command_self_status(args):
     status, settings, state, state_path = refresh_cached_self_update_status(force=args.fetch)
     hooks = install_hooks_status()
+    agentwheel_skill = collect_agentwheel_syncwheel_skill_status()
     output = {
         'settings': settings,
         'settings_path': settings['path'],
@@ -4539,6 +4726,7 @@ def command_self_status(args):
         'last_checked_at': state.get('last_checked_at'),
         'status': status,
         'hooks': hooks,
+        'agentwheel_skill': agentwheel_skill,
     }
     if args.json:
         print(json.dumps(output, indent=2))
@@ -4569,6 +4757,13 @@ def command_self_status(args):
         print('update: none')
     print(f"hooks_active: {'yes' if hooks['active'] else 'no'}")
     print(f"hooks_path: {hooks['configured_hooks_path'] or 'none'}")
+    if agentwheel_skill.get('missing') is True:
+        print(
+            'agentwheel_skill: missing '
+            f"({agentwheel_skill['adapter']}/{agentwheel_skill['installation_type']} "
+            f"at {agentwheel_skill['target_root']})"
+        )
+        print(f"recommended: {agentwheel_skill['install_command']}")
     if output['last_checked_at']:
         print(f"last_checked_at: {output['last_checked_at']}")
     return 0

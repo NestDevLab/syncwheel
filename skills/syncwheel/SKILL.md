@@ -54,11 +54,20 @@ uv tool install --editable <local-clone>                          # development
 syncwheel self update                                             # keep current
 ```
 
+If Agentwheel is available, install this skill into the local Codex runtime for
+the target repo:
+
+```bash
+agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root <repo> --skill syncwheel
+syncwheel self status
+```
+
 If the PATH binary is not available (legacy host or vendored install), fall back to the checkout pointer:
 
 ```bash
 SW="python3 ${SYNCWHEEL_REPO:?set SYNCWHEEL_REPO to the syncwheel checkout}/scripts/syncwheel.py"
 $SW --version
+$SW self status
 ```
 
 Always run Syncwheel **against the target repo**: pass `-r <repo-path-or-alias>`
