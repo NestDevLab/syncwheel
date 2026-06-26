@@ -1,0 +1,27 @@
+# syncwheel
+
+> Deterministic Git maintenance for PR stacks, integration branches, dedicated worktrees, and
+> multi-agent repositories.
+
+## Start Here
+
+- README: https://github.com/NestDevLab/syncwheel#readme
+- AI install handoff: https://github.com/NestDevLab/syncwheel/blob/main/install.md
+- AI agent guide: https://github.com/NestDevLab/syncwheel/blob/main/AGENT.md
+- AI agent docs: https://github.com/NestDevLab/syncwheel/blob/main/docs/ai-agents.md
+
+## Procedures
+
+- Agent procedure: https://github.com/NestDevLab/syncwheel/blob/main/docs/agent-procedure.md
+- Core procedure: https://github.com/NestDevLab/syncwheel/blob/main/docs/core-procedure.md
+- Manifest tracking: https://github.com/NestDevLab/syncwheel/blob/main/docs/manifest-tracking.md
+- Workflow: https://github.com/NestDevLab/syncwheel/blob/main/docs/workflow.md
+- Branch model: https://github.com/NestDevLab/syncwheel/blob/main/docs/branch-model.md
+
+## Install Commands
+
+```bash
+uv tool install "git+https://github.com/NestDevLab/syncwheel"
+syncwheel self status
+agentwheel install github:NestDevLab/syncwheel --adapter codex --local --skill syncwheel
+```

@@ -225,6 +225,33 @@ Practical meaning:
 3. **AI-operated (recommended)**  
    Let an AI agent run the syncwheel flow through prompts, with a human supervising intent and approval boundaries. In practice this gives the best speed/consistency balance for ongoing maintenance.
 
+## Install Methods
+
+**CLI install**
+
+```bash
+uv tool install "git+https://github.com/NestDevLab/syncwheel"
+syncwheel self status
+```
+
+**AI agent handoff**
+
+Give an agent [`install.md`](install.md) when you want it to install Syncwheel, verify the CLI, inspect
+a repository, and install the companion skill through Agentwheel.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NestDevLab/syncwheel/main/install.md
+```
+
+**Companion skill**
+
+When Agentwheel is available, install the Syncwheel skill into the runtime you are using:
+
+```bash
+agentwheel doctor --adapter codex --local --skill syncwheel --source github:NestDevLab/syncwheel
+agentwheel install github:NestDevLab/syncwheel --adapter codex --local --skill syncwheel
+```
+
 ## Install
 
 Requirements:
@@ -653,6 +680,9 @@ raw Git equivalent of the Syncwheel lifecycle.
 
 ## Documentation map
 
+- `install.md`: AI-agent handoff for installing Syncwheel and the companion skill
+- `AGENT.md`: concise operating guide for AI agents
+- `llms.txt`: LLM-oriented map of the public docs
 - `docs/workflow.md`: concise workflow model
 - `docs/core-procedure.md`: deterministic recovery procedure
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
