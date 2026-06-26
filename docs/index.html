@@ -879,6 +879,75 @@
       overflow: hidden;
     }
 
+    .start-methods {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin: 22px 0 26px;
+    }
+
+    .start-method {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 100%;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: rgba(17, 24, 39, 0.72);
+    }
+
+    .start-method.primary-method {
+      border-color: rgba(16, 185, 129, 0.46);
+      background: linear-gradient(180deg, rgba(16, 185, 129, 0.12), rgba(17, 24, 39, 0.72));
+    }
+
+    .method-label {
+      display: inline-flex;
+      align-items: center;
+      align-self: flex-start;
+      min-height: 26px;
+      padding: 0 9px;
+      border: 1px solid rgba(16, 185, 129, 0.32);
+      border-radius: 999px;
+      background: rgba(16, 185, 129, 0.09);
+      color: #a7f3d0;
+      font-size: 11px;
+      font-weight: 900;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .start-method strong {
+      display: block;
+      margin: 14px 0 8px;
+      color: #f8fafc;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .start-method p {
+      margin: 0 0 14px;
+      color: var(--muted);
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.5;
+    }
+
+    .start-method .code {
+      margin: auto 0 0;
+      border-radius: 8px;
+      box-shadow: none;
+    }
+
+    .start-method pre {
+      padding: 16px;
+      font-size: 12px;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
     .codebar {
       display: flex;
       align-items: center;
@@ -972,6 +1041,10 @@
 
       .docs-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .start-methods {
+        grid-template-columns: 1fr;
       }
 
       .story-flow {
@@ -1668,6 +1741,18 @@
         <h2 class="section-title">Go deeper.</h2>
         <p class="section-lead">Everything advanced lives in the docs.</p>
         <div class="docs-grid">
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/install.md">
+            <strong>install.md</strong>
+            <span>AI handoff for installing Syncwheel.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/AGENT.md">
+            <strong>AGENT.md</strong>
+            <span>Concise operating guide for agents.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/llms.txt">
+            <strong>llms.txt</strong>
+            <span>LLM-oriented map of the docs.</span>
+          </a>
           <a class="doc-link" href="https://github.com/NestDevLab/syncwheel#readme">
             <strong>README</strong>
             <span>Quick start and CLI summary.</span>
@@ -1705,26 +1790,49 @@
 
       <section id="get-started">
         <h2 class="section-title">Get started</h2>
-        <p class="section-lead">Python 3.11+, Git, uv.</p>
+        <p class="section-lead">Python 3.11+, Git, uv. Start from the CLI, hand the bootstrap markdown to an AI agent, or install the companion skill.</p>
 
-        <div class="code" aria-label="Install syncwheel">
-          <div class="codebar">
-            <span class="light"></span><span class="light"></span><span class="light"></span>
-            <span>1 · install</span>
-          </div>
-          <pre><code><span class="prompt">$</span> uv tool install "git+https://github.com/NestDevLab/syncwheel"
-<span class="prompt">$</span> syncwheel --help
-<span class="muted"># developing syncwheel itself? `uv tool install --editable /path/to/syncwheel`</span></code></pre>
-        </div>
+        <div class="start-methods" aria-label="Default install methods">
+          <article class="start-method primary-method">
+            <span class="method-label">CLI</span>
+            <strong>Install Syncwheel</strong>
+            <p>Install the command on your machine, then verify the executable before touching a repo.</p>
+            <div class="code" aria-label="CLI install">
+              <div class="codebar">
+                <span class="light"></span><span class="light"></span><span class="light"></span>
+                <span>terminal</span>
+              </div>
+              <pre><code><span class="prompt">$</span> uv tool install "git+https://github.com/NestDevLab/syncwheel"
+<span class="prompt">$</span> syncwheel self status</code></pre>
+            </div>
+          </article>
 
-        <div class="code" aria-label="Install the Syncwheel agent skill">
-          <div class="codebar">
-            <span class="light"></span><span class="light"></span><span class="light"></span>
-            <span>agent skill</span>
-          </div>
-          <pre><code><span class="prompt">$</span> agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root /path/to/repo --skill syncwheel
-<span class="prompt">$</span> syncwheel self status
-<span class="muted"># no syncwheel binary yet? `python3 /path/to/syncwheel/scripts/syncwheel.py self status`</span></code></pre>
+          <article class="start-method">
+            <span class="method-label">AI handoff</span>
+            <strong>Give install.md to an agent</strong>
+            <p>The markdown tells an agent how to install Syncwheel, verify it, inspect a repo, and add the skill.</p>
+            <div class="code" aria-label="AI handoff install markdown">
+              <div class="codebar">
+                <span class="light"></span><span class="light"></span><span class="light"></span>
+                <span>fetch prompt</span>
+              </div>
+              <pre><code><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/NestDevLab/syncwheel/main/install.md</code></pre>
+            </div>
+          </article>
+
+          <article class="start-method">
+            <span class="method-label">Skill</span>
+            <strong>Install the companion skill</strong>
+            <p>Keep Syncwheel's Git safety rules available inside the runtime handling the repo.</p>
+            <div class="code" aria-label="Install the Syncwheel agent skill">
+              <div class="codebar">
+                <span class="light"></span><span class="light"></span><span class="light"></span>
+                <span>codex local</span>
+              </div>
+              <pre><code><span class="prompt">$</span> agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root /path/to/repo --skill syncwheel
+<span class="prompt">$</span> syncwheel self status</code></pre>
+            </div>
+          </article>
         </div>
 
         <div class="code" aria-label="Your first wheel">
