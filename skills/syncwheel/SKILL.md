@@ -241,6 +241,8 @@ Before final response after touching a Git repo:
   repository policy explicitly requires local-only delivery
 - treat Syncwheel manifest changes from stack create/set/close or integration bookkeeping as
   scoped work: commit and push them before handoff, or explicitly report the approved reason they remain local
+- if the user asked to synchronize a repo with outstanding PRs/upstreams, fetch/prune first, inspect open PR heads, and verify each intended PR by both ancestry and diff: `git merge-base --is-ancestor <head> <base>` and `git diff --quiet <base>...<head>`. If you integrate PR heads directly into `main` and push, re-query GitHub; GitHub may auto-mark those PRs merged once the base contains their head.
+- when applying stashed local work after PR synchronization, expect fixture-only conflicts. Resolve by preserving the synchronized upstream behavior and reapplying only the scoped new feature/logging changes; then rerun tests before committing.
 - if the user requested local-only edits, list the dirty files and the next
   command/decision needed to finish delivery
 - never treat unrelated dirty files as a reason to skip this checklist; isolate
