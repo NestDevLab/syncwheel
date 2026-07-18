@@ -38,6 +38,9 @@ complete handoff by itself: before final response, report the Git state, require
 checks, and the commit/push/PR decision or the explicit reason delivery remains
 local.
 
+Before changing a git-tracked source, include commit/push or an explicit
+local-only reason in the approved scope; never leave delivery implicit.
+
 ## The contract
 
 The script owns: repo-state discovery, manifest validation, deterministic branch
