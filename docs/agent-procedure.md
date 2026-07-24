@@ -18,6 +18,12 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 ```
 
+For an active-active version 2 manifest, run `python3 scripts/syncwheel.py
+handoff` before planning a handoff or publication. The diagnostic is read-only;
+use the coordinated `publish`, `stack push`, or `int push` commands rather than
+raw Git pushes. A mergeable lease race still requires an explicit reviewed
+`publish --accept-merge`.
+
 The agent should not improvise branch ownership if:
 - the manifest is missing
 - validation fails because commits are unmapped

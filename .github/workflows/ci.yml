@@ -35,6 +35,10 @@ jobs:
         run: |
           python scripts/syncwheel.py --help
           python scripts/syncwheel.py init --help
+          python scripts/syncwheel.py coordination --help
+          python scripts/syncwheel.py handoff --help
+          python scripts/syncwheel.py gc --help
+          python scripts/syncwheel.py worktree --help
           python scripts/syncwheel.py status --help
           python scripts/syncwheel.py validate --help
           python scripts/syncwheel.py plan --help

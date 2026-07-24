@@ -34,6 +34,12 @@ An AI agent should then:
 5. rerun `check` or `reconcile`
 6. summarize what changed and what still needs a human
 
+For an active-active version 2 manifest, insert `python3 scripts/syncwheel.py
+handoff` before planning or publication. It is a read-only diagnostic of the
+published state, ownership boundary, local locks, pending merge decision, and
+eligible cleanup. Use `publish` rather than a raw Git push so all managed refs
+and the coordination state receive one atomic, leased publication.
+
 ## Safety rules
 
 - do not mutate branches from a dirty worktree
@@ -41,6 +47,14 @@ An AI agent should then:
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback
+- for an active-active manifest, use `handoff` before taking over from another
+  device or agent; never bypass the coordinated publisher with `git push`
+- if a coordinated publish reports a mergeable race, do not retry silently;
+  review the handoff and use `publish --accept-merge` only for that explicit
+  disjoint-stack decision
+- keep local worktrees that need investigation with `worktree lock <stack>`;
+  `gc --apply` removes only eligible local, tombstoned, remotely recoverable
+  artifacts and never deletes a remote branch
 - if manifest and Git disagree, fix the manifest or call out the conflict explicitly
 - do not claim a repo is aligned if integration and PR branches still disagree
 

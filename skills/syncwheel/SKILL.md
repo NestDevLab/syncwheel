@@ -85,6 +85,20 @@ syncwheel reconcile --apply --worktree-root <path> --push   # publish shared bra
 syncwheel check                   # re-verify
 ```
 
+When a version 2 manifest has `coordination.mode: "active-active"`, add a
+read-only handoff before planning mutations or publishing from a different
+device/agent:
+
+```bash
+syncwheel handoff
+```
+
+Use `publish`, `stack push`, or `int push` for that manifest's managed refs.
+They publish atomic state with exact leases; do not substitute a raw `git push`.
+If a publication reports a mergeable race, review `handoff` and use
+`publish --accept-merge` only after the user explicitly accepts that disjoint
+stack merge.
+
 Short aliases are preferred when they make commands easier to scan:
 
 ```bash
@@ -173,6 +187,18 @@ git branch -d <branch>                       # use -D only for a squash-merged b
 git worktree prune                           # drop stale worktree admin entries
 ```
 
+For an active-active manifest, prefer its tombstone-aware lifecycle instead:
+
+```bash
+syncwheel stack close <id> -R merged --force
+syncwheel gc
+syncwheel gc --apply
+```
+
+`stack close` never deletes a remote branch. Automatic cleanup after `sync` or
+`publish`, and explicit `gc --apply`, only remove old tombstoned local artifacts
+that are clean, unlocked, non-current, and recoverable from the remote state.
+
 Prune `backup/*` branches that are no longer a useful safety net, keeping the one
 or two most recent. Never delete a branch that still carries unique unmerged
 commits, and never force-remove a worktree with uncommitted or conflicted changes
@@ -214,6 +240,14 @@ Use this when the repo wants Syncwheel itself tracked under Git. Syncwheel write
 a managed `.gitignore` block for local-only metadata and repo-local worktrees
 under `.syncwheel/wt/`.
 
+New `git-tracked` manifests with a configured publication remote initialize
+active-active coordination by default. Existing manifests stay legacy until the
+maintainer explicitly opts in with:
+
+```bash
+syncwheel coordination init --remote origin --apply
+```
+
 ### `local-only` → keep Syncwheel untracked
 
 Exclude `.syncwheel/` via `.git/info/exclude` (local, does
@@ -225,6 +259,9 @@ Benefits:
 - you do **not** impose Syncwheel config on a maintainer who may not use it
 - your PRs stay clean — only the real change is proposed
 - coordination/recovery happens via the canonical remote + `resume`
+
+`local-only` does not automatically create shared coordination state. It may
+opt in only with the explicit `coordination init --remote ... --apply` command.
 
 Use `syncwheel repo tracking set ... --apply` to migrate between modes. The CLI
 edits only Syncwheel-managed ignore blocks; if manual `.gitignore` entries would

@@ -10,6 +10,22 @@
 - Clarify that feature PRs deliver to their intended branch, never to
   `main-integration`, and document the post-merge stack cleanup flow.
 
+## 0.21.0 - 2026-07-24
+
+- Add manifest version 2 active-active coordination with a persisted disabled
+  mode, explicit migration, and safe defaults for new `git-tracked` manifests.
+- Publish managed refs and append-only remote coordination state through one
+  atomic, exact-lease protocol; fail closed when atomic push is unavailable or
+  a stale manifest would erase a remotely published stack.
+- Add `handoff`, `coordination init`, `coordination disable`, `gc`, local
+  worktree locks, and tombstone-backed `stack close` commands.
+- Classify concurrent publication races as equivalent, explicitly mergeable
+  disjoint stack changes, or conflicts; require `publish --accept-merge` for
+  a reviewed merge.
+- Add public protocol documentation and temporary-bare-remote coverage for
+  atomic rejection, ownership, partial publications, legacy compatibility,
+  privacy-safe state, tombstones, locks, and local cleanup.
+
 ## 0.20.0 - 2026-06-14
 
 - Add short CLI aliases for common repo, manifest, JSON, dry-run, reconcile,
