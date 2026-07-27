@@ -245,6 +245,74 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(handoff['coordination']['state_status'], 'published')
         self.assertEqual(handoff['coordination']['manifest_relation'], 'aligned')
 
+    def test_public_snapshot_omits_local_remote_aliases(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'syncwheel_tracking': 'git-tracked',
+            'defaults': {
+                'canonical_remote': 'alice-laptop',
+                'publication_remote': 'alice-laptop',
+                'base_branch': 'main',
+                'base_ref': 'alice-laptop/main',
+            },
+            'integration': {
+                'branch': 'integration/shared',
+                'base': 'alice-laptop/main',
+                'strategy': 'cherry-pick',
+                'stacks': [],
+            },
+            'coordination': {
+                'mode': 'active-active',
+                'id': 'shared',
+                'remote': 'alice-laptop',
+                'state_branch': 'syncwheel/state/shared',
+                'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+            },
+            'stacks': [{
+                'id': 'feature-a',
+                'branch': 'pr/feature-a',
+                'base': 'alice-laptop/main',
+                'target_remote': 'alice-laptop',
+                'target_branch': 'main',
+                'integration_branch': 'integration/shared',
+                'commits': ['feature-a'],
+            }],
+        }
+
+        snapshot = module.coordination_manifest_snapshot(manifest)
+        serialized = json.dumps(snapshot, sort_keys=True)
+        self.assertNotIn('alice-laptop', serialized)
+        self.assertEqual(
+            snapshot['defaults'],
+            {'base_branch': 'main', 'base_ref': 'refs/heads/main'},
+        )
+        self.assertEqual(snapshot['integration']['base'], 'refs/heads/main')
+        self.assertNotIn('target_remote', snapshot['stacks'][0])
+        self.assertNotIn('remote', snapshot['coordination'])
+
+        other_checkout = json.loads(json.dumps(manifest))
+        other_checkout['defaults'].update({
+            'canonical_remote': 'workstation',
+            'publication_remote': 'workstation',
+            'base_ref': 'workstation/main',
+        })
+        other_checkout['integration']['base'] = 'workstation/main'
+        other_checkout['coordination']['remote'] = 'workstation'
+        other_checkout['stacks'][0].update({
+            'base': 'workstation/main',
+            'target_remote': 'workstation',
+        })
+        self.assertEqual(snapshot, module.coordination_manifest_snapshot(other_checkout))
+
+        restored = module.apply_coordination_snapshot(manifest, snapshot)
+        self.assertEqual(restored['defaults']['canonical_remote'], 'alice-laptop')
+        self.assertEqual(restored['defaults']['publication_remote'], 'alice-laptop')
+        self.assertEqual(restored['defaults']['base_ref'], 'alice-laptop/main')
+        self.assertEqual(restored['integration']['base'], 'alice-laptop/main')
+        self.assertEqual(restored['coordination']['remote'], 'alice-laptop')
+        self.assertEqual(restored['stacks'][0]['target_remote'], 'alice-laptop')
+
     def test_equivalent_lease_loss_aligns_tree_equivalent_local_ref(self):
         origin = self.create_remote()
         first = self.clone(origin, 'first')
@@ -379,6 +447,84 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         tombstone = next(item for item in state['tombstones'] if item['stack'] == 'feature-a')
         self.assertEqual(tombstone['reason'], 'abandoned')
         self.git(repo, 'ls-remote', '--exit-code', 'origin', 'refs/heads/pr/feature-a')
+
+    def test_worktree_unlock_releases_a_closed_stack_lock(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'unlock')
+        self.init_coordinated(repo)
+        feature_sha = self.commit_on_branch(repo, 'pr/feature-a', 'feature-a.txt')
+        self.run_cli(repo, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a')
+        self.run_cli(repo, 'stack', 'push', 'feature-a')
+        self.run_cli(repo, 'worktree', 'lock', 'feature-a')
+        self.run_cli(repo, 'stack', 'close', 'feature-a', '--force')
+
+        self.run_cli(repo, 'worktree', 'unlock', 'feature-a')
+        module = self.load_module()
+        _, coordination = module.coordination_profile(repo)
+        self.assertNotIn('feature-a', coordination['locks'])
+
+    def test_recreated_branch_is_not_gc_candidate_and_supersedes_tombstone(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'recreated')
+        self.init_coordinated(repo)
+        feature_sha = self.commit_on_branch(repo, 'pr/reused', 'feature-a.txt')
+        self.run_cli(repo, 'stack', 'create', 'closed-stack', feature_sha, '--branch', 'pr/reused')
+        self.run_cli(repo, 'stack', 'push', 'closed-stack')
+        self.run_cli(repo, 'stack', 'close', 'closed-stack', '--force')
+        state_tip, closed_state = self.remote_state(origin)
+        state_info = {'tip': state_tip, 'state': json.loads(json.dumps(closed_state))}
+        state_info['state']['tombstones'][0]['closed_at'] = '2020-01-01T00:00:00+00:00'
+
+        self.run_cli(repo, 'stack', 'create', 'recreated-stack', feature_sha, '--branch', 'pr/reused')
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        plan = module.coordination_gc_plan(repo, manifest, fetch=False, state_info=state_info)
+        self.assertEqual(plan['candidates'], [])
+        self.assertTrue(any('active in the current manifest' in item for item in plan['skipped']))
+
+        self.run_cli(repo, 'stack', 'push', 'recreated-stack')
+        _, republished_state = self.remote_state(origin)
+        self.assertFalse(any(
+            item.get('ref') == 'refs/heads/pr/reused'
+            for item in republished_state['tombstones']
+        ))
+
+    def test_gc_requires_the_tombstone_original_remote_tip(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'tombstone-tip')
+        self.init_coordinated(repo)
+        original_tip = self.commit_on_branch(repo, 'pr/recreated', 'original.txt')
+        self.git(repo, 'push', 'origin', 'pr/recreated')
+        self.git(repo, 'switch', '-q', 'pr/recreated')
+        (repo / 'recreated.txt').write_text('recreated\n')
+        self.git(repo, 'add', 'recreated.txt')
+        self.git(repo, 'commit', '-q', '-m', 'feat: recreate branch')
+        recreated_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'push', 'origin', 'pr/recreated')
+        self.git(repo, 'switch', '-q', 'main')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        state_info = {
+            'tip': 'test-state',
+            'state': {
+                'schema_version': 1,
+                'coordination_id': 'default',
+                'manifest': module.coordination_manifest_snapshot(manifest),
+                'manifest_digest': module.coordination_manifest_digest(manifest),
+                'managed_refs': {'refs/heads/pr/recreated': recreated_tip},
+                'tombstones': [{
+                    'stack': 'closed-stack',
+                    'branch': 'pr/recreated',
+                    'ref': 'refs/heads/pr/recreated',
+                    'closed_at': '2020-01-01T00:00:00+00:00',
+                    'remote_tip': original_tip,
+                }],
+            },
+        }
+        plan = module.coordination_gc_plan(repo, manifest, fetch=False, state_info=state_info)
+        self.assertEqual(plan['candidates'], [])
+        self.assertTrue(any('no longer matches the tombstone tip' in item for item in plan['skipped']))
 
     def test_atomic_rejection_does_not_publish_any_ref_or_state(self):
         origin = self.create_remote()
@@ -519,6 +665,23 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         module.save_repo_profile(repo, {'coordination': {}})
         ready = module.coordination_gc_plan(repo, manifest, fetch=False, state_info=state_info)
         self.assertEqual([item['type'] for item in ready['candidates']], ['remove_worktree', 'delete_branch'])
+
+        original_plan = module.coordination_gc_plan
+        calls = {'count': 0}
+
+        def add_lock_after_initial_plan(*args, **kwargs):
+            result = original_plan(*args, **kwargs)
+            calls['count'] += 1
+            if calls['count'] == 1:
+                module.save_repo_profile(repo, {'coordination': {'locks': {'stale': {'created_at': old}}}})
+            return result
+
+        with mock.patch.object(module, 'coordination_gc_plan', side_effect=add_lock_after_initial_plan):
+            raced = module.run_coordination_gc(repo, manifest, apply=True, fetch=False, state_info=state_info)
+        self.assertTrue(worktree.exists())
+        self.assertTrue(any('no longer eligible' in item for item in raced['skipped']))
+
+        module.save_repo_profile(repo, {'coordination': {}})
         module.run_coordination_gc(repo, manifest, apply=True, fetch=False, state_info=state_info)
         self.assertFalse(worktree.exists())
         self.assertNotEqual(self.git(repo, 'show-ref', '--verify', '--quiet', 'refs/heads/pr/stale', expected=1).returncode, 0)

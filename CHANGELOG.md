@@ -10,6 +10,15 @@
 - Clarify that feature PRs deliver to their intended branch, never to
   `main-integration`, and document the post-merge stack cleanup flow.
 
+## 0.21.1 - 2026-07-27
+
+- Prevent a tombstoned branch that becomes active again from becoming a local
+  GC candidate, and require the tombstone's original remote tip before cleanup.
+- Let closed-stack worktree locks be released by stack ID and revalidate GC
+  candidates immediately before local deletion.
+- Keep local remote aliases and remote-qualified local refs out of public
+  coordination state while preserving each checkout's local transport config.
+
 ## 0.21.0 - 2026-07-24
 
 - Add manifest version 2 active-active coordination with a persisted disabled

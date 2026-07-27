@@ -1969,20 +1969,60 @@ def canonical_json_digest(value):
     return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
+def coordination_manifest_remote_aliases(manifest):
+    """Return local Git remote aliases which must not enter public state."""
+    aliases = set()
+    defaults = manifest.get('defaults') or {}
+    for key in ('canonical_remote', 'publication_remote'):
+        value = defaults.get(key)
+        if isinstance(value, str) and value:
+            aliases.add(value)
+    config = coordination_config(manifest)
+    if config and isinstance(config.get('remote'), str) and config['remote']:
+        aliases.add(config['remote'])
+    for stack in manifest.get('stacks') or []:
+        if not isinstance(stack, dict):
+            continue
+        value = stack.get('target_remote')
+        if isinstance(value, str) and value:
+            aliases.add(value)
+    return aliases
+
+
+def public_coordination_ref(value, remote_aliases):
+    """Project a remote-qualified local ref into a portable public ref."""
+    if not isinstance(value, str):
+        return value
+    for remote in sorted(remote_aliases, key=len, reverse=True):
+        remote_tracking_prefix = f'refs/remotes/{remote}/'
+        if value.startswith(remote_tracking_prefix):
+            return f"refs/heads/{value[len(remote_tracking_prefix):]}"
+        remote_prefix = f'{remote}/'
+        if value.startswith(remote_prefix):
+            return f"refs/heads/{value[len(remote_prefix):]}"
+    return value
+
+
+def local_coordination_ref(value, canonical_remote):
+    """Map a portable public branch ref to this checkout's canonical remote."""
+    if isinstance(value, str) and value.startswith('refs/heads/'):
+        return f"{canonical_remote}/{value[len('refs/heads/'):]}"
+    return value
+
+
 def coordination_manifest_snapshot(manifest):
     """Return the public, topology-only projection stored in remote coordination state."""
     defaults = manifest['defaults']
+    remote_aliases = coordination_manifest_remote_aliases(manifest)
     snapshot = {
         'version': manifest['version'],
         'defaults': {
-            'canonical_remote': defaults['canonical_remote'],
-            'publication_remote': defaults['publication_remote'],
             'base_branch': defaults['base_branch'],
-            'base_ref': defaults['base_ref'],
+            'base_ref': public_coordination_ref(defaults['base_ref'], remote_aliases),
         },
         'integration': {
             'branch': manifest['integration']['branch'],
-            'base': manifest['integration']['base'],
+            'base': public_coordination_ref(manifest['integration']['base'], remote_aliases),
             'strategy': manifest['integration'].get('strategy', 'cherry-pick'),
             'stacks': list(manifest['integration'].get('stacks', [])),
         },
@@ -1992,8 +2032,7 @@ def coordination_manifest_snapshot(manifest):
         snapshot['stacks'].append({
             'id': stack['id'],
             'branch': stack['branch'],
-            'base': stack['base'],
-            'target_remote': stack['target_remote'],
+            'base': public_coordination_ref(stack['base'], remote_aliases),
             'target_branch': stack['target_branch'],
             'integration_branch': stack.get('integration_branch'),
             'commits': list(stack['commits']),
@@ -2002,7 +2041,7 @@ def coordination_manifest_snapshot(manifest):
     if config:
         snapshot['coordination'] = {
             key: value for key, value in config.items()
-            if key in {'mode', 'id', 'remote', 'state_branch', 'gc'}
+            if key in {'mode', 'id', 'state_branch', 'gc'}
         }
     return snapshot
 
@@ -2153,14 +2192,32 @@ def require_exclusive_coordination_ownership(repo_root, config, managed_refs):
     return conflicts
 
 
-def coordination_tombstones(previous_state, additional=None):
+def coordination_tombstone_ref(tombstone):
+    if not isinstance(tombstone, dict):
+        return None
+    ref = tombstone.get('ref')
+    if isinstance(ref, str) and ref:
+        return ref
+    branch = tombstone.get('branch')
+    if isinstance(branch, str) and branch:
+        return f'refs/heads/{branch}'
+    return None
+
+
+def coordination_tombstones(previous_state, manifest, additional=None):
+    """Keep closures only while their managed ref remains inactive."""
+    active_refs = set(managed_ref_names(manifest))
     tombstones = []
     if previous_state:
-        tombstones.extend(previous_state.get('tombstones') or [])
+        tombstones.extend(
+            item for item in previous_state.get('tombstones') or []
+            if coordination_tombstone_ref(item) not in active_refs
+        )
     if additional:
+        additional_ref = coordination_tombstone_ref(additional)
         tombstones = [
             item for item in tombstones
-            if not (item.get('stack') == additional.get('stack') and item.get('branch') == additional.get('branch'))
+            if coordination_tombstone_ref(item) != additional_ref
         ]
         tombstones.append(additional)
     return tombstones
@@ -2192,7 +2249,7 @@ def build_coordination_state(manifest, config, previous, observed_refs, changed_
         'changed_refs': dict(sorted(changed_refs.items())),
         'publication_scope': scope,
         'projection_status': projection_status,
-        'tombstones': coordination_tombstones(previous_state, tombstone),
+        'tombstones': coordination_tombstones(previous_state, manifest, tombstone),
     }
 
 
@@ -2391,21 +2448,43 @@ def merge_coordination_snapshots(base, local, remote):
 
 def apply_coordination_snapshot(manifest, snapshot):
     updated = json.loads(json.dumps(manifest))
-    local_stack_meta = {
-        stack['id']: stack.get('meta')
+    local_stacks = {
+        stack['id']: stack
         for stack in updated.get('stacks') or []
-        if isinstance(stack, dict) and isinstance(stack.get('meta'), dict)
+        if isinstance(stack, dict) and isinstance(stack.get('id'), str)
     }
     updated['version'] = snapshot['version']
-    updated['defaults'] = snapshot['defaults']
-    updated['integration'] = snapshot['integration']
+    defaults = dict(updated.get('defaults') or {})
+    defaults.update(snapshot['defaults'])
+    defaults['base_ref'] = local_coordination_ref(
+        snapshot['defaults']['base_ref'],
+        defaults['canonical_remote'],
+    )
+    updated['defaults'] = defaults
+    integration = dict(snapshot['integration'])
+    integration['base'] = local_coordination_ref(
+        snapshot['integration']['base'],
+        defaults['canonical_remote'],
+    )
+    updated['integration'] = integration
     updated['stacks'] = []
     for stack in snapshot['stacks']:
         restored = dict(stack)
-        if stack['id'] in local_stack_meta:
-            restored['meta'] = local_stack_meta[stack['id']]
+        local_stack = local_stacks.get(stack['id'], {})
+        restored['base'] = local_coordination_ref(stack['base'], defaults['canonical_remote'])
+        restored['target_remote'] = local_stack.get(
+            'target_remote', defaults['canonical_remote']
+        )
+        if isinstance(local_stack.get('meta'), dict):
+            restored['meta'] = local_stack['meta']
         updated['stacks'].append(restored)
-    updated['coordination'] = snapshot['coordination']
+    if 'coordination' in snapshot:
+        coordination = dict(updated.get('coordination') or {})
+        coordination.update(snapshot['coordination'])
+        coordination['remote'] = coordination.get('remote') or defaults['publication_remote']
+        updated['coordination'] = coordination
+    else:
+        updated.pop('coordination', None)
     return updated
 
 
@@ -2872,25 +2951,35 @@ def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
     worktree_root = resolve_worktree_root_path(repo_root, syncwheel_worktree_root(manifest))
     worktrees = {item.get('branch'): Path(item['path']) for item in get_worktrees(repo_root) if item.get('branch')}
     tombstones = state.get('tombstones') or []
-    tombstoned_refs = [item.get('ref') or f"refs/heads/{item.get('branch', '')}" for item in tombstones]
+    active_refs = set(managed_ref_names(manifest))
+    tombstoned_refs = [
+        ref for item in tombstones
+        if (ref := coordination_tombstone_ref(item)) and ref not in active_refs
+    ]
     remote_tips = remote_ref_tips(repo_root, config['remote'], tombstoned_refs)
     candidates = []
     skipped = []
     for tombstone in tombstones:
         stack_id = tombstone.get('stack')
         branch = tombstone.get('branch')
-        ref = tombstone.get('ref') or (f'refs/heads/{branch}' if branch else None)
+        ref = coordination_tombstone_ref(tombstone)
         closed_at = parse_coordination_timestamp(tombstone.get('closed_at'))
         label = f'{stack_id or branch or "unknown"}'
         if not branch or not ref or not closed_at:
             skipped.append(f'{label}: malformed tombstone')
             continue
+        if ref in active_refs:
+            skipped.append(f'{label}: tombstoned ref is active in the current manifest')
+            continue
         if (now - closed_at).total_seconds() < grace_seconds:
             skipped.append(f'{label}: tombstone grace period has not elapsed')
             continue
-        expected_tip = state.get('managed_refs', {}).get(ref)
-        if not expected_tip or remote_tips.get(ref) != expected_tip:
-            skipped.append(f'{label}: remote branch is not recoverable from the published state')
+        original_tip = tombstone.get('remote_tip')
+        if not isinstance(original_tip, str) or not original_tip:
+            skipped.append(f'{label}: tombstone is missing its original remote tip')
+            continue
+        if remote_tips.get(ref) != original_tip:
+            skipped.append(f'{label}: remote branch no longer matches the tombstone tip')
             continue
         if lease_active:
             skipped.append(f'{label}: a local coordination lease is active')
@@ -2910,7 +2999,7 @@ def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
         if branch == current_branch:
             skipped.append(f'{label}: branch is currently checked out')
             continue
-        if not local_branch_is_recoverable(repo_root, branch, expected_tip):
+        if not local_branch_is_recoverable(repo_root, branch, original_tip):
             skipped.append(f'{label}: local branch has unique or unpublished commits')
             continue
         if worktree:
@@ -2947,26 +3036,79 @@ def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
     }
 
 
+def coordination_gc_candidate_key(candidate):
+    return (
+        candidate.get('type'),
+        candidate.get('branch'),
+        candidate.get('path'),
+    )
+
+
+def coordination_gc_candidate_is_current(repo_root, manifest, candidate, fetch, state_info):
+    refreshed = coordination_gc_plan(
+        repo_root,
+        manifest,
+        fetch=fetch,
+        state_info=None if fetch else state_info,
+    )
+    target = coordination_gc_candidate_key(candidate)
+    return any(
+        coordination_gc_candidate_key(current) == target
+        for current in refreshed['candidates']
+    )
+
+
+def coordination_gc_note_skip(plan, candidate):
+    label = candidate.get('stack') or candidate.get('branch') or candidate.get('path') or 'unknown'
+    plan['skipped'].append(f'{label}: no longer eligible immediately before deletion')
+
+
 def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info=None):
     plan = coordination_gc_plan(repo_root, manifest, fetch=fetch, state_info=state_info)
     if not apply or not plan['enabled']:
         return plan
     removed_worktrees = set()
+    applied_candidates = []
     for candidate in plan['candidates']:
         if candidate['type'] != 'remove_worktree':
             continue
+        if not coordination_gc_candidate_is_current(
+            repo_root, manifest, candidate, fetch, state_info
+        ):
+            coordination_gc_note_skip(plan, candidate)
+            continue
         run(['git', 'worktree', 'remove', candidate['path']], cwd=repo_root)
         removed_worktrees.add(candidate['branch'])
+        applied_candidates.append(candidate)
     if removed_worktrees:
         git(repo_root, 'worktree', 'prune')
     for candidate in plan['candidates']:
-        if candidate['type'] == 'delete_branch':
-            result = git(repo_root, 'branch', '-d', candidate['branch'], check=False)
-            if result.returncode != 0:
-                git(repo_root, 'branch', '-D', candidate['branch'])
-        elif candidate['type'] == 'delete_backup':
-            git(repo_root, 'branch', '-D', candidate['branch'])
+        if candidate['type'] not in {'delete_branch', 'delete_backup'}:
+            continue
+        if not coordination_gc_candidate_is_current(
+            repo_root, manifest, candidate, fetch, state_info
+        ):
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        branch = candidate['branch']
+        local_tip = ref_tip(repo_root, branch)
+        if not local_tip:
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        result = git(
+            repo_root,
+            'update-ref',
+            '-d',
+            f'refs/heads/{branch}',
+            local_tip,
+            check=False,
+        )
+        if result.returncode != 0:
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        applied_candidates.append(candidate)
     plan['applied'] = True
+    plan['applied_candidates'] = applied_candidates
     return plan
 
 
@@ -3931,11 +4073,13 @@ def command_worktree_lock(args):
 def command_worktree_unlock(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    require_stack(manifest, args.stack)
     profile, coordination = coordination_profile(repo_root)
     locks = coordination.get('locks') or {}
-    if isinstance(locks, dict):
-        locks.pop(args.stack, None)
+    if not isinstance(locks, dict):
+        raise SyncwheelError('syncwheel profile worktree locks must be an object')
+    if args.stack not in locks:
+        require_stack(manifest, args.stack)
+    locks.pop(args.stack, None)
     coordination['locks'] = locks
     profile['coordination'] = coordination
     save_repo_profile(repo_root, profile)
@@ -5286,8 +5430,8 @@ def command_reconcile(args):
         save_manifest_with_ledger(repo_root, manifest_path, manifest, 'resume_manifest_update')
     if args.apply and getattr(args, 'auto_gc', False) and coordination_is_active(manifest):
         gc_plan = run_coordination_gc(repo_root, manifest, apply=True, fetch=True)
-        if gc_plan['candidates']:
-            print(f"automatic gc: processed {len(gc_plan['candidates'])} eligible local artifact(s)")
+        if gc_plan.get('applied_candidates'):
+            print(f"automatic gc: processed {len(gc_plan['applied_candidates'])} eligible local artifact(s)")
     return 0
 
 

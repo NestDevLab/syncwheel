@@ -86,14 +86,16 @@ does not create or update a remote coordination state branch.
 The state branch is an append-only chain of Git commits. Each state snapshot
 contains:
 
-- the normalized public manifest projection and its digest;
+- the normalized public manifest projection and its digest, with local remote
+  aliases and remote-qualified local refs removed;
 - the complete observed managed-ref map and the refs changed by this publication;
 - publication scope and projection status;
 - Syncwheel protocol version, state parent, publication UUID, and tombstones;
 - a pseudonymous per-installation UUID.
 
-State snapshots deliberately exclude local worktree roots, stack metadata, host
-details, usernames, filesystem paths, credentials, and local policy. State
+State snapshots deliberately exclude local worktree roots, stack metadata, local
+remote aliases, host details, usernames, filesystem paths, credentials, and local
+policy. State
 commits use the fixed `Syncwheel Coordination <coordination@syncwheel.invalid>`
 Git identity rather than a maintainer identity.
 
@@ -161,6 +163,10 @@ syncwheel stack close feature-a
 - inside the declared Syncwheel worktree root; and
 - recoverable from the published remote branch and state.
 
+Reusing a closed branch ref makes its old tombstone ineligible immediately. The
+next successful coordinated publication supersedes that tombstone, so GC cannot
+reap a branch that has become active again.
+
 The matching local worktree and stale local branch can then be removed. Backup
 branches keep the two newest backups and retain older backups for 30 days.
 Remote deletion is intentionally out of scope and always requires a future,
@@ -174,3 +180,5 @@ syncwheel worktree unlock feature-a
 syncwheel gc
 syncwheel gc --apply
 ```
+
+A lock can be released by stack ID even after that stack has been closed.
