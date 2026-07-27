@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.21.1`
+Current version: `0.21.2`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -66,8 +66,9 @@ Default behavior is conservative:
   branches are often rewritten by deterministic rebuilds
 - active-active version 2 manifests publish managed refs and state together
   with atomic, exact leases; unsupported remotes fail closed
-- public coordination state omits local remote aliases, and a reused managed
-  branch immediately supersedes its old cleanup tombstone
+- public coordination state uses typed canonical and publication remote roles,
+  rejects ambiguous aliases that cannot be normalized safely, and makes a
+  reused managed branch immediately supersede its old cleanup tombstone
 - `repo tracking status` shows whether the manifest is `git-tracked`,
   `local-only`, or missing a persisted policy
 - if a remote managed branch already matches the manifest projection,

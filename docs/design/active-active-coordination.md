@@ -95,7 +95,10 @@ contains:
 
 State snapshots deliberately exclude local worktree roots, stack metadata, local
 remote aliases, host details, usernames, filesystem paths, credentials, and local
-policy. State
+policy. Syncwheel records remote base refs as typed JSON values with a portable
+`canonical` or `publication` role, never by a local alias. Explicit Git refs
+remain strings and round-trip unchanged. A base ref using another remote is
+ambiguous and fails closed rather than being treated as equivalent. State
 commits use the fixed `Syncwheel Coordination <coordination@syncwheel.invalid>`
 Git identity rather than a maintainer identity.
 

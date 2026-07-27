@@ -67,9 +67,9 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
-    def create_remote(self):
-        origin = self.tmp / 'origin.git'
-        seed = self.tmp / 'seed'
+    def create_remote(self, name='origin'):
+        origin = self.tmp / f'{name}.git'
+        seed = self.tmp / f'{name}-seed'
         subprocess.run(['git', 'init', '--bare', str(origin)], check=True, capture_output=True, text=True)
         subprocess.run(['git', 'init', '-q', '-b', 'main', str(seed)], check=True)
         self.git(seed, 'config', 'user.name', 'Syncwheel Fixture')
@@ -285,9 +285,23 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertNotIn('alice-laptop', serialized)
         self.assertEqual(
             snapshot['defaults'],
-            {'base_branch': 'main', 'base_ref': 'refs/heads/main'},
+            {
+                'base_branch': 'main',
+                'base_ref': {
+                    'kind': 'remote-ref',
+                    'role': 'canonical',
+                    'ref': 'refs/heads/main',
+                },
+            },
         )
-        self.assertEqual(snapshot['integration']['base'], 'refs/heads/main')
+        self.assertEqual(
+            snapshot['integration']['base'],
+            {
+                'kind': 'remote-ref',
+                'role': 'canonical',
+                'ref': 'refs/heads/main',
+            },
+        )
         self.assertNotIn('target_remote', snapshot['stacks'][0])
         self.assertNotIn('remote', snapshot['coordination'])
 
@@ -312,6 +326,171 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(restored['integration']['base'], 'alice-laptop/main')
         self.assertEqual(restored['coordination']['remote'], 'alice-laptop')
         self.assertEqual(restored['stacks'][0]['target_remote'], 'alice-laptop')
+
+    def test_public_snapshot_rejects_an_unmapped_remote_with_a_different_tip(self):
+        origin = self.create_remote()
+        private = self.create_remote('private')
+        repo = self.clone(origin, 'private-alias')
+        manifest = self.init_coordinated(repo)
+        private_seed = self.clone(private, 'private-publisher')
+        (private_seed / 'private.txt').write_text('private\n')
+        self.git(private_seed, 'add', 'private.txt')
+        self.git(private_seed, 'commit', '-q', '-m', 'feat: private remote main')
+        self.git(private_seed, 'push', 'origin', 'main')
+        self.git(repo, 'remote', 'add', 'private-host', str(private))
+        self.git(repo, 'fetch', 'private-host')
+        self.git(repo, 'branch', 'private-host/main', 'origin/main')
+        manifest['defaults']['base_ref'] = 'private-host/main'
+        manifest['integration']['base'] = 'private-host/main'
+
+        module = self.load_module()
+        self.assertNotEqual(
+            self.git(repo, 'rev-parse', 'origin/main').stdout.strip(),
+            self.git(repo, 'rev-parse', 'refs/remotes/private-host/main').stdout.strip(),
+        )
+        with self.assertRaisesRegex(module.SyncwheelError, 'unrecognized local remote alias'):
+            module.coordination_manifest_snapshot(manifest, repo)
+
+    def test_coordination_state_rejects_an_invalid_typed_remote_ref(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'invalid-state')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        state_tip, state = self.remote_state(origin)
+        state['manifest']['defaults']['base_ref'] = {
+            'kind': 'remote-ref',
+            'role': 'canonical',
+            'ref': 'refs/heads/',
+        }
+        module = self.load_module()
+        state['manifest_digest'] = module.canonical_json_digest(state['manifest'])
+        invalid_commit = module.create_coordination_state_commit(repo, state, state_tip)
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'invalid typed remote ref'):
+            module.coordination_state_from_commit(repo, invalid_commit, 'default')
+
+    def test_explicit_refs_are_not_rewritten_by_a_remote_named_refs(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'defaults': {
+                'canonical_remote': 'refs',
+                'publication_remote': 'origin',
+                'base_branch': 'main',
+                'base_ref': 'refs/heads/main',
+            },
+            'integration': {
+                'branch': 'integration/shared',
+                'base': 'refs/heads/main',
+                'strategy': 'cherry-pick',
+                'stacks': [],
+            },
+            'coordination': {
+                'mode': 'active-active',
+                'id': 'shared',
+                'remote': 'origin',
+                'state_branch': 'syncwheel/state/shared',
+                'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+            },
+            'stacks': [],
+        }
+        snapshot = module.coordination_manifest_snapshot(manifest)
+        self.assertEqual(snapshot['defaults']['base_ref'], 'refs/heads/main')
+        self.assertEqual(snapshot['integration']['base'], 'refs/heads/main')
+
+    def test_public_snapshot_distinguishes_canonical_and_publication_roles(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'defaults': {
+                'canonical_remote': 'upstream',
+                'publication_remote': 'fork',
+                'base_branch': 'main',
+                'base_ref': 'upstream/main',
+            },
+            'integration': {
+                'branch': 'integration/shared',
+                'base': 'upstream/main',
+                'strategy': 'cherry-pick',
+                'stacks': [],
+            },
+            'coordination': {
+                'mode': 'active-active',
+                'id': 'shared',
+                'remote': 'fork',
+                'state_branch': 'syncwheel/state/shared',
+                'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+            },
+            'stacks': [],
+        }
+        publication_base = json.loads(json.dumps(manifest))
+        publication_base['defaults']['base_ref'] = 'fork/main'
+        publication_base['integration']['base'] = 'fork/main'
+
+        canonical_snapshot = module.coordination_manifest_snapshot(manifest)
+        publication_snapshot = module.coordination_manifest_snapshot(publication_base)
+        self.assertEqual(
+            canonical_snapshot['defaults']['base_ref'],
+            {
+                'kind': 'remote-ref',
+                'role': 'canonical',
+                'ref': 'refs/heads/main',
+            },
+        )
+        self.assertEqual(
+            publication_snapshot['defaults']['base_ref'],
+            {
+                'kind': 'remote-ref',
+                'role': 'publication',
+                'ref': 'refs/heads/main',
+            },
+        )
+        self.assertNotEqual(canonical_snapshot, publication_snapshot)
+
+    def test_public_ref_round_trip_preserves_roles_and_explicit_refs(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'defaults': {
+                'canonical_remote': 'upstream',
+                'publication_remote': 'fork',
+                'base_branch': 'main',
+                'base_ref': 'upstream/main',
+            },
+            'integration': {
+                'branch': 'integration/shared',
+                'base': 'fork/main',
+                'strategy': 'cherry-pick',
+                'stacks': [],
+            },
+            'coordination': {
+                'mode': 'active-active',
+                'id': 'shared',
+                'remote': 'fork',
+                'state_branch': 'syncwheel/state/shared',
+                'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+            },
+            'stacks': [],
+        }
+        restored = module.apply_coordination_snapshot(
+            manifest,
+            module.coordination_manifest_snapshot(manifest),
+        )
+        self.assertEqual(restored['defaults']['base_ref'], 'upstream/main')
+        self.assertEqual(restored['integration']['base'], 'fork/main')
+
+        explicit = json.loads(json.dumps(manifest))
+        explicit['defaults']['base_ref'] = 'refs/heads/main'
+        explicit['integration']['base'] = 'refs/syncwheel/coordination/canonical/main'
+        restored = module.apply_coordination_snapshot(
+            explicit,
+            module.coordination_manifest_snapshot(explicit),
+        )
+        self.assertEqual(restored['defaults']['base_ref'], 'refs/heads/main')
+        self.assertEqual(
+            restored['integration']['base'],
+            'refs/syncwheel/coordination/canonical/main',
+        )
 
     def test_equivalent_lease_loss_aligns_tree_equivalent_local_ref(self):
         origin = self.create_remote()

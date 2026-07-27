@@ -10,6 +10,13 @@
 - Clarify that feature PRs deliver to their intended branch, never to
   `main-integration`, and document the post-merge stack cleanup flow.
 
+## 0.21.2 - 2026-07-27
+
+- Preserve canonical and publication remote identity in public coordination
+  state without exposing local aliases, and reject unassigned remote aliases.
+- Validate typed remote references at the remote-state boundary before handoff,
+  race classification, or merge acceptance can consume them.
+
 ## 0.21.1 - 2026-07-27
 
 - Prevent a tombstoned branch that becomes active again from becoming a local
@@ -17,7 +24,9 @@
 - Let closed-stack worktree locks be released by stack ID and revalidate GC
   candidates immediately before local deletion.
 - Keep local remote aliases and remote-qualified local refs out of public
-  coordination state while preserving each checkout's local transport config.
+  coordination state while preserving each checkout's local transport config;
+  retain canonical versus publication remote roles in schema 2 and reject
+  ambiguous aliases.
 
 ## 0.21.0 - 2026-07-24
 

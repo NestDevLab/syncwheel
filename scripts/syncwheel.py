@@ -36,9 +36,11 @@ MANIFEST_VERSIONS = {1, 2}
 MANIFEST_VERSION_LEGACY = 1
 MANIFEST_VERSION_COORDINATED = 2
 COORDINATION_MODES = {'active-active', 'disabled'}
-COORDINATION_STATE_SCHEMA_VERSION = 1
+COORDINATION_STATE_SCHEMA_VERSION = 2
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_STATE_PREFIX = 'syncwheel/state/'
+COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
+COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
 COORDINATION_LEASE_SECONDS = 5 * 60
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
@@ -1969,60 +1971,135 @@ def canonical_json_digest(value):
     return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
 
 
-def coordination_manifest_remote_aliases(manifest):
-    """Return local Git remote aliases which must not enter public state."""
-    aliases = set()
-    defaults = manifest.get('defaults') or {}
-    for key in ('canonical_remote', 'publication_remote'):
-        value = defaults.get(key)
-        if isinstance(value, str) and value:
-            aliases.add(value)
-    config = coordination_config(manifest)
-    if config and isinstance(config.get('remote'), str) and config['remote']:
-        aliases.add(config['remote'])
-    for stack in manifest.get('stacks') or []:
-        if not isinstance(stack, dict):
-            continue
-        value = stack.get('target_remote')
-        if isinstance(value, str) and value:
-            aliases.add(value)
-    return aliases
+def coordination_manifest_remote_roles(manifest):
+    """Map only portable manifest roles to local Git remote aliases."""
+    defaults = manifest['defaults']
+    canonical_remote = defaults['canonical_remote']
+    publication_remote = defaults['publication_remote']
+    roles = {canonical_remote: COORDINATION_REMOTE_ROLE_CANONICAL}
+    if publication_remote != canonical_remote:
+        roles[publication_remote] = COORDINATION_REMOTE_ROLE_PUBLICATION
+    return roles
 
 
-def public_coordination_ref(value, remote_aliases):
-    """Project a remote-qualified local ref into a portable public ref."""
+def public_coordination_remote_ref(role, branch, path):
+    ref = f'refs/heads/{branch}' if isinstance(branch, str) else None
+    if not is_valid_coordination_branch_ref(ref):
+        raise SyncwheelError(f'{path} has an invalid remote branch ref')
+    return {
+        'kind': 'remote-ref',
+        'role': role,
+        'ref': ref,
+    }
+
+
+def public_coordination_ref(value, remote_roles, repo_root=None, path='manifest ref'):
+    """Project a local ref into a portable public ref without collapsing remote identity."""
     if not isinstance(value, str):
         return value
-    for remote in sorted(remote_aliases, key=len, reverse=True):
-        remote_tracking_prefix = f'refs/remotes/{remote}/'
-        if value.startswith(remote_tracking_prefix):
-            return f"refs/heads/{value[len(remote_tracking_prefix):]}"
+    if value.startswith('refs/remotes/'):
+        for remote in sorted(remote_roles, key=len, reverse=True):
+            remote_tracking_prefix = f'refs/remotes/{remote}/'
+            if value.startswith(remote_tracking_prefix):
+                return public_coordination_remote_ref(
+                    remote_roles[remote], value[len(remote_tracking_prefix):], path
+                )
+        raise SyncwheelError(
+            f'{path} uses an unrecognized local remote alias: {value!r}; '
+            'use the canonical or publication remote role instead'
+        )
+    if value.startswith('refs/heads/') or value.startswith('refs/tags/'):
+        return value
+    for remote in sorted(remote_roles, key=len, reverse=True):
         remote_prefix = f'{remote}/'
         if value.startswith(remote_prefix):
-            return f"refs/heads/{value[len(remote_prefix):]}"
+            return public_coordination_remote_ref(
+                remote_roles[remote], value[len(remote_prefix):], path
+            )
+    if value.startswith('refs/') or '/' not in value:
+        return value
+    if repo_root is not None:
+        configured_remotes = {
+            line.strip()
+            for line in git(repo_root, 'remote').stdout.splitlines()
+            if line.strip()
+        }
+        for remote in sorted(configured_remotes - set(remote_roles), key=len, reverse=True):
+            if value.startswith(f'{remote}/'):
+                raise SyncwheelError(
+                    f'{path} uses an unrecognized local remote alias: {value!r}; '
+                    'use the canonical or publication remote role instead'
+                )
+        if branch_exists(repo_root, value):
+            return f'refs/heads/{value}'
+    raise SyncwheelError(
+        f'{path} may contain an unrecognized local remote alias: {value!r}; '
+        'use the canonical or publication remote role, or an explicit refs/heads/... local branch'
+    )
+
+
+def is_valid_coordination_branch_ref(value):
+    return (
+        isinstance(value, str)
+        and value.startswith('refs/heads/')
+        and run(['git', 'check-ref-format', value], check=False).returncode == 0
+    )
+
+
+def coordination_public_remote_ref_parts(value, path):
+    """Validate and unpack a typed public remote ref, if present."""
+    if isinstance(value, str):
+        if not value:
+            raise SyncwheelError(f'{path} must be a non-empty ref string')
+        return None
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} must be a ref string or typed remote ref')
+    if set(value) != {'kind', 'role', 'ref'} or value.get('kind') != 'remote-ref':
+        raise SyncwheelError(f'{path} contains an invalid typed remote ref')
+    role = value.get('role')
+    ref = value.get('ref')
+    if role not in {
+        COORDINATION_REMOTE_ROLE_CANONICAL,
+        COORDINATION_REMOTE_ROLE_PUBLICATION,
+    } or not is_valid_coordination_branch_ref(ref):
+        raise SyncwheelError(f'{path} contains an invalid typed remote ref')
+    return role, ref
+
+
+def local_coordination_ref(value, defaults):
+    """Map a portable public ref back to this checkout's remote role."""
+    canonical_remote = defaults['canonical_remote']
+    publication_remote = defaults['publication_remote']
+    remote_ref = coordination_public_remote_ref_parts(value, 'coordination state ref')
+    if remote_ref:
+        role, ref = remote_ref
+        remote = {
+            COORDINATION_REMOTE_ROLE_CANONICAL: canonical_remote,
+            COORDINATION_REMOTE_ROLE_PUBLICATION: publication_remote,
+        }.get(role)
+        if not remote:
+            raise SyncwheelError('coordination state contains an invalid typed remote ref')
+        return f"{remote}/{ref[len('refs/heads/'):]}"
     return value
 
 
-def local_coordination_ref(value, canonical_remote):
-    """Map a portable public branch ref to this checkout's canonical remote."""
-    if isinstance(value, str) and value.startswith('refs/heads/'):
-        return f"{canonical_remote}/{value[len('refs/heads/'):]}"
-    return value
-
-
-def coordination_manifest_snapshot(manifest):
+def coordination_manifest_snapshot(manifest, repo_root=None):
     """Return the public, topology-only projection stored in remote coordination state."""
     defaults = manifest['defaults']
-    remote_aliases = coordination_manifest_remote_aliases(manifest)
+    remote_roles = coordination_manifest_remote_roles(manifest)
     snapshot = {
         'version': manifest['version'],
         'defaults': {
             'base_branch': defaults['base_branch'],
-            'base_ref': public_coordination_ref(defaults['base_ref'], remote_aliases),
+            'base_ref': public_coordination_ref(
+                defaults['base_ref'], remote_roles, repo_root, 'defaults.base_ref'
+            ),
         },
         'integration': {
             'branch': manifest['integration']['branch'],
-            'base': public_coordination_ref(manifest['integration']['base'], remote_aliases),
+            'base': public_coordination_ref(
+                manifest['integration']['base'], remote_roles, repo_root, 'integration.base'
+            ),
             'strategy': manifest['integration'].get('strategy', 'cherry-pick'),
             'stacks': list(manifest['integration'].get('stacks', [])),
         },
@@ -2032,7 +2109,9 @@ def coordination_manifest_snapshot(manifest):
         snapshot['stacks'].append({
             'id': stack['id'],
             'branch': stack['branch'],
-            'base': public_coordination_ref(stack['base'], remote_aliases),
+            'base': public_coordination_ref(
+                stack['base'], remote_roles, repo_root, f"stacks.{stack['id']}.base"
+            ),
             'target_branch': stack['target_branch'],
             'integration_branch': stack.get('integration_branch'),
             'commits': list(stack['commits']),
@@ -2046,8 +2125,8 @@ def coordination_manifest_snapshot(manifest):
     return snapshot
 
 
-def coordination_manifest_digest(manifest):
-    return canonical_json_digest(coordination_manifest_snapshot(manifest))
+def coordination_manifest_digest(manifest, repo_root=None):
+    return canonical_json_digest(coordination_manifest_snapshot(manifest, repo_root))
 
 
 def managed_ref_names(manifest):
@@ -2073,6 +2152,32 @@ def remote_ref_tips(repo_root, remote, refs):
     return output
 
 
+def validate_coordination_snapshot_refs(snapshot):
+    if not isinstance(snapshot, dict):
+        raise SyncwheelError('coordination state manifest must be an object')
+    defaults = snapshot.get('defaults')
+    integration = snapshot.get('integration')
+    stacks = snapshot.get('stacks')
+    if not isinstance(defaults, dict) or 'base_ref' not in defaults:
+        raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
+    if not isinstance(integration, dict) or 'base' not in integration:
+        raise SyncwheelError('coordination state manifest is missing integration.base')
+    if not isinstance(stacks, list):
+        raise SyncwheelError('coordination state manifest stacks must be an array')
+    coordination_public_remote_ref_parts(
+        defaults['base_ref'], 'coordination state defaults.base_ref'
+    )
+    coordination_public_remote_ref_parts(
+        integration['base'], 'coordination state integration.base'
+    )
+    for index, stack in enumerate(stacks):
+        if not isinstance(stack, dict) or 'base' not in stack:
+            raise SyncwheelError(f'coordination state manifest stack {index} is missing base')
+        coordination_public_remote_ref_parts(
+            stack['base'], f'coordination state stacks[{index}].base'
+        )
+
+
 def validate_coordination_state(state, expected_id=None):
     if not isinstance(state, dict):
         raise SyncwheelError('coordination state must be an object')
@@ -2089,6 +2194,7 @@ def validate_coordination_state(state, expected_id=None):
         )
     if not isinstance(state.get('manifest'), dict):
         raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
+    validate_coordination_snapshot_refs(state['manifest'])
     if not isinstance(state.get('manifest_digest'), str) or not state['manifest_digest']:
         raise SyncwheelError('coordination state is missing manifest_digest')
     if canonical_json_digest(state['manifest']) != state['manifest_digest']:
@@ -2223,7 +2329,7 @@ def coordination_tombstones(previous_state, manifest, additional=None):
     return tombstones
 
 
-def build_coordination_state(manifest, config, previous, observed_refs, changed_refs, scope, projection_status, installation, tombstone=None):
+def build_coordination_state(repo_root, manifest, config, previous, observed_refs, changed_refs, scope, projection_status, installation, tombstone=None):
     previous_state = previous.get('state') if previous else None
     managed = {}
     if previous_state:
@@ -2234,7 +2340,7 @@ def build_coordination_state(manifest, config, previous, observed_refs, changed_
         closed_ref = tombstone.get('ref') or f"refs/heads/{tombstone['branch']}"
         if closed_ref not in managed:
             managed[closed_ref] = tombstone.get('remote_tip')
-    snapshot = coordination_manifest_snapshot(manifest)
+    snapshot = coordination_manifest_snapshot(manifest, repo_root)
     return {
         'schema_version': COORDINATION_STATE_SCHEMA_VERSION,
         'coordination_id': config['id'],
@@ -2358,7 +2464,7 @@ def record_pending_coordination_merge(repo_root, config, expected, latest, manif
         'coordination_id': config['id'],
         'base_state': expected.get('tip'),
         'remote_state': latest.get('tip'),
-        'local_manifest_digest': coordination_manifest_digest(manifest),
+        'local_manifest_digest': coordination_manifest_digest(manifest, repo_root),
         'created_at': iso_utc_now(),
     }
     profile['coordination'] = coordination
@@ -2458,20 +2564,20 @@ def apply_coordination_snapshot(manifest, snapshot):
     defaults.update(snapshot['defaults'])
     defaults['base_ref'] = local_coordination_ref(
         snapshot['defaults']['base_ref'],
-        defaults['canonical_remote'],
+        defaults,
     )
     updated['defaults'] = defaults
     integration = dict(snapshot['integration'])
     integration['base'] = local_coordination_ref(
         snapshot['integration']['base'],
-        defaults['canonical_remote'],
+        defaults,
     )
     updated['integration'] = integration
     updated['stacks'] = []
     for stack in snapshot['stacks']:
         restored = dict(stack)
         local_stack = local_stacks.get(stack['id'], {})
-        restored['base'] = local_coordination_ref(stack['base'], defaults['canonical_remote'])
+        restored['base'] = local_coordination_ref(stack['base'], defaults)
         restored['target_remote'] = local_stack.get(
             'target_remote', defaults['canonical_remote']
         )
@@ -2548,7 +2654,7 @@ def align_equivalent_coordination_refs(repo_root, config, state, changed_refs):
 
 def classify_coordination_race(repo_root, manifest, config, expected, changed_refs, projection_status):
     latest = read_remote_coordination_state(repo_root, config, fetch=True)
-    desired_snapshot = coordination_manifest_snapshot(manifest)
+    desired_snapshot = coordination_manifest_snapshot(manifest, repo_root)
     if latest['state']:
         state = latest['state']
         if (
@@ -2593,7 +2699,7 @@ def validate_coordination_publication_base(repo_root, manifest, config, expected
             'published coordination state no longer matches its managed remote refs; run handoff and resolve manually'
         )
     remote_snapshot = state['manifest']
-    local_snapshot = coordination_manifest_snapshot(manifest)
+    local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
     if state['manifest_digest'] == canonical_json_digest(local_snapshot):
         return
 
@@ -2720,6 +2826,7 @@ def coordinated_publish(repo_root, manifest, manifest_path, changed_refs, scope,
         return {'status': 'dry_run', 'state_tip': None}
     installation = installation_id(create=True)
     state = build_coordination_state(
+        repo_root,
         manifest,
         config,
         expected,
@@ -2840,7 +2947,7 @@ def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
     pending = coordination.get('pending_merge')
     if not isinstance(pending, dict) or pending.get('coordination_id') != config['id']:
         raise SyncwheelError('there is no pending mergeable coordinated publication for this manifest')
-    if pending.get('local_manifest_digest') != coordination_manifest_digest(manifest):
+    if pending.get('local_manifest_digest') != coordination_manifest_digest(manifest, repo_root):
         raise SyncwheelError('the local manifest changed after the mergeable conflict; run handoff and resolve again')
     latest = read_remote_coordination_state(repo_root, config, fetch=True)
     if not latest['state'] or latest['tip'] != pending.get('remote_state'):
@@ -2851,7 +2958,7 @@ def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
     base = coordination_state_from_commit(repo_root, base_tip, config['id'])
     merged = merge_coordination_snapshots(
         base['manifest'],
-        coordination_manifest_snapshot(manifest),
+        coordination_manifest_snapshot(manifest, repo_root),
         latest['state']['manifest'],
     )
     if merged['status'] != 'mergeable':
@@ -3148,7 +3255,7 @@ def command_handoff(args):
         state_info = read_remote_coordination_state(repo_root, config, fetch=args.fetch)
         ownership = coordination_ownership_conflicts(repo_root, config, managed_ref_names(manifest))
         profile, local_coordination = coordination_profile(repo_root)
-        local_digest = coordination_manifest_digest(manifest)
+        local_digest = coordination_manifest_digest(manifest, repo_root)
         state = state_info['state']
         output['coordination'].update({
             'state_tip': state_info['tip'],
