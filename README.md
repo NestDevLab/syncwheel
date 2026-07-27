@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.20.0`
+Current version: `0.21.2`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -62,8 +62,13 @@ Default behavior is conservative:
 - `publish` applies the lifecycle and pushes managed branches
 - lower-level `reconcile --apply` and `reconcile --apply --push` remain
   available for explicit scripting
-- `publish` and `reconcile --push` use `--force-with-lease` by default, because managed
+- legacy manifests use `--force-with-lease` by default, because managed
   branches are often rewritten by deterministic rebuilds
+- active-active version 2 manifests publish managed refs and state together
+  with atomic, exact leases; unsupported remotes fail closed
+- public coordination state uses typed canonical and publication remote roles,
+  rejects ambiguous aliases that cannot be normalized safely, and makes a
+  reused managed branch immediately supersede its old cleanup tombstone
 - `repo tracking status` shows whether the manifest is `git-tracked`,
   `local-only`, or missing a persisted policy
 - if a remote managed branch already matches the manifest projection,
@@ -72,12 +77,33 @@ Default behavior is conservative:
 - pass `--no-align-local-to-remote` when you intentionally want to preserve a
   different local history for manual inspection
 
-Use `--no-force-with-lease` only when a normal push is intentionally required.
+For legacy manifests, use `--no-force-with-lease` only when a normal push is
+intentionally required.
 
 `syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` should be
 tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
 through `.git/info/exclude`. New managed worktrees default to repo-relative
 `.syncwheel/wt/`.
+
+## Active-active coordination
+
+Manifest version 2 can safely coordinate the same integration branch from
+multiple independent devices or agents. New `git-tracked` manifests enable it
+when their publication remote is configured:
+
+```bash
+syncwheel init --syncwheel-tracking git-tracked --publication-remote origin
+syncwheel handoff
+syncwheel publish
+```
+
+Existing version 1 manifests remain legacy. Upgrade deliberately with
+`syncwheel coordination init --remote origin --apply`; opt out with
+`syncwheel coordination disable --apply`. Active coordination requires atomic
+push support and never falls back to serial pushes. See
+[the active-active protocol](docs/design/active-active-coordination.md) for the
+state model, lease handling, explicit merge acceptance, privacy contract, and
+local cleanup safeguards.
 
 ## Common Short Flags
 
@@ -173,8 +199,9 @@ Practical meaning:
   integration checkout.
 - `stack rebuild` rebuilds one PR branch from the manifest.
 - `int rebuild` rebuilds integration from ordered stacks.
-- `stack push` and `int push` wrap `git push`, with arbitrary Git arguments
-  after `--`.
+- `stack push` and `int push` are targeted publication commands. On active
+  version 2 manifests they publish a partial atomic state snapshot; legacy
+  manifests retain the direct Git push wrapper and its optional arguments.
 - `reconcile` is the preferred multi-device maintenance entrypoint: it compares
   manifest ownership, stack branches, integration, and remote tips; reports a
   dry-run plan by default; and can rebuild, update manifest SHAs, and push when
@@ -605,10 +632,10 @@ local history for manual inspection:
 python3 scripts/syncwheel.py sync --no-align-local-to-remote
 ```
 
-`publish` and `reconcile --push` use `--force-with-lease` by default because
-rebuilt managed branches commonly replace older remote history in multi-device
-workflows. Pass `--no-force-with-lease` only when a normal push is
-intentionally required.
+Legacy `publish` and `reconcile --push` use `--force-with-lease` by default
+because rebuilt managed branches commonly replace older remote history in
+multi-device workflows. Active version 2 manifests instead use the coordinated
+atomic publisher and reject manual force, lease, or remote overrides.
 
 Use `--json` for automation, `--stack <id>` to limit stack work, `--remote` to
 override the publication remote, and `--in-place-integration` only when the
@@ -625,10 +652,10 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
 python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
-python3 scripts/syncwheel.py stack push feature-a -- --force-with-lease
+python3 scripts/syncwheel.py stack push feature-a
 python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
 python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
-python3 scripts/syncwheel.py int push -- --force-with-lease
+python3 scripts/syncwheel.py int push
 python3 scripts/syncwheel.py int git --auto-worktree -- status
 python3 scripts/syncwheel.py int sync-status --json
 ```
@@ -688,6 +715,7 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
+- `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
 - `docs/ai-agents.md`: short AI behavior contract
 - `docs/agent-procedure.md`: extended AI execution guidance
 - `docs/workflow-longform.md`: long-form practical workflow guide
@@ -699,6 +727,10 @@ raw Git equivalent of the Syncwheel lifecycle.
 python3 scripts/syncwheel.py --help
 python3 scripts/syncwheel.py --version
 python3 scripts/syncwheel.py init --help
+python3 scripts/syncwheel.py coordination --help
+python3 scripts/syncwheel.py handoff --help
+python3 scripts/syncwheel.py gc --help
+python3 scripts/syncwheel.py worktree --help
 python3 scripts/syncwheel.py check --help
 python3 scripts/syncwheel.py status --help
 python3 scripts/syncwheel.py validate --help
@@ -738,7 +770,7 @@ Agents should not infer stack ownership from memory when the repository is meant
 
 Recommended sequence:
 1. `repo tracking status`
-2. `reconcile`
+2. `handoff` for an active-active manifest, otherwise `reconcile`
 3. update the manifest with `stack sync`, `stack set`, or `stack add` if the
    dry-run report shows real ownership changes
 4. `sync`

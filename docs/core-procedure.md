@@ -51,6 +51,28 @@ Then fill in:
 
 Do not call the workflow deterministic until this file exists and matches reality.
 
+### Active-active handoff for version 2 manifests
+
+When the manifest has `coordination.mode: "active-active"`, inspect its remote
+state before changing or publishing managed refs:
+
+```bash
+python3 scripts/syncwheel.py handoff
+python3 scripts/syncwheel.py reconcile
+```
+
+Use the normal full lifecycle to publish a convergent integration projection:
+
+```bash
+python3 scripts/syncwheel.py publish
+```
+
+Syncwheel atomically publishes changed managed refs together with an append-only
+state commit and exact leases. Do not replace it with a raw `git push`. If a
+lease reports disjoint stack changes as mergeable, review `handoff` and run
+`publish --accept-merge`; overlapping or integration/order conflicts require a
+human decision.
+
 ## Phase 3. Validate the manifest against Git
 
 Run:

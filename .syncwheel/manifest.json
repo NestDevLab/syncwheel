@@ -12,7 +12,20 @@
     "strategy": "cherry-pick",
     "stacks": []
   },
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "active-active-coordination",
+      "branch": "branch/syncwheel-active-active-coordination",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "meta": {
+        "purpose": "Public active-active multi-device coordination"
+      }
+    }
+  ],
   "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked"
 }

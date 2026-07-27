@@ -44,6 +44,13 @@ Commit the shared manifest so the team versions it:
 - the manifest becomes the team's **coordination contract**: branch ownership is
   reviewable in-tree
 
+For a newly initialized `git-tracked` repository, Syncwheel enables manifest
+version 2 active-active coordination when a configured publication remote is
+provided. That remote is the shared publication boundary; the manifest and
+append-only remote state remain reviewable without recording local paths or
+identity details. If no usable remote exists, initialization fails rather than
+silently selecting a single-device fallback.
+
 **Manifest self-reference rule.** Treat manifest edits and Syncwheel-version bumps
 as control-plane metadata, not as normal stack-owned product commits. A manifest
 cannot cleanly name the SHA of the commit that edits itself. Keep manifest
@@ -69,6 +76,15 @@ local:
 - your PRs stay clean — only the real change is proposed, with no tooling noise
 - coordination and recovery happen via the canonical remote plus `resume`
 
+`local-only` is deliberately not auto-enrolled in active-active coordination.
+It can opt in only with an explicit remote and apply step:
+
+```bash
+syncwheel coordination init --remote origin --apply
+```
+
+This keeps an untracked manifest from unexpectedly creating shared remote state.
+
 ## Migration
 
 Use `repo tracking set` to migrate between modes:
@@ -83,6 +99,19 @@ Use `repo tracking set` to migrate between modes:
 The CLI only edits Syncwheel-managed blocks. If `.gitignore` contains manual
 `.syncwheel/` ignore entries outside the managed block, `repo tracking set
 git-tracked --apply` stops and asks for manual audit.
+
+Tracking-policy migration does not silently upgrade a legacy manifest to
+active-active coordination. After confirming the publication remote and shared
+ownership boundary, opt in separately:
+
+```bash
+syncwheel coordination init --remote origin --apply
+```
+
+An explicit opt-out remains persisted in the version 2 `coordination` block and
+can later be re-enabled through the same command. See
+[active-active-coordination.md](design/active-active-coordination.md) for the
+protocol details.
 
 ## Multi-agent, multi-machine context
 

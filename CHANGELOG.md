@@ -10,6 +10,40 @@
 - Clarify that feature PRs deliver to their intended branch, never to
   `main-integration`, and document the post-merge stack cleanup flow.
 
+## 0.21.2 - 2026-07-27
+
+- Preserve canonical and publication remote identity in public coordination
+  state without exposing local aliases, and reject unassigned remote aliases.
+- Validate typed remote references at the remote-state boundary before handoff,
+  race classification, or merge acceptance can consume them.
+
+## 0.21.1 - 2026-07-27
+
+- Prevent a tombstoned branch that becomes active again from becoming a local
+  GC candidate, and require the tombstone's original remote tip before cleanup.
+- Let closed-stack worktree locks be released by stack ID and revalidate GC
+  candidates immediately before local deletion.
+- Keep local remote aliases and remote-qualified local refs out of public
+  coordination state while preserving each checkout's local transport config;
+  retain canonical versus publication remote roles in schema 2 and reject
+  ambiguous aliases.
+
+## 0.21.0 - 2026-07-24
+
+- Add manifest version 2 active-active coordination with a persisted disabled
+  mode, explicit migration, and safe defaults for new `git-tracked` manifests.
+- Publish managed refs and append-only remote coordination state through one
+  atomic, exact-lease protocol; fail closed when atomic push is unavailable or
+  a stale manifest would erase a remotely published stack.
+- Add `handoff`, `coordination init`, `coordination disable`, `gc`, local
+  worktree locks, and tombstone-backed `stack close` commands.
+- Classify concurrent publication races as equivalent, explicitly mergeable
+  disjoint stack changes, or conflicts; require `publish --accept-merge` for
+  a reviewed merge.
+- Add public protocol documentation and temporary-bare-remote coverage for
+  atomic rejection, ownership, partial publications, legacy compatibility,
+  privacy-safe state, tombstones, locks, and local cleanup.
+
 ## 0.20.0 - 2026-06-14
 
 - Add short CLI aliases for common repo, manifest, JSON, dry-run, reconcile,

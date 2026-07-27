@@ -275,6 +275,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
             'init',
             '--syncwheel-tracking',
             'git-tracked',
+            '--no-coordination',
             '--worktree-root',
             'var/syncwheel',
             expected=0,
@@ -282,6 +283,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = self.read_manifest()
 
         self.assertEqual(data['syncwheel_tracking'], 'git-tracked')
+        self.assertEqual(data['version'], 2)
+        self.assertEqual(data['coordination']['mode'], 'disabled')
         self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
 
     def test_repo_tracking_status_reports_missing_policy(self):

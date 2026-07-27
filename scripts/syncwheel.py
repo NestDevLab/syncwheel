@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 
 
@@ -31,6 +32,33 @@ ENV_REMOTE_VERSION_URL = 'SYNCWHEEL_REMOTE_VERSION_URL'
 ENV_UV_TOOL_SOURCE = 'SYNCWHEEL_UV_TOOL_SOURCE'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
+MANIFEST_VERSIONS = {1, 2}
+MANIFEST_VERSION_LEGACY = 1
+MANIFEST_VERSION_COORDINATED = 2
+COORDINATION_MODES = {'active-active', 'disabled'}
+COORDINATION_STATE_SCHEMA_VERSION = 2
+COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
+COORDINATION_STATE_PREFIX = 'syncwheel/state/'
+COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
+COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
+COORDINATION_LEASE_SECONDS = 5 * 60
+COORDINATION_GIT_IDENTITY_CONFIG = [
+    '-c',
+    'user.name=Syncwheel Coordination',
+    '-c',
+    'user.email=coordination@syncwheel.invalid',
+]
+COORDINATION_GIT_IDENTITY_ENV = {
+    'GIT_AUTHOR_NAME': 'Syncwheel Coordination',
+    'GIT_AUTHOR_EMAIL': 'coordination@syncwheel.invalid',
+    'GIT_COMMITTER_NAME': 'Syncwheel Coordination',
+    'GIT_COMMITTER_EMAIL': 'coordination@syncwheel.invalid',
+}
+DEFAULT_COORDINATION_GC = {
+    'worktree_grace_days': 7,
+    'backup_retention_days': 30,
+    'backup_keep': 2,
+}
 DEFAULT_INTEGRATION_BRANCH = 'main-integration'
 SYNCWHEEL_TRACKING_VALUES = {'git-tracked', 'local-only'}
 SYNCWHEEL_TRACKING_GIT_TRACKED = 'git-tracked'
@@ -66,7 +94,7 @@ FALLBACK_GIT_IDENTITY_CONFIG = [
 YELLOW = '\033[33m'
 RESET = '\033[0m'
 WARNED_GIT_IDENTITY_PATHS = set()
-COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'merge', 'revert'}
+COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'commit-tree', 'merge', 'revert'}
 
 
 def read_version_file(path):
@@ -1096,6 +1124,11 @@ def get_default_remote_head(repo_root, remote):
     return None
 
 
+def remote_is_configured(repo_root, remote):
+    result = git(repo_root, 'remote', check=False)
+    return remote in {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
 def get_current_branch(repo_root):
     result = git(repo_root, 'branch', '--show-current', check=False)
     return result.stdout.strip() or 'DETACHED'
@@ -1155,6 +1188,117 @@ def normalize_syncwheel_worktree_root(value, path='manifest'):
     if not isinstance(value, str) or not value.strip():
         raise SyncwheelError(f'{path} syncwheel_worktree_root must be a non-empty string')
     return value.strip()
+
+
+def normalize_coordination_gc(value, path='coordination.gc'):
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} must be an object')
+    normalized = dict(DEFAULT_COORDINATION_GC)
+    for key in DEFAULT_COORDINATION_GC:
+        if key not in value:
+            continue
+        candidate = value[key]
+        if not isinstance(candidate, int) or isinstance(candidate, bool) or candidate < 1:
+            raise SyncwheelError(f'{path}.{key} must be a positive integer')
+        normalized[key] = candidate
+    unknown = sorted(set(value) - set(DEFAULT_COORDINATION_GC))
+    if unknown:
+        raise SyncwheelError(f'{path} has unknown keys: {", ".join(unknown)}')
+    return normalized
+
+
+def normalize_coordination_id(value, path='coordination.id'):
+    if not isinstance(value, str) or not value.strip():
+        raise SyncwheelError(f'{path} must be a non-empty string')
+    return safe_ref_segment(value)
+
+
+def default_coordination_id(manifest_path):
+    stem = Path(manifest_path).stem
+    if stem == 'manifest':
+        return 'default'
+    if stem.endswith('.local'):
+        stem = stem[:-len('.local')]
+    return safe_ref_segment(stem or 'default')
+
+
+def default_coordination_state_branch(coordination_id):
+    return f'{COORDINATION_STATE_PREFIX}{normalize_coordination_id(coordination_id)}'
+
+
+def normalize_coordination(value, manifest_path='manifest'):
+    if not isinstance(value, dict):
+        raise SyncwheelError('manifest version 2 requires a coordination object')
+    mode = value.get('mode')
+    if mode not in COORDINATION_MODES:
+        allowed = ', '.join(sorted(COORDINATION_MODES))
+        raise SyncwheelError(f'coordination.mode must be one of: {allowed}')
+    coordination_id = normalize_coordination_id(value.get('id'))
+    remote = value.get('remote')
+    if not isinstance(remote, str) or not remote.strip():
+        raise SyncwheelError('coordination.remote must be a non-empty string')
+    state_branch = value.get('state_branch')
+    expected_state_branch = default_coordination_state_branch(coordination_id)
+    if state_branch != expected_state_branch:
+        raise SyncwheelError(
+            f'coordination.state_branch must be {expected_state_branch!r} for coordination id {coordination_id!r}'
+        )
+    normalized = {
+        'mode': mode,
+        'id': coordination_id,
+        'remote': remote.strip(),
+        'state_branch': state_branch,
+        'gc': normalize_coordination_gc(value.get('gc')),
+    }
+    unknown = sorted(set(value) - {'mode', 'id', 'remote', 'state_branch', 'gc'})
+    if unknown:
+        raise SyncwheelError(f'coordination has unknown keys: {", ".join(unknown)}')
+    return normalized
+
+
+def coordination_config(manifest):
+    if manifest.get('version') != MANIFEST_VERSION_COORDINATED:
+        return None
+    return manifest.get('coordination')
+
+
+def coordination_is_active(manifest):
+    config = coordination_config(manifest)
+    return bool(config and config.get('mode') == 'active-active')
+
+
+def coordination_state_ref(config):
+    return f"refs/heads/{config['state_branch']}"
+
+
+def active_coordination_config(manifest_path, remote, coordination_id=None):
+    coordination_id = normalize_coordination_id(
+        coordination_id or default_coordination_id(manifest_path)
+    )
+    return {
+        'mode': 'active-active',
+        'id': coordination_id,
+        'remote': remote,
+        'state_branch': default_coordination_state_branch(coordination_id),
+        'gc': dict(DEFAULT_COORDINATION_GC),
+    }
+
+
+def disabled_coordination_config(manifest_path, remote, coordination_id=None):
+    coordination_id = normalize_coordination_id(
+        coordination_id or default_coordination_id(manifest_path)
+    )
+    if not isinstance(remote, str) or not remote.strip():
+        raise SyncwheelError('disabled coordination requires a non-empty publication remote name')
+    return {
+        'mode': 'disabled',
+        'id': coordination_id,
+        'remote': remote.strip(),
+        'state_branch': default_coordination_state_branch(coordination_id),
+        'gc': dict(DEFAULT_COORDINATION_GC),
+    }
 
 
 def syncwheel_worktree_root(manifest):
@@ -1371,8 +1515,10 @@ def load_manifest(repo_root, manifest_path=None):
         raise SyncwheelError(f'invalid manifest JSON: {exc}') from exc
     if not isinstance(data, dict):
         raise SyncwheelError('manifest root must be an object')
-    if data.get('version') != 1:
-        raise SyncwheelError('manifest version must be 1')
+    version = data.get('version')
+    if version not in MANIFEST_VERSIONS:
+        allowed = ', '.join(str(item) for item in sorted(MANIFEST_VERSIONS))
+        raise SyncwheelError(f'manifest version must be one of: {allowed}')
     if 'syncwheel_tracking' in data:
         normalize_syncwheel_tracking(data.get('syncwheel_tracking'))
     data['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(
@@ -1426,6 +1572,13 @@ def load_manifest(repo_root, manifest_path=None):
         stack.setdefault('meta', {})
         normalized.append(stack)
     data['stacks'] = normalized
+    if version == MANIFEST_VERSION_COORDINATED:
+        coordination = normalize_coordination(data.get('coordination'), path)
+        if coordination['remote'] != defaults['publication_remote']:
+            raise SyncwheelError(
+                'coordination.remote must match defaults.publication_remote'
+            )
+        data['coordination'] = coordination
     return data, path
 
 
@@ -1780,6 +1933,1358 @@ def save_repo_profile(repo_root, profile):
     return path
 
 
+def coordination_profile(repo_root):
+    profile = load_repo_profile(repo_root)
+    coordination = profile.get('coordination')
+    if coordination is None:
+        coordination = {}
+    if not isinstance(coordination, dict):
+        raise SyncwheelError('syncwheel profile coordination state must be an object')
+    profile['coordination'] = coordination
+    return profile, coordination
+
+
+def installation_id(create=False):
+    path = get_settings_path()
+    data = load_json_file(path, {})
+    identity = data.get('installation')
+    if identity is None:
+        identity = {}
+    if not isinstance(identity, dict):
+        raise SyncwheelError(f'installation settings must be an object: {path}')
+    value = identity.get('id')
+    if value is not None:
+        if not isinstance(value, str) or not value.strip():
+            raise SyncwheelError(f'installation id must be a non-empty string: {path}')
+        return value.strip()
+    if not create:
+        return None
+    value = str(uuid.uuid4())
+    identity['id'] = value
+    data['installation'] = identity
+    save_json_file(path, data)
+    return value
+
+
+def canonical_json_digest(value):
+    canonical = json.dumps(value, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def coordination_manifest_remote_roles(manifest):
+    """Map only portable manifest roles to local Git remote aliases."""
+    defaults = manifest['defaults']
+    canonical_remote = defaults['canonical_remote']
+    publication_remote = defaults['publication_remote']
+    roles = {canonical_remote: COORDINATION_REMOTE_ROLE_CANONICAL}
+    if publication_remote != canonical_remote:
+        roles[publication_remote] = COORDINATION_REMOTE_ROLE_PUBLICATION
+    return roles
+
+
+def public_coordination_remote_ref(role, branch, path):
+    ref = f'refs/heads/{branch}' if isinstance(branch, str) else None
+    if not is_valid_coordination_branch_ref(ref):
+        raise SyncwheelError(f'{path} has an invalid remote branch ref')
+    return {
+        'kind': 'remote-ref',
+        'role': role,
+        'ref': ref,
+    }
+
+
+def public_coordination_ref(value, remote_roles, repo_root=None, path='manifest ref'):
+    """Project a local ref into a portable public ref without collapsing remote identity."""
+    if not isinstance(value, str):
+        return value
+    if value.startswith('refs/remotes/'):
+        for remote in sorted(remote_roles, key=len, reverse=True):
+            remote_tracking_prefix = f'refs/remotes/{remote}/'
+            if value.startswith(remote_tracking_prefix):
+                return public_coordination_remote_ref(
+                    remote_roles[remote], value[len(remote_tracking_prefix):], path
+                )
+        raise SyncwheelError(
+            f'{path} uses an unrecognized local remote alias: {value!r}; '
+            'use the canonical or publication remote role instead'
+        )
+    if value.startswith('refs/heads/') or value.startswith('refs/tags/'):
+        return value
+    for remote in sorted(remote_roles, key=len, reverse=True):
+        remote_prefix = f'{remote}/'
+        if value.startswith(remote_prefix):
+            return public_coordination_remote_ref(
+                remote_roles[remote], value[len(remote_prefix):], path
+            )
+    if value.startswith('refs/') or '/' not in value:
+        return value
+    if repo_root is not None:
+        configured_remotes = {
+            line.strip()
+            for line in git(repo_root, 'remote').stdout.splitlines()
+            if line.strip()
+        }
+        for remote in sorted(configured_remotes - set(remote_roles), key=len, reverse=True):
+            if value.startswith(f'{remote}/'):
+                raise SyncwheelError(
+                    f'{path} uses an unrecognized local remote alias: {value!r}; '
+                    'use the canonical or publication remote role instead'
+                )
+        if branch_exists(repo_root, value):
+            return f'refs/heads/{value}'
+    raise SyncwheelError(
+        f'{path} may contain an unrecognized local remote alias: {value!r}; '
+        'use the canonical or publication remote role, or an explicit refs/heads/... local branch'
+    )
+
+
+def is_valid_coordination_branch_ref(value):
+    return (
+        isinstance(value, str)
+        and value.startswith('refs/heads/')
+        and run(['git', 'check-ref-format', value], check=False).returncode == 0
+    )
+
+
+def coordination_public_remote_ref_parts(value, path):
+    """Validate and unpack a typed public remote ref, if present."""
+    if isinstance(value, str):
+        if not value:
+            raise SyncwheelError(f'{path} must be a non-empty ref string')
+        return None
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} must be a ref string or typed remote ref')
+    if set(value) != {'kind', 'role', 'ref'} or value.get('kind') != 'remote-ref':
+        raise SyncwheelError(f'{path} contains an invalid typed remote ref')
+    role = value.get('role')
+    ref = value.get('ref')
+    if role not in {
+        COORDINATION_REMOTE_ROLE_CANONICAL,
+        COORDINATION_REMOTE_ROLE_PUBLICATION,
+    } or not is_valid_coordination_branch_ref(ref):
+        raise SyncwheelError(f'{path} contains an invalid typed remote ref')
+    return role, ref
+
+
+def local_coordination_ref(value, defaults):
+    """Map a portable public ref back to this checkout's remote role."""
+    canonical_remote = defaults['canonical_remote']
+    publication_remote = defaults['publication_remote']
+    remote_ref = coordination_public_remote_ref_parts(value, 'coordination state ref')
+    if remote_ref:
+        role, ref = remote_ref
+        remote = {
+            COORDINATION_REMOTE_ROLE_CANONICAL: canonical_remote,
+            COORDINATION_REMOTE_ROLE_PUBLICATION: publication_remote,
+        }.get(role)
+        if not remote:
+            raise SyncwheelError('coordination state contains an invalid typed remote ref')
+        return f"{remote}/{ref[len('refs/heads/'):]}"
+    return value
+
+
+def coordination_manifest_snapshot(manifest, repo_root=None):
+    """Return the public, topology-only projection stored in remote coordination state."""
+    defaults = manifest['defaults']
+    remote_roles = coordination_manifest_remote_roles(manifest)
+    snapshot = {
+        'version': manifest['version'],
+        'defaults': {
+            'base_branch': defaults['base_branch'],
+            'base_ref': public_coordination_ref(
+                defaults['base_ref'], remote_roles, repo_root, 'defaults.base_ref'
+            ),
+        },
+        'integration': {
+            'branch': manifest['integration']['branch'],
+            'base': public_coordination_ref(
+                manifest['integration']['base'], remote_roles, repo_root, 'integration.base'
+            ),
+            'strategy': manifest['integration'].get('strategy', 'cherry-pick'),
+            'stacks': list(manifest['integration'].get('stacks', [])),
+        },
+        'stacks': [],
+    }
+    for stack in manifest['stacks']:
+        snapshot['stacks'].append({
+            'id': stack['id'],
+            'branch': stack['branch'],
+            'base': public_coordination_ref(
+                stack['base'], remote_roles, repo_root, f"stacks.{stack['id']}.base"
+            ),
+            'target_branch': stack['target_branch'],
+            'integration_branch': stack.get('integration_branch'),
+            'commits': list(stack['commits']),
+        })
+    config = coordination_config(manifest)
+    if config:
+        snapshot['coordination'] = {
+            key: value for key, value in config.items()
+            if key in {'mode', 'id', 'state_branch', 'gc'}
+        }
+    return snapshot
+
+
+def coordination_manifest_digest(manifest, repo_root=None):
+    return canonical_json_digest(coordination_manifest_snapshot(manifest, repo_root))
+
+
+def managed_ref_names(manifest):
+    names = []
+    for stack in manifest['stacks']:
+        names.append(f"refs/heads/{stack['branch']}")
+    names.append(f"refs/heads/{manifest['integration']['branch']}")
+    return list(dict.fromkeys(names))
+
+
+def remote_ref_tips(repo_root, remote, refs):
+    refs = list(dict.fromkeys(refs))
+    output = {ref: None for ref in refs}
+    if not refs:
+        return output
+    result = git(repo_root, 'ls-remote', '--heads', remote, *refs, check=False)
+    if result.returncode != 0:
+        raise SyncwheelError(result.stderr.strip() or result.stdout.strip() or f'cannot inspect remote {remote}')
+    for line in result.stdout.splitlines():
+        sha, separator, ref = line.partition('\t')
+        if separator and ref in output:
+            output[ref] = sha.strip()
+    return output
+
+
+def validate_coordination_snapshot_refs(snapshot):
+    if not isinstance(snapshot, dict):
+        raise SyncwheelError('coordination state manifest must be an object')
+    defaults = snapshot.get('defaults')
+    integration = snapshot.get('integration')
+    stacks = snapshot.get('stacks')
+    if not isinstance(defaults, dict) or 'base_ref' not in defaults:
+        raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
+    if not isinstance(integration, dict) or 'base' not in integration:
+        raise SyncwheelError('coordination state manifest is missing integration.base')
+    if not isinstance(stacks, list):
+        raise SyncwheelError('coordination state manifest stacks must be an array')
+    coordination_public_remote_ref_parts(
+        defaults['base_ref'], 'coordination state defaults.base_ref'
+    )
+    coordination_public_remote_ref_parts(
+        integration['base'], 'coordination state integration.base'
+    )
+    for index, stack in enumerate(stacks):
+        if not isinstance(stack, dict) or 'base' not in stack:
+            raise SyncwheelError(f'coordination state manifest stack {index} is missing base')
+        coordination_public_remote_ref_parts(
+            stack['base'], f'coordination state stacks[{index}].base'
+        )
+
+
+def validate_coordination_state(state, expected_id=None):
+    if not isinstance(state, dict):
+        raise SyncwheelError('coordination state must be an object')
+    if state.get('schema_version') != COORDINATION_STATE_SCHEMA_VERSION:
+        raise SyncwheelError(
+            f"unsupported coordination state schema: {state.get('schema_version')!r}"
+        )
+    coordination_id = state.get('coordination_id')
+    if not isinstance(coordination_id, str) or not coordination_id:
+        raise SyncwheelError('coordination state is missing coordination_id')
+    if expected_id and coordination_id != expected_id:
+        raise SyncwheelError(
+            f'coordination state id mismatch: expected {expected_id!r}, got {coordination_id!r}'
+        )
+    if not isinstance(state.get('manifest'), dict):
+        raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
+    validate_coordination_snapshot_refs(state['manifest'])
+    if not isinstance(state.get('manifest_digest'), str) or not state['manifest_digest']:
+        raise SyncwheelError('coordination state is missing manifest_digest')
+    if canonical_json_digest(state['manifest']) != state['manifest_digest']:
+        raise SyncwheelError('coordination state manifest_digest does not match its manifest')
+    if not isinstance(state.get('managed_refs'), dict):
+        raise SyncwheelError('coordination state is missing managed_refs')
+    if not isinstance(state.get('tombstones', []), list):
+        raise SyncwheelError('coordination state tombstones must be an array')
+    return state
+
+
+def coordination_state_from_commit(repo_root, commit, expected_id=None):
+    result = git(repo_root, 'show', f'{commit}:{COORDINATION_STATE_FILE}', check=False)
+    if result.returncode != 0:
+        raise SyncwheelError(
+            result.stderr.strip()
+            or f'coordination state commit {commit} does not contain {COORDINATION_STATE_FILE}'
+        )
+    try:
+        state = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SyncwheelError(f'invalid coordination state JSON at {commit}: {exc}') from exc
+    return validate_coordination_state(state, expected_id)
+
+
+def read_remote_coordination_state(repo_root, config, fetch=True):
+    state_ref = coordination_state_ref(config)
+    tip = remote_ref_tips(repo_root, config['remote'], [state_ref])[state_ref]
+    if not tip:
+        return {'tip': None, 'state': None}
+    if fetch:
+        result = git(repo_root, 'fetch', '--quiet', config['remote'], state_ref, check=False)
+        if result.returncode != 0:
+            raise SyncwheelError(
+                result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
+            )
+        commit = 'FETCH_HEAD'
+    else:
+        commit = tip
+    return {
+        'tip': tip,
+        'state': coordination_state_from_commit(repo_root, commit, config['id']),
+    }
+
+
+def read_remote_coordination_states(repo_root, config):
+    result = git(
+        repo_root,
+        'ls-remote',
+        '--heads',
+        config['remote'],
+        f"refs/heads/{COORDINATION_STATE_PREFIX}*",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SyncwheelError(result.stderr.strip() or result.stdout.strip() or 'failed to inspect coordination state refs')
+    states = []
+    for line in result.stdout.splitlines():
+        tip, separator, ref = line.partition('\t')
+        if not separator:
+            continue
+        fetch = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
+        if fetch.returncode != 0:
+            raise SyncwheelError(fetch.stderr.strip() or f'failed to fetch coordination state {ref}')
+        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD')
+        expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
+        if ref != expected_ref:
+            raise SyncwheelError(
+                f'coordination state branch mismatch: {ref} declares {state["coordination_id"]!r}'
+            )
+        states.append({'ref': ref, 'tip': tip, 'state': state})
+    return states
+
+
+def coordination_ownership_conflicts(repo_root, config, managed_refs):
+    claimed = set(managed_refs)
+    conflicts = []
+    for item in read_remote_coordination_states(repo_root, config):
+        state = item['state']
+        if state['coordination_id'] == config['id']:
+            continue
+        overlap = sorted(claimed.intersection(state['managed_refs']))
+        if overlap:
+            conflicts.append({
+                'coordination_id': state['coordination_id'],
+                'state_ref': item['ref'],
+                'refs': overlap,
+            })
+    return conflicts
+
+
+def require_exclusive_coordination_ownership(repo_root, config, managed_refs):
+    conflicts = coordination_ownership_conflicts(repo_root, config, managed_refs)
+    if conflicts:
+        details = '; '.join(
+            f"{item['coordination_id']}: {', '.join(item['refs'])}" for item in conflicts
+        )
+        raise SyncwheelError(
+            'managed refs are already owned by another coordination domain: ' + details
+        )
+    return conflicts
+
+
+def coordination_tombstone_ref(tombstone):
+    if not isinstance(tombstone, dict):
+        return None
+    ref = tombstone.get('ref')
+    if isinstance(ref, str) and ref:
+        return ref
+    branch = tombstone.get('branch')
+    if isinstance(branch, str) and branch:
+        return f'refs/heads/{branch}'
+    return None
+
+
+def coordination_tombstones(previous_state, manifest, additional=None):
+    """Keep closures only while their managed ref remains inactive."""
+    active_refs = set(managed_ref_names(manifest))
+    tombstones = []
+    if previous_state:
+        tombstones.extend(
+            item for item in previous_state.get('tombstones') or []
+            if coordination_tombstone_ref(item) not in active_refs
+        )
+    if additional:
+        additional_ref = coordination_tombstone_ref(additional)
+        tombstones = [
+            item for item in tombstones
+            if coordination_tombstone_ref(item) != additional_ref
+        ]
+        tombstones.append(additional)
+    return tombstones
+
+
+def build_coordination_state(repo_root, manifest, config, previous, observed_refs, changed_refs, scope, projection_status, installation, tombstone=None):
+    previous_state = previous.get('state') if previous else None
+    managed = {}
+    if previous_state:
+        managed.update(previous_state.get('managed_refs') or {})
+    managed.update(observed_refs)
+    managed.update(changed_refs)
+    if tombstone:
+        closed_ref = tombstone.get('ref') or f"refs/heads/{tombstone['branch']}"
+        if closed_ref not in managed:
+            managed[closed_ref] = tombstone.get('remote_tip')
+    snapshot = coordination_manifest_snapshot(manifest, repo_root)
+    return {
+        'schema_version': COORDINATION_STATE_SCHEMA_VERSION,
+        'coordination_id': config['id'],
+        'publication_id': str(uuid.uuid4()),
+        'parent_state': previous.get('tip') if previous else None,
+        'created_at': iso_utc_now(),
+        'syncwheel_version': VERSION,
+        'installation_id': installation,
+        'manifest': snapshot,
+        'manifest_digest': canonical_json_digest(snapshot),
+        'managed_refs': dict(sorted(managed.items())),
+        'changed_refs': dict(sorted(changed_refs.items())),
+        'publication_scope': scope,
+        'projection_status': projection_status,
+        'tombstones': coordination_tombstones(previous_state, manifest, tombstone),
+    }
+
+
+def create_coordination_state_commit(repo_root, state, parent_tip=None):
+    encoded = json.dumps(state, indent=2, sort_keys=True) + '\n'
+    blob = run(['git', 'hash-object', '-w', '--stdin'], cwd=repo_root, input_text=encoded).stdout.strip()
+    descriptor, index_path = tempfile.mkstemp(prefix='syncwheel-coordination-index-')
+    os.close(descriptor)
+    os.unlink(index_path)
+    environment = {
+        'GIT_INDEX_FILE': index_path,
+        **COORDINATION_GIT_IDENTITY_ENV,
+        'GIT_AUTHOR_DATE': state['created_at'],
+        'GIT_COMMITTER_DATE': state['created_at'],
+    }
+    try:
+        if parent_tip:
+            git(repo_root, 'read-tree', f'{parent_tip}^{{tree}}', env=environment)
+        else:
+            git(repo_root, 'read-tree', '--empty', env=environment)
+        git(
+            repo_root,
+            'update-index',
+            '--add',
+            '--cacheinfo',
+            f'100644,{blob},{COORDINATION_STATE_FILE}',
+            env=environment,
+        )
+        tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
+        # Coordination state is public transport. Never inherit a maintainer's
+        # Git identity into these append-only remote commits.
+        command = ['git', *COORDINATION_GIT_IDENTITY_CONFIG, 'commit-tree', tree]
+        if parent_tip:
+            command.extend(['-p', parent_tip])
+        command.extend(['-m', f"syncwheel coordination: {state['publication_scope']}"])
+        return run(command, cwd=repo_root).stdout.strip()
+    finally:
+        try:
+            os.unlink(index_path)
+        except OSError:
+            pass
+
+
+def atomic_push_capability_probe(repo_root, remote):
+    probe_tip = ref_tip(repo_root, 'HEAD')
+    if not probe_tip:
+        probe_tip = git(repo_root, 'rev-list', '--all', '-n', '1', check=False).stdout.strip()
+    if not probe_tip:
+        raise SyncwheelError('cannot probe atomic push capability without a local HEAD commit')
+    probe_ref = f"refs/heads/syncwheel-probe/{uuid.uuid4().hex}"
+    result = git(
+        repo_root,
+        'push',
+        '--atomic',
+        '--dry-run',
+        remote,
+        f'{probe_tip}:{probe_ref}',
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or 'no detail returned'
+        raise SyncwheelError(
+            f'atomic push capability is required for active-active coordination and the preflight failed: {detail}'
+        )
+
+
+def local_lease_is_active(coordination):
+    lease = coordination.get('lease') or {}
+    if not isinstance(lease, dict):
+        return False
+    expires_at = lease.get('expires_at')
+    if not isinstance(expires_at, (int, float)):
+        return False
+    return expires_at > time.time()
+
+
+def acquire_local_coordination_lease(repo_root, config, installation):
+    profile, coordination = coordination_profile(repo_root)
+    lease = coordination.get('lease') or {}
+    if lease and local_lease_is_active(coordination) and lease.get('installation_id') != installation:
+        raise SyncwheelError('another local Syncwheel coordinated publication lease is active')
+    token = str(uuid.uuid4())
+    coordination['lease'] = {
+        'coordination_id': config['id'],
+        'installation_id': installation,
+        'token': token,
+        'expires_at': time.time() + COORDINATION_LEASE_SECONDS,
+    }
+    profile['coordination'] = coordination
+    save_repo_profile(repo_root, profile)
+    return token
+
+
+def release_local_coordination_lease(repo_root, token):
+    profile, coordination = coordination_profile(repo_root)
+    lease = coordination.get('lease') or {}
+    if lease.get('token') == token:
+        coordination.pop('lease', None)
+        profile['coordination'] = coordination
+        save_repo_profile(repo_root, profile)
+
+
+def record_pending_coordination_merge(repo_root, config, expected, latest, manifest):
+    profile, coordination = coordination_profile(repo_root)
+    coordination['pending_merge'] = {
+        'coordination_id': config['id'],
+        'base_state': expected.get('tip'),
+        'remote_state': latest.get('tip'),
+        'local_manifest_digest': coordination_manifest_digest(manifest, repo_root),
+        'created_at': iso_utc_now(),
+    }
+    profile['coordination'] = coordination
+    save_repo_profile(repo_root, profile)
+
+
+def clear_pending_coordination_merge(repo_root, config):
+    profile, coordination = coordination_profile(repo_root)
+    pending = coordination.get('pending_merge')
+    if isinstance(pending, dict) and pending.get('coordination_id') == config['id']:
+        coordination.pop('pending_merge', None)
+        profile['coordination'] = coordination
+        save_repo_profile(repo_root, profile)
+
+
+def record_coordination_state_seen(repo_root, config, state_tip):
+    profile, coordination = coordination_profile(repo_root)
+    coordination['last_seen_state'] = {
+        'coordination_id': config['id'],
+        'state_tip': state_tip,
+        'seen_at': iso_utc_now(),
+    }
+    profile['coordination'] = coordination
+    save_repo_profile(repo_root, profile)
+
+
+def stack_snapshot_map(snapshot):
+    return {stack['id']: stack for stack in snapshot.get('stacks') or []}
+
+
+def changed_stack_ids(base, candidate):
+    base_stacks = stack_snapshot_map(base)
+    candidate_stacks = stack_snapshot_map(candidate)
+    return {
+        stack_id
+        for stack_id in set(base_stacks) | set(candidate_stacks)
+        if base_stacks.get(stack_id) != candidate_stacks.get(stack_id)
+    }
+
+
+def snapshot_globals(snapshot):
+    return {
+        'version': snapshot.get('version'),
+        'defaults': snapshot.get('defaults'),
+        'integration': snapshot.get('integration'),
+        'coordination': snapshot.get('coordination'),
+    }
+
+
+def merge_coordination_snapshots(base, local, remote):
+    """Merge only disjoint stack-record changes with an unchanged shared integration contract."""
+    if not base or snapshot_globals(base) != snapshot_globals(local) or snapshot_globals(base) != snapshot_globals(remote):
+        return {'status': 'conflict', 'reason': 'shared_integration_or_defaults_changed'}
+    local_changes = changed_stack_ids(base, local)
+    remote_changes = changed_stack_ids(base, remote)
+    overlap = sorted(local_changes.intersection(remote_changes))
+    if overlap:
+        return {'status': 'conflict', 'reason': 'overlapping_stack_changes', 'stacks': overlap}
+    if not local_changes or not remote_changes:
+        return {'status': 'conflict', 'reason': 'no_disjoint_changes_to_merge'}
+    merged = json.loads(json.dumps(remote))
+    base_map = stack_snapshot_map(base)
+    local_map = stack_snapshot_map(local)
+    merged_map = stack_snapshot_map(merged)
+    for stack_id in local_changes:
+        if stack_id in local_map:
+            merged_map[stack_id] = local_map[stack_id]
+        else:
+            merged_map.pop(stack_id, None)
+    ordered_ids = []
+    for source in (base.get('stacks') or [], remote.get('stacks') or [], local.get('stacks') or []):
+        for stack in source:
+            stack_id = stack['id']
+            if stack_id in merged_map and stack_id not in ordered_ids:
+                ordered_ids.append(stack_id)
+    merged['stacks'] = [merged_map[stack_id] for stack_id in ordered_ids]
+    branches = [stack['branch'] for stack in merged['stacks']]
+    if len(branches) != len(set(branches)):
+        return {'status': 'conflict', 'reason': 'merged_stack_branch_ownership_conflict'}
+    return {
+        'status': 'mergeable',
+        'merged': merged,
+        'local_stacks': sorted(local_changes),
+        'remote_stacks': sorted(remote_changes),
+    }
+
+
+def apply_coordination_snapshot(manifest, snapshot):
+    updated = json.loads(json.dumps(manifest))
+    local_stacks = {
+        stack['id']: stack
+        for stack in updated.get('stacks') or []
+        if isinstance(stack, dict) and isinstance(stack.get('id'), str)
+    }
+    updated['version'] = snapshot['version']
+    defaults = dict(updated.get('defaults') or {})
+    defaults.update(snapshot['defaults'])
+    defaults['base_ref'] = local_coordination_ref(
+        snapshot['defaults']['base_ref'],
+        defaults,
+    )
+    updated['defaults'] = defaults
+    integration = dict(snapshot['integration'])
+    integration['base'] = local_coordination_ref(
+        snapshot['integration']['base'],
+        defaults,
+    )
+    updated['integration'] = integration
+    updated['stacks'] = []
+    for stack in snapshot['stacks']:
+        restored = dict(stack)
+        local_stack = local_stacks.get(stack['id'], {})
+        restored['base'] = local_coordination_ref(stack['base'], defaults)
+        restored['target_remote'] = local_stack.get(
+            'target_remote', defaults['canonical_remote']
+        )
+        if isinstance(local_stack.get('meta'), dict):
+            restored['meta'] = local_stack['meta']
+        updated['stacks'].append(restored)
+    if 'coordination' in snapshot:
+        coordination = dict(updated.get('coordination') or {})
+        coordination.update(snapshot['coordination'])
+        coordination['remote'] = coordination.get('remote') or defaults['publication_remote']
+        updated['coordination'] = coordination
+    else:
+        updated.pop('coordination', None)
+    return updated
+
+
+def coordination_state_matches_remote(repo_root, config, state):
+    expected = state.get('managed_refs') or {}
+    observed = remote_ref_tips(repo_root, config['remote'], expected)
+    return all(observed.get(ref) == tip for ref, tip in expected.items())
+
+
+def coordination_branch_worktrees(repo_root, branch):
+    return [
+        Path(item['path'])
+        for item in get_worktrees(repo_root)
+        if item.get('branch') == branch
+    ]
+
+
+def align_equivalent_coordination_refs(repo_root, config, state, changed_refs):
+    """Align safe, tree-equivalent local refs after another device won the lease."""
+    aligned = []
+    managed = state.get('managed_refs') or {}
+    for ref in sorted(changed_refs):
+        target_tip = managed.get(ref)
+        if not target_tip:
+            raise SyncwheelError(
+                f'equivalent coordination state does not contain a recoverable remote tip for {ref}'
+            )
+        if not ref.startswith('refs/heads/'):
+            raise SyncwheelError(f'equivalent coordination state has an unsupported managed ref: {ref}')
+        branch = ref[len('refs/heads/'):]
+        local_tip = ref_tip(repo_root, branch)
+        if local_tip == target_tip:
+            continue
+        if not local_tip:
+            raise SyncwheelError(f'cannot align missing local managed branch: {branch}')
+        fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
+        if fetched.returncode != 0 or ref_tip(repo_root, 'FETCH_HEAD') != target_tip:
+            raise SyncwheelError(f'cannot fetch the expected remote coordination tip for {branch}')
+        if ref_tree(repo_root, branch) != ref_tree(repo_root, target_tip):
+            raise SyncwheelError(
+                f'equivalent coordination state has a different tree for {branch}; manual review is required'
+            )
+        worktrees = coordination_branch_worktrees(repo_root, branch)
+        for worktree in worktrees:
+            status = local_worktree_status(worktree)
+            if status is None or status:
+                raise SyncwheelError(
+                    f'cannot align equivalent coordination state because {worktree} is dirty'
+                )
+        backup = backup_branch_command(repo_root, branch, syncwheel_timestamp())
+        if backup:
+            run(backup, cwd=repo_root)
+        if worktrees:
+            for worktree in worktrees:
+                run(['git', '-C', str(worktree), 'reset', '--hard', target_tip])
+        else:
+            git(repo_root, 'update-ref', ref, target_tip, local_tip)
+        aligned.append({'branch': branch, 'from': local_tip, 'to': target_tip})
+    return aligned
+
+
+def classify_coordination_race(repo_root, manifest, config, expected, changed_refs, projection_status):
+    latest = read_remote_coordination_state(repo_root, config, fetch=True)
+    desired_snapshot = coordination_manifest_snapshot(manifest, repo_root)
+    if latest['state']:
+        state = latest['state']
+        if (
+            state.get('manifest_digest') == canonical_json_digest(desired_snapshot)
+            and state.get('projection_status') == projection_status
+            and coordination_state_matches_remote(repo_root, config, state)
+        ):
+            return {'status': 'equivalent', 'latest': latest}
+    base = expected.get('state', {}).get('manifest') if expected.get('state') else None
+    if base and latest['state']:
+        merged = merge_coordination_snapshots(base, desired_snapshot, latest['state']['manifest'])
+        if merged['status'] == 'mergeable':
+            return {'status': 'mergeable', 'latest': latest, **merged}
+        return {'status': 'conflict', 'latest': latest, **merged}
+    return {'status': 'conflict', 'latest': latest, 'reason': 'state_changed_without_a_merge_base'}
+
+
+def fetch_coordination_ref_tip(repo_root, config, ref, expected_tip):
+    fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
+    if fetched.returncode != 0 or ref_tip(repo_root, 'FETCH_HEAD') != expected_tip:
+        raise SyncwheelError(f'cannot fetch the expected remote coordination tip for {ref}')
+    return expected_tip
+
+
+def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local_branch):
+    local_tip = ref_tip(repo_root, local_branch)
+    if local_tip == remote_tip:
+        return True
+    fetch_coordination_ref_tip(repo_root, config, ref, remote_tip)
+    if ref_tree(repo_root, local_branch) == ref_tree(repo_root, remote_tip):
+        return True
+    return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, local_tip, check=False).returncode == 0
+
+
+def validate_coordination_publication_base(repo_root, manifest, config, expected, changed_refs, tombstone=None):
+    """Fail closed when a stale manifest would erase or overwrite published state."""
+    state = expected.get('state') if expected else None
+    if not state:
+        return
+    if not coordination_state_matches_remote(repo_root, config, state):
+        raise SyncwheelError(
+            'published coordination state no longer matches its managed remote refs; run handoff and resolve manually'
+        )
+    remote_snapshot = state['manifest']
+    local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
+    if state['manifest_digest'] == canonical_json_digest(local_snapshot):
+        return
+
+    remote_stacks = stack_snapshot_map(remote_snapshot)
+    local_stacks = stack_snapshot_map(local_snapshot)
+    remote_ids = set(remote_stacks)
+    local_ids = set(local_stacks)
+    removed = remote_ids - local_ids
+    allowed_close = {tombstone['stack']} if tombstone and tombstone.get('stack') else set()
+    unexpected_removed = sorted(removed - allowed_close)
+    if unexpected_removed:
+        raise SyncwheelError(
+            'local manifest would drop remote-managed stack(s): '
+            + ', '.join(unexpected_removed)
+            + '; run handoff and resolve the stale manifest first'
+        )
+
+    changed_stack_refs = {
+        stack['id']
+        for stack in manifest['stacks']
+        if f"refs/heads/{stack['branch']}" in changed_refs
+    }
+    added = local_ids - remote_ids
+    missing_added_refs = sorted(
+        stack_id for stack_id in added if stack_id not in changed_stack_refs
+    )
+    if missing_added_refs:
+        raise SyncwheelError(
+            'new stack(s) require their managed branch in the coordinated publication: '
+            + ', '.join(missing_added_refs)
+        )
+
+    for stack_id in sorted(remote_ids & local_ids):
+        remote_stack = remote_stacks[stack_id]
+        local_stack = local_stacks[stack_id]
+        if remote_stack['branch'] != local_stack['branch']:
+            raise SyncwheelError(
+                f'{stack_id}: changing a managed branch ownership requires manual coordination review'
+            )
+        if remote_stack == local_stack:
+            continue
+        if stack_id not in changed_stack_refs:
+            raise SyncwheelError(
+                f'{stack_id}: local manifest differs from published state without publishing its managed branch'
+            )
+        ref = f"refs/heads/{remote_stack['branch']}"
+        remote_tip = state.get('managed_refs', {}).get(ref)
+        if remote_tip and not coordination_ref_is_safe_successor(
+            repo_root,
+            config,
+            ref,
+            remote_tip,
+            local_stack['branch'],
+        ):
+            raise SyncwheelError(
+                f'{stack_id}: local branch is not a safe successor of the published managed ref; '
+                'run handoff and resolve the overlapping stack change'
+            )
+
+    remote_integration = remote_snapshot.get('integration')
+    local_integration = local_snapshot.get('integration')
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+    if remote_integration != local_integration:
+        if not tombstone and integration_ref not in changed_refs:
+            raise SyncwheelError(
+                'local integration configuration differs from published state without publishing integration'
+            )
+        return
+
+    remote_tip = state.get('managed_refs', {}).get(integration_ref)
+    if integration_ref in changed_refs and remote_tip and not coordination_ref_is_safe_successor(
+        repo_root,
+        config,
+        integration_ref,
+        remote_tip,
+        manifest['integration']['branch'],
+    ):
+        raise SyncwheelError(
+            'local integration branch is not a safe successor of the published integration ref; '
+            'run handoff and resolve the overlap'
+        )
+
+
+def coordinated_publish(repo_root, manifest, manifest_path, changed_refs, scope, projection_status, dry_run=False, tombstone=None):
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        raise SyncwheelError('coordinated publish requires an active-active manifest version 2 coordination block')
+    if config['remote'] != manifest['defaults']['publication_remote']:
+        raise SyncwheelError('coordination.remote must match defaults.publication_remote')
+    changed_refs = dict(changed_refs)
+    managed = managed_ref_names(manifest)
+    if tombstone:
+        managed = list(dict.fromkeys([
+            *managed,
+            tombstone.get('ref') or f"refs/heads/{tombstone['branch']}",
+        ]))
+    invalid = sorted(set(changed_refs) - set(managed))
+    if invalid:
+        raise SyncwheelError('coordinated publish received unmanaged refs: ' + ', '.join(invalid))
+    expected = read_remote_coordination_state(repo_root, config, fetch=True)
+    require_exclusive_coordination_ownership(repo_root, config, managed)
+    observed_refs = remote_ref_tips(repo_root, config['remote'], managed)
+    validate_coordination_publication_base(
+        repo_root,
+        manifest,
+        config,
+        expected,
+        changed_refs,
+        tombstone=tombstone,
+    )
+    for ref, sha in changed_refs.items():
+        if not sha:
+            raise SyncwheelError(f'cannot publish an empty managed ref: {ref}')
+    if dry_run:
+        payload = {
+            'coordination_id': config['id'],
+            'state_ref': coordination_state_ref(config),
+            'changed_refs': changed_refs,
+            'scope': scope,
+            'projection_status': projection_status,
+            'expected_state': expected['tip'],
+        }
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return {'status': 'dry_run', 'state_tip': None}
+    installation = installation_id(create=True)
+    state = build_coordination_state(
+        repo_root,
+        manifest,
+        config,
+        expected,
+        observed_refs,
+        changed_refs,
+        scope,
+        projection_status,
+        installation,
+        tombstone=tombstone,
+    )
+    state_commit = create_coordination_state_commit(repo_root, state, expected['tip'])
+    state_ref = coordination_state_ref(config)
+    lease_refs = [*changed_refs, state_ref]
+    expected_tips = dict(observed_refs)
+    expected_tips[state_ref] = expected['tip']
+    lease_args = [
+        f"--force-with-lease={ref}:{expected_tips.get(ref) or ''}"
+        for ref in sorted(lease_refs)
+    ]
+    refspecs = [f'{changed_refs[ref]}:{ref}' for ref in sorted(changed_refs)]
+    refspecs.append(f'{state_commit}:{state_ref}')
+    token = acquire_local_coordination_lease(repo_root, config, installation)
+    try:
+        atomic_push_capability_probe(repo_root, config['remote'])
+        command = ['git', 'push', '--atomic', *lease_args, config['remote'], *refspecs]
+        result = run(command, cwd=repo_root, check=False)
+        if result.returncode != 0:
+            race = classify_coordination_race(
+                repo_root,
+                manifest,
+                config,
+                expected,
+                changed_refs,
+                projection_status,
+            )
+            if race['status'] == 'equivalent':
+                aligned = align_equivalent_coordination_refs(
+                    repo_root,
+                    config,
+                    race['latest']['state'],
+                    changed_refs,
+                )
+                clear_pending_coordination_merge(repo_root, config)
+                record_coordination_state_seen(repo_root, config, race['latest']['tip'])
+                if aligned:
+                    append_ledger_event(
+                        repo_root,
+                        'coordination_equivalent_aligned',
+                        {'state_tip': race['latest']['tip'], 'refs': aligned},
+                        manifest_path,
+                    )
+                print('coordinated publish: equivalent state was already published by another device')
+                return {
+                    'status': 'equivalent',
+                    'state_tip': race['latest']['tip'],
+                    'aligned_refs': aligned,
+                }
+            if race['status'] == 'mergeable':
+                record_pending_coordination_merge(repo_root, config, expected, race['latest'], manifest)
+                raise SyncwheelError(
+                    'coordinated publish stopped after a lease loss; disjoint stack changes are mergeable. '
+                    'Review handoff, then rerun the full lifecycle with publish --accept-merge.'
+                )
+            detail = result.stderr.strip() or result.stdout.strip() or 'no detail returned'
+            raise SyncwheelError(
+                f"coordinated publish stopped after a lease loss or remote rejection ({race.get('reason', 'conflict')}): {detail}"
+            )
+        clear_pending_coordination_merge(repo_root, config)
+        record_coordination_state_seen(repo_root, config, state_commit)
+        print(quoted(command))
+        return {'status': 'published', 'state_tip': state_commit}
+    finally:
+        release_local_coordination_lease(repo_root, token)
+
+
+def coordinated_push_remote(args, config):
+    if getattr(args, 'remote', None) and args.remote != config['remote']:
+        raise SyncwheelError(
+            f"active-active coordination requires remote {config['remote']!r}; remote overrides are not allowed"
+        )
+    forbidden = [
+        value for value in passthrough_args(getattr(args, 'git_args', []))
+        if value == '--force' or value.startswith('--force-with-lease') or value == '--atomic'
+    ]
+    if (
+        getattr(args, 'command', None) in {'stack', 'int'}
+        and getattr(args, 'force_with_lease', False)
+    ):
+        forbidden.append('--force-with-lease')
+    if forbidden:
+        raise SyncwheelError(
+            'active-active coordination manages atomic and exact lease flags itself; remove: '
+            + ', '.join(forbidden)
+        )
+    return config['remote']
+
+
+def local_manifest_projection_is_convergent(repo_root, manifest):
+    try:
+        for stack in manifest['stacks']:
+            if not branch_exists(repo_root, stack['branch']):
+                return False
+            if ref_tree(repo_root, stack['branch']) != materialize_stack_projection(repo_root, stack):
+                return False
+        integration = manifest['integration']
+        if not branch_exists(repo_root, integration['branch']):
+            return False
+        return ref_tree(repo_root, integration['branch']) == materialize_integration_projection(repo_root, manifest)
+    except SyncwheelError:
+        return False
+
+
+def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        raise SyncwheelError('--accept-merge requires an active-active coordination manifest')
+    profile, coordination = coordination_profile(repo_root)
+    pending = coordination.get('pending_merge')
+    if not isinstance(pending, dict) or pending.get('coordination_id') != config['id']:
+        raise SyncwheelError('there is no pending mergeable coordinated publication for this manifest')
+    if pending.get('local_manifest_digest') != coordination_manifest_digest(manifest, repo_root):
+        raise SyncwheelError('the local manifest changed after the mergeable conflict; run handoff and resolve again')
+    latest = read_remote_coordination_state(repo_root, config, fetch=True)
+    if not latest['state'] or latest['tip'] != pending.get('remote_state'):
+        raise SyncwheelError('remote coordination state changed after the mergeable conflict; run handoff and retry')
+    base_tip = pending.get('base_state')
+    if not base_tip:
+        raise SyncwheelError('the mergeable conflict has no shared coordination-state ancestor')
+    base = coordination_state_from_commit(repo_root, base_tip, config['id'])
+    merged = merge_coordination_snapshots(
+        base['manifest'],
+        coordination_manifest_snapshot(manifest, repo_root),
+        latest['state']['manifest'],
+    )
+    if merged['status'] != 'mergeable':
+        raise SyncwheelError(
+            'the previous mergeable coordination conflict is no longer safe to merge: '
+            + merged.get('reason', 'unknown')
+        )
+    updated = apply_coordination_snapshot(manifest, merged['merged'])
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        updated,
+        'coordination_accept_merge',
+        {
+            'coordination_id': config['id'],
+            'base_state': base_tip,
+            'remote_state': latest['tip'],
+            'local_stacks': merged['local_stacks'],
+            'remote_stacks': merged['remote_stacks'],
+        },
+    )
+    return updated
+
+
+def parse_coordination_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def local_worktree_status(path):
+    result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
+    if result.returncode != 0:
+        return None
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def local_branch_is_recoverable(repo_root, branch, remote_tip):
+    if not remote_tip or not branch_exists(repo_root, branch):
+        return False
+    local_tip = ref_tip(repo_root, branch)
+    if not local_tip:
+        return False
+    return git(repo_root, 'merge-base', '--is-ancestor', local_tip, remote_tip, check=False).returncode == 0
+
+
+def backup_branch_records(repo_root):
+    result = git(
+        repo_root,
+        'for-each-ref',
+        '--format=%(refname:short)%00%(committerdate:unix)',
+        'refs/heads/backup/',
+        check=False,
+    )
+    records = []
+    for line in result.stdout.splitlines():
+        branch, separator, timestamp = line.partition('\x00')
+        if not separator:
+            continue
+        if '-before-syncwheel-' not in branch:
+            continue
+        try:
+            epoch = int(timestamp)
+        except ValueError:
+            epoch = 0
+        records.append({'branch': branch, 'timestamp': epoch})
+    return sorted(records, key=lambda item: item['timestamp'], reverse=True)
+
+
+def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return {'enabled': False, 'candidates': [], 'skipped': ['coordination is not active-active']}
+    state_info = state_info or read_remote_coordination_state(repo_root, config, fetch=fetch)
+    if not state_info['state']:
+        return {
+            'enabled': True,
+            'state_tip': None,
+            'candidates': [],
+            'skipped': ['no remote coordination state has been published'],
+        }
+    state = state_info['state']
+    gc = config['gc']
+    grace_seconds = gc['worktree_grace_days'] * 24 * 60 * 60
+    backup_seconds = gc['backup_retention_days'] * 24 * 60 * 60
+    now = datetime.datetime.now(datetime.timezone.utc)
+    profile, local_coordination = coordination_profile(repo_root)
+    locks = local_coordination.get('locks') or {}
+    lease_active = local_lease_is_active(local_coordination)
+    current_branch = get_current_branch(repo_root)
+    worktree_root = resolve_worktree_root_path(repo_root, syncwheel_worktree_root(manifest))
+    worktrees = {item.get('branch'): Path(item['path']) for item in get_worktrees(repo_root) if item.get('branch')}
+    tombstones = state.get('tombstones') or []
+    active_refs = set(managed_ref_names(manifest))
+    tombstoned_refs = [
+        ref for item in tombstones
+        if (ref := coordination_tombstone_ref(item)) and ref not in active_refs
+    ]
+    remote_tips = remote_ref_tips(repo_root, config['remote'], tombstoned_refs)
+    candidates = []
+    skipped = []
+    for tombstone in tombstones:
+        stack_id = tombstone.get('stack')
+        branch = tombstone.get('branch')
+        ref = coordination_tombstone_ref(tombstone)
+        closed_at = parse_coordination_timestamp(tombstone.get('closed_at'))
+        label = f'{stack_id or branch or "unknown"}'
+        if not branch or not ref or not closed_at:
+            skipped.append(f'{label}: malformed tombstone')
+            continue
+        if ref in active_refs:
+            skipped.append(f'{label}: tombstoned ref is active in the current manifest')
+            continue
+        if (now - closed_at).total_seconds() < grace_seconds:
+            skipped.append(f'{label}: tombstone grace period has not elapsed')
+            continue
+        original_tip = tombstone.get('remote_tip')
+        if not isinstance(original_tip, str) or not original_tip:
+            skipped.append(f'{label}: tombstone is missing its original remote tip')
+            continue
+        if remote_tips.get(ref) != original_tip:
+            skipped.append(f'{label}: remote branch no longer matches the tombstone tip')
+            continue
+        if lease_active:
+            skipped.append(f'{label}: a local coordination lease is active')
+            continue
+        if stack_id and isinstance(locks, dict) and stack_id in locks:
+            skipped.append(f'{label}: local worktree lock is active')
+            continue
+        worktree = worktrees.get(branch)
+        if worktree:
+            if worktree.resolve() == Path(repo_root).resolve() or not path_is_relative_to(worktree, worktree_root):
+                skipped.append(f'{label}: worktree is outside the managed Syncwheel worktree root')
+                continue
+            status = local_worktree_status(worktree)
+            if status is None or status:
+                skipped.append(f'{label}: worktree is dirty or unavailable')
+                continue
+        if branch == current_branch:
+            skipped.append(f'{label}: branch is currently checked out')
+            continue
+        if not local_branch_is_recoverable(repo_root, branch, original_tip):
+            skipped.append(f'{label}: local branch has unique or unpublished commits')
+            continue
+        if worktree:
+            candidates.append({
+                'type': 'remove_worktree',
+                'stack': stack_id,
+                'branch': branch,
+                'path': str(worktree),
+            })
+        candidates.append({
+            'type': 'delete_branch',
+            'stack': stack_id,
+            'branch': branch,
+        })
+
+    worktree_branches = set(worktrees)
+    for index, backup in enumerate(backup_branch_records(repo_root)):
+        if lease_active:
+            skipped.append(f"{backup['branch']}: a local coordination lease is active")
+            continue
+        age_seconds = now.timestamp() - backup['timestamp']
+        if index < gc['backup_keep'] or age_seconds < backup_seconds:
+            continue
+        if backup['branch'] in worktree_branches or backup['branch'] == current_branch:
+            skipped.append(f"{backup['branch']}: backup is checked out")
+            continue
+        candidates.append({'type': 'delete_backup', 'branch': backup['branch']})
+    return {
+        'enabled': True,
+        'state_tip': state_info['tip'],
+        'policy': gc,
+        'candidates': candidates,
+        'skipped': skipped,
+    }
+
+
+def coordination_gc_candidate_key(candidate):
+    return (
+        candidate.get('type'),
+        candidate.get('branch'),
+        candidate.get('path'),
+    )
+
+
+def coordination_gc_candidate_is_current(repo_root, manifest, candidate, fetch, state_info):
+    refreshed = coordination_gc_plan(
+        repo_root,
+        manifest,
+        fetch=fetch,
+        state_info=None if fetch else state_info,
+    )
+    target = coordination_gc_candidate_key(candidate)
+    return any(
+        coordination_gc_candidate_key(current) == target
+        for current in refreshed['candidates']
+    )
+
+
+def coordination_gc_note_skip(plan, candidate):
+    label = candidate.get('stack') or candidate.get('branch') or candidate.get('path') or 'unknown'
+    plan['skipped'].append(f'{label}: no longer eligible immediately before deletion')
+
+
+def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info=None):
+    plan = coordination_gc_plan(repo_root, manifest, fetch=fetch, state_info=state_info)
+    if not apply or not plan['enabled']:
+        return plan
+    removed_worktrees = set()
+    applied_candidates = []
+    for candidate in plan['candidates']:
+        if candidate['type'] != 'remove_worktree':
+            continue
+        if not coordination_gc_candidate_is_current(
+            repo_root, manifest, candidate, fetch, state_info
+        ):
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        run(['git', 'worktree', 'remove', candidate['path']], cwd=repo_root)
+        removed_worktrees.add(candidate['branch'])
+        applied_candidates.append(candidate)
+    if removed_worktrees:
+        git(repo_root, 'worktree', 'prune')
+    for candidate in plan['candidates']:
+        if candidate['type'] not in {'delete_branch', 'delete_backup'}:
+            continue
+        if not coordination_gc_candidate_is_current(
+            repo_root, manifest, candidate, fetch, state_info
+        ):
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        branch = candidate['branch']
+        local_tip = ref_tip(repo_root, branch)
+        if not local_tip:
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        result = git(
+            repo_root,
+            'update-ref',
+            '-d',
+            f'refs/heads/{branch}',
+            local_tip,
+            check=False,
+        )
+        if result.returncode != 0:
+            coordination_gc_note_skip(plan, candidate)
+            continue
+        applied_candidates.append(candidate)
+    plan['applied'] = True
+    plan['applied_candidates'] = applied_candidates
+    return plan
+
+
+def command_gc(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    plan = run_coordination_gc(repo_root, manifest, apply=args.apply, fetch=args.fetch)
+    if args.json:
+        print(json.dumps(plan, indent=2))
+    else:
+        if not plan['enabled']:
+            print('gc: active-active coordination is not enabled')
+        elif not plan['candidates']:
+            print('gc: no eligible local worktrees, branches, or backups')
+        else:
+            for candidate in plan['candidates']:
+                print(f"gc: {candidate['type']} {candidate.get('branch') or candidate.get('path')}")
+            if not args.apply:
+                print('gc: dry-run; pass --apply to remove eligible local artifacts')
+    return 0
+
+
+def command_handoff(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    validation = validate_manifest(repo_root, manifest)
+    config = coordination_config(manifest)
+    output = {
+        'manifest_path': str(manifest_path),
+        'manifest_version': manifest['version'],
+        'validation': validation,
+        'coordination': {'mode': 'legacy'},
+    }
+    if config:
+        output['coordination'] = dict(config)
+    if config and config.get('mode') == 'active-active':
+        state_info = read_remote_coordination_state(repo_root, config, fetch=args.fetch)
+        ownership = coordination_ownership_conflicts(repo_root, config, managed_ref_names(manifest))
+        profile, local_coordination = coordination_profile(repo_root)
+        local_digest = coordination_manifest_digest(manifest, repo_root)
+        state = state_info['state']
+        output['coordination'].update({
+            'state_tip': state_info['tip'],
+            'state_status': 'uninitialized' if not state else 'published',
+            'manifest_relation': (
+                'no_published_state' if not state
+                else ('aligned' if state['manifest_digest'] == local_digest else 'local_proposal_differs')
+            ),
+            'ownership_conflicts': ownership,
+            'pending_merge': local_coordination.get('pending_merge'),
+            'locks': local_coordination.get('locks') or {},
+            'lease_active': local_lease_is_active(local_coordination),
+            'gc': coordination_gc_plan(repo_root, manifest, fetch=False, state_info=state_info),
+        })
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        coordination = output['coordination']
+        print(f"manifest: {output['manifest_path']}")
+        print(f"coordination: {coordination.get('mode')}")
+        if coordination.get('mode') == 'active-active':
+            print(f"state: {coordination['state_status']} ({coordination.get('state_tip') or 'none'})")
+            print(f"manifest relation: {coordination['manifest_relation']}")
+            print(f"ownership conflicts: {len(coordination['ownership_conflicts'])}")
+            print(f"gc candidates: {len(coordination['gc']['candidates'])}")
+    has_ownership_conflict = bool(output['coordination'].get('ownership_conflicts'))
+    return 1 if validation['errors'] or has_ownership_conflict else 0
+
+
 def default_worktree_path(repo_root, branch):
     safe = branch.replace('/', '-').replace('\\', '-')
     return repo_root.parent / f'{repo_root.name}-wt-{safe}'
@@ -1893,7 +3398,28 @@ def collect_repo_snapshot(repo_root, manifest):
 def validate_manifest(repo_root, manifest):
     warnings = []
     errors = []
-    details = {'stacks': [], 'integration': {}}
+    details = {'stacks': [], 'integration': {}, 'coordination': {}}
+    coordination = coordination_config(manifest)
+    if manifest.get('version') == MANIFEST_VERSION_COORDINATED:
+        if not coordination:
+            errors.append('manifest version 2 requires coordination')
+        else:
+            details['coordination'] = {
+                'mode': coordination['mode'],
+                'id': coordination.get('id'),
+                'remote': coordination.get('remote'),
+                'state_branch': coordination.get('state_branch'),
+                'gc': coordination['gc'],
+            }
+            if coordination['mode'] == 'active-active':
+                if not remote_is_configured(repo_root, coordination['remote']):
+                    errors.append(
+                        f"coordination remote is not configured locally: {coordination['remote']}"
+                    )
+                if coordination['remote'] != manifest['defaults']['publication_remote']:
+                    errors.append('coordination remote must match defaults.publication_remote')
+    else:
+        details['coordination'] = {'mode': 'legacy'}
     stacks_by_id = stack_map(manifest)
     integration = manifest['integration']
     integration_branch = integration['branch']
@@ -2493,7 +4019,6 @@ def command_init(args):
     repo_root = resolve_repo_root(args.repo)
     canonical_remote = args.canonical_remote
     base_branch = args.base_branch
-    publication_remote = args.publication_remote
     if args.personal:
         if args.manifest:
             raise SyncwheelError('use either --personal or --manifest, not both')
@@ -2502,8 +4027,12 @@ def command_init(args):
     else:
         manifest_path = Path(args.manifest).expanduser() if args.manifest else repo_root / '.syncwheel' / 'manifest.json'
         integration_branch = args.integration_branch or DEFAULT_INTEGRATION_BRANCH
+    tracking = normalize_syncwheel_tracking(args.syncwheel_tracking) if args.syncwheel_tracking else None
+    publication_remote = args.publication_remote or (
+        canonical_remote if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED else 'fork'
+    )
     manifest = {
-        'version': 1,
+        'version': MANIFEST_VERSION_LEGACY,
         'defaults': {
             'canonical_remote': canonical_remote,
             'publication_remote': publication_remote,
@@ -2518,10 +4047,29 @@ def command_init(args):
         },
         'stacks': [],
     }
-    if args.syncwheel_tracking:
-        manifest['syncwheel_tracking'] = normalize_syncwheel_tracking(args.syncwheel_tracking)
+    if tracking:
+        manifest['syncwheel_tracking'] = tracking
     if args.worktree_root:
         manifest['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(args.worktree_root)
+    if tracking:
+        manifest['version'] = MANIFEST_VERSION_COORDINATED
+        if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED and not args.no_coordination:
+            if not remote_is_configured(repo_root, publication_remote):
+                raise SyncwheelError(
+                    f"git-tracked initialization requires a configured publication remote: {publication_remote!r}. "
+                    'Pass --publication-remote <remote>, configure that remote, or use --no-coordination.'
+                )
+            manifest['coordination'] = active_coordination_config(
+                manifest_path,
+                publication_remote,
+                args.coordination_id,
+            )
+        else:
+            manifest['coordination'] = disabled_coordination_config(
+                manifest_path,
+                publication_remote,
+                args.coordination_id,
+            )
     output = json.dumps(manifest, indent=2) + '\n'
     if args.stdout:
         print(output, end='')
@@ -2532,6 +4080,117 @@ def command_init(args):
     manifest_path.write_text(output)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
+    return 0
+
+
+def command_coordination_init(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    tracking = manifest.get('syncwheel_tracking')
+    if tracking not in SYNCWHEEL_TRACKING_VALUES:
+        raise SyncwheelError(
+            'coordination init requires an explicit syncwheel_tracking policy before migration'
+        )
+    existing = coordination_config(manifest) or {}
+    if existing.get('mode') != 'active-active' and not args.remote:
+        raise SyncwheelError(
+            'active-active coordination is opt-in for legacy, local-only, or disabled manifests; '
+            'pass --remote <configured-remote> explicitly'
+        )
+    remote = args.remote or existing.get('remote') or manifest['defaults']['publication_remote']
+    if not remote_is_configured(repo_root, remote):
+        raise SyncwheelError(f'coordination remote is not configured locally: {remote}')
+    coordination_id = args.coordination_id or existing.get('id') or default_coordination_id(manifest_path)
+    proposed = json.loads(json.dumps(manifest))
+    proposed['version'] = MANIFEST_VERSION_COORDINATED
+    proposed['defaults']['publication_remote'] = remote
+    proposed['coordination'] = active_coordination_config(manifest_path, remote, coordination_id)
+    if existing.get('gc'):
+        proposed['coordination']['gc'] = normalize_coordination_gc(existing['gc'])
+    if not args.apply:
+        print(json.dumps({
+            'manifest_path': str(manifest_path),
+            'migration': 'active-active',
+            'coordination': proposed['coordination'],
+            'remote_state_created': False,
+            'dry_run': True,
+        }, indent=2))
+        return 0
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        proposed,
+        'coordination_init',
+        {'coordination_id': proposed['coordination']['id'], 'remote': remote},
+    )
+    print(f"coordination enabled: {proposed['coordination']['id']}")
+    print('remote state will be created by the first successful coordinated publish')
+    return 0
+
+
+def command_coordination_disable(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    proposed = json.loads(json.dumps(manifest))
+    existing = coordination_config(proposed) or {}
+    disabled = disabled_coordination_config(
+        manifest_path,
+        proposed['defaults']['publication_remote'],
+        existing.get('id'),
+    )
+    if existing.get('gc'):
+        disabled['gc'] = normalize_coordination_gc(existing['gc'])
+    proposed['version'] = MANIFEST_VERSION_COORDINATED
+    proposed['coordination'] = disabled
+    if not args.apply:
+        print(json.dumps({
+            'manifest_path': str(manifest_path),
+            'coordination': disabled,
+            'remote_state_deleted': False,
+            'dry_run': True,
+        }, indent=2))
+        return 0
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        proposed,
+        'coordination_disabled',
+        {'previous_mode': existing.get('mode', 'legacy')},
+    )
+    print('coordination disabled; no remote state branch was deleted')
+    return 0
+
+
+def command_worktree_lock(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    profile, coordination = coordination_profile(repo_root)
+    locks = coordination.get('locks') or {}
+    if not isinstance(locks, dict):
+        raise SyncwheelError('syncwheel profile worktree locks must be an object')
+    locks[stack['id']] = {'branch': stack['branch'], 'created_at': iso_utc_now()}
+    coordination['locks'] = locks
+    profile['coordination'] = coordination
+    save_repo_profile(repo_root, profile)
+    print(f"worktree lock created for {stack['id']}")
+    return 0
+
+
+def command_worktree_unlock(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    profile, coordination = coordination_profile(repo_root)
+    locks = coordination.get('locks') or {}
+    if not isinstance(locks, dict):
+        raise SyncwheelError('syncwheel profile worktree locks must be an object')
+    if args.stack not in locks:
+        require_stack(manifest, args.stack)
+    locks.pop(args.stack, None)
+    coordination['locks'] = locks
+    profile['coordination'] = coordination
+    save_repo_profile(repo_root, profile)
+    print(f"worktree lock removed for {args.stack}")
     return 0
 
 
@@ -2767,11 +4426,37 @@ def command_stack_close(args):
         ]
 
     reason = args.reason or ('merged' if not unmerged else 'closed')
+    coordination_result = None
+    if coordination_is_active(manifest):
+        config = coordination_config(manifest)
+        closed_ref = f'refs/heads/{branch}'
+        remote_tip = remote_ref_tips(repo_root, config['remote'], [closed_ref])[closed_ref]
+        coordination_result = coordinated_publish(
+            repo_root,
+            manifest,
+            manifest_path,
+            {},
+            f'close:{args.stack}',
+            'partial',
+            tombstone={
+                'stack': args.stack,
+                'branch': branch,
+                'ref': closed_ref,
+                'reason': reason,
+                'closed_at': iso_utc_now(),
+                'remote_tip': remote_tip,
+            },
+        )
     save_manifest(manifest_path, manifest)
     append_ledger_event(
         repo_root,
         'stack_closed',
-        {'stack': args.stack, 'branch': branch, 'reason': reason},
+        {
+            'stack': args.stack,
+            'branch': branch,
+            'reason': reason,
+            'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+        },
         manifest_path,
     )
 
@@ -2779,6 +4464,8 @@ def command_stack_close(args):
     print(f"  branch : {branch}")
     print(f"  reason : {reason}")
     print(f"  removed from integration: {manifest['integration']['branch']}")
+    if coordination_result:
+        print(f"  coordination state: {coordination_result['status']}")
 
     if args.delete_branch:
         if branch_exists(repo_root, branch):
@@ -3042,6 +4729,33 @@ def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
+    if coordination_is_active(manifest):
+        config = coordination_config(manifest)
+        coordinated_push_remote(args, config)
+        result = coordinated_publish(
+            repo_root,
+            manifest,
+            manifest_path,
+            {f"refs/heads/{stack['branch']}": ref_tip(repo_root, stack['branch'])},
+            f"stack:{stack['id']}",
+            'partial',
+            dry_run=args.dry_run,
+        )
+        if not args.dry_run:
+            append_ledger_event(
+                repo_root,
+                'stack_pushed',
+                {
+                    'stack': stack['id'],
+                    'branch': stack['branch'],
+                    'remote': config['remote'],
+                    'tip': ref_tip(repo_root, stack['branch']),
+                    'coordination_state': result.get('state_tip'),
+                    'coordination_status': result['status'],
+                },
+                manifest_path,
+            )
+        return 0
     remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
     push_args = push_args_with_options(args)
     command = ['git', 'push', *push_args, remote, stack['branch']]
@@ -3535,9 +5249,13 @@ def command_ledger_show(args):
 
 def command_reconcile(args):
     repo_root = resolve_repo_root(args.repo)
+    if getattr(args, 'accept_merge', False) and args.command != 'publish':
+        raise SyncwheelError('--accept-merge is only available through publish --accept-merge')
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if getattr(args, 'accept_merge', False):
+        manifest = apply_pending_coordination_merge(repo_root, manifest, manifest_path)
     resume_actions = []
     resume_manifest_changed = False
     if args.mode == 'resume':
@@ -3609,6 +5327,11 @@ def command_reconcile(args):
         ensure_syncwheel_metadata_excluded(repo_root, manifest.get('syncwheel_tracking'), worktree_root)
 
     push_args = push_args_with_options(args)
+    coordinated_push = args.push and coordination_is_active(manifest)
+    if coordinated_push:
+        coordinated_push_remote(args, coordination_config(manifest))
+    coordinated_refs = {}
+    coordinated_events = []
     for action in actions:
         if action['type'] == 'rebuild_stack':
             stack = require_stack(manifest, action['stack'])
@@ -3667,6 +5390,16 @@ def command_reconcile(args):
             )
         elif action['type'] == 'push_stack':
             stack = require_stack(manifest, action['stack'])
+            if coordinated_push:
+                ref = f"refs/heads/{stack['branch']}"
+                coordinated_refs[ref] = ref_tip(repo_root, stack['branch'])
+                coordinated_events.append({
+                    'type': 'stack_pushed',
+                    'stack': stack['id'],
+                    'branch': stack['branch'],
+                    'tip': coordinated_refs[ref],
+                })
+                continue
             remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
             command = ['git', 'push', *push_args, remote, stack['branch']]
             run(command, cwd=repo_root)
@@ -3741,6 +5474,16 @@ def command_reconcile(args):
                 manifest_path,
             )
         elif action['type'] == 'push_integration':
+            if coordinated_push:
+                branch = manifest['integration']['branch']
+                ref = f'refs/heads/{branch}'
+                coordinated_refs[ref] = ref_tip(repo_root, branch)
+                coordinated_events.append({
+                    'type': 'integration_pushed',
+                    'branch': branch,
+                    'tip': coordinated_refs[ref],
+                })
+                continue
             remote = args.remote or manifest['defaults']['publication_remote']
             command = ['git', 'push', *push_args, remote, manifest['integration']['branch']]
             run(command, cwd=repo_root)
@@ -3755,20 +5498,61 @@ def command_reconcile(args):
                 },
                 manifest_path,
             )
+    if coordinated_push:
+        full_scope = not args.stack and not args.skip_integration
+        if full_scope and not local_manifest_projection_is_convergent(repo_root, manifest):
+            raise SyncwheelError(
+                'full coordinated publish requires every managed local ref to match the manifest projection'
+            )
+        coordination_result = coordinated_publish(
+            repo_root,
+            manifest,
+            manifest_path,
+            coordinated_refs,
+            'full' if full_scope else 'partial',
+            'convergent' if full_scope else 'partial',
+        )
+        config = coordination_config(manifest)
+        for event in coordinated_events:
+            payload = {
+                **event,
+                'remote': config['remote'],
+                'coordination_state': coordination_result.get('state_tip'),
+                'coordination_status': coordination_result['status'],
+            }
+            append_ledger_event(repo_root, event['type'], payload, manifest_path)
+        if not coordinated_events:
+            append_ledger_event(
+                repo_root,
+                'coordination_published',
+                {
+                    'remote': config['remote'],
+                    'coordination_state': coordination_result.get('state_tip'),
+                    'coordination_status': coordination_result['status'],
+                    'scope': 'full' if full_scope else 'partial',
+                },
+                manifest_path,
+            )
     if args.apply and resume_manifest_changed:
         save_manifest_with_ledger(repo_root, manifest_path, manifest, 'resume_manifest_update')
+    if args.apply and getattr(args, 'auto_gc', False) and coordination_is_active(manifest):
+        gc_plan = run_coordination_gc(repo_root, manifest, apply=True, fetch=True)
+        if gc_plan.get('applied_candidates'):
+            print(f"automatic gc: processed {len(gc_plan['applied_candidates'])} eligible local artifact(s)")
     return 0
 
 
 def command_sync(args):
     args.apply = True
     args.push = False
+    args.auto_gc = True
     return command_reconcile(args)
 
 
 def command_publish(args):
     args.apply = True
     args.push = True
+    args.auto_gc = True
     return command_reconcile(args)
 
 
@@ -3879,6 +5663,32 @@ def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
+    if coordination_is_active(manifest):
+        config = coordination_config(manifest)
+        coordinated_push_remote(args, config)
+        result = coordinated_publish(
+            repo_root,
+            manifest,
+            manifest_path,
+            {f"refs/heads/{integration['branch']}": ref_tip(repo_root, integration['branch'])},
+            'integration',
+            'partial',
+            dry_run=args.dry_run,
+        )
+        if not args.dry_run:
+            append_ledger_event(
+                repo_root,
+                'integration_pushed',
+                {
+                    'branch': integration['branch'],
+                    'remote': config['remote'],
+                    'tip': ref_tip(repo_root, integration['branch']),
+                    'coordination_state': result.get('state_tip'),
+                    'coordination_status': result['status'],
+                },
+                manifest_path,
+            )
+        return 0
     remote = args.remote or manifest['defaults']['publication_remote']
     push_args = push_args_with_options(args)
     command = ['git', 'push', *push_args, remote, integration['branch']]
@@ -4299,6 +6109,11 @@ def add_reconcile_args(parser, include_apply_push=True, include_push_options=Tru
         )
     parser.add_argument('-R', '--remote', help='remote override for managed branch comparisons and publication')
     parser.add_argument(
+        '--accept-merge',
+        action='store_true',
+        help='explicitly apply a previously reported disjoint-stack coordination merge before publishing',
+    )
+    parser.add_argument(
         '-m',
         '--mode',
         choices=sorted(RECONCILE_MODES),
@@ -4427,14 +6242,63 @@ def build_parser():
 
     init_p = sub.add_parser('init', aliases=['in'], help='create a starter manifest', parents=[common])
     init_p.add_argument('-C', '--canonical-remote', default='origin')
-    init_p.add_argument('-P', '--publication-remote', default='fork')
+    init_p.add_argument('-P', '--publication-remote')
     init_p.add_argument('-B', '--base-branch', default='main')
     init_p.add_argument('-I', '--integration-branch')
     init_p.add_argument('-T', '--syncwheel-tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
     init_p.add_argument('-W', '--worktree-root', help='default repo-relative syncwheel worktree/cache root')
+    init_p.add_argument('--no-coordination', action='store_true', help='persist manifest v2 coordination mode=disabled')
+    init_p.add_argument('--coordination-id', help='public coordination-domain id for a new git-tracked manifest')
     init_p.add_argument('-f', '--force', action='store_true')
     init_p.add_argument('-o', '--stdout', action='store_true')
     init_p.set_defaults(func=command_init)
+
+    coordination_p = sub.add_parser(
+        'coordination',
+        aliases=['coord'],
+        help='enable, inspect, or disable active-active remote coordination',
+    )
+    coordination_sub = coordination_p.add_subparsers(dest='coordination_command', required=True)
+
+    coordination_init_p = coordination_sub.add_parser('init', parents=[common])
+    coordination_init_p.add_argument('-R', '--remote', help='configured publication remote for active-active coordination')
+    coordination_init_p.add_argument('--coordination-id', help='public coordination-domain id')
+    coordination_init_p.add_argument('-a', '--apply', action='store_true')
+    coordination_init_p.set_defaults(func=command_coordination_init)
+
+    coordination_disable_p = coordination_sub.add_parser('disable', parents=[common])
+    coordination_disable_p.add_argument('-a', '--apply', action='store_true')
+    coordination_disable_p.set_defaults(func=command_coordination_disable)
+
+    handoff_p = sub.add_parser(
+        'handoff',
+        help='read-only active-active coordination diagnostic for a multi-device handoff',
+        parents=[common],
+    )
+    handoff_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    handoff_p.add_argument('-j', '--json', action='store_true')
+    handoff_p.set_defaults(func=command_handoff, fetch=True)
+
+    gc_p = sub.add_parser(
+        'gc',
+        help='report or reap eligible local tombstoned worktrees, branches, and backups',
+        parents=[common],
+    )
+    gc_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    gc_p.add_argument('-a', '--apply', action='store_true')
+    gc_p.add_argument('-j', '--json', action='store_true')
+    gc_p.set_defaults(func=command_gc, fetch=True)
+
+    worktree_p = sub.add_parser('worktree', aliases=['wt'], help='manage local Syncwheel worktree safety locks')
+    worktree_sub = worktree_p.add_subparsers(dest='worktree_command', required=True)
+
+    worktree_lock_p = worktree_sub.add_parser('lock', parents=[common])
+    worktree_lock_p.add_argument('stack')
+    worktree_lock_p.set_defaults(func=command_worktree_lock)
+
+    worktree_unlock_p = worktree_sub.add_parser('unlock', parents=[common])
+    worktree_unlock_p.add_argument('stack')
+    worktree_unlock_p.set_defaults(func=command_worktree_unlock)
 
     status_p = sub.add_parser('status', aliases=['st'], help='show repo and manifest state', parents=[common])
     status_p.add_argument('-f', '--fetch', action='store_true')

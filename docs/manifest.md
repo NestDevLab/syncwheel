@@ -64,6 +64,57 @@ the repo's shared coordination contract. Use `local-only` when Syncwheel metadat
 must stay out of Git; this mode writes local excludes through `.git/info/exclude`,
 not `.gitignore`.
 
+### Version 2 active-active manifests
+
+The sample above is a valid legacy version 1 manifest. Version 2 adds a required
+`coordination` block for durable, multi-device publication:
+
+```json
+{
+  "version": 2,
+  "syncwheel_tracking": "git-tracked",
+  "defaults": {
+    "canonical_remote": "origin",
+    "publication_remote": "origin",
+    "base_branch": "main",
+    "base_ref": "origin/main"
+  },
+  "coordination": {
+    "mode": "active-active",
+    "id": "default",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
+  }
+}
+```
+
+Create this form for a new shared repository only when the publication remote
+is configured:
+
+```bash
+syncwheel init --syncwheel-tracking git-tracked --publication-remote origin
+```
+
+If the remote is unavailable, initialization stops instead of silently turning
+coordination off. Use `--no-coordination` only for an intentional persisted
+opt-out. Existing version 1, `local-only`, and disabled manifests opt in
+explicitly:
+
+```bash
+syncwheel coordination init --remote origin --apply
+syncwheel coordination disable --apply
+```
+
+`coordination.remote` must equal `defaults.publication_remote`, and its state
+branch is always `syncwheel/state/<coordination-id>`. See
+[active-active-coordination.md](design/active-active-coordination.md) for the
+publication and recovery protocol.
+
 Create a personal local manifest:
 
 ```bash
@@ -98,9 +149,13 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 
 ## Rules
 
-- `version` is currently `1`
+- `version` is `1` for legacy manifests or `2` for manifests with a required
+  `coordination` block
 - `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
+- version 2 `coordination.mode` is `active-active` or persisted `disabled`
+- version 2 coordination must use the same named remote as
+  `defaults.publication_remote`
 - every stack id must be unique
 - every stack branch must be unique
 - every declared commit must exist in Git
