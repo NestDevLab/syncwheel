@@ -1,8 +1,8 @@
 {
-  "version": 1,
+  "version": 2,
   "defaults": {
     "canonical_remote": "origin",
-    "publication_remote": "fork",
+    "publication_remote": "origin",
     "base_branch": "main",
     "base_ref": "origin/main"
   },
@@ -12,20 +12,18 @@
     "strategy": "cherry-pick",
     "stacks": []
   },
-  "stacks": [
-    {
-      "id": "active-active-coordination",
-      "branch": "branch/syncwheel-active-active-coordination",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "meta": {
-        "purpose": "Public active-active multi-device coordination"
-      }
-    }
-  ],
+  "stacks": [],
   "syncwheel_worktree_root": "var/syncwheel",
-  "syncwheel_tracking": "git-tracked"
+  "syncwheel_tracking": "git-tracked",
+  "coordination": {
+    "mode": "active-active",
+    "id": "default",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
+  }
 }
