@@ -125,12 +125,13 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         return tip, json.loads(payload)
 
     def commit_on_branch(self, repo, branch, filename):
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
         self.git(repo, 'switch', '-q', '-c', branch, 'origin/main')
         (repo / filename).write_text(f'{branch}\n')
         self.git(repo, 'add', filename)
         self.git(repo, 'commit', '-q', '-m', f'feat: {branch}')
         sha = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
-        self.git(repo, 'switch', '-q', 'main')
+        self.git(repo, 'switch', '-q', previous)
         return sha
 
     def test_new_git_tracked_init_defaults_to_v2_and_local_only_is_disabled(self):
@@ -142,6 +143,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(manifest['coordination']['mode'], 'active-active')
         self.assertEqual(manifest['coordination']['remote'], 'origin')
         self.assertEqual(manifest['coordination']['state_branch'], 'syncwheel/state/default')
+        self.assertEqual(self.git(tracked, 'branch', '--show-current').stdout.strip(), 'integration/shared')
         forced = self.run_cli(tracked, 'int', 'push', '--force-with-lease', expected=2)
         self.assertIn('manages atomic and exact lease flags itself', forced.stderr)
         non_publish_merge = self.run_cli(

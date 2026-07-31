@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.22.0 - 2026-07-31
+
+- Require the primary Git worktree to remain on the manifest integration branch while allowing
+  feature commands from dedicated worktrees; block status, validation, planning, checks, and
+  handoff when the invariant is broken.
+
 - Harden the Syncwheel skill with managed-repo detection, post-merge
   housekeeping guidance, squash-merge verification, and a housekeeping design
   spec.

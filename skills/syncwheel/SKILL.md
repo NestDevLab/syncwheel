@@ -44,6 +44,11 @@ The script owns: repo-state discovery, manifest validation, deterministic branch
 and integration reconstruction. The agent owns: judgment, communication,
 project-specific validation after a rebuild, and safe execution.
 
+The primary Git worktree stays on `manifest.integration.branch`; feature and fix branches use
+dedicated worktrees. A clean, bounded integration operation may switch it temporarily, but must
+restore and verify the integration branch before completion. Treat any other primary-checkout
+mismatch as a validation error and blocked handoff.
+
 ## Locate the CLI
 
 Syncwheel is available as the PATH `syncwheel` command. Install it with:

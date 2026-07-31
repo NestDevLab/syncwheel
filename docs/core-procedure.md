@@ -14,6 +14,7 @@ Always inspect:
 - remotes and what they really mean
 - canonical base branch
 - integration branch
+- whether the primary Git worktree is on that integration branch
 - active `pr/*` branches
 - worktrees
 - stashes
@@ -30,6 +31,11 @@ Questions that must be answered before edits:
 - which branch is the real integration branch?
 - is there already a deterministic manifest?
 - are there commits on integration that are not mapped to any PR stack?
+
+The primary worktree stays on the manifest integration branch; other branches use dedicated
+worktrees. A clean, bounded integration operation may switch it temporarily only if it restores
+and verifies the integration branch before completion. Otherwise the mismatch blocks validation
+and handoff.
 
 ## Phase 2. Recover or create the deterministic manifest
 
