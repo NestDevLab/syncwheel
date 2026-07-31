@@ -1289,6 +1289,16 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
     def test_pre_commit_hook_runs_version_bump_guard(self):
         hook = REPO_ROOT / 'githooks' / 'pre-commit'
+        docs = self.repo / 'docs'
+        docs.mkdir(exist_ok=True)
+        shutil.copy2(REPO_ROOT / 'docs' / 'sync_version.py', docs / 'sync_version.py')
+        version = '1.0.0'
+        (self.repo / 'VERSION').write_text(f'{version}\n')
+        marker = f'<!-- syncwheel-version:start -->{version}<!-- syncwheel-version:end -->'
+        (docs / 'index.html').write_text(f'hero {marker} footer {marker}\n')
+        self.git('add', 'VERSION', 'docs/sync_version.py', 'docs/index.html')
+        self.git('commit', '-q', '-m', 'test: add generated website')
+
         script = self.repo / 'scripts' / 'demo.py'
         script.parent.mkdir(exist_ok=True)
         script.write_text('print("demo")\n')

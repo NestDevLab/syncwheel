@@ -31,6 +31,9 @@ jobs:
       - name: Compile CLI
         run: python -m py_compile scripts/syncwheel.py
 
+      - name: Check generated website version
+        run: python docs/sync_version.py --check
+
       - name: CLI help smoke test
         run: |
           python scripts/syncwheel.py --help

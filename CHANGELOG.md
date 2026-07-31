@@ -10,6 +10,11 @@
 - Clarify that feature PRs deliver to their intended branch, never to
   `main-integration`, and document the post-merge stack cleanup flow.
 
+## 0.21.3 - 2026-07-31
+
+- Derive the checked-in GitHub Pages version labels from the root `VERSION`
+  file, update them through the pre-commit release flow, and reject drift in CI.
+
 ## 0.21.2 - 2026-07-27
 
 - Preserve canonical and publication remote identity in public coordination

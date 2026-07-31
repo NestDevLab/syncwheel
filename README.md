@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.21.2`
+Current version: `0.21.3`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -687,9 +687,17 @@ staged files. Enable the tracked hooks once per clone:
 python3 scripts/syncwheel.py self install-hooks
 ```
 
-After that, commits that stage release-relevant changes under `scripts/`,
-`tests/`, or `githooks/` must also stage `VERSION`, `CHANGELOG.md`, and the
-README current-version line.
+After that, the hook renders the two website version labels from `VERSION` and
+stops once when `docs/index.html` needs to be reviewed and staged. Commits that
+stage release-relevant changes under `scripts/`, `tests/`, or `githooks/` must
+also stage `VERSION`, `CHANGELOG.md`, and the README current-version line. CI
+checks that the committed static site matches `VERSION`.
+
+Run the same deterministic website render directly with:
+
+```bash
+python3 docs/sync_version.py
+```
 
 `self status` reports whether the hooks are active in the current Syncwheel
 installation. See [docs/manual-git-flow.md](docs/manual-git-flow.md) for the
@@ -700,6 +708,7 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `scripts/syncwheel.py`: main CLI
 - `scripts/syncwheel-status.sh`: small compatibility wrapper
 - `docs/`: human-readable workflow docs and guides
+- `docs/sync_version.py`: renders the checked-in website version from `VERSION`
 - `examples/manifest.example.json`: starter manifest
 - `tests/`: unit tests and fixture repositories
 - `VERSION`: current release version
