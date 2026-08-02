@@ -4,4 +4,11 @@ set -eu
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
+if ! python3 docs/sync_version.py --check; then
+  python3 docs/sync_version.py
+  echo "docs/index.html was updated from VERSION; review and stage it, then retry the commit." >&2
+  exit 1
+fi
+
+python3 docs/sync_version.py --check --staged
 python3 scripts/check-version-bump.py --staged
