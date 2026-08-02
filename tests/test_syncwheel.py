@@ -235,6 +235,35 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['validation']['errors'], [])
         self.assertEqual(data['plan'], [])
 
+    def test_primary_checkout_mismatch_blocks_read_only_handoff_commands(self):
+        self.git('switch', '-c', 'feature/wrong-primary')
+
+        for command in (
+            ('status', '--json'),
+            ('validate', '--json'),
+            ('plan', '--json'),
+            ('check', '--no-fetch', '--json'),
+            ('handoff', '--no-fetch', '--json'),
+        ):
+            result = self.run_cli(*command, expected=1)
+            data = json.loads(result.stdout)
+            if isinstance(data, list):
+                self.assertTrue(any(action['type'] == 'restore_primary_checkout' for action in data))
+            else:
+                validation = data.get('validation', data)
+                self.assertTrue(any('primary worktree branch mismatch' in error for error in validation['errors']))
+
+    def test_feature_worktree_is_allowed_when_primary_checkout_matches(self):
+        feature = self.tmp / 'feature-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'feature/dedicated', str(feature), 'main')
+
+        result = self.run_cli('status', '--json', cwd=feature)
+        data = json.loads(result.stdout)
+
+        self.assertEqual(data['snapshot']['current_branch'], 'feature/dedicated')
+        self.assertEqual(data['snapshot']['primary_checkout']['branch'], 'main')
+        self.assertTrue(data['snapshot']['primary_checkout']['compliant'])
+
     def test_env_repo_allows_running_outside_target_repo(self):
         result = self.run_cli(
             'ck',
@@ -266,6 +295,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = self.read_manifest()
 
         self.assertEqual(data['integration']['branch'], 'main-integration')
+        self.assertEqual(self.git('branch', '--show-current'), 'main-integration')
 
     def test_init_can_persist_syncwheel_tracking_policy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
@@ -926,6 +956,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
             }
         ]
         (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+        self.git('switch', '-q', 'integration/reconcile')
 
     def test_reconcile_apply_uses_default_worktree_root(self):
         self.prepare_reconcile_apply_worktree_scenario()
@@ -1180,6 +1211,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         local_integration = self.git('rev-parse', 'HEAD')
         self.git('switch', '-q', 'main')
         self.git('clean', '-fd')
+        self.git('switch', '-q', 'integration/reconcile')
 
         self.assertNotEqual(local_stack, remote_stack)
         self.assertNotEqual(local_integration, remote_integration)
@@ -1602,6 +1634,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data['integration']['stacks'] = []
         data['stacks'] = []
         manifest.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('switch', '-q', 'integration/test')
 
         result = self.run_cli('resume', '--no-fetch', '--json', expected=0)
         report = json.loads(result.stdout)
@@ -1643,6 +1676,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data['integration']['stacks'] = []
         data['stacks'] = []
         manifest.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('switch', '-q', 'integration/test')
 
         check = self.run_cli('check', '--no-fetch', '--json', expected=0)
         check_report = json.loads(check.stdout)

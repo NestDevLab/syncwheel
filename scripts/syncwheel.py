@@ -1156,6 +1156,31 @@ def get_worktrees(repo_root):
     return blocks
 
 
+def primary_checkout_state(repo_root, manifest):
+    """Return the main Git worktree and its manifest-expected branch."""
+    worktrees = get_worktrees(repo_root)
+    primary = worktrees[0] if worktrees else {}
+    primary_path = Path(primary['path']) if primary.get('path') else None
+    shared_manifest = primary_path / '.syncwheel' / 'manifest.json' if primary_path else None
+    shared_expected = None
+    if shared_manifest and shared_manifest.exists():
+        try:
+            shared_expected = json.loads(shared_manifest.read_text()).get('integration', {}).get('branch')
+        except (OSError, json.JSONDecodeError):
+            pass
+    active_expected = manifest['integration']['branch'] if manifest else None
+    expected = shared_expected or active_expected
+    allowed = list(dict.fromkeys(branch for branch in (expected, active_expected) if branch))
+    actual = primary.get('branch', 'DETACHED')
+    return {
+        'path': str(primary_path) if primary_path else None,
+        'branch': actual,
+        'expected_branch': expected,
+        'expected_branches': allowed,
+        'compliant': not allowed or actual in allowed,
+    }
+
+
 def ensure_clean_worktree(path, allowed_status_prefixes=None):
     result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
     if result.returncode != 0:
@@ -3390,6 +3415,7 @@ def collect_repo_snapshot(repo_root, manifest):
         'canonical_remote_head': get_default_remote_head(repo_root, canonical_remote),
         'base_ref': base_ref,
         'worktrees': worktrees,
+        'primary_checkout': primary_checkout_state(repo_root, manifest),
         'stashes': stashes,
         'remotes': remotes,
     }
@@ -3423,6 +3449,14 @@ def validate_manifest(repo_root, manifest):
     stacks_by_id = stack_map(manifest)
     integration = manifest['integration']
     integration_branch = integration['branch']
+    primary_checkout = primary_checkout_state(repo_root, manifest)
+    details['primary_checkout'] = primary_checkout
+    if not primary_checkout['compliant']:
+        errors.append(
+            f"primary worktree branch mismatch at {primary_checkout['path']}: "
+            f"expected one of {primary_checkout['expected_branches']!r}, "
+            f"found {primary_checkout['branch']!r}"
+        )
     integration_strategy = integration.get('strategy')
     declared_commits = []
     declared_commit_shas = set()
@@ -3511,6 +3545,14 @@ def build_plan(repo_root, manifest, validation):
     actions = []
     details = validation['details']
     integration = manifest['integration']
+    primary_checkout = details.get('primary_checkout') or {}
+    if primary_checkout.get('compliant') is False:
+        actions.append({
+            'type': 'restore_primary_checkout',
+            'path': primary_checkout.get('path'),
+            'branch': primary_checkout.get('expected_branch'),
+            'current_branch': primary_checkout.get('branch'),
+        })
     if not details['integration']['exists']:
         actions.append({
             'type': 'create_integration_branch',
@@ -4074,9 +4116,21 @@ def command_init(args):
     if args.stdout:
         print(output, end='')
         return 0
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     if manifest_path.exists() and not args.force:
         raise SyncwheelError(f'manifest already exists: {manifest_path}')
+    shared_manifest = not args.personal and not args.manifest
+    if shared_manifest:
+        primary = get_worktrees(repo_root)[0]
+        primary_path = Path(primary['path'])
+        current_branch = primary.get('branch', 'DETACHED')
+        if current_branch != integration_branch:
+            ensure_clean_worktree(primary_path)
+            if branch_exists(repo_root, integration_branch):
+                run(['git', '-C', str(primary_path), 'switch', integration_branch])
+            else:
+                start_point = manifest['integration']['base'] if ref_exists(repo_root, manifest['integration']['base']) else 'HEAD'
+                run(['git', '-C', str(primary_path), 'switch', '-c', integration_branch, start_point])
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
     manifest_path.write_text(output)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
@@ -4233,7 +4287,7 @@ def command_status(args):
         output['plan'] = build_plan(repo_root, manifest, validation)
     if args.json:
         print(json.dumps(output, indent=2))
-        return 0
+        return 1 if manifest and not output['validation']['details']['primary_checkout']['compliant'] else 0
     print(f"repo: {snapshot['repo_root']}")
     print(f"current_branch: {snapshot['current_branch']}")
     print(f"canonical_remote_head: {snapshot['canonical_remote_head'] or 'unknown'}")
@@ -4284,7 +4338,7 @@ def command_status(args):
                 print(f'  - {line}')
         else:
             print('  - no actions needed')
-    return 0
+    return 1 if manifest and not output['validation']['details']['primary_checkout']['compliant'] else 0
 
 
 def command_validate(args):
