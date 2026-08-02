@@ -122,6 +122,12 @@ every rebuild. Use `--dry-run` on rebuild/push commands. If the manifest and Git
 disagree, fix the manifest or call out the conflict — do not claim a repo is
 aligned while integration and PR branches still differ.
 
+## Lossless checkout repair
+
+Before switching, rebuilding, resetting, relocating, or reaping a dirty or
+misplaced checkout, follow [the lossless repair
+protocol](references/lossless-repair.md).
+
 > ⚠️ **Rebuilds can silently revert already-applied work.** A `stack rebuild` /
 > `int rebuild` reconstructs the branch from the **manifest's commit projection,
 > not from the branch's current remote tip**. If the manifest points at a
@@ -163,11 +169,11 @@ release branch, but it must not be `main-integration`.
 `main-integration` is a coordination branch for assembling and testing stacks
 before delivery. Do not treat it as a PR target or deployment branch.
 
-After the PR merges, fetch the remote and confirm the stack's content landed in
-the delivery branch — by SHA, or, for a squash/rebase merge, by an empty
-`git diff <delivery_ref> <branch>`. Align or rebuild `main-integration` from the
-updated base, then run the housekeeping below to close the stack and reap its
-worktree and branch.
+After the PR merges, fetch the target and prove absorption against the
+candidate's own HEAD: check ancestry and require `git cherry <delivery_ref>
+<branch>` to contain no `+` patches for squash/rebase merges. A raw tree diff is
+not proof when the target has unrelated commits. Align or rebuild integration
+from the updated base, then close and reap the stack below.
 
 ## Housekeeping: when and how to clean up
 
@@ -185,11 +191,13 @@ Procedure (never destroy unmerged or uncommitted work):
 
 ```bash
 git fetch --all --prune
-git diff --quiet <delivery_ref> <branch> && echo "content merged"   # empty diff also covers squash/rebase
-git worktree remove <worktree-path>          # refuses if dirty/conflicted — resolve or stash first, never blind --force
-syncwheel stack close <id> -R merged --force # a squash merge is not ancestor-reachable, so --force is expected
-git branch -d <branch>                       # use -D only for a squash-merged branch -d won't recognize, after the check above
-git worktree prune                           # drop stale worktree admin entries
+git merge-base --is-ancestor <branch> <delivery_ref>
+git cherry <delivery_ref> <branch>           # if ancestry failed, this must contain no "+" rows
+syncwheel stack close <id> -R merged --force # close metadata before removing its worktree
+git worktree remove <worktree-path>          # non-force; retain and report dirty/conflicted/submodule-blocked trees
+git branch -d <branch>                       # use -D only after squash/rebase absorption was proved above
+git worktree prune --dry-run
+git worktree prune
 ```
 
 For an active-active manifest, prefer its tombstone-aware lifecycle instead:
@@ -204,10 +212,10 @@ syncwheel gc --apply
 `publish`, and explicit `gc --apply`, only remove old tombstoned local artifacts
 that are clean, unlocked, non-current, and recoverable from the remote state.
 
-Prune `backup/*` branches that are no longer a useful safety net, keeping the one
-or two most recent. Never delete a branch that still carries unique unmerged
-commits, and never force-remove a worktree with uncommitted or conflicted changes
-— report it instead.
+Retain recovery refs and stashes until every dependent lane is delivered and
+independently verified; only then prune obsolete backups. Never delete unique
+unmerged commits or force-remove a dirty, conflicted, or submodule-blocked
+worktree — retain and report it unless that exact destructive scope is approved.
 
 ## Decision: Syncwheel tracking policy
 
@@ -283,7 +291,10 @@ Before final response after touching a Git repo:
   repository policy explicitly requires local-only delivery
 - treat Syncwheel manifest changes from stack create/set/close or integration bookkeeping as
   scoped work: commit and push them before handoff, or explicitly report the approved reason they remain local
-- if the user asked to synchronize a repo with outstanding PRs/upstreams, fetch/prune first, inspect open PR heads, and verify each intended PR by both ancestry and diff: `git merge-base --is-ancestor <head> <base>` and `git diff --quiet <base>...<head>`. If you integrate PR heads directly into `main` and push, re-query GitHub; GitHub may auto-mark those PRs merged once the base contains their head.
+- if the user asked to synchronize a repo with outstanding PRs/upstreams,
+  fetch/prune, inspect each PR's own HEAD, then check ancestry and `git cherry`
+  patch absorption. If you integrate PR heads directly into the target and push,
+  re-query the forge; it may then mark those PRs merged.
 - when applying stashed local work after PR synchronization, expect fixture-only conflicts. Resolve by preserving the synchronized upstream behavior and reapplying only the scoped new feature/logging changes; then rerun tests before committing.
 - if the user requested local-only edits, list the dirty files and the next
   command/decision needed to finish delivery

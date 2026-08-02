@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## 0.22.1 - 2026-08-02
+
+- Document lossless dirty-checkout relocation, patch-equivalent merge proof,
+  metadata-first stack closure, and recovery retention through verified delivery.
+
 ## 0.22.0 - 2026-07-31
 
 - Require the primary Git worktree to remain on the manifest integration branch while allowing
