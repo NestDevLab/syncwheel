@@ -28,7 +28,8 @@
         "adf76c31fd0faf419e7efbc4fd172b9e3531d9b1",
         "3cc5325749624c44f7d3a61675b80b7e97fb30e9",
         "56f3d627afd3fd73ef3fc43cad71e0158977ba9a",
-        "45ef3f1a19154a50bd9895d177421ec95aae7820"
+        "45ef3f1a19154a50bd9895d177421ec95aae7820",
+        "958d0ddc56aa7ca35fcb1a0cb60d8f85be440ebe"
       ],
       "meta": {
         "purpose": "Require every active Syncwheel stack to participate in deterministic integration"
