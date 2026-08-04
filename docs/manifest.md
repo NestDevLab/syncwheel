@@ -168,6 +168,8 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
   - `cherry-pick`: replay all declared commits into integration as a linear history
   - `merge-stacks`: merge each declared stack branch into integration in manifest order with `--no-ff`
 - every persistent integration change should belong to exactly one declared stack unless it is explicit temporary debug work
+- a commit changing only `.syncwheel/manifest.json` is treated as integration
+  control-plane metadata, not an unclassified product change
 
 ## What validation checks
 

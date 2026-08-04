@@ -1538,6 +1538,20 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('not declared in any stack', '\n'.join(validation['warnings']))
         self.assertEqual(len(validation['details']['integration']['unmapped_commits']), 1)
 
+    def test_validate_accepts_manifest_only_integration_control_commit(self):
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        data = self.read_manifest()
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'chore(syncwheel): update integration contract')
+
+        validation = json.loads(self.run_cli('validate', '--json', expected=0).stdout)
+        self.assertEqual(validation['warnings'], [])
+        self.assertEqual(len(validation['details']['integration']['control_commits']), 1)
+
     def test_plan_reports_unmapped_integration_commits(self):
         self.git('branch', 'integration/test', 'main')
         self.git('switch', '-q', 'integration/test')

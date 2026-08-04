@@ -1094,6 +1094,12 @@ def commit_changed_files(repo_root, commit, limit=None):
     return files[:limit] if limit else files
 
 
+def is_manifest_only_commit(repo_root, commit):
+    """Whether a commit changes only the tracked Syncwheel coordination manifest."""
+    files = commit_changed_files(repo_root, commit)
+    return bool(files) and set(files) == {'.syncwheel/manifest.json'}
+
+
 def branches_containing_commit(repo_root, commit, remotes=False):
     args = ['branch', '--format=%(refname:short)', '--contains', commit]
     if remotes:
@@ -3536,6 +3542,7 @@ def validate_manifest(repo_root, manifest):
 
     integration_commits = []
     unmapped_commits = []
+    control_commits = []
     integration_merge_commits = []
     if integration_exists and ref_exists(repo_root, integration['base']):
         integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
@@ -3543,6 +3550,9 @@ def validate_manifest(repo_root, manifest):
             full_sha = commit_full_sha(repo_root, commit)
             if commit_parent_count(repo_root, commit) > 1:
                 integration_merge_commits.append(full_sha)
+                continue
+            if is_manifest_only_commit(repo_root, commit):
+                control_commits.append(full_sha)
                 continue
             patch_id = commit_patch_id(repo_root, commit)
             if full_sha not in declared_commit_shas and (not patch_id or patch_id not in declared_patch_ids):
@@ -3562,6 +3572,7 @@ def validate_manifest(repo_root, manifest):
         'commits': integration_commits,
         'declared_commits': declared_commits,
         'unmapped_commits': unmapped_commits,
+        'control_commits': control_commits,
         'merge_commits': integration_merge_commits,
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
