@@ -159,6 +159,10 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 - every stack id must be unique
 - every stack branch must be unique
 - every declared commit must exist in Git
+- `commits` remain the source projection used to rebuild a stack branch
+- `integration_commits`, when present, is the resolved projection used only for
+  integration. Record it after a conflict creates new integration commits; it
+  prevents Syncwheel from treating those commits as source-branch commits.
 - `integration.strategy` is optional and defaults to `cherry-pick`
 - supported integration strategies are:
   - `cherry-pick`: replay all declared commits into integration as a linear history
@@ -180,3 +184,18 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 Unmapped integration commits are reported as warnings plus a
 `classify_integration_commits` plan action. The tool can identify the commits,
 but a human or AI agent still needs to decide which stack owns each change.
+
+### Resolved integration projections
+
+When a declared stack commit conflicts during integration, resolve the conflict
+on the integration branch and record the resulting commit separately. This keeps
+the source branch immutable while allowing deterministic validation and rebuilds
+of integration:
+
+```bash
+syncwheel stack resolve-integration feature-a <resolved-commit>
+```
+
+The command accepts one or more commits already contained by the integration
+branch. It updates `integration_commits` without changing `commits`; stack
+rebuilds still use the latter, while integration rebuilds use the former.

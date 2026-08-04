@@ -1586,6 +1586,14 @@ def load_manifest(repo_root, manifest_path=None):
             raise SyncwheelError(f'duplicate stack branch: {branch}')
         if not isinstance(commits, list) or not all(isinstance(c, str) and c for c in commits):
             raise SyncwheelError(f'stack {stack_id} commits must be a string array')
+        integration_commits = stack.get('integration_commits')
+        if integration_commits is not None and (
+            not isinstance(integration_commits, list)
+            or not all(isinstance(c, str) and c for c in integration_commits)
+        ):
+            raise SyncwheelError(
+                f'stack {stack_id} integration_commits must be a string array when present'
+            )
         seen_ids.add(stack_id)
         seen_branches.add(branch)
         stack.setdefault('base', defaults['base_ref'])
@@ -1610,6 +1618,17 @@ def load_manifest(repo_root, manifest_path=None):
 def save_manifest(path, manifest):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+
+def stack_integration_commits(stack):
+    """Return the commits that materialize a stack on integration.
+
+    Source commits remain authoritative for rebuilding the stack branch. A resolved
+    integration projection can be recorded separately after conflict resolution so
+    validation never asks Syncwheel to rewrite that source branch with integration
+    commits.
+    """
+    return list(stack.get('integration_commits', stack['commits']))
 
 
 def ledger_root(repo_root):
@@ -1664,6 +1683,7 @@ def manifest_stack_history_summary(stack):
         'target_branch': stack['target_branch'],
         'integration_branch': stack.get('integration_branch'),
         'commits': list(stack['commits']),
+        'integration_commits': stack_integration_commits(stack),
         'meta': dict(stack.get('meta', {})),
     }
 
@@ -3487,6 +3507,7 @@ def validate_manifest(repo_root, manifest):
             'missing_from_branch': [],
             'missing_from_integration': [],
             'missing_commits': [],
+            'integration_commits': stack_integration_commits(stack),
         }
         if not item['base_exists']:
             errors.append(f"stack {stack['id']} base ref does not exist: {stack['base']}")
@@ -3497,13 +3518,18 @@ def validate_manifest(repo_root, manifest):
                 item['missing_commits'].append(commit)
                 errors.append(f"stack {stack['id']} references missing commit: {commit}")
                 continue
+            if item['branch_exists'] and not branch_contains(repo_root, stack['branch'], commit):
+                item['missing_from_branch'].append(commit)
+        for commit in item['integration_commits']:
+            if not commit_exists(repo_root, commit):
+                item['missing_commits'].append(commit)
+                errors.append(f"stack {stack['id']} references missing integration commit: {commit}")
+                continue
             declared_commits.append(commit)
             declared_commit_shas.add(commit_full_sha(repo_root, commit))
             patch_id = commit_patch_id(repo_root, commit)
             if patch_id:
                 declared_patch_ids.add(patch_id)
-            if item['branch_exists'] and not branch_contains(repo_root, stack['branch'], commit):
-                item['missing_from_branch'].append(commit)
             if integration_exists and not branch_contains(repo_root, integration_branch, commit):
                 item['missing_from_integration'].append(commit)
         details['stacks'].append(item)
@@ -3954,7 +3980,7 @@ def integration_stack_commands(manifest, worktree=None, stack_ref_overrides=None
     if strategy == 'cherry-pick':
         commits = []
         for stack_id in integration['stacks']:
-            commits.extend(stacks_by_id[stack_id]['commits'])
+            commits.extend(stack_integration_commits(stacks_by_id[stack_id]))
         if not commits:
             return []
         return [[*prefix, 'cherry-pick', *commits]]
@@ -3984,7 +4010,7 @@ def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=
             if integration.get('strategy', 'cherry-pick') == 'cherry-pick':
                 stacks_by_id = stack_map(manifest)
                 for stack_id in integration['stacks']:
-                    for commit in stacks_by_id[stack_id]['commits']:
+                    for commit in stack_integration_commits(stacks_by_id[stack_id]):
                         if branch_contains(worktree, 'HEAD', commit):
                             continue
                         command = ['git', '-C', str(worktree), 'cherry-pick', commit]
@@ -4685,6 +4711,33 @@ def command_stack_set(args):
         {'stack': args.stack, 'branch': stack['branch']},
     )
     print(f"{args.stack}: set {len(stack['commits'])} commits")
+    return 0
+
+
+def command_stack_resolve_integration(args):
+    """Record conflict-resolved commits that already materialize on integration."""
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    integration_branch = manifest['integration']['branch']
+    commits = []
+    for spec in args.specs:
+        commits.extend(commit_list_for_spec(repo_root, spec))
+    commits = list(dict.fromkeys(commits))
+    for commit in commits:
+        if not branch_contains(repo_root, integration_branch, commit):
+            raise SyncwheelError(
+                f"resolved integration commit is not on {integration_branch}: {commit}"
+            )
+    stack['integration_commits'] = commits
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        manifest,
+        'stack_resolve_integration',
+        {'stack': args.stack, 'integration_branch': integration_branch, 'commits': commits},
+    )
+    print(f"{args.stack}: recorded {len(commits)} resolved integration commits")
     return 0
 
 
@@ -6474,6 +6527,16 @@ def build_parser():
     stack_set_p.add_argument('stack')
     stack_set_p.add_argument('specs', nargs='+')
     stack_set_p.set_defaults(func=command_stack_set)
+
+    stack_resolve_p = stack_sub.add_parser(
+        'resolve-integration',
+        aliases=['resolve'],
+        parents=[common],
+        help='record conflict-resolved commits that materialize this stack on integration',
+    )
+    stack_resolve_p.add_argument('stack')
+    stack_resolve_p.add_argument('specs', nargs='+')
+    stack_resolve_p.set_defaults(func=command_stack_resolve_integration)
 
     stack_add_p = stack_sub.add_parser('add', parents=[common])
     stack_add_p.add_argument('stack')

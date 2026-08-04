@@ -652,6 +652,32 @@ class SyncwheelFixtureTest(unittest.TestCase):
         feature_a = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-a')
         self.assertEqual(feature_a['commits'], [beta, alpha])
 
+    def test_stack_resolve_integration_keeps_source_projection_intact(self):
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        Path(self.repo / 'gamma.txt').write_text('resolved integration\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'fix: resolve feature-b integration conflict')
+        resolved = self.git('rev-parse', 'HEAD')
+
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['integration']['branch'] = 'integration/test'
+        manifest['integration']['base'] = 'main'
+        manifest['integration']['stacks'] = ['feature-b']
+        manifest['stacks'] = [manifest['stacks'][1]]
+        manifest['stacks'][0]['integration_branch'] = 'integration/test'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        self.run_cli('stack', 'resolve-integration', 'feature-b', resolved, expected=0)
+        updated = self.read_manifest()
+        stack = updated['stacks'][0]
+        self.assertEqual(stack['integration_commits'], [resolved])
+        self.assertEqual(len(stack['commits']), 2)
+
+        validation = json.loads(self.run_cli('validate', '--json', expected=0).stdout)
+        self.assertEqual(validation['warnings'], [])
+        self.assertEqual(json.loads(self.run_cli('plan', '--json', expected=0).stdout), [])
+
     def test_stack_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork pr/feature-a', result.stdout)
