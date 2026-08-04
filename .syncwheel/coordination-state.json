@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-04T17:24:36+00:00",
+  "created_at": "2026-08-04T17:34:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -37,30 +35,11 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "required-integration-membership"
+        "agentwheel-0230-release"
       ],
       "strategy": "cherry-pick"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "feat/required-integration-membership",
-        "commits": [
-          "c69de31b25a7479281f4affc58630065a2d23789",
-          "adf76c31fd0faf419e7efbc4fd172b9e3531d9b1",
-          "3cc5325749624c44f7d3a61675b80b7e97fb30e9",
-          "56f3d627afd3fd73ef3fc43cad71e0158977ba9a",
-          "45ef3f1a19154a50bd9895d177421ec95aae7820",
-          "958d0ddc56aa7ca35fcb1a0cb60d8f85be440ebe"
-        ],
-        "id": "required-integration-membership",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -78,12 +57,21 @@
     ],
     "version": 2
   },
-  "manifest_digest": "ba8cc9b3370f3a5ea7c851c2008635856337261a65eef486d0d6d6cb2c8e0a8e",
-  "parent_state": "a4e4f266f642ac615b9dd03e3bc0f0c296b1285f",
+  "manifest_digest": "0c9dc0beef6c78429d34353949ea53b129ec84f270cd5d8cb0200595035fffd6",
+  "parent_state": "c05743d605355a4ccc86cab5c67834b8167a9418",
   "projection_status": "partial",
-  "publication_id": "4dd6f66c-ba6e-4fd9-a58d-a0afadeb6313",
-  "publication_scope": "stack:agentwheel-0230-release",
+  "publication_id": "1ea6670b-c64c-4e54-835f-c5b14af8443c",
+  "publication_scope": "close:required-integration-membership",
   "schema_version": 2,
   "syncwheel_version": "0.23.0",
-  "tombstones": []
+  "tombstones": [
+    {
+      "branch": "feat/required-integration-membership",
+      "closed_at": "2026-08-04T17:34:02+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/feat/required-integration-membership",
+      "remote_tip": "d00638b6d0767f45fff06bb4c08ed88661849d01",
+      "stack": "required-integration-membership"
+    }
+  ]
 }
