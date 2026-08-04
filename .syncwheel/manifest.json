@@ -34,6 +34,20 @@
       "meta": {
         "purpose": "Require every active Syncwheel stack to participate in deterministic integration"
       }
+    },
+    {
+      "id": "agentwheel-0230-release",
+      "branch": "release/agentwheel-0230",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "3710353c69e430de70a44157664789e7a90a911b"
+      ],
+      "meta": {
+        "purpose": "Publish Syncwheel 0.23.0 to Agentwheel Fleet"
+      }
     }
   ],
   "syncwheel_worktree_root": "var/syncwheel",
