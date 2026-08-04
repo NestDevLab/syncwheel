@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- New manifests require every declared stack to participate in integration;
+  `stack create` now includes it by default under that policy.
+- Add `manifest require-integration` to preview and apply an explicit migration
+  after absorbed or abandoned stacks are closed.
+- Reject required-membership manifests that leave declared stacks outside
+  `integration.stacks`.
+
 ## 0.22.1 - 2026-08-02
 
 - Document lossless dirty-checkout relocation, patch-equivalent merge proof,

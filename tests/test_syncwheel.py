@@ -295,6 +295,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = self.read_manifest()
 
         self.assertEqual(data['integration']['branch'], 'main-integration')
+        self.assertEqual(data['defaults']['integration_membership'], 'required')
         self.assertEqual(self.git('branch', '--show-current'), 'main-integration')
 
     def test_init_can_persist_syncwheel_tracking_policy(self):
@@ -482,6 +483,55 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(ledger['last_seq'], 1)
         self.assertIn('feature-c', ledger['manifest']['active_stacks'])
         self.assertEqual(ledger['stacks']['feature-c']['branch'], 'pr/alice/feature-c')
+
+    def test_stack_create_includes_stack_by_default_when_membership_is_required(self):
+        gamma = self.git('rev-parse', 'HEAD')
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['defaults']['integration_membership'] = 'required'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        self.run_cli(
+            'stack',
+            'create',
+            'feature-required',
+            gamma,
+            '--branch',
+            'pr/feature-required',
+            expected=0,
+        )
+
+        updated = self.read_manifest()
+        self.assertIn('feature-required', updated['integration']['stacks'])
+
+    def test_required_membership_rejects_excluded_stack(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['defaults']['integration_membership'] = 'required'
+        manifest['integration']['stacks'] = ['feature-a']
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli('validate', expected=1)
+
+        self.assertIn('required integration membership excludes stack(s): feature-b', result.stdout)
+
+    def test_manifest_require_integration_migrates_existing_stacks(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['integration']['stacks'] = ['feature-a']
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli('manifest', 'require-integration', '--json', expected=0)
+        proposal = json.loads(result.stdout)
+
+        self.assertEqual(proposal['add_to_integration'], ['feature-b'])
+        self.assertFalse(proposal['apply'])
+
+        self.run_cli('manifest', 'require-integration', '--apply', expected=0)
+        updated = self.read_manifest()
+
+        self.assertEqual(updated['defaults']['integration_membership'], 'required')
+        self.assertEqual(updated['integration']['stacks'], ['feature-a', 'feature-b'])
 
     def test_spoke_alias_maps_to_stack_commands(self):
         list_result = self.run_cli('spoke', 'list', expected=0)

@@ -13,7 +13,8 @@ The preferred source of truth is `.syncwheel/manifest.json`.
     "canonical_remote": "origin",
     "publication_remote": "fork",
     "base_branch": "main",
-    "base_ref": "origin/main"
+    "base_ref": "origin/main",
+    "integration_membership": "required"
   },
   "integration": {
     "branch": "integration/project-stack",
@@ -141,11 +142,18 @@ python3 scripts/syncwheel.py use --shared
 Create stack entries through the CLI:
 
 ```bash
-python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a -u
+python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a
 python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 ```
 
-`-u` is the short form of `--include-in-integration`.
+New manifests require every declared stack to participate in integration. Migrate
+an existing legacy manifest only after closing stacks that are already absorbed
+or abandoned:
+
+```bash
+python3 scripts/syncwheel.py manifest require-integration
+python3 scripts/syncwheel.py manifest require-integration --apply
+```
 
 ## Rules
 
@@ -153,6 +161,11 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
   `coordination` block
 - `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
+- new manifests set `defaults.integration_membership` to `required`; legacy
+  manifests without it remain compatible until explicitly migrated
+- required membership means every declared stack id must appear in
+  `integration.stacks`; use a normal Git worktree for work that is not ready to
+  enter Syncwheel's integration lifecycle
 - version 2 `coordination.mode` is `active-active` or persisted `disabled`
 - version 2 coordination must use the same named remote as
   `defaults.publication_remote`
@@ -181,6 +194,7 @@ python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 - whether PR branches contain declared commits
 - whether integration contains declared commits
 - whether integration references unknown stacks
+- whether a required-membership manifest excludes declared stacks from integration
 - whether integration contains non-merge commits that are not declared in any stack
 
 Unmapped integration commits are reported as warnings plus a

@@ -35,11 +35,13 @@ Prefer syncwheel commands over manual JSON edits:
 ```bash
 python3 scripts/syncwheel.py init
 python3 scripts/syncwheel.py init --personal alice
-python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a -u
+python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-a
 python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
 
-`-u` is the short form of `--include-in-integration`.
+New manifests require every declared stack to participate in integration. For a
+legacy manifest, classify absorbed stacks first, then use `manifest
+require-integration --apply` before creating more work.
 
 ## Prompt-friendly workflow
 

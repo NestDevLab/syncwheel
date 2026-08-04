@@ -32,6 +32,12 @@ ENV_REMOTE_VERSION_URL = 'SYNCWHEEL_REMOTE_VERSION_URL'
 ENV_UV_TOOL_SOURCE = 'SYNCWHEEL_UV_TOOL_SOURCE'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
+INTEGRATION_MEMBERSHIP_LEGACY = 'legacy'
+INTEGRATION_MEMBERSHIP_REQUIRED = 'required'
+INTEGRATION_MEMBERSHIP_POLICIES = {
+    INTEGRATION_MEMBERSHIP_LEGACY,
+    INTEGRATION_MEMBERSHIP_REQUIRED,
+}
 MANIFEST_VERSIONS = {1, 2}
 MANIFEST_VERSION_LEGACY = 1
 MANIFEST_VERSION_COORDINATED = 2
@@ -1289,6 +1295,15 @@ def normalize_coordination(value, manifest_path='manifest'):
     return normalized
 
 
+def normalize_integration_membership(value, path='defaults.integration_membership'):
+    if value is None:
+        return INTEGRATION_MEMBERSHIP_LEGACY
+    if value not in INTEGRATION_MEMBERSHIP_POLICIES:
+        allowed = ', '.join(sorted(INTEGRATION_MEMBERSHIP_POLICIES))
+        raise SyncwheelError(f'{path} must be one of: {allowed}')
+    return value
+
+
 def coordination_config(manifest):
     if manifest.get('version') != MANIFEST_VERSION_COORDINATED:
         return None
@@ -1561,6 +1576,9 @@ def load_manifest(repo_root, manifest_path=None):
     defaults.setdefault('publication_remote', 'fork')
     defaults.setdefault('base_branch', 'main')
     defaults.setdefault('base_ref', f"{canonical_remote}/{defaults['base_branch']}")
+    defaults['integration_membership'] = normalize_integration_membership(
+        defaults.get('integration_membership')
+    )
 
     integration = data.setdefault('integration', {})
     integration.setdefault('branch', DEFAULT_INTEGRATION_BRANCH)
@@ -3501,6 +3519,16 @@ def validate_manifest(repo_root, manifest):
     unknown_stack_refs = [stack_id for stack_id in integration.get('stacks', []) if stack_id not in stacks_by_id]
     if unknown_stack_refs:
         errors.append('integration references unknown stacks: ' + ', '.join(unknown_stack_refs))
+    if manifest['defaults']['integration_membership'] == INTEGRATION_MEMBERSHIP_REQUIRED:
+        excluded_stack_ids = [
+            stack['id'] for stack in manifest['stacks']
+            if stack['id'] not in integration.get('stacks', [])
+        ]
+        if excluded_stack_ids:
+            errors.append(
+                'required integration membership excludes stack(s): '
+                + ', '.join(excluded_stack_ids)
+            )
 
     for stack in manifest['stacks']:
         item = {
@@ -4117,6 +4145,7 @@ def command_init(args):
             'publication_remote': publication_remote,
             'base_branch': base_branch,
             'base_ref': f'{canonical_remote}/{base_branch}',
+            'integration_membership': INTEGRATION_MEMBERSHIP_REQUIRED,
         },
         'integration': {
             'branch': integration_branch,
@@ -4594,7 +4623,11 @@ def command_stack_create(args):
     if args.purpose:
         stack['meta'] = {'purpose': args.purpose}
     manifest['stacks'].append(stack)
-    if args.include_in_integration and args.stack not in manifest['integration']['stacks']:
+    integration_membership = manifest['defaults']['integration_membership']
+    if (
+        integration_membership == INTEGRATION_MEMBERSHIP_REQUIRED
+        or args.include_in_integration
+    ) and args.stack not in manifest['integration']['stacks']:
         manifest['integration']['stacks'].append(args.stack)
     save_manifest_with_ledger(
         repo_root,
@@ -5935,6 +5968,40 @@ def command_manifest_compare(args):
     return 0
 
 
+def command_manifest_require_integration(args):
+    """Migrate a manifest so every declared stack participates in integration."""
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    integration_stacks = manifest['integration']['stacks']
+    excluded_stack_ids = [
+        stack['id'] for stack in manifest['stacks']
+        if stack['id'] not in integration_stacks
+    ]
+    output = {
+        'manifest_path': str(manifest_path),
+        'integration_membership': INTEGRATION_MEMBERSHIP_REQUIRED,
+        'add_to_integration': excluded_stack_ids,
+        'apply': bool(args.apply),
+    }
+    if args.apply:
+        manifest['defaults']['integration_membership'] = INTEGRATION_MEMBERSHIP_REQUIRED
+        manifest['integration']['stacks'].extend(excluded_stack_ids)
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            manifest,
+            'manifest_require_integration',
+            {'added_stacks': excluded_stack_ids},
+        )
+    if args.json:
+        print(json.dumps(output, indent=2))
+    else:
+        print('add_to_integration: ' + (', '.join(excluded_stack_ids) or 'none'))
+        print('integration_membership: required')
+        print('applied: ' + ('yes' if args.apply else 'no'))
+    return 0
+
+
 def repo_relative_path(repo_root, path):
     try:
         return Path(path).resolve().relative_to(Path(repo_root).resolve()).as_posix()
@@ -6488,7 +6555,7 @@ def build_parser():
     add_reconcile_args(publish_p, include_apply_push=False)
     publish_p.set_defaults(func=command_publish, fetch=True, update_manifest=True, apply=True, push=True, mode='standard')
 
-    manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect and compare syncwheel manifests')
+    manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect, compare, and migrate syncwheel manifests')
     manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)
 
     manifest_compare_p = manifest_sub.add_parser('compare', parents=[common])
@@ -6496,6 +6563,15 @@ def build_parser():
     manifest_compare_p.add_argument('-P', '--other-personal')
     manifest_compare_p.add_argument('-j', '--json', action='store_true')
     manifest_compare_p.set_defaults(func=command_manifest_compare)
+
+    manifest_require_integration_p = manifest_sub.add_parser(
+        'require-integration',
+        help='require every declared stack to participate in integration',
+        parents=[common],
+    )
+    manifest_require_integration_p.add_argument('-a', '--apply', action='store_true')
+    manifest_require_integration_p.add_argument('-j', '--json', action='store_true')
+    manifest_require_integration_p.set_defaults(func=command_manifest_require_integration)
 
     stack_p = sub.add_parser(
         'stack',
@@ -6520,7 +6596,12 @@ def build_parser():
     stack_create_p.add_argument('-T', '--target-branch')
     stack_create_p.add_argument('-I', '--integration-branch')
     stack_create_p.add_argument('-P', '--purpose')
-    stack_create_p.add_argument('-u', '--include-in-integration', action='store_true')
+    stack_create_p.add_argument(
+        '-u',
+        '--include-in-integration',
+        action='store_true',
+        help='compatibility flag; required-membership manifests include every stack by default',
+    )
     stack_create_p.set_defaults(func=command_stack_create)
 
     stack_sync_p = stack_sub.add_parser('sync', parents=[common])
