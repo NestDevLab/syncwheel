@@ -148,7 +148,7 @@ syncwheel init                                  # shared manifest (.syncwheel/ma
 syncwheel repo tracking status
 syncwheel repo tracking set git-tracked --apply # or local-only
 # 3. Declare the stack
-syncwheel stack create feature-a --branch pr/feature-a --base origin/main -u
+syncwheel stack create feature-a --branch pr/feature-a --base origin/main
 # 4. Author in a dedicated worktree (fresh work uses plain git worktree add)
 git worktree add -b pr/feature-a ../repo-wt-feature-a origin/main
 #    ... make and commit your changes in that worktree ...
@@ -158,7 +158,15 @@ syncwheel validate && syncwheel plan --json
 syncwheel stack push feature-a
 ```
 
-`-u` is the short form of `--include-in-integration`.
+New manifests require every declared stack to participate in integration. Do not
+register a track-only stack: use an ordinary Git worktree until the work is ready
+for the Syncwheel lifecycle. Migrate an older manifest only after classifying
+absorbed or abandoned stacks:
+
+```bash
+syncwheel manifest require-integration
+syncwheel manifest require-integration --apply
+```
 
 ## Delivery lifecycle
 

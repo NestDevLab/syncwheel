@@ -94,7 +94,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.git(path, 'config', 'user.email', f'syncwheel-{name}@example.com')
         return path
 
-    def init_coordinated(self, repo, integration='integration/shared'):
+    def init_coordinated(self, repo, integration='integration/shared', integration_membership='legacy'):
         self.git(repo, 'branch', integration, 'origin/main')
         self.run_cli(
             repo,
@@ -106,7 +106,17 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--integration-branch',
             integration,
         )
-        return json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        return self.set_integration_membership(repo, integration_membership)
+
+    def set_integration_membership(self, repo, integration_membership):
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        # Coordination fixtures model pre-existing repositories. Keep their
+        # historical optional integration behavior explicit, while dedicated
+        # initialization coverage exercises the required default.
+        manifest['defaults']['integration_membership'] = integration_membership
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        return manifest
 
     def remote_state(self, origin, coordination_id='default'):
         ref = f'refs/heads/syncwheel/state/{coordination_id}'
@@ -137,9 +147,10 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
     def test_new_git_tracked_init_defaults_to_v2_and_local_only_is_disabled(self):
         origin = self.create_remote()
         tracked = self.clone(origin, 'tracked')
-        manifest = self.init_coordinated(tracked)
+        manifest = self.init_coordinated(tracked, integration_membership='required')
 
         self.assertEqual(manifest['version'], 2)
+        self.assertEqual(manifest['defaults']['integration_membership'], 'required')
         self.assertEqual(manifest['coordination']['mode'], 'active-active')
         self.assertEqual(manifest['coordination']['remote'], 'origin')
         self.assertEqual(manifest['coordination']['state_branch'], 'syncwheel/state/default')
@@ -596,6 +607,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--integration-branch',
             'integration/shared',
         )
+        self.set_integration_membership(current, 'legacy')
         remote_sha = self.commit_on_branch(current, 'pr/remote-change', 'remote.txt')
         self.run_cli(current, 'stack', 'create', 'remote-change', remote_sha, '--branch', 'pr/remote-change')
         self.run_cli(current, 'stack', 'push', 'remote-change')
