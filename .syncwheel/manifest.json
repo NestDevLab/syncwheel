@@ -5,51 +5,15 @@
     "publication_remote": "origin",
     "base_branch": "main",
     "base_ref": "origin/main",
-    "integration_membership": "legacy"
+    "integration_membership": "required"
   },
   "integration": {
     "branch": "main-integration",
     "base": "origin/main",
     "strategy": "cherry-pick",
-    "stacks": [
-      "required-integration-membership"
-    ]
+    "stacks": []
   },
-  "stacks": [
-    {
-      "id": "required-integration-membership",
-      "branch": "feat/required-integration-membership",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "c69de31b25a7479281f4affc58630065a2d23789",
-        "adf76c31fd0faf419e7efbc4fd172b9e3531d9b1",
-        "3cc5325749624c44f7d3a61675b80b7e97fb30e9",
-        "56f3d627afd3fd73ef3fc43cad71e0158977ba9a",
-        "45ef3f1a19154a50bd9895d177421ec95aae7820",
-        "958d0ddc56aa7ca35fcb1a0cb60d8f85be440ebe"
-      ],
-      "meta": {
-        "purpose": "Require every active Syncwheel stack to participate in deterministic integration"
-      }
-    },
-    {
-      "id": "agentwheel-0230-release",
-      "branch": "release/agentwheel-0230",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "3710353c69e430de70a44157664789e7a90a911b"
-      ],
-      "meta": {
-        "purpose": "Publish Syncwheel 0.23.0 to Agentwheel Fleet"
-      }
-    }
-  ],
+  "stacks": [],
   "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked",
   "coordination": {
