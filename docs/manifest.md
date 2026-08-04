@@ -199,3 +199,5 @@ syncwheel stack resolve-integration feature-a <resolved-commit>
 The command accepts one or more commits already contained by the integration
 branch. It updates `integration_commits` without changing `commits`; stack
 rebuilds still use the latter, while integration rebuilds use the former.
+When an obsolete source commit is already absorbed by the integration base or
+another resolved stack, use `--empty` explicitly rather than inventing a commit.

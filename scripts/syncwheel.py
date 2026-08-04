@@ -4720,6 +4720,10 @@ def command_stack_resolve_integration(args):
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
     integration_branch = manifest['integration']['branch']
+    if args.empty and args.specs:
+        raise SyncwheelError('use either --empty or resolved integration commit specs, not both')
+    if not args.empty and not args.specs:
+        raise SyncwheelError('provide resolved integration commit specs or pass --empty explicitly')
     commits = []
     for spec in args.specs:
         commits.extend(commit_list_for_spec(repo_root, spec))
@@ -6535,7 +6539,12 @@ def build_parser():
         help='record conflict-resolved commits that materialize this stack on integration',
     )
     stack_resolve_p.add_argument('stack')
-    stack_resolve_p.add_argument('specs', nargs='+')
+    stack_resolve_p.add_argument('specs', nargs='*')
+    stack_resolve_p.add_argument(
+        '--empty',
+        action='store_true',
+        help='record that this stack was absorbed by the integration base or another resolved stack',
+    )
     stack_resolve_p.set_defaults(func=command_stack_resolve_integration)
 
     stack_add_p = stack_sub.add_parser('add', parents=[common])
