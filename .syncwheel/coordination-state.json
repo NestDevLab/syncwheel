@@ -1,12 +1,12 @@
 {
   "changed_refs": {
-    "refs/heads/feat/required-integration-membership": "8f6a75512fc05bde9c5f2bcb87eb822484ee108a"
+    "refs/heads/feat/required-integration-membership": "c3616cc20f85da48b34465ade926a56068d1a068"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-04T16:56:55+00:00",
+  "created_at": "2026-08-04T17:00:37+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
-    "refs/heads/feat/required-integration-membership": "8f6a75512fc05bde9c5f2bcb87eb822484ee108a",
+    "refs/heads/feat/required-integration-membership": "c3616cc20f85da48b34465ade926a56068d1a068",
     "refs/heads/main-integration": "8e80b383cd300349e37504f9c0836eb9e2f179b8"
   },
   "manifest": {
@@ -52,7 +52,8 @@
           "c69de31b25a7479281f4affc58630065a2d23789",
           "adf76c31fd0faf419e7efbc4fd172b9e3531d9b1",
           "3cc5325749624c44f7d3a61675b80b7e97fb30e9",
-          "56f3d627afd3fd73ef3fc43cad71e0158977ba9a"
+          "56f3d627afd3fd73ef3fc43cad71e0158977ba9a",
+          "45ef3f1a19154a50bd9895d177421ec95aae7820"
         ],
         "id": "required-integration-membership",
         "integration_branch": "main-integration",
@@ -61,12 +62,12 @@
     ],
     "version": 2
   },
-  "manifest_digest": "c9fe6c146238c7590fe4398e1c6828f8afb70a72800bb3a1323c6034d4e1d36d",
-  "parent_state": "575428b32d9a7697c9da4f3f909dae868feb7c19",
+  "manifest_digest": "e57f8a262575c6ba86d337faa75140733532350defbbb20e1c5295f765ba9c5b",
+  "parent_state": "6968ee9903311c9ab3a592a1f65456b776e58607",
   "projection_status": "partial",
-  "publication_id": "ef8f52c2-9530-4976-b8c9-773023a2e537",
+  "publication_id": "69966786-8fe2-40b7-9bd9-8e1242c9fd85",
   "publication_scope": "stack:required-integration-membership",
   "schema_version": 2,
-  "syncwheel_version": "0.22.1",
+  "syncwheel_version": "0.23.0",
   "tombstones": []
 }
