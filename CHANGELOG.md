@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Make stack and cherry-pick integration replays reproducible by carrying each
+  source commit's author and committer metadata, while disabling clone-local
+  rerere and non-reproducible GPG signing for replay commands. The first rebuild
+  after this release can rewrite existing replayed branch SHAs once to their
+  stable deterministic values; unchanged later rebuilds are no-ops.
+- Make `merge-stacks` integration merge metadata deterministic by deriving it
+  from the tip of each merged stack.
 - New manifests require every declared stack to participate in integration;
   `stack create` now includes it by default under that policy.
 - Add `manifest require-integration` to preview and apply an explicit migration

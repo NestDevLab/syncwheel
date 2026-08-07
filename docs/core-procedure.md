@@ -128,6 +128,13 @@ By default this replay is a linear `cherry-pick` of declared commits. If the
 manifest sets `integration.strategy` to `merge-stacks`, syncwheel instead
 merges each declared stack branch in manifest order with `--no-ff`.
 
+Replay carries the source commit's author and committer metadata and disables
+clone-local `rerere` and GPG signing for the command. Replaying the same commits
+onto the same base therefore preserves their SHAs. For `merge-stacks`, the merge
+commit metadata is derived from the tip of the stack being merged, so the merge
+history is deterministic as well. The first rebuild after upgrading may rewrite
+previous replayed SHAs once; an unchanged rebuild after that is a no-op.
+
 Dry-run:
 ```bash
 python3 scripts/syncwheel.py int rebuild --worktree <path> --dry-run
