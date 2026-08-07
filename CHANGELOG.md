@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add a hermetic, clone-per-execution replay determinism harness covering
+  replayed commit identity, moved bases, binary files, renames, file mode
+  changes, merge rejection, and the explicit stop policy for empty commits.
 - Make stack and cherry-pick integration replays reproducible by carrying each
   source commit's author and committer metadata, while disabling clone-local
   rerere and non-reproducible GPG signing for replay commands. The first rebuild
