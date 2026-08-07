@@ -78,12 +78,13 @@ Given the manifest, `syncwheel.py` can verify deterministically:
 - whether the PR branch contains the declared commits
 - whether integration contains the declared commits
 - whether integration references unknown stacks
+- whether replaying a declared commit onto its unchanged base preserves its SHA
 
 ## What still remains heuristic
 
 These remain outside pure Git determinism unless you add more metadata:
 - whether a commit should be split into multiple PRs
-- whether two different SHAs are conceptually the same fix after rewrite
+- whether independently created commits with different SHAs are conceptually the same fix
 - whether an integration-only reconciliation commit should become public
 
 For those cases, the manifest should be updated deliberately.

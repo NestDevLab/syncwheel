@@ -214,6 +214,44 @@ def with_git_identity(default_cwd, command):
     return ['git', *FALLBACK_GIT_IDENTITY_CONFIG, *command[1:]]
 
 
+def commit_identity_env(repo_root, commit):
+    result = git(
+        repo_root,
+        'show',
+        '-s',
+        '--format=%an%x00%ae%x00%aI%x00%cn%x00%ce%x00%cI',
+        commit,
+    )
+    values = result.stdout.rstrip('\n').split('\x00')
+    if len(values) != 6:
+        raise SyncwheelError(f'could not read commit identity for {commit}')
+    author_name, author_email, author_date, committer_name, committer_email, committer_date = values
+    return {
+        'GIT_AUTHOR_NAME': author_name,
+        'GIT_AUTHOR_EMAIL': author_email,
+        'GIT_AUTHOR_DATE': author_date,
+        'GIT_COMMITTER_NAME': committer_name,
+        'GIT_COMMITTER_EMAIL': committer_email,
+        'GIT_COMMITTER_DATE': committer_date,
+    }
+
+
+def replay_hygiene_env():
+    return {
+        'GIT_CONFIG_COUNT': '2',
+        'GIT_CONFIG_KEY_0': 'rerere.enabled',
+        'GIT_CONFIG_VALUE_0': 'false',
+        'GIT_CONFIG_KEY_1': 'commit.gpgsign',
+        'GIT_CONFIG_VALUE_1': 'false',
+    }
+
+
+def replay_commit_env(repo_root, commit):
+    env = replay_hygiene_env()
+    env.update(commit_identity_env(repo_root, commit))
+    return env
+
+
 def get_repo_root(explicit=None):
     cwd = explicit or os.getcwd()
     result = run(['git', 'rev-parse', '--show-toplevel'], cwd=cwd)
@@ -3958,6 +3996,17 @@ def quoted(parts):
     return ' '.join(shlex.quote(part) for part in parts)
 
 
+def quoted_with_env(env, argv):
+    assignments = [] if not env else [f'{key}={shlex.quote(value)}' for key, value in env.items()]
+    return ' '.join([*assignments, quoted(argv)])
+
+
+def command_argv_env(command):
+    if isinstance(command, tuple):
+        return command
+    return command, None
+
+
 def worktree_matches_branch(repo_root, branch, worktree):
     if worktree is None:
         return False
@@ -3977,21 +4026,24 @@ def materialize_pr_commands(repo_root, manifest, stack, worktree=None, in_place=
     if backup:
         commands.append(backup)
     if in_place:
-        commands.extend([
-            ['git', 'reset', '--hard', base],
-            ['git', 'cherry-pick', *commit_args],
-        ])
+        commands.append(['git', 'reset', '--hard', base])
+        commands.extend(
+            (['git', 'cherry-pick', commit], replay_commit_env(repo_root, commit))
+            for commit in commit_args
+        )
         return commands
     if worktree_matches_branch(repo_root, branch, worktree):
-        commands.extend([
-            ['git', '-C', str(worktree), 'reset', '--hard', base],
-            ['git', '-C', str(worktree), 'cherry-pick', *commit_args],
-        ])
+        commands.append(['git', '-C', str(worktree), 'reset', '--hard', base])
+        commands.extend(
+            (['git', '-C', str(worktree), 'cherry-pick', commit], replay_commit_env(repo_root, commit))
+            for commit in commit_args
+        )
         return commands
-    commands.extend([
-        ['git', 'worktree', 'add', '-B', branch, str(worktree), base],
-        ['git', '-C', str(worktree), 'cherry-pick', *commit_args],
-    ])
+    commands.append(['git', 'worktree', 'add', '-B', branch, str(worktree), base])
+    commands.extend(
+        (['git', '-C', str(worktree), 'cherry-pick', commit], replay_commit_env(repo_root, commit))
+        for commit in commit_args
+    )
     return commands
 
 
@@ -4004,38 +4056,43 @@ def materialize_stack_projection(repo_root, stack):
                 if branch_contains(worktree, 'HEAD', commit):
                     continue
                 command = ['git', '-C', str(worktree), 'cherry-pick', commit]
-                run(with_git_identity(repo_root, command), cwd=repo_root)
+                run(command, cwd=repo_root, env=replay_commit_env(repo_root, commit))
             return ref_tree(worktree, 'HEAD')
         finally:
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
 
 
-def integration_stack_commands(manifest, worktree=None, stack_ref_overrides=None):
+def integration_stack_commands(repo_root, manifest, worktree=None, stack_ref_overrides=None):
     integration = manifest['integration']
     stacks_by_id = stack_map(manifest)
     stack_ref_overrides = stack_ref_overrides or {}
     prefix = ['git'] if worktree is None else ['git', '-C', str(worktree)]
     strategy = integration.get('strategy', 'cherry-pick')
     if strategy == 'cherry-pick':
-        commits = []
+        commands = []
         for stack_id in integration['stacks']:
-            commits.extend(stack_integration_commits(stacks_by_id[stack_id]))
-        if not commits:
-            return []
-        return [[*prefix, 'cherry-pick', *commits]]
+            for commit in stack_integration_commits(stacks_by_id[stack_id]):
+                commands.append((
+                    [*prefix, 'cherry-pick', commit],
+                    replay_commit_env(repo_root, commit),
+                ))
+        return commands
     if strategy == 'merge-stacks':
         commands = []
         for stack_id in integration['stacks']:
             stack = stacks_by_id[stack_id]
             stack_ref = stack_ref_overrides.get(stack_id, stack['branch'])
-            commands.append([
-                *prefix,
-                'merge',
-                '--no-ff',
-                stack_ref,
-                '-m',
-                f"Merge stack '{stack_id}' into {integration['branch']}",
-            ])
+            commands.append((
+                [
+                    *prefix,
+                    'merge',
+                    '--no-ff',
+                    stack_ref,
+                    '-m',
+                    f"Merge stack '{stack_id}' into {integration['branch']}",
+                ],
+                replay_commit_env(repo_root, stack_ref),
+            ))
         return commands
     raise SyncwheelError(f"unsupported integration strategy: {strategy}")
 
@@ -4053,10 +4110,10 @@ def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=
                         if branch_contains(worktree, 'HEAD', commit):
                             continue
                         command = ['git', '-C', str(worktree), 'cherry-pick', commit]
-                        run(with_git_identity(repo_root, command), cwd=repo_root)
+                        run(command, cwd=repo_root, env=replay_commit_env(repo_root, commit))
             else:
-                for command in integration_stack_commands(manifest, worktree, stack_ref_overrides):
-                    run(with_git_identity(repo_root, command), cwd=repo_root)
+                for command, env in integration_stack_commands(repo_root, manifest, worktree, stack_ref_overrides):
+                    run(command, cwd=repo_root, env=env)
             return ref_tree(worktree, 'HEAD')
         finally:
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
@@ -4071,14 +4128,14 @@ def materialize_integration_commands(repo_root, manifest, worktree=None, in_plac
         commands.append(backup)
     if in_place:
         commands.append(['git', 'reset', '--hard', integration['base']])
-        commands.extend(integration_stack_commands(manifest))
+        commands.extend(integration_stack_commands(repo_root, manifest))
         return commands
     if worktree_matches_branch(repo_root, integration['branch'], worktree):
         commands.append(['git', '-C', str(worktree), 'reset', '--hard', integration['base']])
-        commands.extend(integration_stack_commands(manifest, worktree))
+        commands.extend(integration_stack_commands(repo_root, manifest, worktree))
         return commands
     commands.append(['git', 'worktree', 'add', '-B', integration['branch'], str(worktree), integration['base']])
-    commands.extend(integration_stack_commands(manifest, worktree))
+    commands.extend(integration_stack_commands(repo_root, manifest, worktree))
     return commands
 
 
@@ -4100,13 +4157,16 @@ def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=No
 
 def run_command_list(commands, repo_root, apply):
     if not apply:
-        for command in commands:
-            print(quoted(with_git_identity(repo_root, command)))
+        for entry in commands:
+            command, env = command_argv_env(entry)
+            effective_command = command if env is not None else with_git_identity(repo_root, command)
+            print(quoted_with_env(env, effective_command))
         return
-    for command in commands:
-        effective_command = with_git_identity(repo_root, command)
-        run(effective_command, cwd=repo_root)
-        print(quoted(effective_command))
+    for entry in commands:
+        command, env = command_argv_env(entry)
+        effective_command = command if env is not None else with_git_identity(repo_root, command)
+        run(effective_command, cwd=repo_root, env=env)
+        print(quoted_with_env(env, effective_command))
 
 
 def ensure_non_in_place_target_clean(repo_root, branch, worktree):

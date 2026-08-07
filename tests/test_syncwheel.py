@@ -174,6 +174,27 @@ class SyncwheelFixtureTest(unittest.TestCase):
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
 
+    def prepare_replay_stack(self):
+        base = self.git('rev-parse', 'main~1')
+        beta = self.git('rev-parse', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        gamma = self.git('rev-parse', 'main')
+        data = self.read_manifest()
+        data['stacks'] = [{
+            'id': 'replay',
+            'branch': 'pr/replay',
+            'base': base,
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'main',
+            'commits': [beta, gamma],
+        }]
+        data['integration']['stacks'] = ['replay']
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+        return base, [beta, gamma]
+
     def init_syncwheel_install_fixture(self):
         seed = self.tmp / 'syncwheel-seed'
         origin = self.tmp / 'syncwheel-origin.git'
@@ -672,6 +693,68 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertIn('git reset --hard main', result.stdout)
         self.assertNotIn('git cherry-pick', result.stdout)
+
+    def test_stack_rebuild_replays_same_commit_to_same_sha(self):
+        base, original_commits = self.prepare_replay_stack()
+        worktree = self.tmp / 'wt-replay'
+
+        self.run_cli('stack', 'rebuild', 'replay', '--worktree', str(worktree), expected=0)
+
+        self.assertEqual(
+            self.git('rev-list', '--reverse', f'{base}..pr/replay').splitlines(),
+            original_commits,
+        )
+
+    def test_stack_rebuild_twice_keeps_identical_tip(self):
+        self.prepare_replay_stack()
+        worktree = self.tmp / 'wt-replay'
+
+        self.run_cli('stack', 'rebuild', 'replay', '--worktree', str(worktree), expected=0)
+        first_tip = self.git('rev-parse', 'pr/replay')
+        self.run_cli('stack', 'rebuild', 'replay', '--worktree', str(worktree), expected=0)
+
+        self.assertEqual(self.git('rev-parse', 'pr/replay'), first_tip)
+
+    def test_stack_rebuild_dry_run_emits_one_pinned_cherry_pick_per_commit(self):
+        result = self.run_cli('stack', 'rebuild', 'feature-b', '--in-place', '--dry-run', expected=0)
+
+        cherry_pick_lines = [line for line in result.stdout.splitlines() if ' cherry-pick ' in line]
+
+        self.assertEqual(len(cherry_pick_lines), 2)
+        self.assertTrue(all('GIT_COMMITTER_DATE=' in line for line in cherry_pick_lines))
+
+    def test_stack_rebuild_disables_configured_gpg_signing(self):
+        _, original_commits = self.prepare_replay_stack()
+        worktree = self.tmp / 'wt-replay'
+        self.git('config', 'commit.gpgsign', 'true')
+
+        self.run_cli('stack', 'rebuild', 'replay', '--worktree', str(worktree), expected=0)
+        first_tip = self.git('rev-parse', 'pr/replay')
+        self.run_cli('stack', 'rebuild', 'replay', '--worktree', str(worktree), expected=0)
+
+        self.assertEqual(first_tip, original_commits[-1])
+        self.assertEqual(self.git('rev-parse', 'pr/replay'), first_tip)
+
+    def test_merge_stacks_rebuild_uses_deterministic_stack_tip_metadata(self):
+        base, _ = self.prepare_replay_stack()
+        stack_worktree = self.tmp / 'wt-replay'
+        self.run_cli('stack', 'rebuild', 'replay', '--worktree', str(stack_worktree), expected=0)
+
+        data = self.read_manifest()
+        data['integration'] = {
+            'branch': 'integration/replay',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': ['replay'],
+        }
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+        integration_worktree = self.tmp / 'wt-integration-replay'
+
+        self.run_cli('int', 'rebuild', '--worktree', str(integration_worktree), expected=0)
+        first_tip = self.git('rev-parse', 'integration/replay')
+        self.run_cli('int', 'rebuild', '--worktree', str(integration_worktree), expected=0)
+
+        self.assertEqual(self.git('rev-parse', 'integration/replay'), first_tip)
 
     def test_in_place_apply_requires_current_target_branch(self):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', expected=2)
