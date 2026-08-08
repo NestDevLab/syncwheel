@@ -198,6 +198,7 @@ class ReplayExecutionSeamTest(unittest.TestCase):
         return outputs
 
     def test_dry_run_output_is_byte_identical_to_origin_main_golden(self):
+        self.maxDiff = None
         self.assertEqual(self.dry_run_outputs(), self.golden_outputs())
 
     def test_non_plumbing_step_render_is_quoted_argv(self):
