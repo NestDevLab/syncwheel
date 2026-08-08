@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shutil
@@ -654,6 +656,85 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(full['publication_scope'], 'full')
         self.assertEqual(full['projection_status'], 'convergent')
         self.assertEqual(full['managed_refs']['refs/heads/pr/feature-a'], feature_sha)
+
+    def test_coordinated_promote_transfers_draft_branch_ownership_with_a_tombstone(self):
+        origin = self.create_remote()
+        first = self.clone(origin, 'promote-first')
+        self.init_coordinated(first)
+        draft_sha = self.commit_on_branch(first, 'scratch/draft-a', 'draft-a.txt')
+        self.run_cli(first, 'stack', 'create', 'draft-a', draft_sha, '--draft')
+
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(first)
+        old_branch = 'syncwheel/draft/draft-a'
+        old_ref = f'refs/heads/{old_branch}'
+        old_tip = module.ref_tip(first, old_branch)
+        with contextlib.redirect_stdout(io.StringIO()):
+            module.coordinated_publish(
+                first,
+                manifest,
+                manifest_path,
+                {old_ref: old_tip},
+                'seed:draft-a',
+                'partial',
+            )
+
+        candidate, candidate_path = module.load_manifest(first)
+        candidate_stack = candidate['stacks'][0]
+        candidate_stack['branch'] = 'pr/draft-a'
+        candidate_stack['state'] = 'published'
+        candidate_stack['publication'] = {'enabled': True}
+        self.git(first, 'branch', 'pr/draft-a', old_branch)
+        with self.assertRaisesRegex(module.SyncwheelError, 'changing a managed branch ownership'):
+            module.coordinated_publish(
+                first,
+                candidate,
+                candidate_path,
+                {'refs/heads/pr/draft-a': old_tip},
+                'unpermitted:rename',
+                'partial',
+            )
+        self.git(first, 'branch', '-D', 'pr/draft-a')
+
+        second = self.clone(origin, 'promote-second')
+        self.init_coordinated(second)
+        _, initial_state = self.remote_state(origin)
+        second_manifest, second_path = module.load_manifest(second)
+        module.save_manifest(
+            second_path,
+            module.apply_coordination_snapshot(second_manifest, initial_state['manifest']),
+        )
+
+        self.run_cli(first, 'stack', 'promote', 'draft-a')
+        _, promoted_state = self.remote_state(origin)
+        promoted = promoted_state['manifest']['stacks'][0]
+        self.assertEqual(promoted['branch'], 'pr/draft-a')
+        self.assertNotIn('state', promoted)
+        self.assertEqual(promoted_state['managed_refs']['refs/heads/pr/draft-a'], old_tip)
+        tombstone = next(item for item in promoted_state['tombstones'] if item['stack'] == 'draft-a')
+        self.assertEqual(tombstone['ref'], old_ref)
+        self.assertEqual(tombstone['remote_tip'], old_tip)
+        self.git(first, 'ls-remote', '--exit-code', 'origin', old_ref)
+
+        handoff = json.loads(self.run_cli(second, 'handoff', '--json').stdout)
+        self.assertEqual(handoff['coordination']['state_status'], 'published')
+        self.assertEqual(handoff['coordination']['manifest_relation'], 'local_proposal_differs')
+
+    def test_coordinated_demote_allows_only_the_explicit_state_transition(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'demote')
+        self.init_coordinated(repo)
+        feature_sha = self.commit_on_branch(repo, 'pr/feature-a', 'feature-a.txt')
+        self.run_cli(repo, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a')
+        self.run_cli(repo, 'stack', 'push', 'feature-a')
+
+        self.run_cli(repo, 'stack', 'demote', 'feature-a')
+
+        _, state = self.remote_state(origin)
+        draft = state['manifest']['stacks'][0]
+        self.assertEqual(draft['branch'], 'pr/feature-a')
+        self.assertEqual(draft['state'], 'draft')
+        self.assertEqual(state['managed_refs']['refs/heads/pr/feature-a'], feature_sha)
 
     def test_coordination_domains_cannot_claim_the_same_managed_ref(self):
         origin = self.create_remote()

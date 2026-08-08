@@ -545,6 +545,103 @@ class SyncwheelFixtureTest(unittest.TestCase):
         updated = self.read_manifest()
         self.assertIn('feature-required', updated['integration']['stacks'])
 
+    def test_stack_create_draft_materializes_its_branch_and_validates_without_warnings(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['defaults']['integration_membership'] = 'required'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        self.run_cli('stack', 'create', 'exploration', '--draft')
+
+        updated = self.read_manifest()
+        draft = next(stack for stack in updated['stacks'] if stack['id'] == 'exploration')
+        self.assertEqual(draft['branch'], 'syncwheel/draft/exploration')
+        self.assertEqual(draft['state'], 'draft')
+        self.assertEqual(draft['publication'], {'enabled': False})
+        self.assertEqual(self.git('rev-parse', 'syncwheel/draft/exploration'), self.git('rev-parse', 'main'))
+        self.assertIn('exploration', updated['integration']['stacks'])
+
+        validation = json.loads(self.run_cli('validate', '--json').stdout)
+        self.assertEqual(validation['errors'], [])
+        self.assertEqual(validation['warnings'], [])
+
+    def test_stack_push_rejects_a_draft_by_state(self):
+        self.run_cli('stack', 'create', 'exploration', '--draft')
+
+        failure = self.run_cli('stack', 'push', 'exploration', expected=2)
+
+        self.assertIn('state draft', failure.stderr)
+
+    def test_reconcile_push_rejects_a_draft_without_dropping_its_rebuild_action(self):
+        self.run_cli('stack', 'create', 'exploration', '--draft')
+        self.git('branch', '-D', 'syncwheel/draft/exploration')
+
+        failure = self.run_cli(
+            'reconcile',
+            '--no-fetch',
+            '--push',
+            '--stack',
+            'exploration',
+            '--skip-integration',
+            expected=2,
+        )
+
+        self.assertIn('rebuild_stack stack=exploration', failure.stdout)
+        self.assertIn('push_stack_refused stack=exploration', failure.stdout)
+        self.assertIn('state draft', failure.stderr)
+
+    def test_stack_promote_matches_a_directly_created_published_stack(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        original = self.read_manifest()
+
+        self.run_cli('stack', 'create', 'lifecycle')
+        direct = next(stack for stack in self.read_manifest()['stacks'] if stack['id'] == 'lifecycle')
+        manifest_path.write_text(json.dumps(original, indent=2) + '\n')
+
+        self.run_cli('stack', 'create', 'lifecycle', '--draft')
+        self.run_cli('stack', 'promote', 'lifecycle')
+        promoted = next(stack for stack in self.read_manifest()['stacks'] if stack['id'] == 'lifecycle')
+
+        self.assertEqual(promoted, direct)
+        self.assertEqual(self.git('rev-parse', 'pr/lifecycle'), self.git('rev-parse', 'main'))
+        self.assertNotEqual(
+            subprocess.run(
+                ['git', 'rev-parse', '--verify', '--quiet', 'syncwheel/draft/lifecycle'],
+                cwd=self.repo,
+                text=True,
+                capture_output=True,
+            ).returncode,
+            0,
+        )
+
+    def test_stack_promote_reports_a_retained_reconcile_worktree_path(self):
+        self.run_cli('stack', 'create', 'lifecycle', '--draft')
+        old_branch = 'syncwheel/draft/lifecycle'
+        retained = self.repo / '.syncwheel' / 'wt' / 'syncwheel-draft-lifecycle'
+        self.git('worktree', 'add', str(retained), old_branch)
+
+        result = self.run_cli('stack', 'promote', 'lifecycle')
+
+        self.assertTrue(retained.exists())
+        self.assertIn(f'worktree path retained (not moved): {retained}', result.stdout)
+        branch = subprocess.run(
+            ['git', '-C', str(retained), 'branch', '--show-current'],
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+        self.assertEqual(branch, 'pr/lifecycle')
+
+    def test_stack_demote_refuses_an_open_github_pull_request(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['stacks'][0]['github'] = {'pr': 42}
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        failure = self.run_cli('stack', 'demote', 'feature-a', expected=2)
+
+        self.assertIn('github.pr', failure.stderr)
+
     def test_required_membership_rejects_excluded_stack(self):
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
         manifest = self.read_manifest()

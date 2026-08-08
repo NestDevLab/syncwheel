@@ -14,6 +14,12 @@
   from the tip of each merged stack.
 - Add draft and published stack state with a backwards-compatible published
   default, coordination-safe draft state transfer, and derived publication state.
+- Add materialized `stack create --draft`, `stack promote`, and `stack demote`
+  lifecycle commands. Promotion transfers managed branch ownership through an
+  explicit active-active coordination permission, publishes a tombstone for the
+  retained draft ref, and reports an old-name reconcile worktree path instead
+  of moving it. Draft publication is refused while draft rebuilds remain
+  available.
 - New manifests require every declared stack to participate in integration;
   `stack create` now includes it by default under that policy.
 - Add `manifest require-integration` to preview and apply an explicit migration
