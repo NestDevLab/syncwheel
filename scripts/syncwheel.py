@@ -3615,6 +3615,14 @@ def resolve_int_rebuild_location(repo_root, manifest, args):
     return default_worktree_path(repo_root, integration['branch']), False
 
 
+def resolve_replay_mode(location):
+    """Map an already-resolved replay location to the current execution mode."""
+    worktree, in_place = location
+    if in_place:
+        return 'in-place', None
+    return 'desk', worktree
+
+
 def collect_repo_snapshot(repo_root, manifest):
     defaults = manifest['defaults'] if manifest else {}
     canonical_remote = defaults.get('canonical_remote', 'origin')
@@ -4157,127 +4165,252 @@ def worktree_matches_branch(repo_root, branch, worktree):
     return found.resolve() == Path(worktree).resolve()
 
 
-def materialize_pr_commands(repo_root, manifest, stack, worktree=None, in_place=False, timestamp=None):
-    branch = stack['branch']
-    base = stack['base']
-    commit_args = stack['commits']
-    timestamp = timestamp or syncwheel_timestamp()
-    commands = [['git', 'fetch', '--all', '--prune']]
-    backup = backup_branch_command(repo_root, branch, timestamp)
-    if backup:
-        commands.append(backup)
-    if in_place:
-        commands.append(['git', 'reset', '--hard', base])
-        commands.extend(
-            (['git', 'cherry-pick', commit], replay_commit_env(repo_root, commit))
-            for commit in commit_args
-        )
-        return commands
-    if worktree_matches_branch(repo_root, branch, worktree):
-        commands.append(['git', '-C', str(worktree), 'reset', '--hard', base])
-        commands.extend(
-            (['git', '-C', str(worktree), 'cherry-pick', commit], replay_commit_env(repo_root, commit))
-            for commit in commit_args
-        )
-        return commands
-    commands.append(['git', 'worktree', 'add', '-B', branch, str(worktree), base])
-    commands.extend(
-        (['git', '-C', str(worktree), 'cherry-pick', commit], replay_commit_env(repo_root, commit))
-        for commit in commit_args
-    )
-    return commands
+def replay_step(kind, argv=None, env=None, render=None):
+    return {
+        'kind': kind,
+        'argv': argv,
+        'env': env,
+        'render': render,
+    }
 
 
-def materialize_stack_projection(repo_root, stack):
-    with tempfile.TemporaryDirectory(prefix='syncwheel-stack-projection-') as tmp:
-        worktree = Path(tmp)
-        git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), stack['base'])
-        try:
-            for commit in stack['commits']:
-                if branch_contains(worktree, 'HEAD', commit):
-                    continue
-                command = ['git', '-C', str(worktree), 'cherry-pick', commit]
-                run(command, cwd=repo_root, env=replay_commit_env(repo_root, commit))
-            return ref_tree(worktree, 'HEAD')
-        finally:
-            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+def replay_exec_step(argv, env=None):
+    return replay_step('exec', argv=argv, env=env, render=quoted(argv))
 
 
-def integration_stack_commands(repo_root, manifest, worktree=None, stack_ref_overrides=None):
-    integration = manifest['integration']
-    stacks_by_id = stack_map(manifest)
-    stack_ref_overrides = stack_ref_overrides or {}
-    prefix = ['git'] if worktree is None else ['git', '-C', str(worktree)]
-    strategy = integration.get('strategy', 'cherry-pick')
-    if strategy == 'cherry-pick':
-        commands = []
+def replay_step_render(step):
+    render = step.get('render')
+    if step['kind'] == 'exec':
+        render = render if render is not None else quoted(step['argv'])
+        env = step.get('env')
+        if not env:
+            return render
+        assignments = [f'{key}={shlex.quote(value)}' for key, value in env.items()]
+        return ' '.join([*assignments, render])
+    return render or ''
+
+
+def replay_target(
+    stack=None,
+    integration=None,
+    worktree=None,
+    return_tree=False,
+    skip_contained=False,
+    stack_ref_overrides=None,
+):
+    # Projections skip contained commits; rebuilds replay their declared history.
+    if stack is not None:
+        return {
+            'kind': 'stack',
+            'stack': stack,
+            'worktree': worktree,
+            'return_tree': return_tree,
+            'skip_contained': skip_contained,
+        }
+    return {
+        'kind': 'integration',
+        'integration': integration,
+        'worktree': worktree,
+        'return_tree': return_tree,
+        'skip_contained': skip_contained,
+        'stack_ref_overrides': stack_ref_overrides or {},
+    }
+
+
+def replay_plan(repo_root, manifest, target, mode):
+    """Build the one current porcelain replay plan without executing it."""
+    if mode not in ('desk', 'in-place'):
+        raise SyncwheelError(f'unsupported replay mode: {mode}')
+
+    projection = target.get('return_tree', False)
+    worktree = target.get('worktree')
+    if target['kind'] == 'stack':
+        stack = target['stack']
+        branch = stack['branch']
+        base = stack['base']
+        replay_kind = 'stack'
+        commits = stack['commits']
+        integration = None
+    elif target['kind'] == 'integration':
+        integration = target['integration']
+        branch = integration['branch']
+        base = integration['base']
+        replay_kind = 'integration'
+        commits = None
+    else:
+        raise SyncwheelError(f"unsupported replay target: {target['kind']}")
+
+    plan_target = {
+        'kind': replay_kind,
+        'branch': branch,
+        'base': base,
+        'worktree': str(worktree) if worktree is not None else None,
+        'return_tree': projection,
+        'skip_contained': target.get('skip_contained', False),
+        'emit_output': not projection,
+    }
+    steps = []
+    if projection:
+        if mode != 'desk' or worktree is None:
+            raise SyncwheelError('tree projection requires a desk worktree')
+        steps.append(replay_exec_step([
+            'git', 'worktree', 'add', '--detach', '--quiet', str(worktree), base,
+        ]))
+    else:
+        timestamp = syncwheel_timestamp()
+        steps.append(replay_exec_step(['git', 'fetch', '--all', '--prune']))
+        backup = backup_branch_command(repo_root, branch, timestamp)
+        if backup:
+            steps.append(replay_exec_step(backup))
+        if mode == 'in-place':
+            steps.append(replay_exec_step(['git', 'reset', '--hard', base]))
+        elif worktree_matches_branch(repo_root, branch, worktree):
+            steps.append(replay_exec_step(['git', '-C', str(worktree), 'reset', '--hard', base]))
+        elif worktree is not None:
+            steps.append(replay_exec_step(['git', 'worktree', 'add', '-B', branch, str(worktree), base]))
+        else:
+            raise SyncwheelError('desk replay requires a worktree path')
+
+    prefix = ['git'] if mode == 'in-place' else ['git', '-C', str(worktree)]
+    if replay_kind == 'stack':
+        for commit in commits:
+            steps.append(replay_exec_step(
+                [*prefix, 'cherry-pick', commit],
+                replay_commit_env(repo_root, commit),
+            ))
+    elif integration.get('strategy', 'cherry-pick') == 'cherry-pick':
+        stacks_by_id = stack_map(manifest)
         for stack_id in integration['stacks']:
             for commit in stack_integration_commits(stacks_by_id[stack_id]):
-                commands.append((
+                steps.append(replay_exec_step(
                     [*prefix, 'cherry-pick', commit],
                     replay_commit_env(repo_root, commit),
                 ))
-        return commands
-    if strategy == 'merge-stacks':
-        commands = []
+    elif integration.get('strategy') == 'merge-stacks':
+        stacks_by_id = stack_map(manifest)
+        stack_ref_overrides = target.get('stack_ref_overrides') or {}
         for stack_id in integration['stacks']:
             stack = stacks_by_id[stack_id]
             stack_ref = stack_ref_overrides.get(stack_id, stack['branch'])
-            commands.append((
+            steps.append(replay_exec_step(
                 [
                     *prefix,
                     'merge',
                     '--no-ff',
                     stack_ref,
                     '-m',
-                    f"Merge stack '{stack_id}' into {integration['branch']}",
+                    f"Merge stack '{stack_id}' into {branch}",
                 ],
                 replay_commit_env(repo_root, stack_ref),
             ))
-        return commands
-    raise SyncwheelError(f"unsupported integration strategy: {strategy}")
+    else:
+        raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
+
+    return {
+        'mode': mode,
+        'target': plan_target,
+        'steps': steps,
+        'fallback_from': None,
+    }
+
+
+def execute_replay(repo_root, plan, apply):
+    """Apply a replay plan or render its dry-run transcript.
+
+    Dry-run output is an executable POSIX shell transcript. For every current
+    non-plumbing ``exec`` step, ``render`` is byte-identical to ``quoted(argv)``;
+    when a step has an environment, its POSIX assignments prefix that render.
+    """
+    target = plan['target']
+    branch = target['branch']
+    before_tip = ref_tip(repo_root, branch)
+    result = {
+        'status': 'applied' if apply else 'planned',
+        'mode': plan['mode'],
+        'branch': branch,
+        'before_tip': before_tip,
+        'after_tip': before_tip,
+        'conflict': None,
+    }
+    if not apply:
+        for step in plan['steps']:
+            render = replay_step_render(step)
+            if render:
+                print(render)
+        return result
+
+    cleanup_worktree = target['worktree'] if target.get('return_tree') else None
+    try:
+        for step in plan['steps']:
+            if step['kind'] == 'exec':
+                argv = step['argv']
+                env = step['env']
+                if target.get('skip_contained') and 'cherry-pick' in argv:
+                    command_cwd = git_command_cwd(repo_root, argv)
+                    if branch_contains(command_cwd, 'HEAD', argv[-1]):
+                        continue
+                effective_argv = argv if env is not None else with_git_identity(repo_root, argv)
+                run(effective_argv, cwd=repo_root, env=env)
+            elif step['kind'] == 'shell':
+                process_env = os.environ.copy()
+                if step['env']:
+                    process_env.update(step['env'])
+                result_shell = subprocess.run(
+                    step['render'],
+                    cwd=repo_root,
+                    shell=True,
+                    text=True,
+                    capture_output=True,
+                    env=process_env,
+                )
+                if result_shell.returncode != 0:
+                    raise SyncwheelError(result_shell.stderr.strip() or result_shell.stdout.strip())
+            elif step['kind'] != 'note':
+                raise SyncwheelError(f"unsupported replay step: {step['kind']}")
+            if target['emit_output']:
+                render = replay_step_render(step)
+                if render:
+                    print(render)
+        if target.get('return_tree'):
+            result['tree'] = ref_tree(target['worktree'], 'HEAD')
+        result['after_tip'] = ref_tip(repo_root, branch)
+        return result
+    finally:
+        if cleanup_worktree:
+            git(repo_root, 'worktree', 'remove', '--force', cleanup_worktree, check=False)
+
+
+def materialize_stack_projection(repo_root, stack):
+    with tempfile.TemporaryDirectory(prefix='syncwheel-stack-projection-') as tmp:
+        plan = replay_plan(
+            repo_root,
+            None,
+            replay_target(
+                stack=stack,
+                worktree=Path(tmp),
+                return_tree=True,
+                skip_contained=True,
+            ),
+            'desk',
+        )
+        return execute_replay(repo_root, plan, True)['tree']
 
 
 def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
-    integration = manifest['integration']
     with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
-        worktree = Path(tmp)
-        git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), integration['base'])
-        try:
-            if integration.get('strategy', 'cherry-pick') == 'cherry-pick':
-                stacks_by_id = stack_map(manifest)
-                for stack_id in integration['stacks']:
-                    for commit in stack_integration_commits(stacks_by_id[stack_id]):
-                        if branch_contains(worktree, 'HEAD', commit):
-                            continue
-                        command = ['git', '-C', str(worktree), 'cherry-pick', commit]
-                        run(command, cwd=repo_root, env=replay_commit_env(repo_root, commit))
-            else:
-                for command, env in integration_stack_commands(repo_root, manifest, worktree, stack_ref_overrides):
-                    run(command, cwd=repo_root, env=env)
-            return ref_tree(worktree, 'HEAD')
-        finally:
-            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
-
-
-def materialize_integration_commands(repo_root, manifest, worktree=None, in_place=False, timestamp=None):
-    integration = manifest['integration']
-    timestamp = timestamp or syncwheel_timestamp()
-    commands = [['git', 'fetch', '--all', '--prune']]
-    backup = backup_branch_command(repo_root, integration['branch'], timestamp)
-    if backup:
-        commands.append(backup)
-    if in_place:
-        commands.append(['git', 'reset', '--hard', integration['base']])
-        commands.extend(integration_stack_commands(repo_root, manifest))
-        return commands
-    if worktree_matches_branch(repo_root, integration['branch'], worktree):
-        commands.append(['git', '-C', str(worktree), 'reset', '--hard', integration['base']])
-        commands.extend(integration_stack_commands(repo_root, manifest, worktree))
-        return commands
-    commands.append(['git', 'worktree', 'add', '-B', integration['branch'], str(worktree), integration['base']])
-    commands.extend(integration_stack_commands(repo_root, manifest, worktree))
-    return commands
+        plan = replay_plan(
+            repo_root,
+            manifest,
+            replay_target(
+                integration=manifest['integration'],
+                worktree=Path(tmp),
+                return_tree=True,
+                skip_contained=True,
+                stack_ref_overrides=stack_ref_overrides,
+            ),
+            'desk',
+        )
+        return execute_replay(repo_root, plan, True)['tree']
 
 
 def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=None, timestamp=None):
@@ -5244,14 +5377,16 @@ def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
-    before_tip = ref_tip(repo_root, stack['branch'])
-    worktree, in_place = resolve_stack_rebuild_location(repo_root, stack, args)
-    if not args.dry_run and in_place:
+    mode, worktree = resolve_replay_mode(resolve_stack_rebuild_location(repo_root, stack, args))
+    if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, stack['branch'])
-    if not args.dry_run and not in_place:
+    if not args.dry_run and mode != 'in-place':
         ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
-    commands = materialize_pr_commands(repo_root, manifest, stack, worktree, in_place)
-    run_command_list(commands, repo_root, not args.dry_run)
+    result = execute_replay(
+        repo_root,
+        replay_plan(repo_root, manifest, replay_target(stack=stack, worktree=worktree), mode),
+        not args.dry_run,
+    )
     if not args.dry_run:
         append_ledger_event(
             repo_root,
@@ -5261,8 +5396,8 @@ def command_stack_rebuild(args):
                 'branch': stack['branch'],
                 'base': stack['base'],
                 'integration_branch': stack.get('integration_branch'),
-                'before_tip': before_tip,
-                'after_tip': ref_tip(repo_root, stack['branch']),
+                'before_tip': result['before_tip'],
+                'after_tip': result['after_tip'],
             },
             manifest_path,
         )
@@ -5907,11 +6042,14 @@ def command_reconcile(args):
     for action in actions:
         if action['type'] == 'rebuild_stack':
             stack = require_stack(manifest, action['stack'])
-            before_tip = ref_tip(repo_root, stack['branch'])
             worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
             ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
-            commands = materialize_pr_commands(repo_root, manifest, stack, worktree, False)
-            run_command_list(commands, repo_root, True)
+            mode, worktree = resolve_replay_mode((worktree, False))
+            result = execute_replay(
+                repo_root,
+                replay_plan(repo_root, manifest, replay_target(stack=stack, worktree=worktree), mode),
+                True,
+            )
             append_ledger_event(
                 repo_root,
                 'stack_rebuilt',
@@ -5920,8 +6058,8 @@ def command_reconcile(args):
                     'branch': stack['branch'],
                     'base': stack['base'],
                     'integration_branch': stack.get('integration_branch'),
-                    'before_tip': before_tip,
-                    'after_tip': ref_tip(repo_root, stack['branch']),
+                    'before_tip': result['before_tip'],
+                    'after_tip': result['after_tip'],
                 },
                 manifest_path,
             )
@@ -5993,7 +6131,6 @@ def command_reconcile(args):
             )
         elif action['type'] == 'rebuild_integration':
             integration = manifest['integration']
-            before_tip = ref_tip(repo_root, integration['branch'])
             use_primary_checkout = get_current_branch(repo_root) == integration['branch']
             if args.in_place_integration or use_primary_checkout:
                 if get_current_branch(repo_root) != integration['branch']:
@@ -6008,15 +6145,24 @@ def command_reconcile(args):
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
                 in_place = False
-            commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
-            run_command_list(commands, repo_root, True)
+            mode, worktree = resolve_replay_mode((worktree, in_place))
+            result = execute_replay(
+                repo_root,
+                replay_plan(
+                    repo_root,
+                    manifest,
+                    replay_target(integration=integration, worktree=worktree),
+                    mode,
+                ),
+                True,
+            )
             append_ledger_event(
                 repo_root,
                 'integration_rebuilt',
                 {
                     'branch': integration['branch'],
-                    'before_tip': before_tip,
-                    'after_tip': ref_tip(repo_root, integration['branch']),
+                    'before_tip': result['before_tip'],
+                    'after_tip': result['after_tip'],
                     'stacks': list(integration.get('stacks', [])),
                 },
                 manifest_path,
@@ -6212,22 +6358,30 @@ def command_int_align_remote(args):
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    before_tip = ref_tip(repo_root, manifest['integration']['branch'])
-    worktree, in_place = resolve_int_rebuild_location(repo_root, manifest, args)
-    if not args.dry_run and in_place:
+    integration = manifest['integration']
+    mode, worktree = resolve_replay_mode(resolve_int_rebuild_location(repo_root, manifest, args))
+    if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, manifest['integration']['branch'])
-    if not args.dry_run and not in_place:
+    if not args.dry_run and mode != 'in-place':
         ensure_non_in_place_target_clean(repo_root, manifest['integration']['branch'], worktree)
-    commands = materialize_integration_commands(repo_root, manifest, worktree, in_place)
-    run_command_list(commands, repo_root, not args.dry_run)
+    result = execute_replay(
+        repo_root,
+        replay_plan(
+            repo_root,
+            manifest,
+            replay_target(integration=integration, worktree=worktree),
+            mode,
+        ),
+        not args.dry_run,
+    )
     if not args.dry_run:
         append_ledger_event(
             repo_root,
             'integration_rebuilt',
             {
                 'branch': manifest['integration']['branch'],
-                'before_tip': before_tip,
-                'after_tip': ref_tip(repo_root, manifest['integration']['branch']),
+                'before_tip': result['before_tip'],
+                'after_tip': result['after_tip'],
                 'stacks': list(manifest['integration'].get('stacks', [])),
             },
             manifest_path,

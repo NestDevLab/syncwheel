@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Introduce an internal replay plan/execution seam while preserving the current
+  porcelain replay behavior and dry-run transcript byte-for-byte.
 - Add a hermetic, clone-per-execution replay determinism harness covering
   replayed commit identity, moved bases, binary files, renames, file mode
   changes, merge rejection, and the explicit stop policy for empty commits.
