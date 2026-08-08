@@ -565,6 +565,129 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(validation['errors'], [])
         self.assertEqual(validation['warnings'], [])
 
+    def test_stack_capture_integration_materializes_a_draft_without_a_worktree(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['defaults']['integration_membership'] = 'required'
+        manifest['integration'] = {
+            'branch': 'integration/capture',
+            'base': 'main',
+            'stacks': [],
+        }
+        manifest['stacks'] = []
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('branch', 'integration/capture', 'main')
+        self.git('switch', '-q', 'integration/capture')
+        self.run_cli('stack', 'create', 'exploration', '--draft')
+
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: capture gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        worktrees_before_capture = self.git('worktree', 'list', '--porcelain')
+
+        result = self.run_cli('stack', 'capture-integration', 'exploration', 'HEAD')
+
+        self.assertIn('exploration: captured 1 integration commit', result.stdout)
+        self.assertEqual(self.git('worktree', 'list', '--porcelain'), worktrees_before_capture)
+        updated = self.read_manifest()
+        draft = next(stack for stack in updated['stacks'] if stack['id'] == 'exploration')
+        self.assertEqual(draft['commits'], [gamma])
+        self.assertEqual(self.git('branch', '--contains', gamma, 'syncwheel/draft/exploration'), 'syncwheel/draft/exploration')
+
+        self.git('switch', '-q', 'main')
+        integration_worktree = self.tmp / 'wt-capture-integration'
+        self.run_cli('int', 'rebuild', '--worktree', str(integration_worktree))
+        self.git('worktree', 'remove', '--force', str(integration_worktree))
+        self.git('switch', '-q', 'integration/capture')
+
+        validation = json.loads(self.run_cli('validate', '--json').stdout)
+        self.assertEqual(validation['details']['integration']['unmapped_commits'], [])
+        self.assertTrue(self.git('merge-base', '--is-ancestor', gamma, 'syncwheel/draft/exploration') == '')
+
+    def test_stack_capture_integration_rolls_back_manifest_when_projection_fails(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        alpha = self.git('rev-parse', 'main~1')
+        manifest['defaults']['integration_membership'] = 'required'
+        manifest['integration'] = {
+            'branch': 'integration/capture-conflict',
+            'base': alpha,
+            'stacks': ['feature-b'],
+        }
+        feature_b = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
+        feature_b['base'] = alpha
+        feature_b['integration_branch'] = 'integration/capture-conflict'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('branch', 'integration/capture-conflict', 'main')
+        self.git('switch', '-q', 'integration/capture-conflict')
+        self.run_cli('stack', 'create', 'exploration', '--draft', '--base', alpha)
+
+        Path(self.repo / 'beta.txt').write_text('beta changed on integration\n')
+        self.git('add', 'beta.txt')
+        self.git('commit', '-q', '-m', 'feat: integration-only beta follow-up')
+        before_capture = manifest_path.read_text()
+
+        failure = self.run_cli('stack', 'capture-integration', 'exploration', 'HEAD', expected=2)
+
+        self.assertIn('projection failed after adding commits', failure.stderr)
+        self.assertEqual(manifest_path.read_text(), before_capture)
+        updated = self.read_manifest()
+        draft = next(stack for stack in updated['stacks'] if stack['id'] == 'exploration')
+        self.assertEqual(draft['commits'], [])
+
+    def test_stack_capture_integration_draft_uses_its_branch_for_merge_stacks(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['defaults']['integration_membership'] = 'required'
+        manifest['integration'] = {
+            'branch': 'integration/capture-merge',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': [],
+        }
+        manifest['stacks'] = []
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('branch', 'integration/capture-merge', 'main')
+        self.git('switch', '-q', 'integration/capture-merge')
+        self.run_cli('stack', 'create', 'exploration', '--draft')
+
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: merge captured gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        self.run_cli('stack', 'capture-integration', 'exploration', 'HEAD')
+
+        self.git('switch', '-q', 'main')
+        integration_worktree = self.tmp / 'wt-capture-merge'
+        self.run_cli('int', 'rebuild', '--worktree', str(integration_worktree))
+        self.assertEqual(self.git('merge-base', '--is-ancestor', gamma, 'integration/capture-merge'), '')
+        self.git('worktree', 'remove', '--force', str(integration_worktree))
+
+    def test_integration_diagnostics_offer_capture_into_a_new_draft(self):
+        self.git('branch', 'integration/capture-diagnostics', 'main')
+        self.git('switch', '-q', 'integration/capture-diagnostics')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: diagnose gamma')
+
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['integration']['branch'] = 'integration/capture-diagnostics'
+        manifest['integration']['base'] = 'main'
+        manifest['integration']['stacks'] = []
+        manifest['stacks'] = []
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        plan = json.loads(self.run_cli('plan', '--json').stdout)
+        action = plan[-1]
+        self.assertEqual(action['remedy']['type'], 'capture_integration_into_new_draft')
+        self.assertIn('stack capture-integration <new-stack-id>', action['remedy']['commands'][1])
+
+        check = self.run_cli('check', '--no-fetch')
+        self.assertIn('remedy: capture into a new draft stack:', check.stdout)
+        self.assertIn('stack capture-integration <new-stack-id>', check.stdout)
+
     def test_stack_push_rejects_a_draft_by_state(self):
         self.run_cli('stack', 'create', 'exploration', '--draft')
 

@@ -39,6 +39,21 @@ python3 scripts/syncwheel.py s new -p alice feature-a --branch pr/alice/feature-
 python3 scripts/syncwheel.py s set -p alice feature-a origin/main..HEAD
 ```
 
+For an integration-first commit whose future PR is not decided, create a draft
+and capture the exact integration commit rather than using `stack add` followed
+by a broad reconcile:
+
+```bash
+python3 scripts/syncwheel.py stack create exploration --draft \
+  --purpose "Classify integration-first work"
+python3 scripts/syncwheel.py stack capture-integration exploration <commit>...
+```
+
+The command validates that the commit starts from the current integration
+projection, validates the revised stack projection before moving a ref, rebuilds
+only the named branch with normal recovery/ledger handling, and leaves
+integration unchanged. A failed projection leaves the saved manifest unchanged.
+
 New manifests require every declared stack to participate in integration. For a
 legacy manifest, classify absorbed stacks first, then use `manifest
 require-integration --apply` before creating more work.

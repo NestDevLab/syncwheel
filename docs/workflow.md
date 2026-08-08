@@ -54,6 +54,19 @@ repair. `auto` remains desk-compatible in this release; use `--replay-mode
 desk --worktree <path>` or `--in-place` for the existing deliberate worktree choices. `plumbing`
 is listed for forward compatibility but is not available yet.
 
+If `plan` identifies an integration commit with no owner and the PR shape is
+still undecided, create a draft and capture it instead of leaving it on
+integration:
+
+```bash
+python3 scripts/syncwheel.py stack create exploration --draft \
+  --purpose "Classify integration-first work"
+python3 scripts/syncwheel.py stack capture-integration exploration <commit>...
+```
+
+Capture rebuilds only the draft source branch. It does not mutate integration;
+the next `int rebuild` reprojects integration from the now-owned commit.
+
 ## Manifest semantics
 
 - `defaults.base_ref`: canonical ref used as replay base
@@ -61,6 +74,10 @@ is listed for forward compatibility but is not available yet.
 - `integration.stacks`: replay order of logical stacks into integration
 - `stacks[].branch`: PR branch for that stack
 - `stacks[].commits`: exact commit list for that logical stack
+
+For a captured integration-first commit, the manifest retains the integration
+SHA. Deterministic replay on an unchanged base reproduces that SHA on the stack
+branch, so both branch and integration containment checks converge.
 
 `validate` also reports non-merge commits that exist on integration after
 `integration.base` but are not declared in any stack. These commits need a

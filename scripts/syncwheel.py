@@ -3866,10 +3866,20 @@ def build_plan(repo_root, manifest, validation):
                 'meta': item.get('meta', {}),
             })
     if details['integration'].get('unmapped_commits'):
+        commits = details['integration']['unmapped_commits']
         actions.append({
             'type': 'classify_integration_commits',
             'branch': integration['branch'],
-            'commits': details['integration']['unmapped_commits'],
+            'commits': commits,
+            'remedy': {
+                'type': 'capture_integration_into_new_draft',
+                'commands': [
+                    'syncwheel stack create --draft <new-stack-id> '
+                    '--purpose "Classify integration-first work"',
+                    'syncwheel stack capture-integration <new-stack-id> '
+                    + ' '.join(commit_short_sha(repo_root, commit) for commit in commits),
+                ],
+            },
         })
     return actions
 
@@ -4087,6 +4097,15 @@ def integration_commit_diagnostics(repo_root, manifest, validation, manifest_pat
             local_branches,
             remote_branches,
         )
+        capture_draft_remedy = {
+            'type': 'capture_integration_into_new_draft',
+            'commands': [
+                'syncwheel stack create --draft <new-stack-id> '
+                '--purpose "Classify integration-first work"',
+                'syncwheel stack capture-integration <new-stack-id> '
+                + commit_short_sha(repo_root, commit),
+            ],
+        }
         suggested_commands = []
         notes = []
         if related_declared:
@@ -4121,6 +4140,7 @@ def integration_commit_diagnostics(repo_root, manifest, validation, manifest_pat
             'related_declared_commits': related_declared,
             'notes': notes,
             'suggested_commands': suggested_commands,
+            'remedy': capture_draft_remedy,
         })
     return diagnostics
 
@@ -4166,6 +4186,10 @@ def print_integration_commit_diagnostics(diagnostics):
             print('    notes:')
             for note in item['notes']:
                 print(f'      - {note}')
+        if item.get('remedy'):
+            print('    remedy: capture into a new draft stack:')
+            for command in item['remedy']['commands']:
+                print(f'      - {command}')
         print('    suggested commands:')
         for command in item['suggested_commands']:
             print(f'      - {command}')
@@ -5460,30 +5484,33 @@ def command_stack_add(args):
     return 0
 
 
-def command_stack_rebuild(args):
-    repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    stack = require_stack(manifest, args.stack)
-    mode, worktree = resolve_replay_mode(
-        resolve_stack_rebuild_location(repo_root, stack, args),
-        requested_replay_mode(args),
-    )
-    if not args.dry_run and mode == 'in-place':
+def rebuild_stack_from_manifest(
+    repo_root,
+    manifest,
+    manifest_path,
+    stack,
+    *,
+    dry_run,
+    mode,
+    worktree,
+):
+    """Rebuild one stack through the shared replay executor and ledger path."""
+    if not dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, stack['branch'])
-    if not args.dry_run and mode == 'ephemeral':
+    if not dry_run and mode == 'ephemeral':
         ensure_non_in_place_target_clean(
             repo_root,
             stack['branch'],
             find_worktree_for_branch(repo_root, stack['branch']),
         )
-    if not args.dry_run and mode == 'desk':
+    if not dry_run and mode == 'desk':
         ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
     result = execute_replay(
         repo_root,
         replay_plan(repo_root, manifest, replay_target(stack=stack, worktree=worktree), mode),
-        not args.dry_run,
+        not dry_run,
     )
-    if not args.dry_run:
+    if not dry_run:
         append_ledger_event(
             repo_root,
             'stack_rebuilt',
@@ -5497,6 +5524,87 @@ def command_stack_rebuild(args):
             },
             manifest_path,
         )
+    return result
+
+
+def command_stack_capture_integration(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+
+    # Expand every requested spec before changing stack ownership or refs.
+    captured_commits = []
+    for spec in args.specs:
+        captured_commits.extend(commit_list_for_spec(repo_root, spec))
+
+    previous_commits = list(stack['commits'])
+    previous_full_shas = {
+        commit_full_sha(repo_root, commit)
+        for commit in previous_commits
+        if commit_exists(repo_root, commit)
+    }
+    added_commits = []
+    for commit in captured_commits:
+        full_sha = commit_full_sha(repo_root, commit)
+        if full_sha not in previous_full_shas:
+            added_commits.append(full_sha)
+            previous_full_shas.add(full_sha)
+
+    # This guard must remain before stack mutation: integration-first commits
+    # can only be captured from the current manifest projection.
+    validate_integration_first_base(repo_root, manifest, added_commits)
+
+    commits = []
+    seen_commits = set()
+    for commit in [*previous_commits, *captured_commits]:
+        full_sha = commit_full_sha(repo_root, commit)
+        if full_sha not in seen_commits:
+            seen_commits.add(full_sha)
+            commits.append(full_sha)
+    stack['commits'] = commits
+    validate_stack_update(repo_root, manifest, stack, previous_commits)
+
+    # Capture owns an integration SHA, so it must materialize the same SHA on
+    # the stack ref before the manifest can record that ownership. The shared
+    # executor creates the usual backup ref and ledger event; R4's ephemeral
+    # mode removes its detached worktree before returning.
+    rebuild_stack_from_manifest(
+        repo_root,
+        manifest,
+        manifest_path,
+        stack,
+        dry_run=False,
+        mode='ephemeral',
+        worktree=None,
+    )
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        manifest,
+        'stack_capture_integration',
+        {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
+    )
+    print(f"{args.stack}: captured {len(added_commits)} integration commit(s)")
+    return 0
+
+
+def command_stack_rebuild(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    mode, worktree = resolve_replay_mode(
+        resolve_stack_rebuild_location(repo_root, stack, args),
+        requested_replay_mode(args),
+    )
+    rebuild_stack_from_manifest(
+        repo_root,
+        manifest,
+        manifest_path,
+        stack,
+        dry_run=args.dry_run,
+        mode=mode,
+        worktree=worktree,
+    )
     return 0
 
 
@@ -7353,6 +7461,16 @@ def build_parser():
     stack_add_p.add_argument('stack')
     stack_add_p.add_argument('specs', nargs='+')
     stack_add_p.set_defaults(func=command_stack_add)
+
+    stack_capture_p = stack_sub.add_parser(
+        'capture-integration',
+        aliases=['capture'],
+        parents=[common],
+        help='assign integration-first commits to a stack and materialize its branch',
+    )
+    stack_capture_p.add_argument('stack')
+    stack_capture_p.add_argument('specs', nargs='+')
+    stack_capture_p.set_defaults(func=command_stack_capture_integration)
 
     stack_rebuild_p = stack_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     stack_rebuild_p.add_argument('stack')

@@ -7,6 +7,10 @@
   collection, and removes the worktree on both success and failure. `auto`
   remains desk-compatible in this release; `plumbing` is accepted as a mode
   name but reports that it is not available yet.
+- Add `stack capture-integration` to assign integration-first commits to a
+  stack, rebuild only that branch through the shared replay executor, and keep
+  no capture worktree after completion. Unmapped integration diagnostics now
+  offer capture into a new draft stack as the durable remedy.
 - Introduce an internal replay plan/execution seam while preserving the current
   porcelain replay behavior and dry-run transcript byte-for-byte.
 - Add a hermetic, clone-per-execution replay determinism harness covering
