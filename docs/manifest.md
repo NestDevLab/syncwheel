@@ -26,10 +26,12 @@ The preferred source of truth is `.syncwheel/manifest.json`.
     {
       "id": "feature-a",
       "branch": "pr/feature-a",
+      "state": "published",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
       "integration_branch": "integration/project-stack",
+      "publication": { "enabled": true },
       "commits": ["abc1234", "def5678"]
     }
   ]
@@ -171,6 +173,8 @@ python3 scripts/syncwheel.py manifest require-integration --apply
   `defaults.publication_remote`
 - every stack id must be unique
 - every stack branch must be unique
+- `state` is `draft` or `published` and defaults to `published`; `publication`
+  is normalized to `{ "enabled": state != "draft" }`
 - every declared commit must exist in Git
 - `commits` remain the source projection used to rebuild a stack branch
 - `integration_commits`, when present, is the resolved projection used only for

@@ -54,6 +54,8 @@ Then fill in:
 - one stack id per logical PR
 - exact commits for each stack, preferably using `stack sync`, `stack set`, or
   `stack add`
+- the state of each stack: `published` by default, or `draft` while it remains
+  outside the publication topology
 
 Do not call the workflow deterministic until this file exists and matches reality.
 
@@ -93,6 +95,8 @@ Look for:
 - commits declared for a PR branch but not contained there
 - commits declared for a stack but not present on integration
 - integration referring to unknown stacks
+- unknown stack states; a missing stack branch remains a warning so reconcile
+  can materialize it
 
 ## Phase 4. Repair PR branches deterministically
 

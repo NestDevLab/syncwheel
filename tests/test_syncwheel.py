@@ -101,6 +101,26 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def read_manifest(self):
         return json.loads((self.repo / '.syncwheel' / 'manifest.json').read_text())
 
+    def test_manifest_stack_state_defaults_to_published(self):
+        module = self.load_syncwheel_module()
+
+        manifest, _ = module.load_manifest(self.repo)
+
+        self.assertEqual(manifest['stacks'][0]['state'], 'published')
+        self.assertEqual(manifest['stacks'][0]['publication'], {'enabled': True})
+
+    def test_validate_manifest_rejects_an_unknown_stack_state(self):
+        module = self.load_syncwheel_module()
+        manifest, _ = module.load_manifest(self.repo)
+        manifest['stacks'][0]['state'] = 'reviewing'
+
+        validation = module.validate_manifest(self.repo, manifest)
+
+        self.assertIn(
+            'stack feature-a state must be one of: draft, published',
+            validation['errors'],
+        )
+
     def read_ledger_state(self):
         result = self.run_cli('ledger', 'show', '--json', expected=0)
         return json.loads(result.stdout)
