@@ -3615,12 +3615,42 @@ def resolve_int_rebuild_location(repo_root, manifest, args):
     return default_worktree_path(repo_root, integration['branch']), False
 
 
-def resolve_replay_mode(location):
-    """Map an already-resolved replay location to the current execution mode."""
+REPLAY_MODE_CHOICES = ('auto', 'plumbing', 'in-place', 'ephemeral', 'desk')
+EPHEMERAL_WORKTREE_PLACEHOLDER = '<syncwheel-ephemeral-worktree>'
+
+
+def resolve_replay_mode(location, requested_mode='auto'):
+    """Map an already-resolved replay location to an available execution mode."""
+    if requested_mode not in REPLAY_MODE_CHOICES:
+        raise SyncwheelError(f'unsupported replay mode: {requested_mode}')
+    if requested_mode == 'plumbing':
+        raise SyncwheelError('replay mode plumbing is not available yet')
+    if requested_mode == 'ephemeral':
+        return 'ephemeral', None
+
     worktree, in_place = location
+    if requested_mode == 'in-place':
+        if not in_place:
+            raise SyncwheelError('replay mode in-place requires the target branch to be checked out')
+        return 'in-place', None
+    if requested_mode == 'desk':
+        if in_place:
+            raise SyncwheelError('replay mode desk requires a separate worktree')
+        return 'desk', worktree
     if in_place:
         return 'in-place', None
     return 'desk', worktree
+
+
+def requested_replay_mode(args):
+    """Read and validate the rebuild-only replay mode selection."""
+    mode = getattr(args, 'replay_mode', 'auto')
+    if mode == 'ephemeral':
+        if args.in_place:
+            raise SyncwheelError('use either --replay-mode ephemeral or --in-place, not both')
+        if args.worktree:
+            raise SyncwheelError('use either --replay-mode ephemeral or --worktree, not both')
+    return mode
 
 
 def collect_repo_snapshot(repo_root, manifest):
@@ -4219,11 +4249,13 @@ def replay_target(
 
 def replay_plan(repo_root, manifest, target, mode):
     """Build the one current porcelain replay plan without executing it."""
-    if mode not in ('desk', 'in-place'):
+    if mode not in ('desk', 'in-place', 'ephemeral'):
         raise SyncwheelError(f'unsupported replay mode: {mode}')
 
     projection = target.get('return_tree', False)
     worktree = target.get('worktree')
+    if mode == 'ephemeral':
+        worktree = EPHEMERAL_WORKTREE_PLACEHOLDER
     if target['kind'] == 'stack':
         stack = target['stack']
         branch = stack['branch']
@@ -4264,6 +4296,10 @@ def replay_plan(repo_root, manifest, target, mode):
             steps.append(replay_exec_step(backup))
         if mode == 'in-place':
             steps.append(replay_exec_step(['git', 'reset', '--hard', base]))
+        elif mode == 'ephemeral':
+            steps.append(replay_exec_step([
+                'git', 'worktree', 'add', '--detach', '--quiet', str(worktree), base,
+            ]))
         elif worktree_matches_branch(repo_root, branch, worktree):
             steps.append(replay_exec_step(['git', '-C', str(worktree), 'reset', '--hard', base]))
         elif worktree is not None:
@@ -4306,6 +4342,11 @@ def replay_plan(repo_root, manifest, target, mode):
     else:
         raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
 
+    if mode == 'ephemeral':
+        steps.append(replay_exec_step([
+            'git', '-C', str(worktree), 'update-ref', f'refs/heads/{branch}', 'HEAD',
+        ]))
+
     return {
         'mode': mode,
         'target': plan_target,
@@ -4314,31 +4355,37 @@ def replay_plan(repo_root, manifest, target, mode):
     }
 
 
-def execute_replay(repo_root, plan, apply):
-    """Apply a replay plan or render its dry-run transcript.
+def bind_ephemeral_worktree(plan, worktree):
+    """Replace the dry-run-only ephemeral path with one temporary worktree."""
+    worktree = str(worktree)
+    target = dict(plan['target'])
+    target['worktree'] = worktree
+    steps = []
+    for step in plan['steps']:
+        bound = dict(step)
+        if step['kind'] == 'exec':
+            bound['argv'] = [
+                worktree if value == EPHEMERAL_WORKTREE_PLACEHOLDER else value
+                for value in step['argv']
+            ]
+            bound['render'] = quoted(bound['argv'])
+        steps.append(bound)
+    return {**plan, 'target': target, 'steps': steps}
 
-    Dry-run output is an executable POSIX shell transcript. For every current
-    non-plumbing ``exec`` step, ``render`` is byte-identical to ``quoted(argv)``;
-    when a step has an environment, its POSIX assignments prefix that render.
-    """
+
+def execute_replay_steps(repo_root, plan):
+    """Execute an already-materialized replay plan."""
     target = plan['target']
     branch = target['branch']
     before_tip = ref_tip(repo_root, branch)
     result = {
-        'status': 'applied' if apply else 'planned',
+        'status': 'applied',
         'mode': plan['mode'],
         'branch': branch,
         'before_tip': before_tip,
         'after_tip': before_tip,
         'conflict': None,
     }
-    if not apply:
-        for step in plan['steps']:
-            render = replay_step_render(step)
-            if render:
-                print(render)
-        return result
-
     cleanup_worktree = target['worktree'] if target.get('return_tree') else None
     try:
         for step in plan['steps']:
@@ -4371,6 +4418,10 @@ def execute_replay(repo_root, plan, apply):
                 render = replay_step_render(step)
                 if render:
                     print(render)
+        if plan['mode'] == 'ephemeral':
+            target_worktree = find_worktree_for_branch(repo_root, branch)
+            if target_worktree:
+                run(['git', '-C', str(target_worktree), 'reset', '--hard', branch], cwd=repo_root)
         if target.get('return_tree'):
             result['tree'] = ref_tree(target['worktree'], 'HEAD')
         result['after_tip'] = ref_tip(repo_root, branch)
@@ -4378,6 +4429,42 @@ def execute_replay(repo_root, plan, apply):
     finally:
         if cleanup_worktree:
             git(repo_root, 'worktree', 'remove', '--force', cleanup_worktree, check=False)
+
+
+def execute_replay(repo_root, plan, apply):
+    """Apply a replay plan or render its dry-run transcript.
+
+    Dry-run output is an executable POSIX shell transcript. For every current
+    non-plumbing ``exec`` step, ``render`` is byte-identical to ``quoted(argv)``;
+    when a step has an environment, its POSIX assignments prefix that render.
+    """
+    if not apply:
+        target = plan['target']
+        branch = target['branch']
+        before_tip = ref_tip(repo_root, branch)
+        result = {
+            'status': 'planned',
+            'mode': plan['mode'],
+            'branch': branch,
+            'before_tip': before_tip,
+            'after_tip': before_tip,
+            'conflict': None,
+        }
+        for step in plan['steps']:
+            render = replay_step_render(step)
+            if render:
+                print(render)
+        return result
+
+    if plan['mode'] == 'ephemeral':
+        with tempfile.TemporaryDirectory(prefix='syncwheel-replay-') as tmp:
+            worktree = Path(tmp)
+            bound_plan = bind_ephemeral_worktree(plan, worktree)
+            try:
+                return execute_replay_steps(repo_root, bound_plan)
+            finally:
+                git(repo_root, 'worktree', 'remove', '--force', worktree, check=False)
+    return execute_replay_steps(repo_root, plan)
 
 
 def materialize_stack_projection(repo_root, stack):
@@ -5377,10 +5464,19 @@ def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
-    mode, worktree = resolve_replay_mode(resolve_stack_rebuild_location(repo_root, stack, args))
+    mode, worktree = resolve_replay_mode(
+        resolve_stack_rebuild_location(repo_root, stack, args),
+        requested_replay_mode(args),
+    )
     if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, stack['branch'])
-    if not args.dry_run and mode != 'in-place':
+    if not args.dry_run and mode == 'ephemeral':
+        ensure_non_in_place_target_clean(
+            repo_root,
+            stack['branch'],
+            find_worktree_for_branch(repo_root, stack['branch']),
+        )
+    if not args.dry_run and mode == 'desk':
         ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
     result = execute_replay(
         repo_root,
@@ -6359,10 +6455,19 @@ def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
-    mode, worktree = resolve_replay_mode(resolve_int_rebuild_location(repo_root, manifest, args))
+    mode, worktree = resolve_replay_mode(
+        resolve_int_rebuild_location(repo_root, manifest, args),
+        requested_replay_mode(args),
+    )
     if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, manifest['integration']['branch'])
-    if not args.dry_run and mode != 'in-place':
+    if not args.dry_run and mode == 'ephemeral':
+        ensure_non_in_place_target_clean(
+            repo_root,
+            manifest['integration']['branch'],
+            find_worktree_for_branch(repo_root, manifest['integration']['branch']),
+        )
+    if not args.dry_run and mode == 'desk':
         ensure_non_in_place_target_clean(repo_root, manifest['integration']['branch'], worktree)
     result = execute_replay(
         repo_root,
@@ -6830,6 +6935,12 @@ def command_repo_tracking_set(args):
 def add_rebuild_args(parser):
     parser.add_argument('-w', '--worktree')
     parser.add_argument('-i', '--in-place', action='store_true')
+    parser.add_argument(
+        '--replay-mode',
+        choices=REPLAY_MODE_CHOICES,
+        default='auto',
+        help='replay execution mode (plumbing is not available yet; auto keeps the desk default)',
+    )
     parser.add_argument('-n', '--dry-run', action='store_true')
 
 

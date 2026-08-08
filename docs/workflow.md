@@ -38,6 +38,22 @@ That becomes deterministic only when the repository declares the mapping in `.sy
 5. rerun validation or `reconcile`
 6. run project-specific tests outside `syncwheel`
 
+## Replay execution
+
+Use an explicit ephemeral replay when rebuilding does not need a durable desk:
+
+```bash
+syncwheel stack rebuild feature-a --replay-mode ephemeral
+syncwheel int rebuild --replay-mode ephemeral
+```
+
+The replay runs in a detached temporary worktree, updates the managed branch
+ref, and removes the temporary worktree before the command returns. This keeps
+routine reconstruction separate from a checkout a person intends to inspect or
+repair. `auto` remains desk-compatible in this release; use `--replay-mode
+desk --worktree <path>` or `--in-place` for the existing deliberate worktree choices. `plumbing`
+is listed for forward compatibility but is not available yet.
+
 ## Manifest semantics
 
 - `defaults.base_ref`: canonical ref used as replay base

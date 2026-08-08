@@ -48,11 +48,20 @@ for explicit follow-up.
 
 ## Worktrees
 
-Recommended layout:
+Worktrees are desks a person chooses for development or conflict resolution;
+they are not required artifacts of a routine replay. Use `--replay-mode
+ephemeral` on `stack rebuild` or `int rebuild` to cherry-pick in a detached
+temporary worktree. Syncwheel updates the real branch ref and removes that
+worktree before the command returns, including when replay fails.
+
+`auto` remains desk-compatible for this release, so use `ephemeral` explicitly
+when no persistent checkout is wanted. `plumbing` is reserved for a later
+release and currently reports that it is unavailable.
+
+Recommended persistent layout:
 - repo root = active integration checkout by default
 - optional administrative checkout for manifest-only work
-- one worktree per active PR branch
-- temporary worktrees for rebuilds only when needed
+- optional worktree for an actively developed or manually repaired PR branch
 
 ## Safe defaults
 
