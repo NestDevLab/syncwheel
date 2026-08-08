@@ -50,11 +50,22 @@ class ReplayModesTest(unittest.TestCase):
         self.environment_patch.stop()
         shutil.rmtree(self.tmp)
 
-    def replay_once(self, source_repo, manifest, stack, attempt):
+    def replay_once(self, source_repo, manifest, stack, attempt, replay_mode='auto'):
         clone = clone_repo(source_repo, self.tmp / f'{source_repo.name}-{attempt}', manifest)
         worktree = clone.parent / f'{clone.name}-replay-worktree'
-        run_cli(clone, 'stack', 'rebuild', stack['id'], '--worktree', str(worktree))
+        command = ['stack', 'rebuild', stack['id']]
+        if replay_mode != 'auto':
+            command.extend(['--replay-mode', replay_mode])
+        if replay_mode in ('auto', 'desk'):
+            command.extend(['--worktree', str(worktree)])
+        run_cli(clone, *command)
         return commit_log(clone, stack['base'], stack['branch'])
+
+    def worktree_entries(self, repo_path):
+        return [
+            line for line in git(repo_path, 'worktree', 'list', '--porcelain').stdout.splitlines()
+            if line.startswith('worktree ')
+        ]
 
     def assert_replay_is_stable(self, builder):
         source_repo, manifest, stack_id = builder(self.tmp)
@@ -88,6 +99,101 @@ class ReplayModesTest(unittest.TestCase):
         source = commit_log(repo_path, 'main', 'source')
 
         self.assertNotEqual(replayed, source)
+
+    def test_ephemeral_replay_is_byte_identical_to_desk_for_the_fixed_corpus(self):
+        scenarios = {
+            'linear chain': build_linear_chain,
+            'moved base': build_moved_base,
+            'binary file': build_binary_file,
+            'rename': build_rename,
+            'file mode change': build_file_mode_change,
+        }
+        for name, builder in scenarios.items():
+            with self.subTest(scenario=name):
+                source_repo, manifest, stack_id = builder(self.tmp)
+                stack = next(item for item in manifest['stacks'] if item['id'] == stack_id)
+                desk = self.replay_once(source_repo, manifest, stack, f'{name}-desk')
+                ephemeral = self.replay_once(
+                    source_repo,
+                    manifest,
+                    stack,
+                    f'{name}-ephemeral',
+                    replay_mode='ephemeral',
+                )
+                self.assertEqual(ephemeral, desk)
+
+    def test_ephemeral_stack_rebuild_leaves_no_worktree(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        clone = clone_repo(source_repo, self.tmp / 'ephemeral-stack', manifest)
+        before = self.worktree_entries(clone)
+
+        run_cli(clone, 'stack', 'rebuild', stack_id, '--replay-mode', 'ephemeral')
+
+        self.assertEqual(self.worktree_entries(clone), before)
+        event = [
+            item for item in load_syncwheel_module().load_ledger_events(clone)
+            if item['type'] == 'stack_rebuilt'
+        ][-1]
+        self.assertEqual(event['payload']['after_tip'], git(clone, 'rev-parse', 'pr/replay').stdout.strip())
+
+    def test_ephemeral_integration_rebuild_leaves_no_worktree(self):
+        source_repo, manifest, _stack_id = build_linear_chain(self.tmp)
+        clone = clone_repo(source_repo, self.tmp / 'ephemeral-integration', manifest)
+        git(clone, 'add', '.syncwheel/manifest.json')
+        git(clone, 'commit', '-q', '-m', 'test: add replay manifest')
+        before = self.worktree_entries(clone)
+
+        run_cli(clone, 'int', 'rebuild', '--replay-mode', 'ephemeral')
+
+        self.assertEqual(self.worktree_entries(clone), before)
+        event = [
+            item for item in load_syncwheel_module().load_ledger_events(clone)
+            if item['type'] == 'integration_rebuilt'
+        ][-1]
+        self.assertEqual(event['payload']['after_tip'], git(clone, 'rev-parse', 'integration').stdout.strip())
+
+    def test_ephemeral_replay_removes_its_worktree_after_a_mid_replay_failure(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        stack = manifest['stacks'][0]
+        git(source_repo, 'switch', '-q', '-c', 'failure-topic', stack['base'])
+        (source_repo / 'topic.txt').write_text('topic\n')
+        git(source_repo, 'add', 'topic.txt')
+        git(source_repo, 'commit', '-q', '-m', 'test: topic for merge failure')
+        git(source_repo, 'switch', '-q', '-c', 'failure-merge', stack['base'])
+        (source_repo / 'integration.txt').write_text('integration\n')
+        git(source_repo, 'add', 'integration.txt')
+        git(source_repo, 'commit', '-q', '-m', 'test: integration for merge failure')
+        git(source_repo, 'merge', '--no-ff', 'failure-topic', '-m', 'test: merge replay failure')
+        merge = git(source_repo, 'rev-parse', 'HEAD').stdout.strip()
+        failing_manifest = {
+            **manifest,
+            'stacks': [{
+                **manifest['stacks'][0],
+                'commits': [*manifest['stacks'][0]['commits'], merge],
+            }],
+        }
+        clone = clone_repo(source_repo, self.tmp / 'ephemeral-failure', failing_manifest)
+        before = self.worktree_entries(clone)
+
+        run_cli(
+            clone,
+            'stack',
+            'rebuild',
+            stack_id,
+            '--replay-mode',
+            'ephemeral',
+            expected=2,
+        )
+
+        self.assertEqual(self.worktree_entries(clone), before)
+
+    def test_plumbing_mode_reports_that_it_is_not_available(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        clone = clone_repo(source_repo, self.tmp / 'plumbing-unavailable', manifest)
+
+        failure = run_cli(clone, 'stack', 'rebuild', stack_id, '--replay-mode', 'plumbing', expected=2)
+
+        self.assertIn('replay mode plumbing is not available yet', failure.stderr)
 
     def test_merge_commit_rejection_and_validation_are_stable(self):
         repo_path, manifest, _stack_id, base, merge = build_merge_commit(self.tmp)
