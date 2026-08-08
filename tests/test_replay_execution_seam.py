@@ -1,19 +1,18 @@
 """Golden coverage for the porcelain replay seam.
 
-The compressed fixture was captured from origin/main at 58c28cd before this
-seam existed. Commands are invoked directly only to pin the backup timestamp;
-the captured text is the stdout from stack rebuild --dry-run and int rebuild
---dry-run for each supported worktree location.
+The normalized fixture was captured from origin/main at 56ce4ee before this
+seam existed. It preserves the shell transcript while replacing fixture inputs
+(temporary paths, object IDs, and backup timestamps) with stable markers.
 """
 
-import base64
 import contextlib
-import gzip
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,21 +21,35 @@ from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-GOLDEN_PATH = REPO_ROOT / 'tests' / 'fixtures' / 'replay-dry-run-golden.json.gz.b64'
-BASELINE_ROOT = '/tmp/syncwheel-r3-baseline-origin-main'
+GOLDEN_PATH = REPO_ROOT / 'tests' / 'fixtures' / 'replay-dry-run-golden.json'
 FIXED_DATE = '2026-08-08T00:00:00+00:00'
-FIXED_TIMESTAMP = '20260808T000000000000Z'
+TIMESTAMP_PATTERN = re.compile(r'\b\d{8}T\d{12}Z\b')
+SHA_PATTERN = re.compile(r'\b[0-9a-f]{7,64}\b')
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from _replay_support import hermetic_environment
+
+
+def normalize_transcript(transcript, root):
+    """Replace fixture-specific command inputs without changing command form."""
+    transcript = transcript.replace(str(root), '<TMP>')
+    transcript = TIMESTAMP_PATTERN.sub('<TIMESTAMP>', transcript)
+    return SHA_PATTERN.sub('<SHA>', transcript)
 
 
 class ReplayExecutionSeamTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-replay-execution-seam-'))
+        environment = hermetic_environment(self.tmp)
+        environment.update({
+            'GIT_AUTHOR_DATE': FIXED_DATE,
+            'GIT_COMMITTER_DATE': FIXED_DATE,
+        })
         self.environment_patch = mock.patch.dict(
             os.environ,
-            {
-                'GIT_AUTHOR_DATE': FIXED_DATE,
-                'GIT_COMMITTER_DATE': FIXED_DATE,
-            },
+            environment,
+            clear=True,
         )
         self.environment_patch.start()
         self.repo = self.tmp / 'repo'
@@ -44,6 +57,10 @@ class ReplayExecutionSeamTest(unittest.TestCase):
         self.git('init', '-q', '-b', 'main')
         self.git('config', 'user.name', 'Syncwheel Fixture')
         self.git('config', 'user.email', 'syncwheel@example.com')
+        self.git('config', 'commit.gpgsign', 'false')
+        self.git('config', 'rerere.enabled', 'false')
+        self.git('config', 'core.autocrlf', 'false')
+        self.git('config', 'core.fileMode', 'true')
         (self.repo / 'alpha.txt').write_text('alpha\n')
         self.git('add', 'alpha.txt')
         self.git('commit', '-q', '-m', 'feat: add alpha')
@@ -90,7 +107,6 @@ class ReplayExecutionSeamTest(unittest.TestCase):
         }
         self.write_manifest()
         self.module = self.load_module()
-        self.module.syncwheel_timestamp = lambda: FIXED_TIMESTAMP
 
     def tearDown(self):
         self.environment_patch.stop()
@@ -135,13 +151,12 @@ class ReplayExecutionSeamTest(unittest.TestCase):
         with contextlib.redirect_stdout(stream):
             status = command(args)
         self.assertEqual(status, 0)
-        return stream.getvalue()
+        return normalize_transcript(stream.getvalue(), self.tmp)
 
     def golden_outputs(self):
-        encoded = GOLDEN_PATH.read_text().strip()
-        return json.loads(gzip.decompress(base64.b64decode(encoded)))
+        return json.loads(GOLDEN_PATH.read_text())
 
-    def test_dry_run_output_is_byte_identical_to_origin_main_golden(self):
+    def dry_run_outputs(self):
         outputs = {}
         outputs['stack_new_worktree'] = self.capture(
             self.module.command_stack_rebuild,
@@ -180,12 +195,10 @@ class ReplayExecutionSeamTest(unittest.TestCase):
             self.module.command_int_rebuild,
             self.args(worktree=None, in_place=True),
         )
+        return outputs
 
-        expected = {
-            key: value.replace(BASELINE_ROOT, str(self.tmp))
-            for key, value in self.golden_outputs().items()
-        }
-        self.assertEqual(outputs, expected)
+    def test_dry_run_output_is_byte_identical_to_origin_main_golden(self):
+        self.assertEqual(self.dry_run_outputs(), self.golden_outputs())
 
     def test_non_plumbing_step_render_is_quoted_argv(self):
         stack = self.manifest['stacks'][0]
