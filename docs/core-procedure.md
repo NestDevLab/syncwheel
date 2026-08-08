@@ -103,6 +103,26 @@ Use `stack demote <stack>` only after the PR linkage has been removed; Syncwheel
 refuses demotion while `github.pr` is populated. Demotion is a state-only
 transition and deliberately keeps the existing branch name.
 
+### Capturing integration-first work
+
+When a non-merge commit was made directly on integration and its eventual PR is
+not known yet, create a draft and capture it before the next integration rebuild:
+
+```bash
+python3 scripts/syncwheel.py stack create exploration --draft \
+  --purpose "Classify integration-first work"
+python3 scripts/syncwheel.py stack capture-integration exploration <commit>...
+```
+
+Capture first resolves every commit spec, then verifies that the first new
+commit was created on the current manifest projection. It adds and deduplicates
+the integration SHAs, reuses the normal stack-update projection guard, and only
+then rebuilds that one source branch with the normal backup and `stack_rebuilt`
+ledger event. The manifest is saved only after the rebuild succeeds. It does
+not rebuild or otherwise change integration; run `int rebuild` later when the
+projection should be refreshed. Capture uses a temporary worktree and removes it
+before returning.
+
 ## Phase 3. Validate the manifest against Git
 
 Run:
@@ -117,6 +137,8 @@ Look for:
 - commits declared for a PR branch but not contained there
 - commits declared for a stack but not present on integration
 - integration referring to unknown stacks
+- unmapped integration commits: `plan` and `check` offer a new draft plus
+  `stack capture-integration` as the durable remedy
 - unknown stack states; a missing stack branch remains a warning so reconcile
   can materialize it
 
