@@ -340,6 +340,95 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(restored['coordination']['remote'], 'alice-laptop')
         self.assertEqual(restored['stacks'][0]['target_remote'], 'alice-laptop')
 
+    def test_published_state_keeps_the_legacy_coordination_snapshot_and_digest(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'syncwheel_tracking': 'git-tracked',
+            'defaults': {
+                'canonical_remote': 'alice-laptop',
+                'publication_remote': 'alice-laptop',
+                'base_branch': 'main',
+                'base_ref': 'alice-laptop/main',
+            },
+            'integration': {
+                'branch': 'integration/shared',
+                'base': 'alice-laptop/main',
+                'strategy': 'cherry-pick',
+                'stacks': ['feature-a'],
+            },
+            'coordination': {
+                'mode': 'active-active',
+                'id': 'shared',
+                'remote': 'alice-laptop',
+                'state_branch': 'syncwheel/state/shared',
+                'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+            },
+            'stacks': [{
+                'id': 'feature-a',
+                'branch': 'pr/feature-a',
+                'base': 'alice-laptop/main',
+                'target_remote': 'alice-laptop',
+                'target_branch': 'main',
+                'integration_branch': 'integration/shared',
+                'commits': ['feature-a'],
+            }],
+        }
+
+        snapshot = module.coordination_manifest_snapshot(manifest)
+
+        self.assertEqual(
+            json.dumps(snapshot, sort_keys=True, separators=(',', ':')),
+            '{"coordination":{"gc":{"backup_keep":2,"backup_retention_days":30,"worktree_grace_days":7},"id":"shared","mode":"active-active","state_branch":"syncwheel/state/shared"},"defaults":{"base_branch":"main","base_ref":{"kind":"remote-ref","ref":"refs/heads/main","role":"canonical"}},"integration":{"base":{"kind":"remote-ref","ref":"refs/heads/main","role":"canonical"},"branch":"integration/shared","stacks":["feature-a"],"strategy":"cherry-pick"},"stacks":[{"base":{"kind":"remote-ref","ref":"refs/heads/main","role":"canonical"},"branch":"pr/feature-a","commits":["feature-a"],"id":"feature-a","integration_branch":"integration/shared","target_branch":"main"}],"version":2}',
+        )
+        self.assertEqual(
+            module.coordination_manifest_digest(manifest),
+            'c96c05ff86ecd527db0ec077d8efbe457db0659f69bf108315dd28fecd10b38b',
+        )
+
+    def test_coordination_snapshot_round_trip_preserves_draft_state(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'defaults': {
+                'canonical_remote': 'origin',
+                'publication_remote': 'origin',
+                'base_branch': 'main',
+                'base_ref': 'origin/main',
+            },
+            'integration': {
+                'branch': 'integration/shared',
+                'base': 'origin/main',
+                'strategy': 'cherry-pick',
+                'stacks': ['draft-a'],
+            },
+            'coordination': {
+                'mode': 'active-active',
+                'id': 'shared',
+                'remote': 'origin',
+                'state_branch': 'syncwheel/state/shared',
+                'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+            },
+            'stacks': [{
+                'id': 'draft-a',
+                'state': 'draft',
+                'branch': 'syncwheel/draft/draft-a',
+                'base': 'origin/main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/shared',
+                'commits': ['draft-a'],
+            }],
+        }
+
+        restored = module.apply_coordination_snapshot(
+            manifest,
+            module.coordination_manifest_snapshot(manifest),
+        )
+
+        self.assertEqual(restored['stacks'][0]['state'], 'draft')
+        self.assertEqual(restored['stacks'][0]['publication'], {'enabled': False})
+
     def test_public_snapshot_rejects_an_unmapped_remote_with_a_different_tip(self):
         origin = self.create_remote()
         private = self.create_remote('private')

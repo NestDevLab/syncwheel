@@ -12,6 +12,8 @@
   stable deterministic values; unchanged later rebuilds are no-ops.
 - Make `merge-stacks` integration merge metadata deterministic by deriving it
   from the tip of each merged stack.
+- Add draft and published stack state with a backwards-compatible published
+  default, coordination-safe draft state transfer, and derived publication state.
 - New manifests require every declared stack to participate in integration;
   `stack create` now includes it by default under that policy.
 - Add `manifest require-integration` to preview and apply an explicit migration

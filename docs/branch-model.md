@@ -14,6 +14,8 @@ Unless a repo documents otherwise:
 - `main` or equivalent is the canonical base
 - `main-integration` is where day-to-day combined work happens
 - `pr/*` branches are extracted review surfaces for upstream PRs
+- stacks are `published` by default; a `draft` stack is still an owned
+  integration branch, but carries an explicit non-publication topology state
 - integration should not be the only home of long-lived product changes
 
 ## Deterministic mapping
@@ -21,6 +23,7 @@ Unless a repo documents otherwise:
 The important step is not just naming branches. It is declaring:
 - which commits belong to which logical stack
 - which stack maps to which `pr/*` branch
+- whether that stack is `draft` or `published`
 - in what order stacks are replayed into integration
 
 Without that mapping, Git can only infer ownership heuristically.

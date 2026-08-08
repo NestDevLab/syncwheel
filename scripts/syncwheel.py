@@ -38,6 +38,7 @@ INTEGRATION_MEMBERSHIP_POLICIES = {
     INTEGRATION_MEMBERSHIP_LEGACY,
     INTEGRATION_MEMBERSHIP_REQUIRED,
 }
+STACK_STATES = {'draft', 'published'}
 MANIFEST_VERSIONS = {1, 2}
 MANIFEST_VERSION_LEGACY = 1
 MANIFEST_VERSION_COORDINATED = 2
@@ -1662,6 +1663,12 @@ def load_manifest(repo_root, manifest_path=None):
         stack.setdefault('target_remote', canonical_remote)
         stack.setdefault('target_branch', defaults['base_branch'])
         stack.setdefault('integration_branch', integration['branch'])
+        stack.setdefault('state', 'published')
+        if stack['state'] not in STACK_STATES:
+            raise SyncwheelError(
+                f"stack {stack_id} state must be one of: {', '.join(sorted(STACK_STATES))}"
+            )
+        stack['publication'] = {'enabled': stack['state'] != 'draft'}
         if 'meta' in stack and not isinstance(stack['meta'], dict):
             raise SyncwheelError(f'stack {stack_id} meta must be an object when present')
         stack.setdefault('meta', {})
@@ -1744,6 +1751,7 @@ def manifest_stack_history_summary(stack):
         'target_remote': stack['target_remote'],
         'target_branch': stack['target_branch'],
         'integration_branch': stack.get('integration_branch'),
+        'state': stack.get('state', 'published'),
         'commits': list(stack['commits']),
         'integration_commits': stack_integration_commits(stack),
         'meta': dict(stack.get('meta', {})),
@@ -2213,7 +2221,7 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
         'stacks': [],
     }
     for stack in manifest['stacks']:
-        snapshot['stacks'].append({
+        snapshot_stack = {
             'id': stack['id'],
             'branch': stack['branch'],
             'base': public_coordination_ref(
@@ -2222,7 +2230,10 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
             'target_branch': stack['target_branch'],
             'integration_branch': stack.get('integration_branch'),
             'commits': list(stack['commits']),
-        })
+        }
+        if stack.get('state', 'published') != 'published':
+            snapshot_stack['state'] = stack['state']
+        snapshot['stacks'].append(snapshot_stack)
     config = coordination_config(manifest)
     if config:
         snapshot['coordination'] = {
@@ -2688,6 +2699,8 @@ def apply_coordination_snapshot(manifest, snapshot):
         restored['target_remote'] = local_stack.get(
             'target_remote', defaults['canonical_remote']
         )
+        restored['state'] = stack.get('state', 'published')
+        restored['publication'] = {'enabled': restored['state'] != 'draft'}
         if isinstance(local_stack.get('meta'), dict):
             restored['meta'] = local_stack['meta']
         updated['stacks'].append(restored)
@@ -3569,9 +3582,11 @@ def validate_manifest(repo_root, manifest):
             )
 
     for stack in manifest['stacks']:
+        state = stack.get('state', 'published')
         item = {
             'id': stack['id'],
             'branch': stack['branch'],
+            'state': state,
             'meta': stack.get('meta', {}),
             'branch_exists': branch_exists(repo_root, stack['branch']),
             'base_exists': ref_exists(repo_root, stack['base']),
@@ -3581,6 +3596,10 @@ def validate_manifest(repo_root, manifest):
             'missing_commits': [],
             'integration_commits': stack_integration_commits(stack),
         }
+        if state not in STACK_STATES:
+            errors.append(
+                f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
+            )
         if not item['base_exists']:
             errors.append(f"stack {stack['id']} base ref does not exist: {stack['base']}")
         if not item['branch_exists']:
@@ -4560,7 +4579,10 @@ def command_stack_list(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     for stack in manifest['stacks']:
-        print(f"{stack['id']}\t{stack['branch']}\tcommits={len(stack['commits'])}")
+        print(
+            f"{stack['id']}\t{stack['branch']}\tcommits={len(stack['commits'])}"
+            f"\tstate={stack['state']}"
+        )
     return 0
 
 
