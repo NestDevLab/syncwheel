@@ -133,6 +133,12 @@ Dry-run:
 python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path> --dry-run
 ```
 
+Dry-run output is an executable POSIX shell transcript, not a description of
+what Syncwheel might do. For the current non-plumbing replay, each line is the
+exact shell-quoted argv (`quoted(argv)`); replay identity settings appear only
+as leading POSIX environment assignments. It can therefore be inspected,
+saved, or executed by a POSIX shell without translating it.
+
 Apply:
 ```bash
 python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
@@ -168,6 +174,10 @@ Dry-run:
 ```bash
 python3 scripts/syncwheel.py int rebuild --worktree <path> --dry-run
 ```
+
+This has the same executable POSIX transcript contract as `stack rebuild
+--dry-run`: non-plumbing argv stay shell-quoted exactly, with replay environment
+assignments prefixed when required.
 
 Apply:
 ```bash

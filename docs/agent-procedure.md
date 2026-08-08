@@ -65,6 +65,9 @@ Given one of those prompts, the agent should:
 - Prefer dedicated worktrees for each rebuild step.
 - Treat `stack rebuild` and `int rebuild` as branch mutation unless `--dry-run`
   is used.
+- Treat each rebuild dry-run as an executable POSIX shell transcript. Current
+  non-plumbing commands retain their exact shell-quoted argv; replay environment
+  assignments, when present, are only a POSIX prefix to that argv.
 - If the repo uses GitHub, validate publication state after branch rebuilds.
 - If the manifest and Git disagree, fix the manifest or name the conflict explicitly.
 - **A rebuild reconstructs a branch from the manifest's commit projection, NOT from the
