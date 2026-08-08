@@ -25,6 +25,7 @@ GOLDEN_PATH = REPO_ROOT / 'tests' / 'fixtures' / 'replay-dry-run-golden.json'
 FIXED_DATE = '2026-08-08T00:00:00+00:00'
 TIMESTAMP_PATTERN = re.compile(r'\b\d{8}T\d{12}Z\b')
 SHA_PATTERN = re.compile(r'\b[0-9a-f]{7,64}\b')
+COMMIT_DATE_PATTERN = re.compile(r'(GIT_(?:AUTHOR|COMMITTER)_DATE=)[^ ]+')
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -35,6 +36,7 @@ def normalize_transcript(transcript, root):
     """Replace fixture-specific command inputs without changing command form."""
     transcript = transcript.replace(str(root), '<TMP>')
     transcript = TIMESTAMP_PATTERN.sub('<TIMESTAMP>', transcript)
+    transcript = COMMIT_DATE_PATTERN.sub(r'\1<DATE>', transcript)
     return SHA_PATTERN.sub('<SHA>', transcript)
 
 
@@ -198,7 +200,6 @@ class ReplayExecutionSeamTest(unittest.TestCase):
         return outputs
 
     def test_dry_run_output_is_byte_identical_to_origin_main_golden(self):
-        self.maxDiff = None
         self.assertEqual(self.dry_run_outputs(), self.golden_outputs())
 
     def test_non_plumbing_step_render_is_quoted_argv(self):
