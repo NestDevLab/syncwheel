@@ -16,6 +16,8 @@ Unless a repo documents otherwise:
 - `pr/*` branches are extracted review surfaces for upstream PRs
 - stacks are `published` by default; a `draft` stack is still an owned
   integration branch, but carries an explicit non-publication topology state
+- draft source branches use `syncwheel/draft/<stack-id>` and are materialized
+  like any other stack branch; published stacks normally use `pr/<stack-id>`
 - integration should not be the only home of long-lived product changes
 
 ## Deterministic mapping
@@ -29,6 +31,20 @@ The important step is not just naming branches. It is declaring:
 Without that mapping, Git can only infer ownership heuristically.
 
 With that mapping, syncwheel becomes scriptable.
+
+## Draft lifecycle
+
+A draft is never branchless. Create it with `stack create --draft`; the command
+creates `syncwheel/draft/<stack-id>` immediately so validation and deterministic
+rebuilds have a durable owner. Draft stacks remain in integration and can be
+rebuilt, but cannot be pushed through `stack push` or `reconcile --push`.
+
+`stack promote <stack>` changes a draft to published and renames the source to
+its PR branch. `stack demote <stack>` changes published back to draft without a
+rename and refuses a stack with `github.pr`. In active-active coordination, a
+promotion publishes the new PR ref atomically, retains the old draft remote ref
+as a tombstone, and leaves any old-name reconcile worktree directory in place
+for explicit follow-up.
 
 ## Worktrees
 

@@ -2809,7 +2809,16 @@ def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local
     return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, local_tip, check=False).returncode == 0
 
 
-def validate_coordination_publication_base(repo_root, manifest, config, expected, changed_refs, tombstone=None):
+def validate_coordination_publication_base(
+    repo_root,
+    manifest,
+    config,
+    expected,
+    changed_refs,
+    tombstone=None,
+    rename=None,
+    state_transition=None,
+):
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
     if not state:
@@ -2837,12 +2846,104 @@ def validate_coordination_publication_base(repo_root, manifest, config, expected
             + '; run handoff and resolve the stale manifest first'
         )
 
+    rename_stack = None
+    transition_stack = None
+    if rename:
+        if not isinstance(rename, dict):
+            raise SyncwheelError('coordination branch rename permission must be an object')
+        required = {'stack', 'from_branch', 'to_branch', 'from_ref_tip'}
+        if set(rename) != required:
+            raise SyncwheelError(
+                'coordination branch rename permission must contain exactly: '
+                + ', '.join(sorted(required))
+            )
+        rename_stack = rename['stack']
+        if rename_stack not in remote_stacks or rename_stack not in local_stacks:
+            raise SyncwheelError('coordination branch rename permission requires an existing stack')
+        remote_stack = remote_stacks[rename_stack]
+        local_stack = local_stacks[rename_stack]
+        if (
+            remote_stack['branch'] != rename['from_branch']
+            or local_stack['branch'] != rename['to_branch']
+            or rename['from_branch'] == rename['to_branch']
+        ):
+            raise SyncwheelError(
+                f'{rename_stack}: coordination branch rename permission does not match the manifest transition'
+            )
+        if remote_stack.get('state', 'published') != 'draft' or local_stack.get('state', 'published') != 'published':
+            raise SyncwheelError(
+                f'{rename_stack}: coordination branch rename permission is limited to draft-to-published promotion'
+            )
+        remote_without_transition = dict(remote_stack)
+        local_without_transition = dict(local_stack)
+        remote_without_transition.pop('branch', None)
+        remote_without_transition.pop('state', None)
+        local_without_transition.pop('branch', None)
+        local_without_transition.pop('state', None)
+        if remote_without_transition != local_without_transition:
+            raise SyncwheelError(
+                f'{rename_stack}: coordination branch rename permission cannot change other stack fields'
+            )
+        from_ref = f"refs/heads/{rename['from_branch']}"
+        remote_tip = state.get('managed_refs', {}).get(from_ref)
+        if not remote_tip or rename['from_ref_tip'] != remote_tip:
+            raise SyncwheelError(
+                f'{rename_stack}: coordination branch rename requires the original published remote tip'
+            )
+        if (
+            not isinstance(tombstone, dict)
+            or coordination_tombstone_ref(tombstone) != from_ref
+            or tombstone.get('remote_tip') != remote_tip
+        ):
+            raise SyncwheelError(
+                f'{rename_stack}: coordination branch rename requires a tombstone for the original remote ref'
+            )
+
+    if state_transition:
+        if rename:
+            raise SyncwheelError('coordination publication cannot combine branch rename and state-only permissions')
+        if not isinstance(state_transition, dict):
+            raise SyncwheelError('coordination state transition permission must be an object')
+        required = {'stack', 'from_state', 'to_state'}
+        if set(state_transition) != required:
+            raise SyncwheelError(
+                'coordination state transition permission must contain exactly: '
+                + ', '.join(sorted(required))
+            )
+        transition_stack = state_transition['stack']
+        if transition_stack not in remote_stacks or transition_stack not in local_stacks:
+            raise SyncwheelError('coordination state transition permission requires an existing stack')
+        remote_stack = remote_stacks[transition_stack]
+        local_stack = local_stacks[transition_stack]
+        if (
+            remote_stack.get('state', 'published') != state_transition['from_state']
+            or local_stack.get('state', 'published') != state_transition['to_state']
+            or (state_transition['from_state'], state_transition['to_state'])
+            not in {('draft', 'published'), ('published', 'draft')}
+        ):
+            raise SyncwheelError(
+                f'{transition_stack}: coordination state transition permission does not match the manifest transition'
+            )
+        if remote_stack['branch'] != local_stack['branch']:
+            raise SyncwheelError(
+                f'{transition_stack}: a state-only coordination transition cannot change branch ownership'
+            )
+        remote_without_state = dict(remote_stack)
+        local_without_state = dict(local_stack)
+        remote_without_state.pop('state', None)
+        local_without_state.pop('state', None)
+        if remote_without_state != local_without_state:
+            raise SyncwheelError(
+                f'{transition_stack}: a state-only coordination transition cannot change other stack fields'
+            )
+
     changed_stack_refs = {
         stack['id']
         for stack in manifest['stacks']
         if f"refs/heads/{stack['branch']}" in changed_refs
     }
     added = local_ids - remote_ids
+    added.update({rename_stack} if rename_stack else set())
     missing_added_refs = sorted(
         stack_id for stack_id in added if stack_id not in changed_stack_refs
     )
@@ -2856,15 +2957,18 @@ def validate_coordination_publication_base(repo_root, manifest, config, expected
         remote_stack = remote_stacks[stack_id]
         local_stack = local_stacks[stack_id]
         if remote_stack['branch'] != local_stack['branch']:
-            raise SyncwheelError(
-                f'{stack_id}: changing a managed branch ownership requires manual coordination review'
-            )
+            if stack_id != rename_stack:
+                raise SyncwheelError(
+                    f'{stack_id}: changing a managed branch ownership requires manual coordination review'
+                )
         if remote_stack == local_stack:
             continue
         if stack_id not in changed_stack_refs:
-            raise SyncwheelError(
-                f'{stack_id}: local manifest differs from published state without publishing its managed branch'
-            )
+            if stack_id != transition_stack:
+                raise SyncwheelError(
+                    f'{stack_id}: local manifest differs from published state without publishing its managed branch'
+                )
+            continue
         ref = f"refs/heads/{remote_stack['branch']}"
         remote_tip = state.get('managed_refs', {}).get(ref)
         if remote_tip and not coordination_ref_is_safe_successor(
@@ -2903,7 +3007,18 @@ def validate_coordination_publication_base(repo_root, manifest, config, expected
         )
 
 
-def coordinated_publish(repo_root, manifest, manifest_path, changed_refs, scope, projection_status, dry_run=False, tombstone=None):
+def coordinated_publish(
+    repo_root,
+    manifest,
+    manifest_path,
+    changed_refs,
+    scope,
+    projection_status,
+    dry_run=False,
+    tombstone=None,
+    rename=None,
+    state_transition=None,
+):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         raise SyncwheelError('coordinated publish requires an active-active manifest version 2 coordination block')
@@ -2915,6 +3030,11 @@ def coordinated_publish(repo_root, manifest, manifest_path, changed_refs, scope,
         managed = list(dict.fromkeys([
             *managed,
             tombstone.get('ref') or f"refs/heads/{tombstone['branch']}",
+        ]))
+    if rename:
+        managed = list(dict.fromkeys([
+            *managed,
+            f"refs/heads/{rename['from_branch']}",
         ]))
     invalid = sorted(set(changed_refs) - set(managed))
     if invalid:
@@ -2929,6 +3049,8 @@ def coordinated_publish(repo_root, manifest, manifest_path, changed_refs, scope,
         expected,
         changed_refs,
         tombstone=tombstone,
+        rename=rename,
+        state_transition=state_transition,
     )
     for ref, sha in changed_refs.items():
         if not sha:
@@ -4687,9 +4809,17 @@ def command_stack_create(args):
     stacks = stack_map(manifest)
     if args.stack in stacks:
         raise SyncwheelError(f"stack already exists: {args.stack}")
-    branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
+    if args.draft and args.branch:
+        raise SyncwheelError('--draft chooses the reserved syncwheel/draft branch name; omit --branch')
+    branch = (
+        f'syncwheel/draft/{safe_ref_segment(args.stack)}'
+        if args.draft
+        else args.branch or f'pr/{safe_ref_segment(args.stack)}'
+    )
     if any(stack['branch'] == branch for stack in manifest['stacks']):
         raise SyncwheelError(f'stack branch already exists in manifest: {branch}')
+    if args.draft and branch_exists(repo_root, branch):
+        raise SyncwheelError(f'draft stack branch already exists locally: {branch}')
     commits = []
     for spec in args.specs:
         commits.extend(commit_list_for_spec(repo_root, spec))
@@ -4701,9 +4831,14 @@ def command_stack_create(args):
         'target_branch': args.target_branch or manifest['defaults']['base_branch'],
         'integration_branch': args.integration_branch or manifest['integration']['branch'],
         'commits': list(dict.fromkeys(commits)),
+        'state': 'draft' if args.draft else 'published',
+        'publication': {'enabled': not args.draft},
+        'meta': {},
     }
     if args.purpose:
         stack['meta'] = {'purpose': args.purpose}
+    if args.draft:
+        materialize_new_stack_branch(repo_root, stack)
     manifest['stacks'].append(stack)
     integration_membership = manifest['defaults']['integration_membership']
     if (
@@ -4718,7 +4853,179 @@ def command_stack_create(args):
         'stack_create',
         {'stack': args.stack, 'branch': branch},
     )
-    print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits")
+    print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
+    return 0
+
+
+def materialize_new_stack_branch(repo_root, stack):
+    """Create a new stack branch without leaving a persistent worktree behind."""
+    with tempfile.TemporaryDirectory(prefix='syncwheel-stack-create-') as tmp:
+        worktree = Path(tmp)
+        git(repo_root, 'worktree', 'add', '-B', stack['branch'], str(worktree), stack['base'])
+        try:
+            for commit in stack['commits']:
+                if branch_contains(worktree, 'HEAD', commit):
+                    continue
+                run(
+                    ['git', '-C', str(worktree), 'cherry-pick', commit],
+                    cwd=repo_root,
+                    env=replay_commit_env(repo_root, commit),
+                )
+        finally:
+            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+
+
+def command_stack_promote(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    if stack.get('state', 'published') != 'draft':
+        raise SyncwheelError(f"{args.stack}: promote requires state draft (found {stack.get('state', 'published')})")
+    from_branch = stack['branch']
+    if not branch_exists(repo_root, from_branch):
+        raise SyncwheelError(f"{args.stack}: cannot promote draft without a materialized branch: {from_branch}")
+    to_branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
+    if to_branch != from_branch:
+        if any(
+            other['id'] != args.stack and other['branch'] == to_branch
+            for other in manifest['stacks']
+        ):
+            raise SyncwheelError(f'stack branch already exists in manifest: {to_branch}')
+        if branch_exists(repo_root, to_branch):
+            raise SyncwheelError(f'cannot promote onto an existing local branch: {to_branch}')
+
+    previous_worktree_path = None
+    worktree_root = effective_worktree_root(manifest)
+    if worktree_root:
+        safe = from_branch.replace('/', '-').replace('\\', '-')
+        previous_worktree_path = resolve_worktree_root_path(repo_root, worktree_root) / safe
+
+    stack['branch'] = to_branch
+    stack['state'] = 'published'
+    stack['publication'] = {'enabled': True}
+    renamed = False
+    coordination_result = None
+    try:
+        if to_branch != from_branch:
+            run(['git', 'branch', '-m', from_branch, to_branch], cwd=repo_root)
+            renamed = True
+
+        if coordination_is_active(manifest):
+            config = coordination_config(manifest)
+            if to_branch != from_branch:
+                from_ref = f'refs/heads/{from_branch}'
+                from_ref_tip = remote_ref_tips(repo_root, config['remote'], [from_ref])[from_ref]
+                rename = {
+                    'stack': args.stack,
+                    'from_branch': from_branch,
+                    'to_branch': to_branch,
+                    'from_ref_tip': from_ref_tip,
+                }
+                tombstone = None
+                if from_ref_tip:
+                    tombstone = {
+                        'stack': args.stack,
+                        'branch': from_branch,
+                        'ref': from_ref,
+                        'reason': 'promoted',
+                        'closed_at': iso_utc_now(),
+                        'remote_tip': from_ref_tip,
+                    }
+                coordination_result = coordinated_publish(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    {f'refs/heads/{to_branch}': ref_tip(repo_root, to_branch)},
+                    f'promote:{args.stack}',
+                    'partial',
+                    tombstone=tombstone,
+                    rename=rename,
+                )
+            else:
+                coordination_result = coordinated_publish(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    {},
+                    f'promote:{args.stack}',
+                    'partial',
+                    state_transition={
+                        'stack': args.stack,
+                        'from_state': 'draft',
+                        'to_state': 'published',
+                    },
+                )
+    except Exception:
+        if renamed and branch_exists(repo_root, to_branch) and not branch_exists(repo_root, from_branch):
+            git(repo_root, 'branch', '-m', to_branch, from_branch, check=False)
+        raise
+
+    save_manifest(manifest_path, manifest)
+    append_ledger_event(
+        repo_root,
+        'stack_promoted',
+        {
+            'stack': args.stack,
+            'from_branch': from_branch,
+            'branch': to_branch,
+            'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+        },
+        manifest_path,
+    )
+    print(f'{args.stack}: promoted draft -> published')
+    if to_branch != from_branch:
+        print(f'  branch: {from_branch} -> {to_branch}')
+        if previous_worktree_path and previous_worktree_path.exists():
+            print(f'  worktree path retained (not moved): {previous_worktree_path}')
+    else:
+        print(f'  branch: {to_branch} (unchanged)')
+    if coordination_result:
+        print(f"  coordination state: {coordination_result['status']}")
+    return 0
+
+
+def command_stack_demote(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    stack = require_stack(manifest, args.stack)
+    if stack.get('state', 'published') != 'published':
+        raise SyncwheelError(f"{args.stack}: demote requires state published (found {stack.get('state', 'published')})")
+    github = stack.get('github')
+    if isinstance(github, dict) and github.get('pr') not in (None, ''):
+        raise SyncwheelError(f"{args.stack}: cannot demote while github.pr is set")
+
+    stack['state'] = 'draft'
+    stack['publication'] = {'enabled': False}
+    coordination_result = None
+    if coordination_is_active(manifest):
+        coordination_result = coordinated_publish(
+            repo_root,
+            manifest,
+            manifest_path,
+            {},
+            f'demote:{args.stack}',
+            'partial',
+            state_transition={
+                'stack': args.stack,
+                'from_state': 'published',
+                'to_state': 'draft',
+            },
+        )
+    save_manifest(manifest_path, manifest)
+    append_ledger_event(
+        repo_root,
+        'stack_demoted',
+        {
+            'stack': args.stack,
+            'branch': stack['branch'],
+            'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+        },
+        manifest_path,
+    )
+    print(f'{args.stack}: demoted published -> draft')
+    print(f"  branch: {stack['branch']} (unchanged)")
+    if coordination_result:
+        print(f"  coordination state: {coordination_result['status']}")
     return 0
 
 
@@ -4966,6 +5273,10 @@ def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
+    if stack.get('state', 'published') == 'draft':
+        raise SyncwheelError(
+            f"{args.stack}: cannot push stack in state draft; promote it before publishing"
+        )
     if coordination_is_active(manifest):
         config = coordination_config(manifest)
         coordinated_push_remote(args, config)
@@ -5251,12 +5562,21 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             or report.get('remote_matches_projection') is False
         )
         if push_needed:
-            actions.append({
-                'type': 'push_stack',
-                'stack': stack['id'],
-                'branch': stack['branch'],
-                'remote_ref': report['remote_ref'],
-            })
+            if stack.get('state', 'published') == 'draft':
+                actions.append({
+                    'type': 'push_stack_refused',
+                    'stack': stack['id'],
+                    'branch': stack['branch'],
+                    'state': 'draft',
+                    'reason': 'draft_stacks_are_not_published',
+                })
+            else:
+                actions.append({
+                    'type': 'push_stack',
+                    'stack': stack['id'],
+                    'branch': stack['branch'],
+                    'remote_ref': report['remote_ref'],
+                })
 
     integration_rebuild_needed = (
         not args.skip_integration
@@ -5436,6 +5756,8 @@ def format_reconcile_action(action):
         line += ' detail=remote already has the manifest projection; aligning local history'
     elif action['type'] in ('push_stack', 'push_integration'):
         line += ' detail=local projection needs publishing'
+    elif action['type'] == 'push_stack_refused':
+        line += f" detail=stack state={action['state']} cannot be published"
     elif action['type'] == 'manual_review':
         line += ' detail=manual review required before applying'
     elif action['type'] == 'resume_add_commit':
@@ -5545,8 +5867,21 @@ def command_reconcile(args):
     }
     if args.json and not args.apply:
         print(json.dumps(output, indent=2))
-        return 1 if validation['errors'] else 0
+        return 2 if any(
+            action['type'] == 'push_stack_refused' for action in output['actions']
+        ) else (1 if validation['errors'] else 0)
     print_reconcile_report(output)
+    refused_pushes = [
+        action for action in output['actions']
+        if action['type'] == 'push_stack_refused'
+    ]
+    if refused_pushes:
+        stack_ids = ', '.join(action['stack'] for action in refused_pushes)
+        raise SyncwheelError(
+            'reconcile cannot push stack(s) in state draft: '
+            + stack_ids
+            + '; promote them before publishing'
+        )
     if validation['errors']:
         return 1
     if not args.apply:
@@ -5627,6 +5962,10 @@ def command_reconcile(args):
             )
         elif action['type'] == 'push_stack':
             stack = require_stack(manifest, action['stack'])
+            if stack.get('state', 'published') == 'draft':
+                raise SyncwheelError(
+                    f"{stack['id']}: cannot push stack in state draft; promote it before publishing"
+                )
             if coordinated_push:
                 ref = f"refs/heads/{stack['branch']}"
                 coordinated_refs[ref] = ref_tip(repo_root, stack['branch'])
@@ -6679,12 +7018,36 @@ def build_parser():
     stack_create_p.add_argument('-I', '--integration-branch')
     stack_create_p.add_argument('-P', '--purpose')
     stack_create_p.add_argument(
+        '--draft',
+        action='store_true',
+        help='create a materialized draft stack on syncwheel/draft/<stack>',
+    )
+    stack_create_p.add_argument(
         '-u',
         '--include-in-integration',
         action='store_true',
         help='compatibility flag; required-membership manifests include every stack by default',
     )
     stack_create_p.set_defaults(func=command_stack_create)
+
+    stack_promote_p = stack_sub.add_parser(
+        'promote',
+        aliases=['pro'],
+        parents=[common],
+        help='promote a draft stack and rename its branch for PR publication',
+    )
+    stack_promote_p.add_argument('stack')
+    stack_promote_p.add_argument('-b', '--branch', help='published PR branch name (default: pr/<stack>)')
+    stack_promote_p.set_defaults(func=command_stack_promote)
+
+    stack_demote_p = stack_sub.add_parser(
+        'demote',
+        aliases=['dem'],
+        parents=[common],
+        help='demote a published stack to draft without renaming its branch',
+    )
+    stack_demote_p.add_argument('stack')
+    stack_demote_p.set_defaults(func=command_stack_demote)
 
     stack_sync_p = stack_sub.add_parser('sync', parents=[common])
     stack_sync_p.add_argument('stack')

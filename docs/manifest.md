@@ -148,6 +148,31 @@ python3 scripts/syncwheel.py stack create feature-a --branch pr/feature-a
 python3 scripts/syncwheel.py stack set feature-a origin/main..HEAD
 ```
 
+Create a private-but-owned draft with its required source branch already
+materialized. Drafts still participate in `integration.stacks`; only
+publication is disabled.
+
+```bash
+python3 scripts/syncwheel.py stack create exploration --draft
+# branch: syncwheel/draft/exploration
+python3 scripts/syncwheel.py stack promote exploration
+# branch: pr/exploration, state: published
+```
+
+`stack promote` accepts `--branch <pr-branch>` when the published branch does
+not use the default `pr/<stack-id>` name. It renames the local branch and sets
+`state: published` with `publication.enabled: true`. `stack demote <stack>` is
+the reverse state transition but intentionally does not rename the branch; it
+refuses a stack with a populated `github.pr` value. `stack push` and
+`reconcile --push` refuse draft stacks by state. Rebuilds remain allowed, so a
+draft remains recoverable from the manifest.
+
+For active-active manifests, promotion atomically publishes the replacement
+branch and coordination state. The former draft remote branch is retained as a
+tombstoned recovery ref; Syncwheel does not delete it. If a reconcile-created
+`.syncwheel/wt/<draft-branch>` directory exists, promotion prints its retained
+path rather than moving it silently.
+
 New manifests require every declared stack to participate in integration. Migrate
 an existing legacy manifest only after closing stacks that are already absorbed
 or abandoned:

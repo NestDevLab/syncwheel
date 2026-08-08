@@ -81,6 +81,28 @@ lease reports disjoint stack changes as mergeable, review `handoff` and run
 `publish --accept-merge`; overlapping or integration/order conflicts require a
 human decision.
 
+### Draft lifecycle
+
+Use a draft when ownership is known but the PR branch is not ready:
+
+```bash
+python3 scripts/syncwheel.py stack create exploration --draft
+python3 scripts/syncwheel.py stack promote exploration
+```
+
+Creation materializes `syncwheel/draft/exploration` immediately and includes the
+stack in required integration membership. Rebuilds remain available for drafts,
+but `stack push` and `reconcile --push` refuse them and name the `draft` state.
+Promotion selects `pr/<stack-id>` unless `--branch` is given. In active-active
+mode it atomically publishes that new ref and a tombstone for the old draft ref;
+it never deletes the old remote branch. A retained
+`.syncwheel/wt/<old-draft-branch>` directory is reported for deliberate local
+cleanup rather than moved automatically.
+
+Use `stack demote <stack>` only after the PR linkage has been removed; Syncwheel
+refuses demotion while `github.pr` is populated. Demotion is a state-only
+transition and deliberately keeps the existing branch name.
+
 ## Phase 3. Validate the manifest against Git
 
 Run:
@@ -116,6 +138,9 @@ Apply:
 python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
 python3 scripts/syncwheel.py stack push <stack>
 ```
+
+Do not run the push step for a draft stack. Keep it in the rebuild/validate
+cycle until an explicit `stack promote` makes it published.
 
 If you are already on the target PR branch and the checkout is clean, you can
 use in-place mode instead:
