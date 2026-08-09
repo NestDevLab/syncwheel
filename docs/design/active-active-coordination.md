@@ -123,6 +123,23 @@ These surfaces use the same publisher when coordination is active:
 Only a full `publish` can claim a `convergent` projection, after every managed
 local ref matches the manifest projection.
 
+### Draft source refs
+
+A `draft` stack is withheld from the forge, not from the coordination domain.
+Its source ref `refs/heads/syncwheel/draft/<stack>` is an ordinary managed ref:
+it is observed, leased, and published in the same atomic push as every other
+managed ref, and it appears in the state snapshot's managed-ref map. Publishing
+it is what makes the draft reproducible — another clone applies the snapshot and
+rebuilds the branch from the manifest alone, holding none of the originating
+clone's objects.
+
+The two publication levels stay independent. A draft push is accepted only when
+coordination is `active-active` and the resolved remote is the coordination
+remote, which `defaults.publication_remote` must equal. Every other destination
+— the stack's `target_remote`, an explicit `--remote` override, or a manifest
+with coordination disabled — is refused with the `draft` state as the reason.
+`publication.enabled: false` continues to gate the PR side only.
+
 ## Concurrent publications
 
 Run this before handing a repository to another device or agent:

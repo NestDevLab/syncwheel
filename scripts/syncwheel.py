@@ -1354,6 +1354,23 @@ def coordination_is_active(manifest):
     return bool(config and config.get('mode') == 'active-active')
 
 
+def stack_push_remote(manifest, stack, remote_override=None):
+    return remote_override or stack.get('publication_remote') or manifest['defaults']['publication_remote']
+
+
+def draft_push_refusal(manifest, stack, remote):
+    """Drafts publish their source ref to the coordination remote only; the forge side stays private."""
+    if stack.get('state', 'published') != 'draft':
+        return None
+    config = coordination_config(manifest)
+    if config and config.get('mode') == 'active-active' and remote == config['remote']:
+        return None
+    return (
+        f"{stack['id']}: cannot push stack in state draft to remote {remote!r}; "
+        'a draft publishes its source ref only to the coordination remote'
+    )
+
+
 def coordination_state_ref(config):
     return f"refs/heads/{config['state_branch']}"
 
@@ -5772,10 +5789,9 @@ def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
-    if stack.get('state', 'published') == 'draft':
-        raise SyncwheelError(
-            f"{args.stack}: cannot push stack in state draft; promote it before publishing"
-        )
+    refusal = draft_push_refusal(manifest, stack, stack_push_remote(manifest, stack, args.remote))
+    if refusal:
+        raise SyncwheelError(refusal)
     if coordination_is_active(manifest):
         config = coordination_config(manifest)
         coordinated_push_remote(args, config)
@@ -5803,7 +5819,7 @@ def command_stack_push(args):
                 manifest_path,
             )
         return 0
-    remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
+    remote = stack_push_remote(manifest, stack, args.remote)
     push_args = push_args_with_options(args)
     command = ['git', 'push', *push_args, remote, stack['branch']]
     if args.dry_run:
@@ -6061,13 +6077,13 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             or report.get('remote_matches_projection') is False
         )
         if push_needed:
-            if stack.get('state', 'published') == 'draft':
+            if draft_push_refusal(manifest, stack, stack_push_remote(manifest, stack, args.remote)):
                 actions.append({
                     'type': 'push_stack_refused',
                     'stack': stack['id'],
                     'branch': stack['branch'],
                     'state': 'draft',
-                    'reason': 'draft_stacks_are_not_published',
+                    'reason': 'draft_stacks_publish_only_to_the_coordination_remote',
                 })
             else:
                 actions.append({
@@ -6377,9 +6393,9 @@ def command_reconcile(args):
     if refused_pushes:
         stack_ids = ', '.join(action['stack'] for action in refused_pushes)
         raise SyncwheelError(
-            'reconcile cannot push stack(s) in state draft: '
+            'reconcile cannot push stack(s) in state draft to this remote: '
             + stack_ids
-            + '; promote them before publishing'
+            + '; a draft publishes its source ref only to the coordination remote'
         )
     if validation['errors']:
         return 1
@@ -6465,10 +6481,9 @@ def command_reconcile(args):
             )
         elif action['type'] == 'push_stack':
             stack = require_stack(manifest, action['stack'])
-            if stack.get('state', 'published') == 'draft':
-                raise SyncwheelError(
-                    f"{stack['id']}: cannot push stack in state draft; promote it before publishing"
-                )
+            refusal = draft_push_refusal(manifest, stack, stack_push_remote(manifest, stack, args.remote))
+            if refusal:
+                raise SyncwheelError(refusal)
             if coordinated_push:
                 ref = f"refs/heads/{stack['branch']}"
                 coordinated_refs[ref] = ref_tip(repo_root, stack['branch'])
@@ -6479,7 +6494,7 @@ def command_reconcile(args):
                     'tip': coordinated_refs[ref],
                 })
                 continue
-            remote = args.remote or stack.get('publication_remote') or manifest['defaults']['publication_remote']
+            remote = stack_push_remote(manifest, stack, args.remote)
             command = ['git', 'push', *push_args, remote, stack['branch']]
             run(command, cwd=repo_root)
             print(quoted(command))

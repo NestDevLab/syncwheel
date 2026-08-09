@@ -8,6 +8,12 @@
   releases use the existing ephemeral replay path. A plumbing conflict names
   its paths and stops with an explicit `--replay-mode desk` retry command. The
   target ref must not already be checked out.
+- Publish draft source refs to the coordination remote. Under `active-active`
+  coordination, `stack push` and `reconcile --push` now carry
+  `refs/heads/syncwheel/draft/*` through the normal atomic leased publication,
+  so a second clone can rebuild a draft from the manifest alone. Pushing a draft
+  anywhere else — a target/forge remote, an overridden `--remote`, or any
+  uncoordinated manifest — is still refused and names the state.
 - Add the explicit `--replay-mode ephemeral` rebuild path. It replays in a
   detached temporary worktree, updates the real branch ref before ledger
   collection, and removes the worktree on both success and failure. `auto`
