@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Bring the published surface in line with the working model: the landing page, README, `llms.txt`,
+  `AGENT.md` and the bundled `syncwheel` skill no longer present a dedicated worktree per branch as
+  the way to work. They now describe a single checkout, automatic replay-mode selection, and draft
+  stacks, and the skill documents `--replay-mode`, `stack create --draft`, `capture-integration`,
+  `promote` and `demote`.
+
 - **`auto` no longer creates a worktree.** The default replay mode now selects
   `plumbing` where Git supports `merge-tree --write-tree`, and falls back to
   `ephemeral` below that threshold; `in-place` is still used when the target

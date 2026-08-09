@@ -1164,7 +1164,7 @@
       <section class="hero">
         <img class="hero-logo" src="assets/syncwheel-logo.png" alt="" width="124" height="127">
         <div>
-          <span class="eyebrow"><span class="dot"></span> v<!-- syncwheel-version:start -->0.31.0<!-- syncwheel-version:end --> — reconcile · resume · ledger</span>
+          <span class="eyebrow"><span class="dot"></span> v<!-- syncwheel-version:start -->0.31.1<!-- syncwheel-version:end --> — reconcile · resume · ledger</span>
           <h1><span class="title-line">One branch.</span><span class="title-line accent"><span class="accent-sky">Many</span> PRs.</span></h1>
           <p class="subhead">Hack in one place. Syncwheel rebuilds, reconciles, and publishes every PR branch from one declared manifest.</p>
           <div class="actions">
@@ -1554,11 +1554,11 @@
                 <circle cx="780" cy="184" r="5.5" fill="#14b8a6"/>
                 <circle cx="780" cy="184" r="9.5" fill="none" stroke="#5eead4" stroke-width="1.5"/>
               </g>
-              <!-- worktree chips -->
+              <!-- replay chips -->
               <rect x="420" y="126" width="190" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
-              <text x="430" y="140" font-size="10.5" fill="#94a3b8">worktree ../wt/pr-feature-a</text>
+              <text x="430" y="140" font-size="10.5" fill="#94a3b8">replayed, no worktree</text>
               <rect x="420" y="194" width="190" height="20" rx="5" fill="rgba(2,6,23,0.72)" stroke="rgba(148,163,184,0.35)"/>
-              <text x="430" y="208" font-size="10.5" fill="#94a3b8">worktree ../wt/pr-feature-b</text>
+              <text x="430" y="208" font-size="10.5" fill="#94a3b8">replayed, no worktree</text>
             </g>
 
             <!-- step: publish -->
@@ -1632,11 +1632,11 @@
             <p>Dry-run: compare manifest, branches, and remote tips. Nothing mutates.</p>
           </div>
           <div role="tabpanel" id="panel-sync" aria-labelledby="tab-sync">
-            <code class="cmd"><span class="prompt">$</span> syncwheel sync --worktree-root ../wt</code>
-            <p>Same changes, new commits: each drifted branch is replayed onto the new base — in a worktree, backup first.</p>
+            <code class="cmd"><span class="prompt">$</span> syncwheel sync</code>
+            <p>Same changes, same commits: each drifted branch is replayed onto the new base, reproducibly, with a backup first and without creating a worktree.</p>
           </div>
           <div role="tabpanel" id="panel-publish" aria-labelledby="tab-publish">
-            <code class="cmd"><span class="prompt">$</span> syncwheel publish --worktree-root ../wt</code>
+            <code class="cmd"><span class="prompt">$</span> syncwheel publish</code>
             <p>Push managed branches with <code>--force-with-lease</code>.</p>
           </div>
           <div role="tabpanel" id="panel-resume" aria-labelledby="tab-resume">
@@ -1872,8 +1872,8 @@
 <span class="prompt">$</span> syncwheel stack create feature-a --branch pr/feature-a  <span class="muted"># included in integration by default</span>
 <span class="prompt">$</span> syncwheel stack set feature-a origin/main..HEAD
 <span class="prompt">$</span> syncwheel reconcile                          <span class="muted"># dry-run plan first, always</span>
-<span class="prompt">$</span> syncwheel sync --worktree-root ../wt
-<span class="prompt">$</span> syncwheel publish --worktree-root ../wt</code></pre>
+<span class="prompt">$</span> syncwheel sync
+<span class="prompt">$</span> syncwheel publish</code></pre>
         </div>
 
         <p class="inline-note">Shorthands (<code>rec</code>, <code>s</code>, <code>i</code>, <code>-p</code>, <code>-u</code>), repo aliases, and <code>self update</code> live in the
@@ -1882,7 +1882,7 @@
     </main>
 
     <footer>
-      <span>syncwheel v<!-- syncwheel-version:start -->0.31.0<!-- syncwheel-version:end --> · MIT · a NestDevLab project</span>
+      <span>syncwheel v<!-- syncwheel-version:start -->0.31.1<!-- syncwheel-version:end --> · MIT · a NestDevLab project</span>
       <a class="logo-link" href="https://www.nestdev.it/" aria-label="NestDevLab">
         <img src="https://www.nestdev.it/assets/logo-nestdev.png" width="22" height="22" alt="">
       </a>

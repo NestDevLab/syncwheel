@@ -1,6 +1,6 @@
 ---
 name: syncwheel
-description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, dedicated worktrees, stacked PRs, and integration branches. Use whenever you are about to create a PR branch, manage a fork/upstream/integration or PR-stack workflow, prepare or rebuild a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
+description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, and integration branches, all from a single checkout. Use whenever you are about to create a PR branch, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
 allowed-tools: [Bash]
 ---
 
@@ -28,7 +28,7 @@ Reach for Syncwheel **before** any of these, not after:
 - creating a PR branch or a stack of dependent PRs
 - working in a repo that has a `.syncwheel/` manifest, or a
   fork/upstream/integration/PR-stack workflow
-- preparing changes in a dedicated worktree
+- committing on integration before you know which PR owns the change
 - rebuilding or pushing PR branches / integration
 - coordinating with other agents who may rebase the same branches
 
@@ -44,10 +44,15 @@ The script owns: repo-state discovery, manifest validation, deterministic branch
 and integration reconstruction. The agent owns: judgment, communication,
 project-specific validation after a rebuild, and safe execution.
 
-The primary Git worktree stays on `manifest.integration.branch`; feature and fix branches use
-dedicated worktrees. A clean, bounded integration operation may switch it temporarily, but must
-restore and verify the integration branch before completion. Treat any other primary-checkout
-mismatch as a validation error and blocked handoff.
+The primary Git worktree stays on `manifest.integration.branch`, and you work there. Rebuilds no
+longer create a worktree: replay runs through Git plumbing where available, or a temporary worktree
+that is removed before the command returns. A clean, bounded integration operation may switch the
+primary checkout temporarily, but must restore and verify the integration branch before completion.
+Treat any other primary-checkout mismatch as a validation error and blocked handoff.
+
+Reach for a dedicated worktree only when you actually want one: to resolve a conflict, or to build,
+run, or test a branch in isolation. That is `--replay-mode desk`, and it is a deliberate choice rather
+than a side effect of rebuilding.
 
 ## Locate the CLI
 
@@ -117,10 +122,35 @@ syncwheel repo tracking set git-tracked -a
 `syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
 wheel metaphor helps, but the manifest field remains `stacks`.
 
-Never mutate branches from a dirty worktree. Prefer a dedicated worktree for
-every rebuild. Use `--dry-run` on rebuild/push commands. If the manifest and Git
-disagree, fix the manifest or call out the conflict — do not claim a repo is
-aligned while integration and PR branches still differ.
+Never mutate branches from a dirty checkout. Use `--dry-run` on rebuild/push commands. If the manifest
+and Git disagree, fix the manifest or call out the conflict — do not claim a repo is aligned while
+integration and PR branches still differ.
+
+## Replay modes
+
+Rebuilds pick their execution mode automatically; you only override it deliberately.
+
+| Mode | What it does | When you would ask for it |
+|---|---|---|
+| `plumbing` | replays through Git plumbing, no working tree at all | fastest; chosen automatically on Git ≥ 2.38 |
+| `ephemeral` | temporary worktree, removed before the command returns | automatic fallback on older Git |
+| `in-place` | replays in the checkout you are already standing in | automatic when the target is the current branch |
+| `desk` | persistent worktree, left behind on purpose | resolving a conflict, or building/testing a branch in isolation |
+
+```bash
+syncwheel stack rebuild <id> --replay-mode desk   # keep the worktree, e.g. to resolve a conflict
+syncwheel replay-mode                             # show the repo-local default
+syncwheel replay-mode set desk                    # persist it for this clone
+```
+
+Selection is four-tier, most specific first: the `--replay-mode` flag, `replay_mode` in the repo-local
+`.syncwheel/profile.local.json`, `defaults.replay_mode` in the manifest, then `auto`. An unavailable
+mode falls back rather than failing.
+
+**A plumbing conflict never descends silently.** It names the conflicted paths, leaves the filesystem
+untouched, and stops with the exact `--replay-mode desk` retry command. Take that escalation: `stack
+absorb` and `stack resolve-integration` both need a checkout to resolve in, and plumbing never made
+one.
 
 ## Lossless checkout repair
 
@@ -138,6 +168,10 @@ protocol](references/lossless-repair.md).
 > `syncwheel stack set <id> <rev-or-range>` so the projection includes the latest commit;
 > and after every rebuild/sync/publish, diff the rebuilt branch against the expected
 > post-fix state to confirm earlier cleanups did not regress.
+>
+> Replay is now reproducible — the same declared commits on the same base rebuild to the same SHAs, so
+> a rebuild that changes nothing is a genuine no-op. That removes the noise, not the hazard: a stale
+> projection still force-pushes the branch back to what the manifest says.
 
 ## Authoring a new PR stack
 
@@ -149,19 +183,37 @@ syncwheel repo tracking status
 syncwheel repo tracking set git-tracked --apply # or local-only
 # 3. Declare the stack
 syncwheel stack create feature-a --branch pr/feature-a --base origin/main
-# 4. Author in a dedicated worktree (fresh work uses plain git worktree add)
-git worktree add -b pr/feature-a ../repo-wt-feature-a origin/main
-#    ... make and commit your changes in that worktree ...
+# 4. Author on the integration branch, in the checkout you are already in
+#    ... make and commit your changes ...
 # 5. Record the commits into the manifest, then validate and push
 syncwheel stack set feature-a origin/main..HEAD
 syncwheel validate && syncwheel plan --json
 syncwheel stack push feature-a
 ```
 
-New manifests require every declared stack to participate in integration. Do not
-register a track-only stack: use an ordinary Git worktree until the work is ready
-for the Syncwheel lifecycle. Migrate an older manifest only after classifying
-absorbed or abandoned stacks:
+## When you do not know which PR owns the change yet
+
+Commit on integration, then put the commit in a drawer and decide later. A draft stack owns its
+commits but is forbidden from becoming a pull request until you promote it, so the work is tracked from
+the first commit instead of sitting unowned until the next rebuild drops it.
+
+```bash
+syncwheel stack create --draft caching-experiment       # owned, not proposed
+syncwheel stack capture-integration caching-experiment HEAD
+#    ... keep working; capture more commits into the same draft, or start another ...
+syncwheel stack promote caching-experiment --branch pr/caching   # now it is a real PR branch
+```
+
+A draft refuses `stack push` to the target remote and names its state as the reason. Under
+active-active coordination its *source* ref does publish to the coordination remote, so another clone
+can rebuild it from the manifest alone. `syncwheel stack demote <id>` goes back, and refuses when the
+stack already has an open PR recorded.
+
+If `plan` reports integration commits that belong to no stack, that is exactly this situation: it now
+names `capture-integration` into a new draft as the remedy.
+
+New manifests require every declared stack to participate in integration. Migrate an older manifest
+only after classifying absorbed or abandoned stacks:
 
 ```bash
 syncwheel manifest require-integration
@@ -192,8 +244,11 @@ loop or they accumulate. Clean up when any of these holds:
 - `syncwheel status` shows a worktree or local branch not backing an **active**
   manifest stack (orphans — common after an integration-scheme change)
 - `backup/*` branches have piled up
-- before handing off a managed repo: leave only the active stacks' worktrees plus
-  the integration worktree
+- before handing off a managed repo: leave only the integration checkout, plus any
+  `desk` worktree someone is genuinely working in
+
+Rebuilds no longer add to this pile — a worktree now exists only because someone asked for one, so an
+unexplained worktree is a real signal rather than routine residue.
 
 Procedure (never destroy unmerged or uncommitted work):
 
@@ -275,8 +330,7 @@ Exclude `.syncwheel/` via `.git/info/exclude` (local, does
 not touch the committed `.gitignore`).
 
 Benefits:
-- you still get worktree isolation, stacks, deterministic reconcile, and the
-  ledger
+- you still get stacks, deterministic reconcile, and the ledger
 - you do **not** impose Syncwheel config on a maintainer who may not use it
 - your PRs stay clean — only the real change is proposed
 - coordination/recovery happens via the canonical remote + `resume`

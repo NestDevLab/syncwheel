@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.31.0`
+Current version: `0.31.1`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -14,6 +14,9 @@ It is especially useful when you:
 - keep many open PRs alive while upstream keeps moving
 - maintain a fork with clean review branches and a combined local runtime branch
 - need to rebuild PR branches deterministically instead of hand-rebasing them
+- want to send several pull requests while working in a single checkout, without
+  a worktree per branch
+- need to own a commit before you know which pull request it belongs to
 - work across multiple devices or AI agents without one checkout becoming the
   hidden source of truth
 - want branch recovery to follow a manifest, not memory
@@ -147,6 +150,28 @@ self-removing temporary worktree below that, the current checkout when it is
 already on the target branch, and an existing worktree when the branch has one.
 Pin a mode with `--replay-mode`, with `syncwheel replay-mode <mode>` for a
 repo-local default, or with `defaults.replay_mode` in the manifest.
+
+## Owning a commit before you know its PR
+
+A commit made on the integration branch has to belong to a stack to reach the base branch. Until it
+does, `validate` reports it as owned by nobody and the next integration rebuild drops it.
+
+A draft stack closes that gap. It owns its commits like any other stack, but is forbidden from
+becoming a pull request until you promote it:
+
+```bash
+syncwheel stack create --draft caching-experiment
+syncwheel stack capture-integration caching-experiment HEAD
+syncwheel stack promote caching-experiment --branch pr/caching
+```
+
+A draft refuses `stack push` to the target remote and names its state as the reason. Under
+active-active coordination its source ref does publish to the coordination remote, so another clone
+can rebuild the draft from the manifest alone. `stack demote` reverses the promotion, and refuses when
+the stack already records an open pull request.
+
+When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
+new draft as the remedy.
 
 ## System flow (visual)
 
