@@ -165,13 +165,13 @@ Look for:
 
 For each stack that needs repair:
 1. use the manifest as the exact commit list
-2. rebuild the PR branch in a dedicated worktree
+2. rebuild the PR branch
 3. validate again
 4. only then push or update the PR
 
 Dry-run:
 ```bash
-python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path> --dry-run
+python3 scripts/syncwheel.py stack rebuild <stack> --dry-run
 ```
 
 Dry-run output is an executable POSIX shell transcript, not a description of
@@ -181,16 +181,26 @@ environment assignments. Plumbing uses a shell block because the tree and
 commit object IDs flow through command substitutions; it remains directly
 executable by a POSIX shell.
 
-`--replay-mode plumbing` detects whether Git supports `merge-tree --write-tree`
-(Git 2.38 or newer). When unavailable it uses the ephemeral path. A plumbing
-conflict never selects another mode: Syncwheel reports the paths and stops with
-the literal desk-mode retry command, leaving no checkout to resolve by mistake.
-The target branch must not already be checked out; use ephemeral or desk when
-it is.
+The default mode, `auto`, replays through `plumbing` when Git supports
+`merge-tree --write-tree` (Git 2.38 or newer) and through `ephemeral` below that
+threshold, so a routine rebuild leaves no worktree behind. It uses `in-place`
+when the target branch is the current one, and `desk` when the branch already
+has a worktree or `--worktree` was passed. Capability is detected at runtime and
+an inapplicable mode falls back rather than failing.
+
+Pin a mode when the default is not wanted, most specific first: `--replay-mode`
+on the command, `replay_mode` in the repo-local `.syncwheel/profile.local.json`
+(`syncwheel replay-mode <mode>`), then `defaults.replay_mode` in the manifest.
+The mode that ran is recorded in the rebuild's ledger event, and `plan --json`
+names the mode a rebuild would take.
+
+A plumbing conflict never selects another mode: Syncwheel reports the paths and
+stops with the literal desk-mode retry command, leaving no checkout to resolve
+by mistake. Plumbing also requires its target branch not to be checked out.
 
 Apply:
 ```bash
-python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
+python3 scripts/syncwheel.py stack rebuild <stack>
 python3 scripts/syncwheel.py stack push <stack>
 ```
 
@@ -222,7 +232,7 @@ previous replayed SHAs once; an unchanged rebuild after that is a no-op.
 
 Dry-run:
 ```bash
-python3 scripts/syncwheel.py int rebuild --worktree <path> --dry-run
+python3 scripts/syncwheel.py int rebuild --dry-run
 ```
 
 This has the same executable POSIX transcript contract as `stack rebuild
@@ -231,9 +241,12 @@ the executable object-ID shell block.
 
 Apply:
 ```bash
-python3 scripts/syncwheel.py int rebuild --worktree <path>
+python3 scripts/syncwheel.py int rebuild
 python3 scripts/syncwheel.py int push
 ```
+
+`merge-stacks` integration has no plumbing form, so `auto` uses `in-place`,
+`desk`, or `ephemeral` for it.
 
 If you are already on the integration branch and the checkout is clean:
 

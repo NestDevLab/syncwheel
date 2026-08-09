@@ -40,31 +40,49 @@ That becomes deterministic only when the repository declares the mapping in `.sy
 
 ## Replay execution
 
-Use an explicit ephemeral replay when rebuilding does not need a durable desk:
+A rebuild leaves no worktree behind:
 
 ```bash
-syncwheel stack rebuild feature-a --replay-mode ephemeral
-syncwheel int rebuild --replay-mode ephemeral
+syncwheel stack rebuild feature-a
+syncwheel int rebuild
 ```
 
-The replay runs in a detached temporary worktree, updates the managed branch
-ref, and removes the temporary worktree before the command returns. This keeps
-routine reconstruction separate from a checkout a person intends to inspect or
-repair. `auto` remains desk-compatible in this release; use `--replay-mode
-desk --worktree <path>` or `--in-place` for the existing deliberate worktree choices.
+The default mode, `auto`, replays through Git plumbing when Git supports
+`merge-tree --write-tree` (2.38 or newer) and in a detached temporary worktree
+below that threshold. It uses the current checkout when the target branch is
+already the current one, and an existing desk when the branch already has one.
+Capability is detected at runtime and an inapplicable mode falls back rather
+than failing.
 
-On Git 2.38 or newer, `--replay-mode plumbing` can rebuild the same history
-without creating a working tree:
+Ask for a desk when you actually want one — to resolve a conflict, or to build,
+run, or test the branch in isolation:
 
 ```bash
-syncwheel stack rebuild feature-a --replay-mode plumbing
+syncwheel stack rebuild feature-a --replay-mode desk --worktree <path>
+syncwheel stack rebuild feature-a --in-place
 ```
 
-Git capability is detected at runtime; Git versions below 2.38 use ephemeral
-replay. A plumbing conflict prints the conflicted paths and a literal retry with
+A plumbing conflict prints the conflicted paths and a literal retry with
 `--replay-mode desk`; it does not silently create a checkout where the conflict
-could be resolved. The target branch must not already be checked out; use
-ephemeral or desk for an active integration checkout.
+could be resolved. Plumbing also requires its target branch not to be checked
+out, so `auto` uses in-place or desk for an active integration checkout.
+
+Pin a default when `auto` is not what you want, most specific first: the
+`--replay-mode` flag on the command, then the repo-local profile, then the
+manifest.
+
+```bash
+syncwheel replay-mode              # show the effective mode and where it came from
+syncwheel replay-mode ephemeral    # set the repo-local default
+syncwheel replay-mode --clear      # fall back to the manifest, then to auto
+```
+
+The repo-local value lives in `.syncwheel/profile.local.json`, which is never
+committed. `defaults.replay_mode` in the manifest is the shared default for a
+repository whose contributors should agree on one; it is deliberately excluded
+from coordination state, because it changes how a ref was produced, not what it
+contains. Each rebuild records the mode it used in its ledger event, and
+`plan --json` names the mode a rebuild would take.
 
 If `plan` identifies an integration commit with no owner and the PR shape is
 still undecided, create a draft and capture it instead of leaving it on

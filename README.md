@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.30.0`
+Current version: `0.31.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -131,19 +131,22 @@ syncwheel reconcile -a -P -W .syncwheel/wt
 syncwheel stack rebuild feature-a -n
 ```
 
-## Worktree-first model
+## One checkout, worktrees on request
 
-Syncwheel is fundamentally built around Git worktrees. The safest default is:
+The safest default is:
 
 - keep the primary working checkout on the shared integration branch
-- use one worktree per PR branch when rebuilding or validating PR state
+- rebuild and publish every PR branch from there, without checking it out
 - optionally keep a separate administrative checkout for manifest-only work
+- create a worktree for a PR branch when you actually want a desk: to resolve a
+  conflict, or to build, run, or test that branch in isolation
 
-This keeps branch mutation explicit and avoids losing your place in a normal
-working checkout. For simpler human-operated workflows, `stack rebuild` and
-`int rebuild` also support `--in-place`; in-place mode requires the current
-checkout to already be on the target branch and to be clean before anything is
-reset or replayed.
+`stack rebuild` and `int rebuild` leave no worktree behind by default. Their
+`auto` replay mode uses Git plumbing where Git supports it (2.38 or newer) and a
+self-removing temporary worktree below that, the current checkout when it is
+already on the target branch, and an existing worktree when the branch has one.
+Pin a mode with `--replay-mode`, with `syncwheel replay-mode <mode>` for a
+repo-local default, or with `defaults.replay_mode` in the manifest.
 
 ## System flow (visual)
 
@@ -474,7 +477,8 @@ python3 scripts/syncwheel.py use --shared
 ```
 
 `use alice` writes `.syncwheel/profile.local.json`, which should be ignored by
-the host repository because it is local operator state.
+the host repository because it is local operator state. `syncwheel replay-mode
+<mode>` stores the repo-local default replay execution mode in the same file.
 
 ## Stack metadata (optional)
 

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **`auto` no longer creates a worktree.** The default replay mode now selects
+  `plumbing` where Git supports `merge-tree --write-tree`, and falls back to
+  `ephemeral` below that threshold; `in-place` is still used when the target
+  branch is already the current one, and `desk` when it already has a worktree
+  or you ask for one. Routine `stack rebuild`, `int rebuild` and
+  `reconcile --apply` therefore stop leaving a worktree behind — the last one
+  matters most, since it is where worktrees used to accumulate. `desk` remains
+  available and becomes what its name says: a place someone deliberately chose
+  to work, and `reconcile --apply --replay-mode desk` restores the previous
+  behaviour when that is what you want. Selection is available at
+  four levels, most specific first — the `--replay-mode` flag, `replay_mode` in
+  the repo-local `.syncwheel/profile.local.json`, `defaults.replay_mode` in the
+  manifest, then built-in `auto`. Use the new `syncwheel replay-mode` command to
+  read or set the repo-local default. An unavailable mode makes `auto` fall
+  back rather than fail. The chosen mode is now recorded in `plan --json` and in
+  the `stack_rebuilt` and `integration_rebuilt` ledger events. `use <name>` now
+  keeps the other keys in `profile.local.json` instead of replacing the file.
 - Add `--replay-mode plumbing`: Git 2.38+ replays directly through
   `merge-tree --write-tree`, `commit-tree`, and one final `update-ref`, without
   creating a working tree. Git capability is detected at runtime; older Git
@@ -16,8 +33,7 @@
   uncoordinated manifest — is still refused and names the state.
 - Add the explicit `--replay-mode ephemeral` rebuild path. It replays in a
   detached temporary worktree, updates the real branch ref before ledger
-  collection, and removes the worktree on both success and failure. `auto`
-  remains desk-compatible in this release.
+  collection, and removes the worktree on both success and failure.
 - Add `stack capture-integration` to assign integration-first commits to a
   stack, rebuild only that branch through the shared replay executor, and keep
   no capture worktree after completion. Unmapped integration diagnostics now

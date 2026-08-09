@@ -48,20 +48,35 @@ for explicit follow-up.
 
 ## Worktrees
 
-Worktrees are desks a person chooses for development or conflict resolution;
-they are not required artifacts of a routine replay. Use `--replay-mode
-ephemeral` on `stack rebuild` or `int rebuild` to cherry-pick in a detached
-temporary worktree. Syncwheel updates the real branch ref and removes that
-worktree before the command returns, including when replay fails.
+Worktrees are desks a person chooses for development or conflict resolution.
+They are not artifacts of a routine replay: `stack rebuild` and `int rebuild`
+leave nothing behind unless you ask them to.
 
-`auto` remains desk-compatible for this release, so use `ephemeral` explicitly
-when no persistent checkout is wanted. On Git 2.38 or newer, `plumbing` builds
-the replayed objects without creating a working tree and updates the branch only
-after the complete replay succeeds. Older Git releases fall back to `ephemeral`.
+The default mode, `auto`, picks the cheapest path that applies:
+
+| Mode | Chosen when | Leaves behind |
+|---|---|---|
+| `in-place` | the target branch is the current one | nothing |
+| `desk` | the target branch already has a worktree, or `--worktree` was passed | that worktree |
+| `plumbing` | Git supports `merge-tree --write-tree` (2.38 or newer) | nothing |
+| `ephemeral` | below that Git threshold | nothing |
+
+`plumbing` builds the replayed objects without creating a working tree and
+updates the branch only after the complete replay succeeds. `ephemeral`
+cherry-picks in a detached temporary worktree and removes it before the command
+returns, including when replay fails. When a mode does not apply, `auto`
+descends to the next one rather than failing.
+
 If plumbing detects a conflict, it reports the paths and stops; rerun explicitly
-with `--replay-mode desk` to obtain a checkout for resolution.
-Plumbing requires its target branch not to be checked out, so it cannot leave an
-existing desk out of sync with the updated ref.
+with `--replay-mode desk` to obtain a checkout for resolution. Plumbing requires
+its target branch not to be checked out, so it cannot leave an existing desk out
+of sync with the updated ref.
+
+Pin a mode when the default is not what a repository or an operator wants, most
+specific first: the `--replay-mode` flag, `replay_mode` in the repo-local
+`.syncwheel/profile.local.json` (`syncwheel replay-mode <mode>`), then
+`defaults.replay_mode` in the manifest. Every rebuild records the mode it used
+in its ledger event, and `plan --json` names the mode a rebuild would take.
 
 Recommended persistent layout:
 - repo root = active integration checkout by default
