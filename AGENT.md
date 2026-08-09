@@ -30,8 +30,12 @@ syncwheel handoff
 - `reconcile` is read-only by default.
 - `sync`, `publish`, `reconcile --apply`, stack rebuilds, integration rebuilds, branch deletion, and
   pushes are mutations.
-- Never mutate branches from a dirty worktree.
-- Prefer dedicated worktrees under the declared Syncwheel worktree root.
+- Never mutate branches from a dirty checkout.
+- Rebuilds do not create a worktree. Ask for one with `--replay-mode desk` only when you need to
+  resolve a conflict or build/test a branch in isolation, and put it under the declared Syncwheel
+  worktree root.
+- A plumbing conflict stops and prints the `--replay-mode desk` retry command. Take it: `stack absorb`
+  and `stack resolve-integration` need a checkout that plumbing never created.
 - For active-active repositories, never bypass `publish`, `stack push`, or
   `int push` with a raw `git push`; they provide the required atomic state and
   exact leases.
