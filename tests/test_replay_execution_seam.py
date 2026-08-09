@@ -216,6 +216,46 @@ class ReplayExecutionSeamTest(unittest.TestCase):
                 self.assertEqual(step['kind'], 'exec')
                 self.assertEqual(step['render'], self.module.quoted(step['argv']))
 
+    def test_plumbing_dry_run_is_an_executable_shell_transcript(self):
+        self.git('switch', '-q', '-c', 'plumbing-source', 'main')
+        (self.repo / 'plumbing.txt').write_text('plumbing\n')
+        self.git('add', 'plumbing.txt')
+        self.git('commit', '-q', '-m', 'feat: plumbing transcript source')
+        source = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+        stack = {
+            'id': 'plumbing-transcript',
+            'branch': 'pr/plumbing-transcript',
+            'base': 'main',
+            'commits': [source],
+        }
+        plan = self.module.replay_plan(
+            self.repo,
+            self.manifest,
+            self.module.replay_target(stack=stack),
+            'plumbing',
+        )
+        stream = io.StringIO()
+
+        with contextlib.redirect_stdout(stream):
+            result = self.module.execute_replay(self.repo, plan, False)
+
+        transcript = stream.getvalue()
+        self.assertEqual(result['status'], 'planned')
+        self.assertEqual(plan['steps'][-1]['kind'], 'shell')
+        self.assertIn('T=$(git merge-tree --write-tree', transcript)
+        self.assertIn('N=$(GIT_CONFIG_COUNT=', transcript)
+        self.assertIn('git update-ref refs/heads/pr/plumbing-transcript "$N"', transcript)
+        executed = subprocess.run(
+            transcript,
+            cwd=self.repo,
+            shell=True,
+            text=True,
+            capture_output=True,
+            env=os.environ.copy(),
+        )
+        self.assertEqual(executed.returncode, 0, executed.stdout + executed.stderr)
+
     def test_stack_projection_skips_a_declared_base_commit(self):
         stack = dict(self.manifest['stacks'][0])
         stack['commits'] = [self.git('rev-parse', 'main')]

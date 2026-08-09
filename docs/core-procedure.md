@@ -156,10 +156,18 @@ python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path> --dry-run
 ```
 
 Dry-run output is an executable POSIX shell transcript, not a description of
-what Syncwheel might do. For the current non-plumbing replay, each line is the
-exact shell-quoted argv (`quoted(argv)`); replay identity settings appear only
-as leading POSIX environment assignments. It can therefore be inspected,
-saved, or executed by a POSIX shell without translating it.
+what Syncwheel might do. Non-plumbing replay lines are the exact shell-quoted
+argv (`quoted(argv)`), with replay identity settings only as leading POSIX
+environment assignments. Plumbing uses a shell block because the tree and
+commit object IDs flow through command substitutions; it remains directly
+executable by a POSIX shell.
+
+`--replay-mode plumbing` detects whether Git supports `merge-tree --write-tree`
+(Git 2.38 or newer). When unavailable it uses the ephemeral path. A plumbing
+conflict never selects another mode: Syncwheel reports the paths and stops with
+the literal desk-mode retry command, leaving no checkout to resolve by mistake.
+The target branch must not already be checked out; use ephemeral or desk when
+it is.
 
 Apply:
 ```bash
@@ -198,8 +206,8 @@ python3 scripts/syncwheel.py int rebuild --worktree <path> --dry-run
 ```
 
 This has the same executable POSIX transcript contract as `stack rebuild
---dry-run`: non-plumbing argv stay shell-quoted exactly, with replay environment
-assignments prefixed when required.
+--dry-run`: non-plumbing argv stay shell-quoted exactly, while plumbing renders
+the executable object-ID shell block.
 
 Apply:
 ```bash

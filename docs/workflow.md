@@ -51,8 +51,20 @@ The replay runs in a detached temporary worktree, updates the managed branch
 ref, and removes the temporary worktree before the command returns. This keeps
 routine reconstruction separate from a checkout a person intends to inspect or
 repair. `auto` remains desk-compatible in this release; use `--replay-mode
-desk --worktree <path>` or `--in-place` for the existing deliberate worktree choices. `plumbing`
-is listed for forward compatibility but is not available yet.
+desk --worktree <path>` or `--in-place` for the existing deliberate worktree choices.
+
+On Git 2.38 or newer, `--replay-mode plumbing` can rebuild the same history
+without creating a working tree:
+
+```bash
+syncwheel stack rebuild feature-a --replay-mode plumbing
+```
+
+Git capability is detected at runtime; Git versions below 2.38 use ephemeral
+replay. A plumbing conflict prints the conflicted paths and a literal retry with
+`--replay-mode desk`; it does not silently create a checkout where the conflict
+could be resolved. The target branch must not already be checked out; use
+ephemeral or desk for an active integration checkout.
 
 If `plan` identifies an integration commit with no owner and the PR shape is
 still undecided, create a draft and capture it instead of leaving it on
