@@ -1635,6 +1635,8 @@ def load_manifest(repo_root, manifest_path=None):
     defaults['integration_membership'] = normalize_integration_membership(
         defaults.get('integration_membership')
     )
+    if defaults.get('replay_mode') is not None:
+        normalize_replay_mode(defaults['replay_mode'], 'manifest defaults.replay_mode')
 
     integration = data.setdefault('integration', {})
     integration.setdefault('branch', DEFAULT_INTEGRATION_BRANCH)
@@ -3658,10 +3660,82 @@ def git_supports_write_tree(repo_root):
     return (major, minor) >= (2, 38)
 
 
-def resolve_replay_mode(repo_root, location, requested_mode='auto'):
+def normalize_replay_mode(value, source):
+    if value not in REPLAY_MODE_CHOICES:
+        allowed = ', '.join(REPLAY_MODE_CHOICES)
+        raise SyncwheelError(f'invalid {source}: {value!r}; expected one of: {allowed}')
+    return value
+
+
+def configured_replay_mode(repo_root, manifest):
+    """Return the configured default and where it came from, most specific first."""
+    profile_mode = load_repo_profile(repo_root).get('replay_mode')
+    if profile_mode is not None:
+        return normalize_replay_mode(profile_mode, f'{PROFILE_FILENAME} replay_mode'), 'profile'
+    manifest_mode = ((manifest or {}).get('defaults') or {}).get('replay_mode')
+    if manifest_mode is not None:
+        return normalize_replay_mode(manifest_mode, 'manifest defaults.replay_mode'), 'manifest'
+    return 'auto', 'builtin'
+
+
+def auto_replay_mode(
+    repo_root,
+    branch,
+    location,
+    *,
+    explicit_worktree=False,
+    plumbing_supported=True,
+):
+    """Pick the cheapest mode that applies. Unavailability falls back, never fails."""
+    _worktree, in_place = location
+    if in_place:
+        return 'in-place'
+    if explicit_worktree or find_worktree_for_branch(repo_root, branch):
+        return 'desk'
+    if plumbing_supported and git_supports_write_tree(repo_root):
+        return 'plumbing'
+    return 'ephemeral'
+
+
+def select_replay_mode(
+    repo_root,
+    manifest,
+    args,
+    branch,
+    location,
+    *,
+    plumbing_supported=True,
+):
+    """Four-tier selection: command flags, repo profile, manifest default, auto."""
+    mode = requested_replay_mode(args)
+    explicit_worktree = bool(getattr(args, 'worktree', None))
+    if mode is None and (explicit_worktree or getattr(args, 'in_place', False)):
+        # --worktree and --in-place are command flags too, so they outrank a
+        # configured default and let auto read the location they asked for.
+        mode = 'auto'
+    if mode is None:
+        mode = configured_replay_mode(repo_root, manifest)[0]
+    if mode == 'auto':
+        mode = auto_replay_mode(
+            repo_root,
+            branch,
+            location,
+            explicit_worktree=explicit_worktree,
+            plumbing_supported=plumbing_supported,
+        )
+    return resolve_replay_mode(repo_root, location, mode)
+
+
+def integration_supports_plumbing(manifest):
+    return manifest['integration'].get('strategy', 'cherry-pick') == 'cherry-pick'
+
+
+def resolve_replay_mode(repo_root, location, requested_mode):
     """Map an already-resolved replay location to an available execution mode."""
     if requested_mode not in REPLAY_MODE_CHOICES:
         raise SyncwheelError(f'unsupported replay mode: {requested_mode}')
+    if requested_mode == 'auto':
+        raise SyncwheelError('replay mode auto must be resolved before this point')
     if requested_mode == 'plumbing':
         if git_supports_write_tree(repo_root):
             return 'plumbing', None
@@ -3684,8 +3758,11 @@ def resolve_replay_mode(repo_root, location, requested_mode='auto'):
 
 
 def requested_replay_mode(args):
-    """Read and validate the rebuild-only replay mode selection."""
-    mode = getattr(args, 'replay_mode', 'auto')
+    """Read and validate the explicit --replay-mode flag; None when unset."""
+    mode = getattr(args, 'replay_mode', None)
+    if mode is None:
+        return None
+    normalize_replay_mode(mode, '--replay-mode')
     if mode in ('ephemeral', 'plumbing'):
         if args.in_place:
             raise SyncwheelError(f'use either --replay-mode {mode} or --in-place, not both')
@@ -3864,10 +3941,29 @@ def validate_manifest(repo_root, manifest):
     return {'errors': errors, 'warnings': warnings, 'details': details}
 
 
+def planned_replay_mode(repo_root, manifest, branch, plumbing_supported=True):
+    """Name the mode a rebuild of ``branch`` would take, for plan output."""
+    mode = configured_replay_mode(repo_root, manifest)[0]
+    if mode != 'auto':
+        return mode
+    return auto_replay_mode(
+        repo_root,
+        branch,
+        (None, get_current_branch(repo_root) == branch),
+        plumbing_supported=plumbing_supported,
+    )
+
+
 def build_plan(repo_root, manifest, validation):
     actions = []
     details = validation['details']
     integration = manifest['integration']
+    integration_replay_mode = planned_replay_mode(
+        repo_root,
+        manifest,
+        integration['branch'],
+        integration_supports_plumbing(manifest),
+    )
     primary_checkout = details.get('primary_checkout') or {}
     if primary_checkout.get('compliant') is False:
         actions.append({
@@ -3896,6 +3992,7 @@ def build_plan(repo_root, manifest, validation):
                 'stack': item['id'],
                 'branch': item['branch'],
                 'missing_commits': item['missing_from_branch'],
+                'replay_mode': planned_replay_mode(repo_root, manifest, item['branch']),
                 'meta': item.get('meta', {}),
             })
         if item['missing_from_integration']:
@@ -3904,6 +4001,7 @@ def build_plan(repo_root, manifest, validation):
                 'stack': item['id'],
                 'branch': integration['branch'],
                 'missing_commits': item['missing_from_integration'],
+                'replay_mode': integration_replay_mode,
                 'meta': item.get('meta', {}),
             })
     if details['integration'].get('unmapped_commits'):
@@ -4953,9 +5051,43 @@ def command_use(args):
             print(repo_root / '.syncwheel' / 'manifest.json')
         return 0
     personal = safe_ref_segment(args.personal)
-    path = save_repo_profile(repo_root, {'personal': personal})
+    profile = load_repo_profile(repo_root)
+    profile['personal'] = personal
+    path = save_repo_profile(repo_root, profile)
     print(f'using personal manifest: {personal}')
     print(path)
+    return 0
+
+
+def command_replay_mode(args):
+    repo_root = resolve_repo_root(args.repo)
+    profile = load_repo_profile(repo_root)
+    if args.clear and args.mode:
+        raise SyncwheelError('use either a mode or --clear, not both')
+    if args.clear or args.mode:
+        if args.clear:
+            profile.pop('replay_mode', None)
+        else:
+            profile['replay_mode'] = normalize_replay_mode(args.mode, '--replay-mode')
+        save_repo_profile(repo_root, profile)
+        profile = load_repo_profile(repo_root)
+    manifest, _manifest_path = load_manifest(
+        repo_root, resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    )
+    mode, source = configured_replay_mode(repo_root, manifest)
+    report = {
+        'replay_mode': mode,
+        'source': source,
+        'profile': profile.get('replay_mode'),
+        'manifest': ((manifest or {}).get('defaults') or {}).get('replay_mode'),
+        'profile_path': str(repo_profile_path(repo_root)),
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print(f"replay_mode: {report['replay_mode']} (from {report['source']})")
+    print(f"profile: {report['profile'] or 'unset'} ({report['profile_path']})")
+    print(f"manifest defaults.replay_mode: {report['manifest'] or 'unset'}")
     return 0
 
 
@@ -5697,6 +5829,7 @@ def rebuild_stack_from_manifest(
                 'integration_branch': stack.get('integration_branch'),
                 'before_tip': result['before_tip'],
                 'after_tip': result['after_tip'],
+                'replay_mode': result['mode'],
             },
             manifest_path,
         )
@@ -5768,10 +5901,12 @@ def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
-    mode, worktree = resolve_replay_mode(
+    mode, worktree = select_replay_mode(
         repo_root,
+        manifest,
+        args,
+        stack['branch'],
         resolve_stack_rebuild_location(repo_root, stack, args),
-        requested_replay_mode(args),
     )
     rebuild_stack_from_manifest(
         repo_root,
@@ -6424,7 +6559,9 @@ def command_reconcile(args):
             stack = require_stack(manifest, action['stack'])
             worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
             ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
-            mode, worktree = resolve_replay_mode(repo_root, (worktree, False))
+            mode, worktree = select_replay_mode(
+                repo_root, manifest, args, stack['branch'], (worktree, False)
+            )
             result = execute_replay(
                 repo_root,
                 replay_plan(repo_root, manifest, replay_target(stack=stack, worktree=worktree), mode),
@@ -6441,6 +6578,7 @@ def command_reconcile(args):
                     'integration_branch': stack.get('integration_branch'),
                     'before_tip': result['before_tip'],
                     'after_tip': result['after_tip'],
+                    'replay_mode': result['mode'],
                 },
                 manifest_path,
             )
@@ -6525,7 +6663,14 @@ def command_reconcile(args):
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
                 in_place = False
-            mode, worktree = resolve_replay_mode(repo_root, (worktree, in_place))
+            mode, worktree = select_replay_mode(
+                repo_root,
+                manifest,
+                args,
+                integration['branch'],
+                (worktree, in_place),
+                plumbing_supported=integration_supports_plumbing(manifest),
+            )
             result = execute_replay(
                 repo_root,
                 replay_plan(
@@ -6545,6 +6690,7 @@ def command_reconcile(args):
                     'before_tip': result['before_tip'],
                     'after_tip': result['after_tip'],
                     'stacks': list(integration.get('stacks', [])),
+                    'replay_mode': result['mode'],
                 },
                 manifest_path,
             )
@@ -6740,10 +6886,13 @@ def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
-    mode, worktree = resolve_replay_mode(
+    mode, worktree = select_replay_mode(
         repo_root,
+        manifest,
+        args,
+        integration['branch'],
         resolve_int_rebuild_location(repo_root, manifest, args),
-        requested_replay_mode(args),
+        plumbing_supported=integration_supports_plumbing(manifest),
     )
     if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, manifest['integration']['branch'])
@@ -6775,6 +6924,7 @@ def command_int_rebuild(args):
                 'before_tip': result['before_tip'],
                 'after_tip': result['after_tip'],
                 'stacks': list(manifest['integration'].get('stacks', [])),
+                'replay_mode': result['mode'],
             },
             manifest_path,
         )
@@ -7225,8 +7375,11 @@ def add_rebuild_args(parser):
     parser.add_argument(
         '--replay-mode',
         choices=REPLAY_MODE_CHOICES,
-        default='auto',
-        help='replay execution mode (plumbing requires Git 2.38+; auto keeps the desk default)',
+        default=None,
+        help=(
+            'replay execution mode; unset falls back to the repo profile, then the '
+            'manifest default, then auto (plumbing when Git supports it, else ephemeral)'
+        ),
     )
     parser.add_argument('-n', '--dry-run', action='store_true')
 
@@ -7251,6 +7404,11 @@ def add_git_args(parser):
 def add_reconcile_args(parser, include_apply_push=True, include_push_options=True):
     parser.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
     parser.add_argument('-j', '--json', action='store_true')
+    parser.add_argument(
+        '--replay-mode',
+        choices=REPLAY_MODE_CHOICES,
+        help='replay execution mode for the rebuilds this reconcile applies',
+    )
     if include_apply_push:
         parser.add_argument('-a', '--apply', action='store_true', help='execute the reported rebuild/push plan')
         parser.add_argument('-P', '--push', action='store_true', help='push rebuilt or drifted managed branches')
@@ -7401,6 +7559,18 @@ def build_parser():
     use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
     use_p.add_argument('-s', '--shared', action='store_true', help='clear the local profile and use the shared manifest')
     use_p.set_defaults(func=command_use)
+
+    replay_mode_p = sub.add_parser(
+        'replay-mode',
+        help='show or set the repo-local default replay execution mode',
+        parents=[common],
+    )
+    replay_mode_p.add_argument('mode', nargs='?', choices=REPLAY_MODE_CHOICES)
+    replay_mode_p.add_argument(
+        '-c', '--clear', action='store_true', help='remove the repo-local default'
+    )
+    replay_mode_p.add_argument('-j', '--json', action='store_true')
+    replay_mode_p.set_defaults(func=command_replay_mode)
 
     init_p = sub.add_parser('init', aliases=['in'], help='create a starter manifest', parents=[common])
     init_p.add_argument('-C', '--canonical-remote', default='origin')

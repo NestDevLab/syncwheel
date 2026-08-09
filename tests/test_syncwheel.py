@@ -1360,16 +1360,29 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_reconcile_apply_uses_default_worktree_root(self):
         self.prepare_reconcile_apply_worktree_scenario()
 
-        self.run_cli('reconcile', '--no-fetch', '--apply', '--skip-integration', expected=0)
+        self.run_cli(
+            'reconcile', '--no-fetch', '--apply', '--skip-integration', '--replay-mode', 'desk', expected=0
+        )
 
         self.assertTrue((self.repo / '.syncwheel' / 'wt' / 'pr-feature-b').exists())
 
     def test_reconcile_apply_preserves_explicit_legacy_worktree_root(self):
         self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
 
-        self.run_cli('reconcile', '--no-fetch', '--apply', '--skip-integration', expected=0)
+        self.run_cli(
+            'reconcile', '--no-fetch', '--apply', '--skip-integration', '--replay-mode', 'desk', expected=0
+        )
 
         self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
+
+    def test_reconcile_apply_leaves_no_worktree_by_default(self):
+        self.prepare_reconcile_apply_worktree_scenario()
+        before = self.git('worktree', 'list', '--porcelain')
+
+        self.run_cli('reconcile', '--no-fetch', '--apply', '--skip-integration', expected=0)
+
+        self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
+        self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'pr-feature-b').exists())
 
     def test_sync_rebuilds_local_projection_without_push(self):
         beta = self.git('rev-parse', 'main')

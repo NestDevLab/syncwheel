@@ -14,7 +14,8 @@ The preferred source of truth is `.syncwheel/manifest.json`.
     "publication_remote": "fork",
     "base_branch": "main",
     "base_ref": "origin/main",
-    "integration_membership": "required"
+    "integration_membership": "required",
+    "replay_mode": "auto"
   },
   "integration": {
     "branch": "integration/project-stack",
@@ -200,6 +201,13 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - required membership means every declared stack id must appear in
   `integration.stacks`; use a normal Git worktree for work that is not ready to
   enter Syncwheel's integration lifecycle
+- `defaults.replay_mode` is optional and is the repository-wide default replay
+  execution mode: `auto`, `plumbing`, `in-place`, `ephemeral`, or `desk`. It is
+  the shared default for contributors who should agree on one; a `replay_mode`
+  in the repo-local `.syncwheel/profile.local.json` overrides it, and
+  `--replay-mode` on the command overrides both. Omitted means `auto`.
+  It is deliberately absent from coordination state: it changes how a ref was
+  produced, not what it contains, so it is not shared topology.
 - version 2 `coordination.mode` is `active-active` or persisted `disabled`
 - version 2 coordination must use the same named remote as
   `defaults.publication_remote`
