@@ -163,9 +163,16 @@ python3 scripts/syncwheel.py stack promote exploration
 not use the default `pr/<stack-id>` name. It renames the local branch and sets
 `state: published` with `publication.enabled: true`. `stack demote <stack>` is
 the reverse state transition but intentionally does not rename the branch; it
-refuses a stack with a populated `github.pr` value. `stack push` and
-`reconcile --push` refuse draft stacks by state. Rebuilds remain allowed, so a
-draft remains recoverable from the manifest.
+refuses a stack with a populated `github.pr` value. Rebuilds remain allowed, so
+a draft remains recoverable from the manifest.
+
+A draft's source ref and its PR branch are two independent publication levels.
+Under active-active coordination, `stack push` and `reconcile --push` publish
+`refs/heads/syncwheel/draft/<stack>` to the coordination remote through the
+normal atomic leased publication, which is what lets another clone rebuild the
+draft from the manifest alone. Every other destination — the stack's
+`target_remote`, an overridden `--remote`, or any manifest without active
+coordination — is refused and names the `draft` state.
 
 For active-active manifests, promotion atomically publishes the replacement
 branch and coordination state. The former draft remote branch is retained as a

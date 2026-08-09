@@ -91,8 +91,7 @@ python3 scripts/syncwheel.py stack promote exploration
 ```
 
 Creation materializes `syncwheel/draft/exploration` immediately and includes the
-stack in required integration membership. Rebuilds remain available for drafts,
-but `stack push` and `reconcile --push` refuse them and name the `draft` state.
+stack in required integration membership. Rebuilds remain available for drafts.
 Promotion selects `pr/<stack-id>` unless `--branch` is given. In active-active
 mode it atomically publishes that new ref and a tombstone for the old draft ref;
 it never deletes the old remote branch. A retained
@@ -102,6 +101,26 @@ cleanup rather than moved automatically.
 Use `stack demote <stack>` only after the PR linkage has been removed; Syncwheel
 refuses demotion while `github.pr` is populated. Demotion is a state-only
 transition and deliberately keeps the existing branch name.
+
+### Sharing a draft between clones
+
+A draft is private to the forge, not to the coordination domain. Under
+active-active coordination, `stack push` and `reconcile --push` publish the
+draft's source ref to the coordination remote like any other managed ref: same
+atomic push, same leases, same coordination state.
+
+```bash
+python3 scripts/syncwheel.py stack push exploration
+```
+
+That is what makes the draft reproducible elsewhere. A second clone applies the
+published coordination snapshot and rebuilds the draft branch from the manifest
+alone, without any object from the clone that created it.
+
+Anywhere else the push is refused and names the `draft` state: the stack's
+`target_remote`, an explicit `--remote` override, and any manifest without
+active coordination. In that last case, keep the draft in the rebuild/validate
+cycle until an explicit `stack promote` makes it published.
 
 ### Capturing integration-first work
 
@@ -175,8 +194,9 @@ python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
 python3 scripts/syncwheel.py stack push <stack>
 ```
 
-Do not run the push step for a draft stack. Keep it in the rebuild/validate
-cycle until an explicit `stack promote` makes it published.
+For a draft stack, the push step is the coordination-remote publication
+described in "Sharing a draft between clones"; it never reaches the stack's
+target remote.
 
 If you are already on the target PR branch and the checkout is clean, you can
 use in-place mode instead:

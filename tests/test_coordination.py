@@ -720,6 +720,103 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(handoff['coordination']['state_status'], 'published')
         self.assertEqual(handoff['coordination']['manifest_relation'], 'local_proposal_differs')
 
+    def test_published_draft_source_ref_lets_a_second_clone_rebuild_from_the_manifest(self):
+        origin = self.create_remote()
+        first = self.clone(origin, 'draft-first')
+        self.init_coordinated(first)
+        draft_sha = self.commit_on_branch(first, 'scratch/exploration', 'exploration.txt')
+        self.run_cli(first, 'stack', 'create', 'exploration', draft_sha, '--draft')
+        draft_branch = 'syncwheel/draft/exploration'
+        draft_ref = f'refs/heads/{draft_branch}'
+
+        self.run_cli(
+            first,
+            'reconcile',
+            '--apply',
+            '--push',
+            '--stack',
+            'exploration',
+            '--skip-integration',
+        )
+
+        _, state = self.remote_state(origin)
+        published = next(item for item in state['manifest']['stacks'] if item['id'] == 'exploration')
+        self.assertEqual(published['state'], 'draft')
+        self.assertEqual(
+            state['managed_refs'][draft_ref],
+            self.git(first, 'rev-parse', draft_branch).stdout.strip(),
+        )
+        self.git(first, 'ls-remote', '--exit-code', 'origin', draft_ref)
+
+        second = self.clone(origin, 'draft-second')
+        self.init_coordinated(second)
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(second)
+        module.save_manifest(
+            manifest_path,
+            module.apply_coordination_snapshot(manifest, state['manifest']),
+        )
+        self.git(second, 'rev-parse', '--verify', '--quiet', draft_ref, expected=1)
+        self.assertEqual(self.git(second, 'remote').stdout.split(), ['origin'])
+        self.git(second, 'cat-file', '-e', state['managed_refs'][draft_ref])
+
+        rebuild = self.run_cli(
+            second,
+            'reconcile',
+            '--apply',
+            '--stack',
+            'exploration',
+            '--skip-integration',
+            '--rebuild',
+            'all',
+        )
+
+        self.assertIn('rebuild_stack stack=exploration', rebuild.stdout)
+        self.assertEqual(
+            self.git(second, 'rev-parse', f'{draft_branch}^{{tree}}').stdout.strip(),
+            self.git(second, 'rev-parse', f"{state['managed_refs'][draft_ref]}^{{tree}}").stdout.strip(),
+        )
+        self.assertEqual(
+            self.git(second, 'show', f'{draft_branch}:exploration.txt').stdout,
+            'scratch/exploration\n',
+        )
+        rebuilt = next(
+            item
+            for item in json.loads((second / '.syncwheel' / 'manifest.json').read_text())['stacks']
+            if item['id'] == 'exploration'
+        )
+        self.assertEqual(rebuilt['state'], 'draft')
+        self.assertEqual(len(rebuilt['commits']), 1)
+
+    def test_draft_push_to_the_target_remote_is_refused_by_state(self):
+        origin = self.create_remote()
+        forge = self.create_remote('forge')
+        repo = self.clone(origin, 'draft-target')
+        self.git(repo, 'remote', 'add', 'forge', str(forge))
+        self.init_coordinated(repo)
+        draft_sha = self.commit_on_branch(repo, 'scratch/exploration', 'exploration.txt')
+        self.run_cli(
+            repo,
+            'stack',
+            'create',
+            'exploration',
+            draft_sha,
+            '--draft',
+            '--target-remote',
+            'forge',
+        )
+        self.run_cli(repo, 'stack', 'push', 'exploration')
+
+        failure = self.run_cli(repo, 'stack', 'push', 'exploration', '--remote', 'forge', expected=2)
+
+        self.assertIn('state draft', failure.stderr)
+        self.assertIn("remote 'forge'", failure.stderr)
+        self.git(repo, 'ls-remote', '--exit-code', 'origin', 'refs/heads/syncwheel/draft/exploration')
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'forge', 'refs/heads/syncwheel/draft/exploration').stdout.strip(),
+            '',
+        )
+
     def test_coordinated_demote_allows_only_the_explicit_state_transition(self):
         origin = self.create_remote()
         repo = self.clone(origin, 'demote')
