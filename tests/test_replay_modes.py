@@ -6,6 +6,8 @@ moved base must produce different parent-dependent SHAs while remaining stable
 between executions. Do not replace this comparison with source-SHA equality.
 """
 
+import contextlib
+import io
 import os
 import shutil
 import sys
@@ -29,10 +31,12 @@ from _replay_support import (
     clone_at_base,
     clone_repo,
     commit_log,
+    create_repo,
     git,
     hermetic_environment,
     load_syncwheel_module,
     run_cli,
+    write_manifest,
 )
 
 
@@ -122,6 +126,34 @@ class ReplayModesTest(unittest.TestCase):
                 )
                 self.assertEqual(ephemeral, desk)
 
+    def test_plumbing_replay_is_byte_identical_to_ephemeral_for_the_fixed_corpus(self):
+        scenarios = {
+            'linear chain': build_linear_chain,
+            'moved base': build_moved_base,
+            'binary file': build_binary_file,
+            'rename': build_rename,
+            'file mode change': build_file_mode_change,
+        }
+        for name, builder in scenarios.items():
+            with self.subTest(scenario=name):
+                source_repo, manifest, stack_id = builder(self.tmp)
+                stack = next(item for item in manifest['stacks'] if item['id'] == stack_id)
+                ephemeral = self.replay_once(
+                    source_repo,
+                    manifest,
+                    stack,
+                    f'{name}-ephemeral',
+                    replay_mode='ephemeral',
+                )
+                plumbing = self.replay_once(
+                    source_repo,
+                    manifest,
+                    stack,
+                    f'{name}-plumbing',
+                    replay_mode='plumbing',
+                )
+                self.assertEqual(plumbing, ephemeral)
+
     def test_ephemeral_stack_rebuild_leaves_no_worktree(self):
         source_repo, manifest, stack_id = build_linear_chain(self.tmp)
         clone = clone_repo(source_repo, self.tmp / 'ephemeral-stack', manifest)
@@ -187,13 +219,100 @@ class ReplayModesTest(unittest.TestCase):
 
         self.assertEqual(self.worktree_entries(clone), before)
 
-    def test_plumbing_mode_reports_that_it_is_not_available(self):
+    def test_plumbing_conflict_leaves_the_primary_checkout_unchanged_and_requires_desk(self):
+        source_repo, base = create_repo(self.tmp, 'plumbing-conflict')
+        git(source_repo, 'switch', '-q', '-c', 'topic', base)
+        (source_repo / 'shared.txt').write_text('topic\n')
+        git(source_repo, 'add', 'shared.txt')
+        git(source_repo, 'commit', '-q', '-m', 'feat: conflicting topic')
+        topic = git(source_repo, 'rev-parse', 'HEAD').stdout.strip()
+        git(source_repo, 'switch', '-q', '-c', 'integration', base)
+        (source_repo / 'shared.txt').write_text('integration\n')
+        git(source_repo, 'add', 'shared.txt')
+        git(source_repo, 'commit', '-q', '-m', 'feat: conflicting integration')
+        manifest = write_manifest(
+            source_repo,
+            git(source_repo, 'rev-parse', 'HEAD').stdout.strip(),
+            [topic],
+        )
+        clone = clone_repo(source_repo, self.tmp / 'plumbing-conflict-clone', manifest)
+        before_status = git(clone, 'status', '--porcelain=v1', '--branch').stdout
+        before_worktrees = self.worktree_entries(clone)
+        module = load_syncwheel_module()
+        plan = module.replay_plan(
+            clone,
+            manifest,
+            module.replay_target(stack=manifest['stacks'][0]),
+            'plumbing',
+        )
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            result = module.execute_replay(clone, plan, True)
+
+        self.assertEqual(result['status'], 'conflict')
+        self.assertEqual(result['mode'], 'plumbing')
+        self.assertEqual(result['conflict']['paths'], ['shared.txt'])
+        self.assertEqual(git(clone, 'status', '--porcelain=v1', '--branch').stdout, before_status)
+        self.assertEqual(self.worktree_entries(clone), before_worktrees)
+        self.assertEqual(git(clone, 'show-ref', '--verify', '--quiet', 'refs/heads/pr/replay', expected=1).returncode, 1)
+
+        failure = run_cli(clone, 'stack', 'rebuild', 'replay', '--replay-mode', 'plumbing', expected=2)
+
+        self.assertIn('replay mode: plumbing', failure.stderr)
+        self.assertIn('shared.txt', failure.stderr)
+        self.assertIn('syncwheel stack rebuild replay --replay-mode desk', failure.stderr)
+        self.assertEqual(git(clone, 'status', '--porcelain=v1', '--branch').stdout, before_status)
+        self.assertEqual(self.worktree_entries(clone), before_worktrees)
+
+    def test_plumbing_empty_commit_stops_like_ephemeral_replay(self):
+        source_repo, manifest, stack_id, _base, _empty = build_empty_commit(self.tmp)
+        ephemeral = clone_repo(source_repo, self.tmp / 'empty-ephemeral', manifest)
+        plumbing = clone_repo(source_repo, self.tmp / 'empty-plumbing', manifest)
+
+        expected = run_cli(ephemeral, 'stack', 'rebuild', stack_id, '--replay-mode', 'ephemeral', expected=2)
+        actual = run_cli(plumbing, 'stack', 'rebuild', stack_id, '--replay-mode', 'plumbing', expected=2)
+
+        self.assertEqual(actual.stderr, expected.stderr)
+        self.assertIn('The previous cherry-pick is now empty', actual.stderr)
+
+    def test_plumbing_falls_back_to_ephemeral_for_git_2_37(self):
         source_repo, manifest, stack_id = build_linear_chain(self.tmp)
-        clone = clone_repo(source_repo, self.tmp / 'plumbing-unavailable', manifest)
+        clone = clone_repo(source_repo, self.tmp / 'plumbing-git-2-37', manifest)
+        fake_bin = self.tmp / 'fake-git-bin'
+        fake_bin.mkdir()
+        actual_git = shutil.which('git')
+        self.assertIsNotNone(actual_git)
+        fake_git = fake_bin / 'git'
+        fake_git.write_text(
+            '#!/bin/sh\n'
+            'if test "$1" = "--version"; then\n'
+            "  printf '%s\\n' 'git version 2.37.9'\n"
+            '  exit 0\n'
+            'fi\n'
+            f'exec {actual_git} "$@"\n'
+        )
+        fake_git.chmod(0o755)
+
+        with mock.patch.dict(os.environ, {'PATH': f'{fake_bin}{os.pathsep}{os.environ["PATH"]}'}):
+            result = run_cli(clone, 'stack', 'rebuild', stack_id, '--replay-mode', 'plumbing')
+
+        self.assertIn('git worktree add --detach', result.stdout)
+        self.assertNotIn('git merge-tree --write-tree', result.stdout)
+        self.assertTrue(commit_log(clone, manifest['stacks'][0]['base'], 'pr/replay'))
+
+    def test_plumbing_refuses_a_checked_out_target_branch(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        clone = clone_repo(source_repo, self.tmp / 'plumbing-checked-out-target', manifest)
+        git(clone, 'branch', 'pr/replay', manifest['stacks'][0]['base'])
+        git(clone, 'switch', '-q', 'pr/replay')
+        git(clone, 'add', '.syncwheel/manifest.json')
+        git(clone, 'commit', '-q', '-m', 'test: add replay manifest')
+        before = git(clone, 'status', '--porcelain=v1', '--branch').stdout
 
         failure = run_cli(clone, 'stack', 'rebuild', stack_id, '--replay-mode', 'plumbing', expected=2)
 
-        self.assertIn('replay mode plumbing is not available yet', failure.stderr)
+        self.assertIn("requires target branch 'pr/replay' to be unchecked out", failure.stderr)
+        self.assertEqual(git(clone, 'status', '--porcelain=v1', '--branch').stdout, before)
 
     def test_merge_commit_rejection_and_validation_are_stable(self):
         repo_path, manifest, _stack_id, base, merge = build_merge_commit(self.tmp)

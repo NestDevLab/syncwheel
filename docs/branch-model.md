@@ -55,8 +55,13 @@ temporary worktree. Syncwheel updates the real branch ref and removes that
 worktree before the command returns, including when replay fails.
 
 `auto` remains desk-compatible for this release, so use `ephemeral` explicitly
-when no persistent checkout is wanted. `plumbing` is reserved for a later
-release and currently reports that it is unavailable.
+when no persistent checkout is wanted. On Git 2.38 or newer, `plumbing` builds
+the replayed objects without creating a working tree and updates the branch only
+after the complete replay succeeds. Older Git releases fall back to `ephemeral`.
+If plumbing detects a conflict, it reports the paths and stops; rerun explicitly
+with `--replay-mode desk` to obtain a checkout for resolution.
+Plumbing requires its target branch not to be checked out, so it cannot leave an
+existing desk out of sync with the updated ref.
 
 Recommended persistent layout:
 - repo root = active integration checkout by default
