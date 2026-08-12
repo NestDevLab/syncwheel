@@ -4840,6 +4840,39 @@ def ensure_non_in_place_target_clean(repo_root, branch, worktree):
             )
 
 
+def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root):
+    """Fail before reconciliation changes a managed ref when a later target is dirty."""
+    stack_actions = {'rebuild_stack', 'align_stack_to_remote'}
+    integration_actions = {'rebuild_integration', 'align_integration_to_remote'}
+    checked = set()
+
+    for action in actions:
+        if action['type'] in stack_actions:
+            stack = require_stack(manifest, action['stack'])
+            worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
+            path = Path(worktree).resolve()
+            key = (stack['branch'], path)
+            if key not in checked:
+                ensure_non_in_place_target_clean(repo_root, stack['branch'], path)
+                checked.add(key)
+        elif action['type'] in integration_actions:
+            integration = manifest['integration']
+            branch = integration['branch']
+            if get_current_branch(repo_root) == branch:
+                path = Path(repo_root).resolve()
+                key = (branch, path)
+                if key not in checked:
+                    ensure_clean_worktree(path, allowed_status_prefixes=['?? .syncwheel/'])
+                    checked.add(key)
+            else:
+                worktree = reconcile_worktree_path(repo_root, branch, worktree_root)
+                path = Path(worktree).resolve()
+                key = (branch, path)
+                if key not in checked:
+                    ensure_non_in_place_target_clean(repo_root, branch, path)
+                    checked.add(key)
+
+
 def command_init(args):
     repo_root = resolve_repo_root(args.repo)
     canonical_remote = args.canonical_remote
@@ -6542,6 +6575,8 @@ def command_reconcile(args):
     ]
     if manual_actions:
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
+
+    preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root)
 
     if is_external_manifest_path(repo_root, manifest_path):
         ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)

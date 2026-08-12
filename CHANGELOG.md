@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Preflight every local reconciliation rebuild or alignment target before the
+  first mutation. A dirty later target now stops `reconcile --apply` and its
+  `sync` and `publish` wrappers without changing an earlier stack, manifest,
+  or ledger.
+
 - Bring the published surface in line with the working model: the landing page, README, `llms.txt`,
   `AGENT.md` and the bundled `syncwheel` skill no longer present a dedicated worktree per branch as
   the way to work. They now describe a single checkout, automatic replay-mode selection, and draft

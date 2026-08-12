@@ -1384,6 +1384,39 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
         self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'pr-feature-b').exists())
 
+    def test_reconcile_apply_preflights_dirty_integration_before_rebuilding_a_stack(self):
+        self.prepare_reconcile_apply_worktree_scenario()
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        before_manifest = manifest.read_text()
+        before_stack = self.git('rev-parse', 'pr/feature-b')
+        ledger = self.repo / '.syncwheel' / 'ledger'
+        self.assertFalse(ledger.exists())
+        Path(self.repo / 'alpha.txt').write_text('dirty integration\n')
+
+        result = self.run_cli('reconcile', '--no-fetch', '--apply', expected=2)
+
+        self.assertIn(f'{self.repo} is not clean', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
+        self.assertEqual(manifest.read_text(), before_manifest)
+        self.assertFalse(ledger.exists())
+
+    def test_check_leaves_reconcile_targets_manifest_and_ledger_unchanged(self):
+        self.prepare_reconcile_apply_worktree_scenario()
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        before_manifest = manifest.read_text()
+        before_stack = self.git('rev-parse', 'pr/feature-b')
+        before_integration = self.git('rev-parse', 'integration/reconcile')
+        ledger = self.repo / '.syncwheel' / 'ledger'
+        self.assertFalse(ledger.exists())
+
+        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+
+        self.assertIn('plan', json.loads(result.stdout))
+        self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
+        self.assertEqual(self.git('rev-parse', 'integration/reconcile'), before_integration)
+        self.assertEqual(manifest.read_text(), before_manifest)
+        self.assertFalse(ledger.exists())
+
     def test_sync_rebuilds_local_projection_without_push(self):
         beta = self.git('rev-parse', 'main')
         base = self.git('rev-parse', 'main~1')
