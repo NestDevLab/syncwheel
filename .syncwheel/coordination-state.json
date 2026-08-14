@@ -1,10 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
-    "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-14T08:32:39+00:00",
+  "created_at": "2026-08-14T08:36:54+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -38,36 +35,19 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "journal-mode"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/journal-mode",
-        "commits": [
-          "c78cae12ab3964f15026050e3738e8f59d6a8b16"
-        ],
-        "id": "journal-mode",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "7734e8d3016b70f04a6f960ef40f72324090151f661333669814a9c06fa1ac90",
-  "parent_state": "934de466a8aa44ad6611f13bb9213ad297eb54ff",
-  "projection_status": "convergent",
-  "publication_id": "09ce5c4f-8e9e-4518-9fdf-334d57aa6c43",
-  "publication_scope": "full",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "882cf0ee3d9206d2398417dc481c46162ca3a2cb",
+  "projection_status": "partial",
+  "publication_id": "76635cc3-b5e9-49ad-b140-e4167a7ed2f0",
+  "publication_scope": "close:journal-mode",
   "schema_version": 2,
-  "syncwheel_version": "0.31.1",
+  "syncwheel_version": "0.32.0",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -84,6 +64,14 @@
       "ref": "refs/heads/release/agentwheel-0230",
       "remote_tip": "8357acfe809baa9d52c162853c15505ff184fd76",
       "stack": "agentwheel-0230-release"
+    },
+    {
+      "branch": "pr/journal-mode",
+      "closed_at": "2026-08-14T08:36:51+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/journal-mode",
+      "remote_tip": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
+      "stack": "journal-mode"
     }
   ]
 }
