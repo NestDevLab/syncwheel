@@ -1,11 +1,13 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "938cac8ea20c60fdbd4b85aaca035bedb2ae422e"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-14T08:36:54+00:00",
+  "created_at": "2026-08-14T08:37:56+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
+    "refs/heads/main-integration": "938cac8ea20c60fdbd4b85aaca035bedb2ae422e",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
@@ -42,10 +44,10 @@
     "version": 2
   },
   "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "882cf0ee3d9206d2398417dc481c46162ca3a2cb",
+  "parent_state": "5f33571cb4f46ce3e5e7fdf1a4370bbafcdef2c4",
   "projection_status": "partial",
-  "publication_id": "76635cc3-b5e9-49ad-b140-e4167a7ed2f0",
-  "publication_scope": "close:journal-mode",
+  "publication_id": "227fab90-07d0-461a-971e-4b9ce2e5416e",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.32.0",
   "tombstones": [
