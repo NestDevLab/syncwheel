@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.31.1`
+Current version: `0.32.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -779,6 +779,10 @@ python3 scripts/syncwheel.py ledger show --help
 python3 scripts/syncwheel.py resume --help
 python3 scripts/syncwheel.py sync --help
 python3 scripts/syncwheel.py publish --help
+python3 scripts/syncwheel.py journal status --help
+python3 scripts/syncwheel.py journal snapshot --help
+python3 scripts/syncwheel.py journal publish --help
+python3 scripts/syncwheel.py journal schedule --help
 python3 scripts/syncwheel.py stack --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help
@@ -788,6 +792,27 @@ python3 scripts/syncwheel.py int rebuild --help
 python3 scripts/syncwheel.py int push --help
 python3 scripts/syncwheel.py int git --help
 ```
+
+## Journal repositories
+
+Set `repository_mode` to `journal` for a single-branch repository that records
+an allowlisted working tree without PR stacks or integration. The manifest's
+`journal` object declares `branch`, `remote`, `include`, `exclude`,
+`max_file_bytes`, and an optional `interval` (default `30m`).
+
+```bash
+syncwheel journal status
+syncwheel journal snapshot            # plan
+syncwheel journal snapshot --apply    # locked temporary-index commit
+syncwheel journal publish             # plan snapshot and exact-lease push
+syncwheel journal publish --apply
+syncwheel journal schedule install    # plan a Linux systemd user timer
+syncwheel journal schedule install --apply
+```
+
+Journal snapshots refuse a dirty real index, sensitive paths, oversized files,
+and high-confidence secrets. Publication stops on remote-ahead, divergence, or
+lease loss; it never merges, resets, rebases, or force-updates a remote.
 
 Common aliases:
 - `check` -> `ck`

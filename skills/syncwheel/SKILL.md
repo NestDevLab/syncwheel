@@ -40,6 +40,12 @@ local.
 
 ## The contract
 
+When the manifest declares `repository_mode: "journal"`, use only
+`syncwheel journal status`, plan-first `journal snapshot` / `journal publish`,
+and `journal schedule`. Add `--apply` only with mutation authority. Journal mode
+forbids stack, integration, reconcile, sync, and delivery publish commands; its
+publisher stops on remote-ahead, divergence, or lease loss without history surgery.
+
 The script owns: repo-state discovery, manifest validation, deterministic branch
 and integration reconstruction. The agent owns: judgment, communication,
 project-specific validation after a rebuild, and safe execution.
