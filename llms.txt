@@ -4,6 +4,9 @@
 > repositories — several pull requests built and published from one checkout, without a worktree per
 > branch.
 
+Journal mode is the plan-first single-branch alternative for safe allowlisted
+snapshots, exact-lease publication, and an optional Linux systemd user timer.
+
 ## Start Here
 
 - README: https://github.com/NestDevLab/syncwheel#readme

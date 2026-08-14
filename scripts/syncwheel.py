@@ -1,12 +1,16 @@
 #!/usr/bin/env python3
 import argparse
+import contextlib
 import datetime
+import fnmatch
 import hashlib
 import importlib.metadata
 import json
 import os
+import re
 import shutil
 import shlex
+import stat
 import tempfile
 import subprocess
 import sys
@@ -15,6 +19,11 @@ import urllib.error
 import urllib.request
 import uuid
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX snapshotting reports unsupported at runtime
+    fcntl = None
 
 
 class SyncwheelError(Exception):
@@ -102,6 +111,25 @@ YELLOW = '\033[33m'
 RESET = '\033[0m'
 WARNED_GIT_IDENTITY_PATHS = set()
 COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'commit-tree', 'merge', 'revert'}
+REPOSITORY_MODES = {'delivery', 'journal'}
+DEFAULT_JOURNAL_INTERVAL = '30m'
+JOURNAL_SENSITIVE_PARTS = {
+    '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
+    'id_rsa', 'id_ed25519', 'credentials', 'credentials.json',
+}
+JOURNAL_SECRET_PATTERNS = (
+    ('private key', re.compile(br'-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----')),
+    ('OpenSSH private key', re.compile(br'-----BEGIN OPENSSH PRIVATE KEY-----')),
+    ('AWS access key', re.compile(br'(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])')),
+    ('GitHub token', re.compile(br'(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{36}(?![A-Za-z0-9])')),
+    ('GitHub token', re.compile(br'(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{60,}(?![A-Za-z0-9_])')),
+    ('Slack token', re.compile(br'(?<![A-Za-z0-9])xoxb-[0-9]{10,}-[A-Za-z0-9-]{20,}(?![A-Za-z0-9])')),
+)
+JOURNAL_FORBIDDEN_COMMANDS = {
+    'stack', 's', 'spoke', 'int', 'i', 'publish', 'sync', 'reconcile', 'rec',
+    'resume', 'coordination', 'coord', 'handoff', 'gc', 'worktree', 'wt',
+    'plan', 'pl', 'check', 'ck', 'manifest', 'm',
+}
 
 
 def read_version_file(path):
@@ -1623,6 +1651,36 @@ def load_manifest(repo_root, manifest_path=None):
         raise SyncwheelError(f'manifest version must be one of: {allowed}')
     if 'syncwheel_tracking' in data:
         normalize_syncwheel_tracking(data.get('syncwheel_tracking'))
+    repository_mode = data.get('repository_mode', 'delivery')
+    if repository_mode not in REPOSITORY_MODES:
+        raise SyncwheelError(
+            'repository_mode must be one of: ' + ', '.join(sorted(REPOSITORY_MODES))
+        )
+    data['repository_mode'] = repository_mode
+    if repository_mode == 'journal':
+        raw_journal = data.get('journal')
+        if not isinstance(raw_journal, dict):
+            raise SyncwheelError('journal mode requires a journal object')
+        journal = dict(raw_journal)
+        for field in ('branch', 'remote'):
+            if not isinstance(journal.get(field), str) or not journal[field].strip():
+                raise SyncwheelError(f'journal.{field} must be a non-empty string')
+        for field in ('include', 'exclude'):
+            value = journal.get(field)
+            if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+                raise SyncwheelError(f'journal.{field} must be a string array')
+            if field == 'include' and not value:
+                raise SyncwheelError('journal.include must be a non-empty explicit allowlist')
+            journal[field] = value
+        max_bytes = journal.get('max_file_bytes')
+        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
+            raise SyncwheelError('journal.max_file_bytes must be a positive integer')
+        journal['max_file_bytes'] = max_bytes
+        interval = journal.get('interval', DEFAULT_JOURNAL_INTERVAL)
+        if not isinstance(interval, str) or not re.fullmatch(r'[1-9][0-9]*(?:s|min|m|h|d|w)', interval):
+            raise SyncwheelError('journal.interval must be a positive systemd duration such as 30m')
+        journal['interval'] = interval
+        data['journal'] = journal
     data['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(
         data.get('syncwheel_worktree_root')
     )
@@ -1693,7 +1751,7 @@ def load_manifest(repo_root, manifest_path=None):
         stack.setdefault('meta', {})
         normalized.append(stack)
     data['stacks'] = normalized
-    if version == MANIFEST_VERSION_COORDINATED:
+    if version == MANIFEST_VERSION_COORDINATED and repository_mode != 'journal':
         coordination = normalize_coordination(data.get('coordination'), path)
         if coordination['remote'] != defaults['publication_remote']:
             raise SyncwheelError(
@@ -3771,6 +3829,437 @@ def requested_replay_mode(args):
     return mode
 
 
+def require_journal_manifest(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    if manifest.get('repository_mode') != 'journal':
+        raise SyncwheelError('journal commands require manifest repository_mode="journal"')
+    return repo_root, manifest, manifest_path
+
+
+def journal_path_matches(path, patterns):
+    path = path.replace(os.sep, '/')
+    return any(
+        pattern == '**'
+        or fnmatch.fnmatchcase(path, pattern)
+        or (pattern.startswith('**/') and fnmatch.fnmatchcase(path, pattern[3:]))
+        for pattern in patterns
+    )
+
+
+def journal_path_sensitive(path):
+    parts = Path(path).parts
+    return any(part.lower() in JOURNAL_SENSITIVE_PARTS for part in parts)
+
+
+def journal_secret_reason(content):
+    for label, pattern in JOURNAL_SECRET_PATTERNS:
+        if pattern.search(content):
+            return label
+    return None
+
+
+def journal_status_entries(repo_root):
+    result = git(
+        repo_root, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
+        '--ignore-submodules=all', '--no-renames',
+    )
+    tokens = result.stdout.split('\0')
+    entries = []
+    index = 0
+    while index < len(tokens):
+        record = tokens[index]
+        index += 1
+        if not record:
+            continue
+        status = record[:2]
+        path = record[3:]
+        if status[0] in {'R', 'C'}:
+            if index >= len(tokens):
+                raise SyncwheelError('could not parse git status rename record')
+            path = tokens[index]
+            index += 1
+        entries.append({'status': status, 'path': path})
+    return entries
+
+
+def journal_real_index_clean(repo_root):
+    return git(repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', check=False).returncode == 0
+
+
+def journal_file_fingerprint(path):
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise SyncwheelError('unsupported file type')
+        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
+            content = handle.read()
+    finally:
+        os.close(descriptor)
+    return (
+        file_stat.st_mode, file_stat.st_size, file_stat.st_mtime_ns,
+        file_stat.st_dev, file_stat.st_ino, hashlib.sha256(content).hexdigest(),
+    )
+
+
+def journal_read_admitted_file(path, max_file_bytes):
+    path_stat = os.lstat(path)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    try:
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            raise SyncwheelError('unsupported file type')
+        if (path_stat.st_dev, path_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
+            raise SyncwheelError('content changed before reading')
+        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
+            before = os.fstat(handle.fileno())
+            content = handle.read(max_file_bytes + 1)
+            after = os.fstat(handle.fileno())
+    finally:
+        os.close(descriptor)
+    if len(content) > max_file_bytes or after.st_size > max_file_bytes:
+        raise SyncwheelError(f'oversize ({after.st_size} bytes)')
+    stable_fields = ('st_mode', 'st_size', 'st_mtime_ns', 'st_ino', 'st_dev')
+    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+        raise SyncwheelError('content changed while reading')
+    mode = '100755' if before.st_mode & 0o111 else '100644'
+    fingerprint = (
+        before.st_mode, before.st_size, before.st_mtime_ns,
+        before.st_dev, before.st_ino, hashlib.sha256(content).hexdigest(),
+    )
+    return content, fingerprint, mode
+
+
+def journal_admission(repo_root, journal):
+    admitted = []
+    excluded = []
+    rejected = []
+    fingerprints = {}
+    blobs = {}
+    for entry in journal_status_entries(repo_root):
+        path = entry['path']
+        if not journal_path_matches(path, journal['include']) or journal_path_matches(path, journal['exclude']):
+            excluded.append(entry)
+            continue
+        if journal_path_sensitive(path):
+            rejected.append({**entry, 'reason': 'sensitive path'})
+            continue
+        target = repo_root / path
+        deleted = entry['status'][1] == 'D' or (entry['status'] == ' D') or not target.exists()
+        if deleted:
+            fingerprints[path] = None
+        else:
+            try:
+                content, fingerprint, mode = journal_read_admitted_file(
+                    target, journal['max_file_bytes']
+                )
+            except (OSError, SyncwheelError) as exc:
+                rejected.append({**entry, 'reason': str(exc)})
+                continue
+            secret = journal_secret_reason(content)
+            if secret:
+                rejected.append({**entry, 'reason': f'high-confidence secret: {secret}'})
+                continue
+            fingerprints[path] = fingerprint
+            blobs[path] = {'content': content, 'mode': mode}
+        admitted.append(entry)
+    return admitted, excluded, rejected, fingerprints, blobs
+
+
+@contextlib.contextmanager
+def journal_lock(repo_root):
+    if fcntl is None:
+        raise SyncwheelError(f'journal snapshot locking is unsupported on {sys.platform}')
+    git_dir = Path(git(repo_root, 'rev-parse', '--absolute-git-dir').stdout.strip())
+    lock_path = git_dir / 'syncwheel-journal.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open('a+') as handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise SyncwheelError(f'journal snapshot already running: {lock_path}') from exc
+        yield lock_path
+
+
+@contextlib.contextmanager
+def journal_index_lock(repo_root):
+    git_dir = Path(git(repo_root, 'rev-parse', '--absolute-git-dir').stdout.strip())
+    index_path = git_dir / 'index'
+    lock_path = git_dir / 'index.lock'
+    try:
+        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError as exc:
+        raise SyncwheelError(f'journal could not lock real index: {lock_path}') from exc
+    try:
+        with os.fdopen(descriptor, 'wb') as handle:
+            if index_path.exists():
+                handle.write(index_path.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+        yield index_path, lock_path
+    finally:
+        lock_path.unlink(missing_ok=True)
+
+
+def journal_snapshot(repo_root, manifest, apply=False):
+    journal = manifest['journal']
+    branch = journal['branch']
+    if get_current_branch(repo_root) != branch:
+        raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}')
+    if not journal_real_index_clean(repo_root):
+        raise SyncwheelError('journal snapshot requires a clean real index')
+    parent = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
+    admitted, excluded, rejected, fingerprints, blobs = journal_admission(repo_root, journal)
+    result = {
+        'mode': 'apply' if apply else 'plan',
+        'branch': branch,
+        'parent': parent,
+        'admitted': admitted,
+        'excluded': excluded,
+        'rejected': rejected,
+        'commit': None,
+        'changed': False,
+    }
+    if rejected:
+        reasons = ', '.join(f"{item['path']}: {item['reason']}" for item in rejected)
+        raise SyncwheelError(f'journal snapshot rejected content: {reasons}')
+    if not apply or not admitted:
+        return result
+    with journal_lock(repo_root), journal_index_lock(repo_root) as (real_index_path, real_index_lock):
+        if git(repo_root, 'rev-parse', 'HEAD').stdout.strip() != parent:
+            raise SyncwheelError('journal HEAD changed during snapshot; retry')
+        if not journal_real_index_clean(repo_root):
+            raise SyncwheelError('journal real index changed during snapshot; retry')
+        with tempfile.NamedTemporaryFile(prefix='syncwheel-journal-index-', delete=False) as handle:
+            index_path = Path(handle.name)
+        index_path.unlink(missing_ok=True)
+        env = {'GIT_INDEX_FILE': str(index_path)}
+        try:
+            git(repo_root, 'read-tree', parent, env=env)
+            for entry in admitted:
+                path = entry['path']
+                blob = blobs.get(path)
+                if blob is None:
+                    git(repo_root, 'update-index', '--force-remove', '--', path, env=env)
+                    continue
+                with tempfile.NamedTemporaryFile(prefix='syncwheel-journal-blob-', delete=False) as blob_file:
+                    blob_path = Path(blob_file.name)
+                    blob_file.write(blob['content'])
+                try:
+                    object_id = git(repo_root, 'hash-object', '-w', str(blob_path)).stdout.strip()
+                finally:
+                    blob_path.unlink(missing_ok=True)
+                git(
+                    repo_root, 'update-index', '--add', '--cacheinfo',
+                    f"{blob['mode']},{object_id},{path}", env=env,
+                )
+            tree = git(repo_root, 'write-tree', env=env).stdout.strip()
+            parent_tree = git(repo_root, 'rev-parse', f'{parent}^{{tree}}').stdout.strip()
+            if tree == parent_tree:
+                return result
+            for path, before in fingerprints.items():
+                target = repo_root / path
+                if before is None:
+                    stable = not target.exists()
+                else:
+                    try:
+                        stable = target.exists() and journal_file_fingerprint(target) == before
+                    except (OSError, SyncwheelError):
+                        stable = False
+                if not stable:
+                    raise SyncwheelError(f'journal content changed during snapshot: {path}; retry')
+            if git(repo_root, 'rev-parse', 'HEAD').stdout.strip() != parent:
+                raise SyncwheelError('journal HEAD changed during snapshot; retry')
+            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+            message = f'journal: snapshot {timestamp}'
+            commit_cmd = with_git_identity(
+                repo_root, ['git', 'commit-tree', tree, '-p', parent, '-m', message]
+            )
+            commit = run(commit_cmd, cwd=repo_root).stdout.strip()
+            update = git(repo_root, 'update-ref', f'refs/heads/{branch}', commit, parent, check=False)
+            if update.returncode != 0:
+                raise SyncwheelError('journal HEAD changed before commit publication; retry')
+            try:
+                git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(real_index_lock)})
+                os.replace(real_index_lock, real_index_path)
+            except Exception as exc:
+                rollback = git(
+                    repo_root, 'update-ref', f'refs/heads/{branch}', parent, commit, check=False
+                )
+                if rollback.returncode != 0:
+                    raise SyncwheelError(
+                        'journal index realignment failed and branch rollback also failed; STOP'
+                    ) from exc
+                raise SyncwheelError('journal index realignment failed; branch update rolled back') from exc
+            result.update({'commit': commit, 'changed': True})
+            return result
+        finally:
+            index_path.unlink(missing_ok=True)
+
+
+def journal_remote_tip(repo_root, remote, branch):
+    result = git(repo_root, 'ls-remote', '--heads', remote, f'refs/heads/{branch}', check=False)
+    if result.returncode != 0:
+        raise SyncwheelError(result.stderr.strip() or f'could not observe journal remote {remote}')
+    line = result.stdout.strip()
+    return line.split()[0] if line else None
+
+
+def command_journal_status(args):
+    repo_root, manifest, _ = require_journal_manifest(args)
+    journal = manifest['journal']
+    admitted, excluded, rejected, _, _ = journal_admission(repo_root, journal)
+    payload = {
+        'repository_mode': 'journal',
+        'branch': journal['branch'],
+        'remote': journal['remote'],
+        'interval': journal['interval'],
+        'max_file_bytes': journal['max_file_bytes'],
+        'current_branch': get_current_branch(repo_root),
+        'index_clean': journal_real_index_clean(repo_root),
+        'head': git(repo_root, 'rev-parse', 'HEAD').stdout.strip(),
+        'remote_tip': journal_remote_tip(repo_root, journal['remote'], journal['branch']),
+        'admitted': admitted,
+        'excluded': excluded,
+        'rejected': rejected,
+    }
+    print(json.dumps(payload, indent=2) if args.json else '\n'.join(
+        f'{key}: {value}' for key, value in payload.items()
+    ))
+    return 0
+
+
+def command_journal_snapshot(args):
+    repo_root, manifest, _ = require_journal_manifest(args)
+    payload = journal_snapshot(repo_root, manifest, apply=args.apply)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def command_journal_publish(args):
+    repo_root, manifest, _ = require_journal_manifest(args)
+    journal = manifest['journal']
+    observed = journal_remote_tip(repo_root, journal['remote'], journal['branch'])
+    tracking_ref = f"refs/remotes/{journal['remote']}/{journal['branch']}"
+    expected_parent = ref_tip(repo_root, tracking_ref) or observed
+    if observed != expected_parent:
+        raise SyncwheelError(
+            f'journal remote tip mismatch; expected parent {expected_parent}, observed {observed or "missing"}; STOP'
+        )
+    if not args.apply:
+        payload = journal_snapshot(repo_root, manifest, apply=False)
+        payload.update({'remote': journal['remote'], 'expected_remote_tip': expected_parent})
+        print(json.dumps(payload, indent=2))
+        return 0
+    local_head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
+    if expected_parent and git(
+        repo_root, 'merge-base', '--is-ancestor', expected_parent, local_head, check=False
+    ).returncode != 0:
+        raise SyncwheelError('journal local branch diverged from the expected remote parent; STOP')
+    snapshot = journal_snapshot(repo_root, manifest, apply=True)
+    tip = snapshot['commit'] or local_head
+    if tip != observed:
+        refspec = f'{tip}:refs/heads/{journal["branch"]}'
+        lease = f'--force-with-lease=refs/heads/{journal["branch"]}:{observed}'
+        pushed = git(repo_root, 'push', '--porcelain', lease, journal['remote'], refspec, check=False)
+        if pushed.returncode != 0:
+            raise SyncwheelError('journal publish lease lost; STOP without merge, reset, rebase, or force')
+    snapshot.update({'remote': journal['remote'], 'expected_remote_tip': expected_parent, 'published_tip': tip})
+    print(json.dumps(snapshot, indent=2))
+    return 0
+
+
+def journal_unit_id(repo_root):
+    safe = ''.join(char.lower() if char.isalnum() else '-' for char in repo_root.name).strip('-') or 'repo'
+    digest = hashlib.sha256(str(repo_root.resolve()).encode()).hexdigest()[:12]
+    return f'syncwheel-journal-{safe[:32]}-{digest}'
+
+
+def journal_systemd_paths(repo_root):
+    root = Path(os.environ.get('SYNCWHEEL_SYSTEMD_USER_DIR', Path.home() / '.config/systemd/user'))
+    unit_id = journal_unit_id(repo_root)
+    return unit_id, root / f'{unit_id}.service', root / f'{unit_id}.timer'
+
+
+def journal_executable():
+    configured = os.environ.get('SYNCWHEEL_EXECUTABLE')
+    candidate = configured or shutil.which('syncwheel') or sys.argv[0]
+    return str(Path(candidate).expanduser().resolve())
+
+
+def journal_systemctl(*args, check=True):
+    executable = os.environ.get('SYNCWHEEL_SYSTEMCTL', 'systemctl')
+    return run([executable, '--user', *args], check=check)
+
+
+def journal_unit_contents(repo_root, manifest):
+    executable = journal_executable()
+    repo = str(repo_root.resolve())
+    interval = manifest['journal']['interval']
+    def systemd_quote(value):
+        return '"' + value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"') + '"'
+
+    service = '\n'.join([
+        '[Unit]', 'Description=Syncwheel journal snapshot and publish', '',
+        '[Service]', 'Type=oneshot',
+        f'ExecStart={systemd_quote(executable)} journal publish --repo {systemd_quote(repo)} --apply', '',
+    ])
+    timer = '\n'.join([
+        '[Unit]', 'Description=Run Syncwheel journal periodically', '',
+        '[Timer]', f'OnUnitInactiveSec={interval}', 'Persistent=true', '',
+        '[Install]', 'WantedBy=timers.target', '',
+    ])
+    return service, timer
+
+
+def require_linux_scheduler():
+    if not sys.platform.startswith('linux'):
+        raise SyncwheelError(f'journal scheduler is unsupported on {sys.platform}')
+
+
+def command_journal_schedule(args):
+    require_linux_scheduler()
+    repo_root, manifest, _ = require_journal_manifest(args)
+    unit_id, service_path, timer_path = journal_systemd_paths(repo_root)
+    service, timer = journal_unit_contents(repo_root, manifest)
+    managed_files = ((service_path, service), (timer_path, timer))
+    payload = {
+        'mode': 'apply' if args.apply else 'plan', 'unit_id': unit_id,
+        'service_path': str(service_path), 'timer_path': str(timer_path),
+        'command': args.schedule_command,
+    }
+    if args.schedule_command == 'status':
+        payload['installed'] = service_path.read_text() == service if service_path.exists() else False
+        payload['timer_installed'] = timer_path.read_text() == timer if timer_path.exists() else False
+        enabled = journal_systemctl('is-enabled', f'{unit_id}.timer', check=False)
+        payload['enabled'] = enabled.returncode == 0
+    elif args.schedule_command == 'install' and args.apply:
+        conflicts = [str(path) for path, content in managed_files if path.exists() and path.read_text() != content]
+        if conflicts:
+            raise SyncwheelError('journal scheduler unit collision; refusing overwrite: ' + ', '.join(conflicts))
+        service_path.parent.mkdir(parents=True, exist_ok=True)
+        service_path.write_text(service)
+        timer_path.write_text(timer)
+        journal_systemctl('daemon-reload')
+        journal_systemctl('enable', '--now', f'{unit_id}.timer')
+    elif args.schedule_command == 'remove' and args.apply:
+        conflicts = [str(path) for path, content in managed_files if path.exists() and path.read_text() != content]
+        if conflicts:
+            raise SyncwheelError('journal scheduler unit collision; refusing removal: ' + ', '.join(conflicts))
+        if not service_path.exists() and not timer_path.exists():
+            print(json.dumps(payload, indent=2))
+            return 0
+        journal_systemctl('disable', '--now', f'{unit_id}.timer')
+        service_path.unlink(missing_ok=True)
+        timer_path.unlink(missing_ok=True)
+        journal_systemctl('daemon-reload')
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def collect_repo_snapshot(repo_root, manifest):
     defaults = manifest['defaults'] if manifest else {}
     canonical_remote = defaults.get('canonical_remote', 'origin')
@@ -3798,6 +4287,16 @@ def validate_manifest(repo_root, manifest):
     warnings = []
     errors = []
     details = {'stacks': [], 'integration': {}, 'coordination': {}}
+    if manifest.get('repository_mode') == 'journal':
+        journal = manifest['journal']
+        details['journal'] = dict(journal)
+        if not remote_is_configured(repo_root, journal['remote']):
+            errors.append(f"journal remote is not configured locally: {journal['remote']}")
+        if get_current_branch(repo_root) != journal['branch']:
+            warnings.append(
+                f"journal branch is not checked out: expected {journal['branch']!r}"
+            )
+        return {'warnings': warnings, 'errors': errors, 'details': details}
     coordination = coordination_config(manifest)
     if manifest.get('version') == MANIFEST_VERSION_COORDINATED:
         if not coordination:
@@ -7716,6 +8215,24 @@ def build_parser():
     manifest_require_integration_p.add_argument('-j', '--json', action='store_true')
     manifest_require_integration_p.set_defaults(func=command_manifest_require_integration)
 
+    journal_p = sub.add_parser(
+        'journal', help='inspect, snapshot, publish, or schedule a journal repository'
+    )
+    journal_sub = journal_p.add_subparsers(dest='journal_command', required=True)
+    journal_status_p = journal_sub.add_parser('status', parents=[common])
+    journal_status_p.add_argument('-j', '--json', action='store_true')
+    journal_status_p.set_defaults(func=command_journal_status)
+    journal_snapshot_p = journal_sub.add_parser('snapshot', parents=[common])
+    journal_snapshot_p.add_argument('-a', '--apply', action='store_true')
+    journal_snapshot_p.set_defaults(func=command_journal_snapshot)
+    journal_publish_p = journal_sub.add_parser('publish', parents=[common])
+    journal_publish_p.add_argument('-a', '--apply', action='store_true')
+    journal_publish_p.set_defaults(func=command_journal_publish)
+    journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
+    journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))
+    journal_schedule_p.add_argument('-a', '--apply', action='store_true')
+    journal_schedule_p.set_defaults(func=command_journal_schedule)
+
     stack_p = sub.add_parser(
         'stack',
         aliases=['s', 'spoke'],
@@ -8085,6 +8602,16 @@ def main():
     args.git_args = passthrough
     try:
         maybe_handle_startup_update_policy(args)
+        if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
+            repo_root = resolve_repo_root(args.repo)
+            manifest_path = resolve_manifest_path(
+                repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+            )
+            manifest, _ = load_manifest(repo_root, manifest_path)
+            if manifest and manifest.get('repository_mode') == 'journal':
+                raise SyncwheelError(
+                    f'{args.command} is forbidden for repository_mode="journal"; use journal commands'
+                )
         return args.func(args)
     except SyncwheelError as exc:
         print(f'error: {exc}', file=sys.stderr)

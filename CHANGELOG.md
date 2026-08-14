@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.32.0 - 2026-08-14
+
+- Add manifest `repository_mode: "journal"` with explicit branch, remote,
+  include/exclude allowlists, maximum file size, and a default 30-minute interval.
+- Add plan-first `journal status`, `journal snapshot`, `journal publish`, and
+  Linux systemd user scheduler install/status/remove commands.
+- Snapshot through a locked temporary index, reject sensitive or secret content,
+  verify HEAD and file stability, avoid empty commits, and realign the real index
+  without changing the worktree.
+- Publish only from an unchanged observed remote parent with an exact lease and
+  stop on remote-ahead, divergence, or lease loss without history surgery.
+
 - Bring the published surface in line with the working model: the landing page, README, `llms.txt`,
   `AGENT.md` and the bundled `syncwheel` skill no longer present a dedicated worktree per branch as
   the way to work. They now describe a single checkout, automatic replay-mode selection, and draft

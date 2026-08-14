@@ -27,6 +27,11 @@ syncwheel handoff
 
 ## Mutation Rules
 
+For `repository_mode: "journal"`, do not use stack or integration commands.
+Run `journal status`, then plan with `journal snapshot` or `journal publish`;
+add `--apply` only for an authorized commit or exact-lease push. Scheduler
+install/remove is also plan-first and Linux-only.
+
 - `reconcile` is read-only by default.
 - `sync`, `publish`, `reconcile --apply`, stack rebuilds, integration rebuilds, branch deletion, and
   pushes are mutations.

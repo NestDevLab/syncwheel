@@ -39,6 +39,32 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 }
 ```
 
+## Journal mode
+
+Omitting `repository_mode` preserves the delivery manifest behavior above.
+Journal repositories use this separate contract:
+
+```json
+{
+  "version": 1,
+  "repository_mode": "journal",
+  "syncwheel_tracking": "git-tracked",
+  "journal": {
+    "branch": "journal",
+    "remote": "origin",
+    "include": ["**"],
+    "exclude": [".cache/**", "tmp/**"],
+    "max_file_bytes": 10485760,
+    "interval": "30m"
+  }
+}
+```
+
+`branch`, `remote`, the explicit include/exclude lists, and maximum size are
+required. Only the interval defaults, to `30m`. Journal mode forbids
+delivery stack, integration, reconcile, sync, and publish commands; use the
+`journal` command family instead.
+
 ## Create manifests with commands
 
 Create a shared manifest:
