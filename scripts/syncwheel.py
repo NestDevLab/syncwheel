@@ -14,6 +14,7 @@ import stat
 import tempfile
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -28,6 +29,10 @@ except ImportError:  # pragma: no cover - non-POSIX snapshotting reports unsuppo
 
 class SyncwheelError(Exception):
     pass
+
+
+class ManifestDurabilityError(SyncwheelError):
+    """The manifest was replaced, but durable directory sync could not be proven."""
 
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
@@ -48,11 +53,13 @@ INTEGRATION_MEMBERSHIP_POLICIES = {
     INTEGRATION_MEMBERSHIP_REQUIRED,
 }
 STACK_STATES = {'draft', 'published'}
-MANIFEST_VERSIONS = {1, 2}
+MANIFEST_VERSIONS = {1, 2, 3}
 MANIFEST_VERSION_LEGACY = 1
 MANIFEST_VERSION_COORDINATED = 2
+MANIFEST_VERSION_CHANNELS = 3
 COORDINATION_MODES = {'active-active', 'disabled'}
 COORDINATION_STATE_SCHEMA_VERSION = 2
+COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_STATE_PREFIX = 'syncwheel/state/'
 COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
@@ -113,6 +120,9 @@ WARNED_GIT_IDENTITY_PATHS = set()
 COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'commit-tree', 'merge', 'revert'}
 REPOSITORY_MODES = {'delivery', 'journal'}
 DEFAULT_JOURNAL_INTERVAL = '30m'
+CHANNEL_LIFECYCLES = {'shared', 'ephemeral'}
+CHANNEL_PLAN_SCHEMA_VERSION = 1
+ZERO_OBJECT_ID = '0' * 40
 JOURNAL_SENSITIVE_PARTS = {
     '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
     'id_rsa', 'id_ed25519', 'credentials', 'credentials.json',
@@ -128,7 +138,7 @@ JOURNAL_SECRET_PATTERNS = (
 JOURNAL_FORBIDDEN_COMMANDS = {
     'stack', 's', 'spoke', 'int', 'i', 'publish', 'sync', 'reconcile', 'rec',
     'resume', 'coordination', 'coord', 'handoff', 'gc', 'worktree', 'wt',
-    'plan', 'pl', 'check', 'ck', 'manifest', 'm',
+    'plan', 'pl', 'check', 'ck', 'manifest', 'm', 'channel', 'ch',
 }
 
 
@@ -1372,7 +1382,7 @@ def normalize_integration_membership(value, path='defaults.integration_membershi
 
 
 def coordination_config(manifest):
-    if manifest.get('version') != MANIFEST_VERSION_COORDINATED:
+    if manifest.get('version') not in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS}:
         return None
     return manifest.get('coordination')
 
@@ -1635,6 +1645,361 @@ def ensure_in_place_target(repo_root, target_branch):
     ensure_clean_worktree(repo_root)
 
 
+def normalize_channel_timestamp(value, field):
+    if not isinstance(value, str) or not value.strip():
+        raise SyncwheelError(f'{field} must be a non-empty ISO-8601 timestamp')
+    candidate = value.strip()
+    try:
+        datetime.datetime.fromisoformat(candidate.replace('Z', '+00:00'))
+    except ValueError as exc:
+        raise SyncwheelError(f'{field} must be an ISO-8601 timestamp') from exc
+    return candidate
+
+
+def normalize_channel_entry(raw, channel_id):
+    if not isinstance(raw, dict):
+        raise SyncwheelError(f'channel {channel_id} composition entries must be objects')
+    entry = dict(raw)
+    stack_id = entry.get('stack')
+    branch = entry.get('branch')
+    stack_base = entry.get('stackBase')
+    stack_base_revision = entry.get('stackBaseRevision')
+    branch_revision = entry.get('branchRevision')
+    commits = entry.get('commits')
+    if not isinstance(stack_id, str) or not stack_id:
+        raise SyncwheelError(f'channel {channel_id} composition entry needs a stack id')
+    if not isinstance(branch, str) or not branch:
+        raise SyncwheelError(f'channel {channel_id} stack {stack_id} needs a branch')
+    if not isinstance(stack_base, str) or not stack_base:
+        raise SyncwheelError(f'channel {channel_id} stack {stack_id} needs stackBase')
+    if not isinstance(stack_base_revision, str) or not re.fullmatch(r'[0-9a-f]{40}', stack_base_revision):
+        raise SyncwheelError(
+            f'channel {channel_id} stack {stack_id} stackBaseRevision must be a full commit SHA'
+        )
+    if not isinstance(branch_revision, str) or not re.fullmatch(r'[0-9a-f]{40}', branch_revision):
+        raise SyncwheelError(
+            f'channel {channel_id} stack {stack_id} branchRevision must be a full commit SHA'
+        )
+    if (
+        not isinstance(commits, list)
+        or not all(isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) for commit in commits)
+    ):
+        raise SyncwheelError(
+            f'channel {channel_id} stack {stack_id} commits must be ordered full commit SHAs'
+        )
+    dependencies = entry.get('dependsOn', [])
+    if (
+        not isinstance(dependencies, list)
+        or not all(isinstance(item, str) and item for item in dependencies)
+        or len(dependencies) != len(set(dependencies))
+        or stack_id in dependencies
+    ):
+        raise SyncwheelError(
+            f'channel {channel_id} stack {stack_id} dependsOn must be a unique string array '
+            'that excludes itself'
+        )
+    normalized = {
+        'stack': stack_id,
+        'branch': branch,
+        'stackBase': stack_base,
+        'stackBaseRevision': stack_base_revision,
+        'branchRevision': branch_revision,
+        'commits': list(commits),
+        'dependsOn': list(dependencies),
+    }
+    return normalized
+
+
+def normalize_channel_resolution(raw, channel_id, pin_digest):
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SyncwheelError(f'channel {channel_id} resolution must be an object')
+    required = ('forPinDigest', 'revision', 'tree', 'parentRevision')
+    for field in required:
+        value = raw.get(field)
+        expected_length = 64 if field == 'forPinDigest' else 40
+        if not isinstance(value, str) or not re.fullmatch(
+            rf'[0-9a-f]{{{expected_length}}}', value
+        ):
+            raise SyncwheelError(
+                f'channel {channel_id} resolution.{field} must be a full object id or digest'
+            )
+    if raw['forPinDigest'] != pin_digest:
+        raise SyncwheelError(
+            f'channel {channel_id} resolution does not bind the current pin digest'
+        )
+    return {field: raw[field] for field in required}
+
+
+def validate_channel_dependency_order(channel):
+    seen = set()
+    for entry in channel.get('composition', []):
+        missing = [dependency for dependency in entry.get('dependsOn', []) if dependency not in seen]
+        if missing:
+            raise SyncwheelError(
+                f"channel {channel['id']} stack {entry['stack']} requires earlier dependency stack(s): "
+                + ', '.join(missing)
+            )
+        seen.add(entry['stack'])
+
+
+def normalize_manifest_channels(data, defaults, repository_mode):
+    raw_channels = data.get('channels', [])
+    if raw_channels and repository_mode != 'delivery':
+        raise SyncwheelError('manifest channels are supported only in repository_mode="delivery"')
+    if not isinstance(raw_channels, list):
+        raise SyncwheelError('manifest channels must be an array')
+    seen_ids = set()
+    seen_branches = set()
+    channels = []
+    for raw in raw_channels:
+        if not isinstance(raw, dict):
+            raise SyncwheelError('each channel entry must be an object')
+        channel = dict(raw)
+        channel_id = channel.get('id')
+        branch = channel.get('branch')
+        if not isinstance(channel_id, str) or not channel_id:
+            raise SyncwheelError('each channel needs a string id')
+        if channel_id in seen_ids:
+            raise SyncwheelError(f'duplicate channel id: {channel_id}')
+        if not isinstance(branch, str) or not branch:
+            raise SyncwheelError(f'channel {channel_id} needs a branch')
+        if branch in seen_branches:
+            raise SyncwheelError(f'duplicate channel branch: {branch}')
+        lifecycle = channel.get('lifecycle', 'shared')
+        if lifecycle not in CHANNEL_LIFECYCLES:
+            raise SyncwheelError(
+                f'channel {channel_id} lifecycle must be one of: '
+                + ', '.join(sorted(CHANNEL_LIFECYCLES))
+            )
+        composition = channel.get('composition', [])
+        if not isinstance(composition, list):
+            raise SyncwheelError(f'channel {channel_id} composition must be an array')
+        normalized_composition = []
+        composition_ids = set()
+        for entry in composition:
+            normalized_entry = normalize_channel_entry(entry, channel_id)
+            if normalized_entry['stack'] in composition_ids:
+                raise SyncwheelError(
+                    f"channel {channel_id} contains stack {normalized_entry['stack']} more than once"
+                )
+            composition_ids.add(normalized_entry['stack'])
+            normalized_composition.append(normalized_entry)
+        normalized = {
+            'id': channel_id,
+            'branch': branch,
+            'lifecycle': lifecycle,
+            'base': channel.get('base') or defaults['base_ref'],
+            'baseRevision': channel.get('baseRevision'),
+            'remote': channel.get('remote') or defaults['publication_remote'],
+            'composition': normalized_composition,
+        }
+        if (
+            not isinstance(normalized['baseRevision'], str)
+            or not re.fullmatch(r'[0-9a-f]{40}', normalized['baseRevision'])
+        ):
+            raise SyncwheelError(
+                f'channel {channel_id} baseRevision must be a full commit SHA'
+            )
+        if lifecycle == 'ephemeral':
+            expiry = channel.get('expiry')
+            if not isinstance(expiry, dict):
+                raise SyncwheelError(f'ephemeral channel {channel_id} requires expiry metadata')
+            normalized['expiry'] = {
+                'createdAt': normalize_channel_timestamp(
+                    expiry.get('createdAt'), f'channel {channel_id} expiry.createdAt'
+                ),
+                'expiresAt': normalize_channel_timestamp(
+                    expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt'
+                ),
+            }
+        elif 'expiry' in channel:
+            raise SyncwheelError(f'shared channel {channel_id} must not define expiry metadata')
+        validate_channel_dependency_order(normalized)
+        pin_digest = channel_pin_digest(normalized)
+        resolution = normalize_channel_resolution(
+            channel.get('resolution'), channel_id, pin_digest
+        )
+        if resolution:
+            normalized['resolution'] = resolution
+        seen_ids.add(channel_id)
+        seen_branches.add(branch)
+        channels.append(normalized)
+    return channels
+
+
+def validate_channel_stack_authority(channels, stacks):
+    """Bind every persisted channel entry to its authoritative stack declaration."""
+    by_id = {stack['id']: stack for stack in stacks}
+    for channel in channels:
+        for entry in channel.get('composition', []):
+            stack = by_id.get(entry['stack'])
+            if stack is None:
+                raise SyncwheelError(
+                    f"channel {channel['id']} references unknown stack: {entry['stack']}"
+                )
+            if entry['branch'] != stack['branch']:
+                raise SyncwheelError(
+                    f"channel {channel['id']} stack {entry['stack']} pinned branch "
+                    f"{entry['branch']!r} does not match stack branch {stack['branch']!r}"
+                )
+            if entry['stackBase'] != stack['base']:
+                raise SyncwheelError(
+                    f"channel {channel['id']} stack {entry['stack']} pinned stackBase "
+                    f"{entry['stackBase']!r} does not match stack base {stack['base']!r}"
+                )
+            if list(entry.get('dependsOn', [])) != list(stack.get('depends_on', [])):
+                raise SyncwheelError(
+                    f"channel {channel['id']} stack {entry['stack']} pinned dependencies "
+                    'do not match the authoritative stack declaration'
+                )
+
+
+def symbolic_base_branch_for_remote(value, remote):
+    if not isinstance(value, str) or not value or re.fullmatch(r'[0-9a-f]{40}', value):
+        return None
+    remote_ref_prefix = f'refs/remotes/{remote}/'
+    if value.startswith(remote_ref_prefix):
+        return value[len(remote_ref_prefix):]
+    short_remote_prefix = f'{remote}/'
+    if value.startswith(short_remote_prefix):
+        return value[len(short_remote_prefix):]
+    if value.startswith('refs/remotes/'):
+        return None
+    if value.startswith('refs/heads/'):
+        return value[len('refs/heads/'):]
+    if value.startswith('refs/') or value in {'HEAD', '@'}:
+        return None
+    return value
+
+
+def validate_channel_branch_ownership(manifest):
+    """Keep channel refs disjoint from every authoritative repository ref role."""
+    defaults = manifest['defaults']
+    integration_branch = manifest['integration']['branch']
+    coordination = manifest.get('coordination') or {}
+    stacks = manifest.get('stacks', [])
+    for channel in manifest.get('channels', []):
+        branch = channel['branch']
+        remote = channel['remote']
+        if branch == defaults['base_branch']:
+            raise SyncwheelError(
+                f"channel {channel['id']} branch {branch!r} overlaps protected "
+                f"defaults.base_branch on remote {remote!r}"
+            )
+        base_authorities = [
+            ('channel.base', channel.get('base')),
+            ('defaults.base_ref', defaults.get('base_ref')),
+            ('integration.base', manifest['integration'].get('base')),
+            *(
+                (f"stack {stack['id']} base", stack.get('base'))
+                for stack in stacks
+            ),
+        ]
+        conflicting_bases = [
+            label for label, value in base_authorities
+            if symbolic_base_branch_for_remote(value, remote) == branch
+        ]
+        if conflicting_bases:
+            raise SyncwheelError(
+                f"channel {channel['id']} branch {branch!r} on remote {remote!r} "
+                'overlaps canonical symbolic base(s): ' + ', '.join(conflicting_bases)
+            )
+        source_owners = sorted(
+            stack['id'] for stack in stacks if stack['branch'] == branch
+        )
+        if branch == integration_branch or source_owners:
+            raise SyncwheelError(
+                f"channel {channel['id']} branch overlaps a stack or integration branch: "
+                f'{branch}'
+            )
+        target_owners = sorted(
+            stack['id'] for stack in stacks
+            if stack.get('target_remote') == remote
+            and stack.get('target_branch') == branch
+        )
+        if target_owners:
+            raise SyncwheelError(
+                f"channel {channel['id']} branch {branch!r} on remote {remote!r} "
+                'overlaps target branch owned by stack(s): ' + ', '.join(target_owners)
+            )
+        if branch == coordination.get('state_branch'):
+            raise SyncwheelError(
+                f"channel {channel['id']} branch must not overlap coordination.state_branch"
+            )
+
+
+def stack_base_owner_id(stack, stacks):
+    base = stack.get('base')
+    if not isinstance(base, str):
+        # Public coordination snapshots encode remote refs as typed objects.
+        # Their explicit depends_on graph is still validated below.
+        return None
+    candidates = [
+        (len(candidate['branch']), candidate['id'])
+        for candidate in stacks
+        if candidate['id'] != stack['id']
+        and (
+            base == candidate['branch']
+            or base.endswith(f"/{candidate['branch']}")
+        )
+    ]
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+def derive_stack_dependencies(stacks):
+    for stack in stacks:
+        owner = stack_base_owner_id(stack, stacks)
+        if owner and owner not in stack.get('depends_on', []):
+            stack['depends_on'] = [*stack.get('depends_on', []), owner]
+    return stacks
+
+
+def validate_stack_dependency_graph(stacks, require_declared_dependencies=True):
+    by_id = {stack['id']: stack for stack in stacks}
+    for stack in stacks:
+        dependencies = stack.get('depends_on', [])
+        unknown = sorted(set(dependencies) - set(by_id))
+        if unknown:
+            raise SyncwheelError(
+                f"stack {stack['id']} depends_on unknown stack(s): " + ', '.join(unknown)
+            )
+        if stack['id'] in dependencies:
+            raise SyncwheelError(f"stack {stack['id']} must not depend on itself")
+        base_owner = stack_base_owner_id(stack, stacks)
+        if (
+            require_declared_dependencies
+            and base_owner
+            and base_owner not in dependencies
+        ):
+            raise SyncwheelError(
+                f"stack {stack['id']} base {stack['base']!r} belongs to stack {base_owner}; "
+                f'declare depends_on: ["{base_owner}"]'
+            )
+
+    visiting = set()
+    visited = set()
+
+    def visit(stack_id, path):
+        if stack_id in visiting:
+            cycle = path[path.index(stack_id):] + [stack_id]
+            raise SyncwheelError('stack dependency cycle: ' + ' -> '.join(cycle))
+        if stack_id in visited:
+            return
+        visiting.add(stack_id)
+        for dependency in by_id[stack_id].get('depends_on', []):
+            visit(dependency, [*path, dependency])
+        visiting.remove(stack_id)
+        visited.add(stack_id)
+
+    for stack_id in by_id:
+        visit(stack_id, [stack_id])
+
+
 def load_manifest(repo_root, manifest_path=None):
     path = Path(manifest_path) if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
     if not path.exists():
@@ -1748,22 +2113,100 @@ def load_manifest(repo_root, manifest_path=None):
         stack['publication'] = {'enabled': stack['state'] != 'draft'}
         if 'meta' in stack and not isinstance(stack['meta'], dict):
             raise SyncwheelError(f'stack {stack_id} meta must be an object when present')
+        dependencies = stack.get('depends_on', [])
+        if (
+            not isinstance(dependencies, list)
+            or not all(isinstance(item, str) and item for item in dependencies)
+            or len(dependencies) != len(set(dependencies))
+        ):
+            raise SyncwheelError(f'stack {stack_id} depends_on must be a unique string array')
+        if dependencies and version != MANIFEST_VERSION_CHANNELS:
+            raise SyncwheelError(
+                f'stack {stack_id} depends_on requires manifest version 3; '
+                'migrate explicitly with channel create --apply before declaring dependencies'
+            )
+        if dependencies:
+            stack['depends_on'] = list(dependencies)
+        else:
+            stack.pop('depends_on', None)
         stack.setdefault('meta', {})
         normalized.append(stack)
     data['stacks'] = normalized
-    if version == MANIFEST_VERSION_COORDINATED and repository_mode != 'journal':
+    validate_stack_dependency_graph(
+        data['stacks'], require_declared_dependencies=version == MANIFEST_VERSION_CHANNELS
+    )
+    data['channels'] = normalize_manifest_channels(data, defaults, repository_mode)
+    validate_channel_stack_authority(data['channels'], data['stacks'])
+    if version == MANIFEST_VERSION_CHANNELS and repository_mode != 'delivery':
+        raise SyncwheelError('manifest version 3 is supported only for repository_mode="delivery"')
+    if data.get('channels') and version != MANIFEST_VERSION_CHANNELS:
+        raise SyncwheelError('manifest channels require version 3; migrate explicitly with channel create --apply')
+    if version in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS} and repository_mode != 'journal':
         coordination = normalize_coordination(data.get('coordination'), path)
         if coordination['remote'] != defaults['publication_remote']:
             raise SyncwheelError(
                 'coordination.remote must match defaults.publication_remote'
             )
         data['coordination'] = coordination
+        if version == MANIFEST_VERSION_CHANNELS and coordination['mode'] == 'active-active':
+            mismatched = [
+                channel['id'] for channel in data['channels']
+                if channel['remote'] != coordination['remote']
+            ]
+            if mismatched:
+                raise SyncwheelError(
+                    'active-active channel remote must match coordination.remote for: '
+                    + ', '.join(mismatched)
+                )
+    validate_channel_branch_ownership(data)
     return data, path
 
 
 def save_manifest(path, manifest):
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest, indent=2) + '\n')
+    existing_mode = None
+    if path.exists() or path.is_symlink():
+        existing = path.stat(follow_symlinks=False)
+        if not stat.S_ISREG(existing.st_mode):
+            raise SyncwheelError(f'manifest path is not a regular file: {path}')
+        existing_mode = stat.S_IMODE(existing.st_mode)
+    payload = (json.dumps(manifest, indent=2) + '\n').encode('utf-8')
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.tmp-', dir=str(path.parent)
+    )
+    temporary_path = Path(temporary_name)
+    replaced = False
+    try:
+        if existing_mode is not None:
+            os.fchmod(descriptor, existing_mode)
+        with os.fdopen(descriptor, 'wb') as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        require_manifest_transaction_current(path)
+        os.replace(temporary_path, path)
+        replaced = True
+        transaction = active_manifest_write_transaction(path)
+        if transaction is not None:
+            transaction['expectedDigest'] = manifest_digest(manifest)
+        directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+        try:
+            directory_fd = os.open(path.parent, directory_flags)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            raise ManifestDurabilityError(
+                f'manifest replace completed but parent directory durability check failed; '
+                f'outcome is unknown: {path}'
+            ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not replaced:
+            temporary_path.unlink(missing_ok=True)
 
 
 def stack_integration_commits(stack):
@@ -1816,12 +2259,115 @@ def ledger_checkpoints_dir(repo_root, manifest_path=None):
     return ledger_root(repo_root, manifest_path) / 'checkpoints'
 
 
+_CHANNEL_MUTATION_LOCK_STATE = threading.local()
+_MANIFEST_WRITE_TRANSACTION_STATE = threading.local()
+
+
+@contextlib.contextmanager
+def channel_mutation_lock(repo_root, manifest_path, channel_id):
+    if fcntl is None:
+        raise SyncwheelError('channel mutations require POSIX file locking support')
+    if is_external_manifest_path(repo_root, manifest_path):
+        lock_dir = ledger_root(repo_root, manifest_path) / 'locks'
+    else:
+        common_dir = git(repo_root, 'rev-parse', '--git-common-dir').stdout.strip()
+        common_path = Path(common_dir)
+        if not common_path.is_absolute():
+            common_path = repo_root / common_path
+        lock_dir = common_path.resolve(strict=False) / 'syncwheel-locks'
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_key = hashlib.sha256(
+        str(Path(manifest_path).resolve(strict=False)).encode('utf-8')
+    ).hexdigest()[:32]
+    lock_path = lock_dir / f'manifest-{lock_key}.lock'
+    held = getattr(_CHANNEL_MUTATION_LOCK_STATE, 'held', None)
+    if held is None:
+        held = {}
+        _CHANNEL_MUTATION_LOCK_STATE.held = held
+    lock_identity = str(lock_path.resolve(strict=False))
+    if lock_identity in held:
+        held[lock_identity] += 1
+        try:
+            yield lock_path
+        finally:
+            held[lock_identity] -= 1
+        return
+    with lock_path.open('a+') as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        held[lock_identity] = 1
+        try:
+            yield lock_path
+        finally:
+            held.pop(lock_identity, None)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def active_manifest_write_transaction(manifest_path):
+    transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', {})
+    return transactions.get(str(Path(manifest_path).resolve(strict=False)))
+
+
+def require_manifest_transaction_current(manifest_path):
+    transaction = active_manifest_write_transaction(manifest_path)
+    if transaction is None:
+        return
+    current, _ = load_manifest(transaction['repoRoot'], manifest_path)
+    current_digest = manifest_digest(current) if current is not None else None
+    if current_digest != transaction['expectedDigest']:
+        raise SyncwheelError(
+            'manifest changed outside the active transaction; refusing stale write or side effect'
+        )
+
+
+@contextlib.contextmanager
+def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command'):
+    identity = str(Path(manifest_path).resolve(strict=False))
+    transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', None)
+    if transactions is None:
+        transactions = {}
+        _MANIFEST_WRITE_TRANSACTION_STATE.transactions = transactions
+    existing = transactions.get(identity)
+    if existing is not None:
+        existing['depth'] += 1
+        try:
+            yield
+        finally:
+            existing['depth'] -= 1
+        return
+    with channel_mutation_lock(repo_root, manifest_path, owner):
+        observed, _ = load_manifest(repo_root, manifest_path)
+        transaction = {
+            'repoRoot': repo_root,
+            'expectedDigest': manifest_digest(observed) if observed is not None else None,
+            'depth': 1,
+        }
+        transactions[identity] = transaction
+        try:
+            yield
+        finally:
+            transactions.pop(identity, None)
+
+
+def require_locked_manifest_observation(repo_root, manifest_path, plan):
+    current, _ = load_manifest(repo_root, manifest_path)
+    if not current or manifest_digest(current) != plan.get('manifestDigestBefore'):
+        raise SyncwheelError(
+            'channel plan is stale under mutation lock; manifest changed before apply'
+        )
+    return current
+
+
+def channel_mutation_checkpoint():
+    """Fault-injection seam immediately before an authoritative channel mutation."""
+    return None
+
+
 def ledger_checkpoint_path(repo_root, manifest_path=None):
     return ledger_checkpoints_dir(repo_root, manifest_path) / 'latest.json'
 
 
 def manifest_stack_history_summary(stack):
-    return {
+    summary = {
         'id': stack['id'],
         'branch': stack['branch'],
         'base': stack['base'],
@@ -1833,6 +2379,37 @@ def manifest_stack_history_summary(stack):
         'integration_commits': stack_integration_commits(stack),
         'meta': dict(stack.get('meta', {})),
     }
+    if stack.get('depends_on'):
+        summary['depends_on'] = list(stack['depends_on'])
+    return summary
+
+
+def manifest_channel_history_summary(channel):
+    summary = {
+        'id': channel['id'],
+        'branch': channel['branch'],
+        'base': channel['base'],
+        'baseRevision': channel['baseRevision'],
+        'remote': channel['remote'],
+        'lifecycle': channel['lifecycle'],
+        'composition': [
+            {
+                'stack': entry['stack'],
+                'branch': entry['branch'],
+                'stackBase': entry['stackBase'],
+                'stackBaseRevision': entry['stackBaseRevision'],
+                'branchRevision': entry['branchRevision'],
+                'commits': list(entry['commits']),
+                'dependsOn': list(entry.get('dependsOn', [])),
+            }
+            for entry in channel.get('composition', [])
+        ],
+    }
+    if channel.get('expiry'):
+        summary['expiry'] = dict(channel['expiry'])
+    if channel.get('resolution'):
+        summary['resolution'] = dict(channel['resolution'])
+    return summary
 
 
 def manifest_digest(manifest):
@@ -1853,6 +2430,10 @@ def manifest_event_payload(manifest_path, manifest, reason, context=None):
             'stacks': list(manifest['integration'].get('stacks', [])),
         },
         'stacks': [manifest_stack_history_summary(stack) for stack in manifest['stacks']],
+        'channels': [
+            manifest_channel_history_summary(channel)
+            for channel in manifest.get('channels', [])
+        ],
     }
 
 
@@ -1864,6 +2445,7 @@ def default_ledger_state():
         'manifest': None,
         'integration': {},
         'stacks': {},
+        'channels': {},
         'recent_events': [],
     }
 
@@ -1907,6 +2489,17 @@ def apply_ledger_event(state, event):
         for stack_id, stack in state['stacks'].items():
             if stack_id not in active_ids:
                 stack['active_in_manifest'] = False
+        active_channel_ids = set()
+        channels = state.setdefault('channels', {})
+        for summary in payload.get('channels') or []:
+            channel = channels.setdefault(summary['id'], {'id': summary['id']})
+            channel.update(summary)
+            channel['active_in_manifest'] = True
+            channel['last_manifest_seq'] = event['seq']
+            active_channel_ids.add(summary['id'])
+        for channel_id, channel in channels.items():
+            if channel_id not in active_channel_ids:
+                channel['active_in_manifest'] = False
         integration = payload.get('integration') or {}
         state['manifest'] = {
             'manifest_path': payload.get('manifest_path'),
@@ -1914,6 +2507,7 @@ def apply_ledger_event(state, event):
             'reason': payload.get('reason'),
             'integration': integration,
             'active_stacks': sorted(active_ids),
+            'active_channels': sorted(active_channel_ids),
             'last_seq': event['seq'],
         }
         state['integration'].update({
@@ -1923,6 +2517,40 @@ def apply_ledger_event(state, event):
             'active_stacks': list(integration.get('stacks') or []),
             'last_manifest_seq': event['seq'],
         })
+        return state
+
+    if event['type'] in (
+        'channel_operation_started', 'channel_operation_prepared',
+        'channel_operation_receipt',
+    ):
+        channel_id = payload.get('channel')
+        if channel_id:
+            channels = state.setdefault('channels', {})
+            channel = channels.setdefault(channel_id, {'id': channel_id})
+            channel['last_operation_id'] = payload.get('operationId')
+            channel['last_operation'] = payload.get('operation')
+            channel['last_operation_seq'] = event['seq']
+            channel['last_operation_status'] = (
+                payload.get('status')
+                if event['type'] == 'channel_operation_receipt' else 'pending'
+            )
+        return state
+
+    if event['type'] in ('channel_applied', 'channel_published', 'channel_closed'):
+        channel_id = payload.get('channel')
+        if channel_id:
+            channels = state.setdefault('channels', {})
+            channel = channels.setdefault(channel_id, {'id': channel_id})
+            channel.update({
+                'branch': payload.get('branch') or channel.get('branch'),
+                'last_event_type': event['type'],
+                'last_event_seq': event['seq'],
+                'last_plan_digest': payload.get('planDigest'),
+                'last_tip': payload.get('tip') or channel.get('last_tip'),
+                'last_remote_tip': payload.get('publishedRevision') or channel.get('last_remote_tip'),
+            })
+            if event['type'] == 'channel_closed':
+                channel['active_in_manifest'] = False
         return state
 
     if event['type'] == 'stack_rebuilt':
@@ -2002,7 +2630,8 @@ def next_ledger_segment_path(repo_root, manifest_path=None):
     if not segments:
         return directory / '000001.jsonl'
     current = segments[-1]
-    line_count = sum(1 for _ in current.open())
+    with current.open() as handle:
+        line_count = sum(1 for _ in handle)
     if line_count < LEDGER_SEGMENT_MAX_EVENTS:
         return current
     next_index = int(current.stem) + 1
@@ -2045,6 +2674,16 @@ def stack_map(manifest):
     return {stack['id']: stack for stack in manifest.get('stacks', [])}
 
 
+def channel_ids_referencing_stack(manifest, stack_id):
+    return sorted(
+        channel['id'] for channel in manifest.get('channels', [])
+        if any(
+            entry['stack'] == stack_id
+            for entry in channel.get('composition', [])
+        )
+    )
+
+
 def require_manifest(repo_root, repo_value=None, manifest_override=None, personal=None):
     manifest_path = resolve_manifest_path(repo_root, repo_value, manifest_override, personal)
     manifest, manifest_path = load_manifest(repo_root, manifest_path)
@@ -2058,6 +2697,481 @@ def require_stack(manifest, stack_id):
     if stack_id not in stacks:
         raise SyncwheelError(f'unknown stack: {stack_id}')
     return stacks[stack_id]
+
+
+def channel_map(manifest):
+    return {channel['id']: channel for channel in manifest.get('channels', [])}
+
+
+def require_delivery_manifest(manifest):
+    if manifest.get('repository_mode') != 'delivery':
+        raise SyncwheelError('channel commands require repository_mode="delivery"')
+
+
+def require_channel(manifest, channel_id):
+    channels = channel_map(manifest)
+    if channel_id not in channels:
+        raise SyncwheelError(f'unknown channel: {channel_id}')
+    return channels[channel_id]
+
+
+def channel_pin_digest(channel):
+    return canonical_json_digest({
+        'base': channel['base'],
+        'baseRevision': channel['baseRevision'],
+        'composition': channel.get('composition', []),
+    })
+
+
+def channel_composition_digest(channel):
+    return canonical_json_digest({
+        'pinDigest': channel_pin_digest(channel),
+        'resolution': channel.get('resolution'),
+    })
+
+
+def pin_stack_for_channel(repo_root, manifest, stack_id):
+    stack = require_stack(manifest, stack_id)
+    if not branch_exists(repo_root, stack['branch']):
+        raise SyncwheelError(
+            f"cannot pin stack {stack_id}: local branch {stack['branch']!r} is missing"
+        )
+    branch_revision = commit_full_sha(repo_root, stack['branch'])
+    if not ref_exists(repo_root, stack['base']):
+        raise SyncwheelError(f"cannot pin stack {stack_id}: base ref {stack['base']!r} is missing")
+    stack_base_revision = commit_full_sha(repo_root, stack['base'])
+    commits = [commit_full_sha(repo_root, commit) for commit in stack.get('commits', [])]
+    observed_commits = [
+        commit_full_sha(repo_root, commit)
+        for commit in rev_list(repo_root, f'{stack_base_revision}..{branch_revision}')
+    ]
+    if observed_commits != commits:
+        undeclared = [commit for commit in observed_commits if commit not in commits]
+        missing = [commit for commit in commits if commit not in observed_commits]
+        details = []
+        if undeclared:
+            details.append('undeclared=' + ','.join(undeclared))
+        if missing:
+            details.append('missing=' + ','.join(missing))
+        raise SyncwheelError(
+            f'cannot pin stack {stack_id}: branch range must exactly match declared ordered commits'
+            + (f" ({'; '.join(details)})" if details else '')
+        )
+    return {
+        'stack': stack_id,
+        'branch': stack['branch'],
+        'stackBase': stack['base'],
+        'stackBaseRevision': stack_base_revision,
+        'branchRevision': branch_revision,
+        'commits': commits,
+        'dependsOn': list(stack.get('depends_on', [])),
+    }
+
+
+def channel_entry_projection_errors(repo_root, manifest, entry):
+    errors = []
+    stack_id = entry['stack']
+    if not commit_exists(repo_root, entry['stackBaseRevision']):
+        errors.append(f'pinned stack base revision is missing: {entry["stackBaseRevision"]}')
+        return errors
+    if not commit_exists(repo_root, entry['branchRevision']):
+        errors.append(f'pinned branch revision is missing: {entry["branchRevision"]}')
+        return errors
+    if not branch_contains(repo_root, entry['branchRevision'], entry['stackBaseRevision']):
+        errors.append('pinned branch revision does not descend from pinned stack base revision')
+        return errors
+    for commit in entry['commits']:
+        if not commit_exists(repo_root, commit):
+            errors.append(f'pinned commit is missing: {commit}')
+    if errors:
+        return errors
+    observed = [
+        commit_full_sha(repo_root, commit)
+        for commit in rev_list(
+            repo_root, f"{entry['stackBaseRevision']}..{entry['branchRevision']}"
+        )
+    ]
+    if observed != entry['commits']:
+        errors.append('pinned branch range does not equal pinned ordered commits')
+    stack = stack_map(manifest).get(stack_id)
+    if stack:
+        if entry['branch'] != stack['branch']:
+            errors.append(
+                f"pinned branch {entry['branch']!r} does not match stack branch {stack['branch']!r}"
+            )
+        if entry['stackBase'] != stack['base']:
+            errors.append(
+                f"pinned stackBase {entry['stackBase']!r} does not match stack base {stack['base']!r}"
+            )
+        if list(stack.get('depends_on', [])) != list(entry.get('dependsOn', [])):
+            errors.append('current stack dependency declaration does not equal the pinned dependencies')
+        current_branch_revision = ref_tip(repo_root, stack['branch'])
+        if current_branch_revision == entry['branchRevision']:
+            declared = [commit_full_sha(repo_root, commit) for commit in stack.get('commits', [])]
+            if declared != entry['commits']:
+                errors.append('current stack declaration does not equal the pinned ordered commits')
+        elif current_branch_revision and not branch_contains(
+            repo_root, current_branch_revision, entry['branchRevision']
+        ):
+            errors.append('pinned branch revision is not historical ancestry of the current stack branch')
+    return errors
+
+
+def require_channel_materialization_valid(repo_root, manifest, channel):
+    validate_channel_dependency_order(channel)
+    failures = []
+    for entry in channel.get('composition', []):
+        for error in channel_entry_projection_errors(repo_root, manifest, entry):
+            failures.append(f"{entry['stack']}: {error}")
+    resolution = channel.get('resolution')
+    if resolution:
+        revision = resolution['revision']
+        if not commit_exists(repo_root, revision):
+            failures.append(f'resolution revision is missing: {revision}')
+        else:
+            parents = git(repo_root, 'rev-list', '--parents', '-n', '1', revision).stdout.split()
+            if len(parents) != 2 or parents[1] != channel['baseRevision']:
+                failures.append('resolution revision must be single-parent directly on baseRevision')
+            if ref_tree(repo_root, revision) != resolution['tree']:
+                failures.append('resolution tree does not match its recorded revision')
+        if resolution['parentRevision'] != channel['baseRevision']:
+            failures.append('resolution parentRevision does not match channel baseRevision')
+        if resolution['forPinDigest'] != channel_pin_digest(channel):
+            failures.append('resolution is stale for the current pins')
+    if failures:
+        raise SyncwheelError(
+            f"channel {channel['id']} has invalid pinned projection: " + '; '.join(failures)
+        )
+
+
+def channel_remote_observation(repo_root, channel):
+    remote = channel['remote']
+    ref = f"refs/heads/{channel['branch']}"
+    if not remote_is_configured(repo_root, remote):
+        return {'known': False, 'revision': None, 'error': f'remote not configured: {remote}'}
+    result = git(repo_root, 'ls-remote', '--heads', remote, ref, check=False)
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or 'remote observation failed'
+        return {'known': False, 'revision': None, 'error': message[:400]}
+    revision = None
+    for line in result.stdout.splitlines():
+        sha, separator, observed_ref = line.partition('\t')
+        if separator and observed_ref == ref:
+            revision = sha.strip()
+            break
+    return {'known': True, 'revision': revision, 'error': None}
+
+
+def observe_new_channel_ref(repo_root, channel):
+    local_revision = ref_tip(repo_root, f"refs/heads/{channel['branch']}")
+    remote = channel_remote_observation(repo_root, channel)
+    return {
+        'localRevision': local_revision,
+        'remoteKnown': remote['known'],
+        'remoteRevision': remote['revision'],
+    }
+
+
+def require_new_channel_ref_unowned(repo_root, channel, phase='create'):
+    observation = observe_new_channel_ref(repo_root, channel)
+    if observation['localRevision']:
+        raise SyncwheelError(
+            f"channel {phase} refuses existing unowned local branch: {channel['branch']}"
+        )
+    if not observation['remoteKnown']:
+        raise SyncwheelError(
+            f"channel {phase} cannot prove remote branch absence on {channel['remote']!r}; "
+            'remote observation is unknown'
+        )
+    if observation['remoteRevision']:
+        raise SyncwheelError(
+            f"channel {phase} refuses existing unowned remote branch: "
+            f"{channel['remote']}/{channel['branch']}"
+        )
+    return observation
+
+
+def channel_observation(repo_root, manifest, channel, include_remote=True):
+    current_base_revision = ref_tip(repo_root, channel['base'])
+    current_revision = ref_tip(repo_root, channel['branch'])
+    remote = (
+        channel_remote_observation(repo_root, channel)
+        if include_remote else {'known': None, 'revision': None, 'error': None}
+    )
+    stack_revisions = {}
+    for entry in channel.get('composition', []):
+        stack_revisions[entry['stack']] = ref_tip(repo_root, entry['branch'])
+    body = {
+        'manifestDigest': manifest_digest(manifest),
+        'pinDigest': channel_pin_digest(channel),
+        'channelDigest': channel_composition_digest(channel),
+        'baseRevision': channel['baseRevision'],
+        'currentBaseRevision': current_base_revision,
+        'currentRevision': current_revision,
+        'remoteKnown': remote['known'],
+        'remoteRevision': remote['revision'],
+        'stackRevisions': stack_revisions,
+    }
+    return {
+        **body,
+        'remoteError': remote['error'],
+        'observationRevision': canonical_json_digest(body),
+    }
+
+
+def normalize_channel_operation_id(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', value):
+        raise SyncwheelError(
+            '--operation-id must be 1-128 ref-safe letters, digits, dot, underscore, colon, or dash'
+        )
+    return value
+
+
+def channel_operation_id_from_args(args):
+    value = getattr(args, 'operation_id', None)
+    return value if isinstance(value, str) else None
+
+
+def return_existing_channel_operation(args):
+    operation_id = channel_operation_id_from_args(args)
+    plan_digest = getattr(args, 'plan_digest', None)
+    if not getattr(args, 'apply', False) or not operation_id or not plan_digest:
+        return False
+    repo_root = resolve_repo_root(args.repo)
+    _, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    events = channel_operation_events(repo_root, manifest_path, operation_id)
+    receipts = [
+        event.get('payload') or {} for event in events
+        if event.get('type') == 'channel_operation_receipt'
+    ]
+    if not receipts:
+        return False
+    receipt = receipts[-1]
+    if receipt.get('planDigest') != plan_digest:
+        raise SyncwheelError(
+            f'channel operation id collision: {operation_id} is bound to another plan'
+        )
+    if receipt.get('status') == 'unknown':
+        raise SyncwheelError(
+            f'channel operation {operation_id} has unknown outcome; use channel operation reconcile'
+        )
+    print(json.dumps(receipt, indent=2))
+    return True
+
+
+def finalize_channel_plan(plan, operation_id=None):
+    requested = normalize_channel_operation_id(operation_id)
+    plan['planDigest'] = canonical_json_digest(plan)
+    if requested is None:
+        requested = 'chop-' + hashlib.sha256(
+            f"channel-operation:{plan['planDigest']}".encode('utf-8')
+        ).hexdigest()[:24]
+    plan['operationId'] = requested
+    return plan
+
+
+def build_channel_plan(repo_root, manifest, channel, operation='apply', operation_id=None):
+    if operation not in {'apply', 'publish'}:
+        raise SyncwheelError(f'unsupported channel plan operation: {operation}')
+    require_channel_materialization_valid(repo_root, manifest, channel)
+    observation = channel_observation(repo_root, manifest, channel, include_remote=True)
+    if not observation['baseRevision']:
+        raise SyncwheelError(f"channel {channel['id']} pinned base revision is missing")
+    if not commit_exists(repo_root, observation['baseRevision']):
+        raise SyncwheelError(
+            f"channel {channel['id']} pinned base revision is unavailable: "
+            f"{observation['baseRevision']}"
+        )
+    if operation == 'publish' and channel['lifecycle'] == 'shared':
+        stacks = stack_map(manifest)
+        drafts = [
+            entry['stack'] for entry in channel.get('composition', [])
+            if entry['stack'] in stacks and stacks[entry['stack']].get('state') == 'draft'
+        ]
+        if drafts:
+            raise SyncwheelError(
+                'shared channel publication refuses draft stack(s): ' + ', '.join(drafts)
+            )
+    coordination_active = operation == 'publish' and coordination_is_active(manifest)
+    coordination_state_revision = None
+    coordination_manifest_revision = None
+    coordination_target = None
+    if coordination_active:
+        config = coordination_config(manifest)
+        coordination_target = coordination_state_ref(config)
+        coordination_state_revision = remote_ref_tips(
+            repo_root, config['remote'], [coordination_target]
+        )[coordination_target]
+        coordination_manifest_revision = coordination_manifest_digest(manifest, repo_root)
+    actions = []
+    if operation == 'apply':
+        actions.append({
+            'id': 'materialize-local-channel-ref',
+            'type': 'materialize-local-channel',
+            'target': f"refs/heads/{channel['branch']}",
+            'before': observation['currentRevision'],
+            'intendedAfter': {
+                'pinDigest': observation['pinDigest'],
+                'compositionDigest': observation['channelDigest'],
+            },
+        })
+    else:
+        actions.append({
+            'id': 'publish-channel-ref',
+            'type': 'publish-channel-ref',
+            'target': f"{channel['remote']}:refs/heads/{channel['branch']}",
+            'before': observation['remoteRevision'],
+            'intendedAfter': observation['currentRevision'],
+            **({'atomicGroup': 'coordinated-publication'} if coordination_active else {}),
+        })
+        if coordination_active:
+            actions.append({
+                'id': 'publish-coordination-state',
+                'type': 'publish-coordination-state',
+                'target': f"{config['remote']}:{coordination_target}",
+                'before': coordination_state_revision,
+                'intendedAfter': {
+                    'manifestDigest': coordination_manifest_revision,
+                },
+                'atomicGroup': 'coordinated-publication',
+            })
+    plan = {
+        'kind': 'channelPlan',
+        'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+        'operation': operation,
+        'request': {
+            'operation': operation,
+            'channel': channel['id'],
+        },
+        'channel': channel['id'],
+        'branch': channel['branch'],
+        'lifecycle': channel['lifecycle'],
+        'expiry': channel.get('expiry'),
+        'observationRevision': observation['observationRevision'],
+        'manifestDigest': observation['manifestDigest'],
+        'manifestDigestBefore': observation['manifestDigest'],
+        'compositionDigest': observation['channelDigest'],
+        'pinDigest': observation['pinDigest'],
+        'base': channel['base'],
+        'baseRevision': observation['baseRevision'],
+        'currentBaseRevision': observation['currentBaseRevision'],
+        'baseDrifted': observation['currentBaseRevision'] != observation['baseRevision'],
+        'currentRevision': observation['currentRevision'],
+        'remote': channel['remote'],
+        'remoteObservationKnown': observation['remoteKnown'],
+        'remoteRevision': observation['remoteRevision'],
+        'coordinationStateRevision': coordination_state_revision,
+        'coordinationManifestDigest': coordination_manifest_revision,
+        'composition': json.loads(json.dumps(channel.get('composition', []))),
+        'actions': actions,
+        'before': {
+            'manifestDigest': observation['manifestDigest'],
+            'channel': manifest_channel_history_summary(channel),
+            'localRevision': observation['currentRevision'],
+            'remoteRevision': observation['remoteRevision'],
+        },
+        'after': {
+            'manifestDigest': observation['manifestDigest'],
+            'channel': manifest_channel_history_summary(channel),
+            'localRevision': (
+                '<materialized-from-composition>'
+                if operation == 'apply' else observation['currentRevision']
+            ),
+            'remoteRevision': (
+                observation['currentRevision']
+                if operation == 'publish' else observation['remoteRevision']
+            ),
+        },
+        'deployment': {
+            'asserted': False,
+            'note': 'A published channel branch is not proof of an external deployment.',
+        },
+    }
+    return finalize_channel_plan(plan, operation_id)
+
+
+def verify_channel_plan_digest(
+    repo_root, manifest, channel, operation, expected_digest, operation_id=None
+):
+    if not isinstance(expected_digest, str) or not expected_digest:
+        raise SyncwheelError('--plan-digest is required with --apply')
+    plan = build_channel_plan(repo_root, manifest, channel, operation, operation_id)
+    if plan['planDigest'] != expected_digest:
+        raise SyncwheelError(
+            'channel plan is stale: manifest, base, composition, local branch, stack branch, '
+            'or remote observation changed; generate a new plan'
+        )
+    return plan
+
+
+def latest_channel_event(repo_root, manifest_path, channel_id, event_type):
+    for event in reversed(load_ledger_events(repo_root, manifest_path)):
+        if event.get('type') != event_type:
+            continue
+        payload = event.get('payload') or {}
+        if payload.get('channel') == channel_id:
+            return payload
+    return None
+
+
+def materialize_channel_tip(repo_root, channel, plan):
+    if find_worktree_for_branch(repo_root, channel['branch']):
+        raise SyncwheelError(
+            f"channel branch {channel['branch']!r} is checked out; close its worktree before apply"
+        )
+    resolution = channel.get('resolution')
+    if resolution:
+        return resolution['revision']
+    temporary_branch = f"syncwheel/channel-build/{plan['planDigest'][:24]}"
+    temporary_ref = f'refs/heads/{temporary_branch}'
+    if ref_tip(repo_root, temporary_ref):
+        raise SyncwheelError(f'temporary channel build ref already exists: {temporary_ref}')
+    commits = [
+        commit
+        for entry in channel.get('composition', [])
+        for commit in entry.get('commits', [])
+    ]
+    synthetic = {
+        'id': f"channel-{channel['id']}",
+        'branch': temporary_branch,
+        'base': channel['baseRevision'],
+        'commits': commits,
+    }
+    mode = 'plumbing' if git_supports_write_tree(repo_root) else 'ephemeral'
+    replay = replay_plan(repo_root, None, replay_target(stack=synthetic), mode)
+    try:
+        with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
+            result = execute_replay(repo_root, replay, True)
+        require_replay_success(result)
+        tip = result['after_tip']
+        if not tip:
+            raise SyncwheelError('channel materialization did not produce a commit')
+        return tip
+    finally:
+        git(repo_root, 'update-ref', '-d', temporary_ref, check=False)
+
+
+def channel_receipt(channel, plan, status, tip=None, published_revision=None, coordination_state=None):
+    return {
+        'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+        'channel': channel['id'],
+        'branch': channel['branch'],
+        'operation': plan['operation'],
+        'status': status,
+        'operationId': plan['operationId'],
+        'planDigest': plan['planDigest'],
+        'observationRevision': plan['observationRevision'],
+        'compositionDigest': plan['compositionDigest'],
+        'tip': tip,
+        'publishedRevision': published_revision,
+        'coordinationState': coordination_state,
+        'deploymentAsserted': False,
+        'recordedAt': iso_utc_now(),
+    }
 
 
 def rev_list(repo_root, rev_range):
@@ -2310,7 +3424,18 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
         }
         if stack.get('state', 'published') != 'published':
             snapshot_stack['state'] = stack['state']
+        if stack.get('depends_on'):
+            snapshot_stack['depends_on'] = list(stack['depends_on'])
         snapshot['stacks'].append(snapshot_stack)
+    if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
+        snapshot['channels'] = []
+        for channel in manifest.get('channels', []):
+            snapshot_channel = manifest_channel_history_summary(channel)
+            snapshot_channel.pop('remote', None)
+            snapshot_channel['base'] = public_coordination_ref(
+                channel['base'], remote_roles, repo_root, f"channels.{channel['id']}.base"
+            )
+            snapshot['channels'].append(snapshot_channel)
     config = coordination_config(manifest)
     if config:
         snapshot['coordination'] = {
@@ -2329,6 +3454,8 @@ def managed_ref_names(manifest):
     for stack in manifest['stacks']:
         names.append(f"refs/heads/{stack['branch']}")
     names.append(f"refs/heads/{manifest['integration']['branch']}")
+    for channel in manifest.get('channels', []):
+        names.append(f"refs/heads/{channel['branch']}")
     return list(dict.fromkeys(names))
 
 
@@ -2353,12 +3480,15 @@ def validate_coordination_snapshot_refs(snapshot):
     defaults = snapshot.get('defaults')
     integration = snapshot.get('integration')
     stacks = snapshot.get('stacks')
+    channels = snapshot.get('channels', [])
     if not isinstance(defaults, dict) or 'base_ref' not in defaults:
         raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
     if not isinstance(integration, dict) or 'base' not in integration:
         raise SyncwheelError('coordination state manifest is missing integration.base')
     if not isinstance(stacks, list):
         raise SyncwheelError('coordination state manifest stacks must be an array')
+    if not isinstance(channels, list):
+        raise SyncwheelError('coordination state manifest channels must be an array')
     coordination_public_remote_ref_parts(
         defaults['base_ref'], 'coordination state defaults.base_ref'
     )
@@ -2371,12 +3501,67 @@ def validate_coordination_snapshot_refs(snapshot):
         coordination_public_remote_ref_parts(
             stack['base'], f'coordination state stacks[{index}].base'
         )
+        dependencies = stack.get('depends_on', [])
+        if (
+            not isinstance(dependencies, list)
+            or not all(isinstance(item, str) and item for item in dependencies)
+            or len(dependencies) != len(set(dependencies))
+        ):
+            raise SyncwheelError(
+                f'coordination state manifest stack {index} has invalid depends_on'
+            )
+    validate_stack_dependency_graph(
+        stacks,
+        require_declared_dependencies=snapshot.get('version') == MANIFEST_VERSION_CHANNELS,
+    )
+    for index, channel in enumerate(channels):
+        if not isinstance(channel, dict) or 'base' not in channel:
+            raise SyncwheelError(f'coordination state manifest channel {index} is missing base')
+        coordination_public_remote_ref_parts(
+            channel['base'], f'coordination state channels[{index}].base'
+        )
+        channel_id = channel.get('id')
+        if not isinstance(channel_id, str) or not channel_id:
+            raise SyncwheelError(f'coordination state manifest channel {index} is missing id')
+        if not isinstance(channel.get('branch'), str) or not channel['branch']:
+            raise SyncwheelError(f'coordination state manifest channel {channel_id} is missing branch')
+        if not isinstance(channel.get('baseRevision'), str) or not re.fullmatch(
+            r'[0-9a-f]{40}', channel['baseRevision']
+        ):
+            raise SyncwheelError(
+                f'coordination state manifest channel {channel_id} has invalid baseRevision'
+            )
+        if channel.get('lifecycle') not in CHANNEL_LIFECYCLES:
+            raise SyncwheelError(
+                f'coordination state manifest channel {channel_id} has invalid lifecycle'
+            )
+        composition = channel.get('composition')
+        if not isinstance(composition, list):
+            raise SyncwheelError(
+                f'coordination state manifest channel {channel_id} has invalid composition'
+            )
+        for entry in composition:
+            normalize_channel_entry(entry, channel_id)
+        normalize_channel_resolution(
+            channel.get('resolution'), channel_id, channel_pin_digest(channel)
+        )
+        if channel['lifecycle'] == 'ephemeral':
+            expiry = channel.get('expiry')
+            if not isinstance(expiry, dict):
+                raise SyncwheelError(
+                    f'coordination state ephemeral channel {channel_id} is missing expiry'
+                )
+            normalize_channel_timestamp(expiry.get('createdAt'), f'channel {channel_id} expiry.createdAt')
+            normalize_channel_timestamp(expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt')
 
 
 def validate_coordination_state(state, expected_id=None):
     if not isinstance(state, dict):
         raise SyncwheelError('coordination state must be an object')
-    if state.get('schema_version') != COORDINATION_STATE_SCHEMA_VERSION:
+    if state.get('schema_version') not in {
+        COORDINATION_STATE_SCHEMA_VERSION,
+        COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
+    }:
         raise SyncwheelError(
             f"unsupported coordination state schema: {state.get('schema_version')!r}"
         )
@@ -2389,6 +3574,26 @@ def validate_coordination_state(state, expected_id=None):
         )
     if not isinstance(state.get('manifest'), dict):
         raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
+    manifest_version = state['manifest'].get('version')
+    expected_schema = (
+        COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
+        if manifest_version == MANIFEST_VERSION_CHANNELS
+        else COORDINATION_STATE_SCHEMA_VERSION
+    )
+    if state['schema_version'] != expected_schema:
+        raise SyncwheelError(
+            f'coordination state schema {state["schema_version"]} is incompatible with '
+            f'manifest version {manifest_version}'
+        )
+    dependency_stacks = [
+        stack.get('id') for stack in state['manifest'].get('stacks', [])
+        if isinstance(stack, dict) and stack.get('depends_on')
+    ]
+    if dependency_stacks and manifest_version != MANIFEST_VERSION_CHANNELS:
+        raise SyncwheelError(
+            'coordination state stack depends_on requires manifest version 3: '
+            + ', '.join(str(stack_id) for stack_id in dependency_stacks)
+        )
     validate_coordination_snapshot_refs(state['manifest'])
     if not isinstance(state.get('manifest_digest'), str) or not state['manifest_digest']:
         raise SyncwheelError('coordination state is missing manifest_digest')
@@ -2415,7 +3620,7 @@ def coordination_state_from_commit(repo_root, commit, expected_id=None):
     return validate_coordination_state(state, expected_id)
 
 
-def read_remote_coordination_state(repo_root, config, fetch=True):
+def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest_version=None):
     state_ref = coordination_state_ref(config)
     tip = remote_ref_tips(repo_root, config['remote'], [state_ref])[state_ref]
     if not tip:
@@ -2429,9 +3634,24 @@ def read_remote_coordination_state(repo_root, config, fetch=True):
         commit = 'FETCH_HEAD'
     else:
         commit = tip
+    state = coordination_state_from_commit(repo_root, commit, config['id'])
+    remote_manifest_version = state['manifest'].get('version')
+    compatible_upgrade = (
+        local_manifest_version == MANIFEST_VERSION_CHANNELS
+        and remote_manifest_version == MANIFEST_VERSION_COORDINATED
+    )
+    if (
+        local_manifest_version is not None
+        and remote_manifest_version != local_manifest_version
+        and not compatible_upgrade
+    ):
+        raise SyncwheelError(
+            f"remote coordination manifest version {remote_manifest_version} is incompatible "
+            f'with local manifest version {local_manifest_version}; migrate explicitly'
+        )
     return {
         'tip': tip,
-        'state': coordination_state_from_commit(repo_root, commit, config['id']),
+        'state': state,
     }
 
 
@@ -2537,7 +3757,11 @@ def build_coordination_state(repo_root, manifest, config, previous, observed_ref
             managed[closed_ref] = tombstone.get('remote_tip')
     snapshot = coordination_manifest_snapshot(manifest, repo_root)
     return {
-        'schema_version': COORDINATION_STATE_SCHEMA_VERSION,
+        'schema_version': (
+            COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
+            if manifest.get('version') == MANIFEST_VERSION_CHANNELS
+            else COORDINATION_STATE_SCHEMA_VERSION
+        ),
         'coordination_id': config['id'],
         'publication_id': str(uuid.uuid4()),
         'parent_state': previous.get('tip') if previous else None,
@@ -2690,6 +3914,10 @@ def stack_snapshot_map(snapshot):
     return {stack['id']: stack for stack in snapshot.get('stacks') or []}
 
 
+def channel_snapshot_map(snapshot):
+    return {channel['id']: channel for channel in snapshot.get('channels') or []}
+
+
 def changed_stack_ids(base, candidate):
     base_stacks = stack_snapshot_map(base)
     candidate_stacks = stack_snapshot_map(candidate)
@@ -2705,6 +3933,7 @@ def snapshot_globals(snapshot):
         'version': snapshot.get('version'),
         'defaults': snapshot.get('defaults'),
         'integration': snapshot.get('integration'),
+        'channels': snapshot.get('channels', []),
         'coordination': snapshot.get('coordination'),
     }
 
@@ -2781,6 +4010,12 @@ def apply_coordination_snapshot(manifest, snapshot):
         if isinstance(local_stack.get('meta'), dict):
             restored['meta'] = local_stack['meta']
         updated['stacks'].append(restored)
+    updated['channels'] = []
+    for channel in snapshot.get('channels', []):
+        restored_channel = dict(channel)
+        restored_channel['base'] = local_coordination_ref(channel['base'], defaults)
+        restored_channel['remote'] = defaults['publication_remote']
+        updated['channels'].append(restored_channel)
     if 'coordination' in snapshot:
         coordination = dict(updated.get('coordination') or {})
         coordination.update(snapshot['coordination'])
@@ -2850,7 +4085,9 @@ def align_equivalent_coordination_refs(repo_root, config, state, changed_refs):
 
 
 def classify_coordination_race(repo_root, manifest, config, expected, changed_refs, projection_status):
-    latest = read_remote_coordination_state(repo_root, config, fetch=True)
+    latest = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
     desired_snapshot = coordination_manifest_snapshot(manifest, repo_root)
     if latest['state']:
         state = latest['state']
@@ -2922,6 +4159,50 @@ def validate_coordination_publication_base(
             + ', '.join(unexpected_removed)
             + '; run handoff and resolve the stale manifest first'
         )
+
+    remote_channels = channel_snapshot_map(remote_snapshot)
+    local_channels = channel_snapshot_map(local_snapshot)
+    remote_channel_ids = set(remote_channels)
+    local_channel_ids = set(local_channels)
+    removed_channels = remote_channel_ids - local_channel_ids
+    allowed_channel_close = {
+        tombstone['channel']
+        if tombstone and tombstone.get('channel') else None
+    } - {None}
+    unexpected_removed_channels = sorted(removed_channels - allowed_channel_close)
+    if unexpected_removed_channels:
+        raise SyncwheelError(
+            'local manifest would drop remote-managed channel(s): '
+            + ', '.join(unexpected_removed_channels)
+            + '; run handoff and resolve the stale manifest first'
+        )
+    changed_channel_refs = {
+        channel['id']
+        for channel in manifest.get('channels', [])
+        if f"refs/heads/{channel['branch']}" in changed_refs
+    }
+    added_channels = local_channel_ids - remote_channel_ids
+    missing_channel_refs = sorted(added_channels - changed_channel_refs)
+    if missing_channel_refs:
+        raise SyncwheelError(
+            'new channel(s) require their managed branch in the coordinated publication: '
+            + ', '.join(missing_channel_refs)
+        )
+    for channel_id in sorted(remote_channel_ids & local_channel_ids):
+        remote_channel = remote_channels[channel_id]
+        local_channel = local_channels[channel_id]
+        if remote_channel == local_channel:
+            continue
+        if remote_channel['branch'] != local_channel['branch']:
+            raise SyncwheelError(
+                f'{channel_id}: changing channel branch ownership requires manual coordination review'
+            )
+        if channel_id not in changed_channel_refs:
+            raise SyncwheelError(
+                f'{channel_id}: local channel differs from published state without publishing its managed branch'
+            )
+        # Channel branches intentionally replace pinned compositions. The exact
+        # coordinated lease, rather than ancestry, is the concurrency boundary.
 
     rename_stack = None
     transition_stack = None
@@ -3116,7 +4397,9 @@ def coordinated_publish(
     invalid = sorted(set(changed_refs) - set(managed))
     if invalid:
         raise SyncwheelError('coordinated publish received unmanaged refs: ' + ', '.join(invalid))
-    expected = read_remote_coordination_state(repo_root, config, fetch=True)
+    expected = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
     require_exclusive_coordination_ownership(repo_root, config, managed)
     observed_refs = remote_ref_tips(repo_root, config['remote'], managed)
     validate_coordination_publication_base(
@@ -3243,7 +4526,7 @@ def coordinated_push_remote(args, config):
     return config['remote']
 
 
-def local_manifest_projection_is_convergent(repo_root, manifest):
+def local_manifest_projection_is_convergent(repo_root, manifest, manifest_path=None):
     try:
         for stack in manifest['stacks']:
             if not branch_exists(repo_root, stack['branch']):
@@ -3253,7 +4536,21 @@ def local_manifest_projection_is_convergent(repo_root, manifest):
         integration = manifest['integration']
         if not branch_exists(repo_root, integration['branch']):
             return False
-        return ref_tree(repo_root, integration['branch']) == materialize_integration_projection(repo_root, manifest)
+        if ref_tree(repo_root, integration['branch']) != materialize_integration_projection(repo_root, manifest):
+            return False
+        for channel in manifest.get('channels', []):
+            tip = ref_tip(repo_root, channel['branch'])
+            applied = latest_channel_event(
+                repo_root, manifest_path, channel['id'], 'channel_applied'
+            )
+            if (
+                not tip
+                or not applied
+                or applied.get('tip') != tip
+                or applied.get('compositionDigest') != channel_composition_digest(channel)
+            ):
+                return False
+        return True
     except SyncwheelError:
         return False
 
@@ -3268,7 +4565,9 @@ def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
         raise SyncwheelError('there is no pending mergeable coordinated publication for this manifest')
     if pending.get('local_manifest_digest') != coordination_manifest_digest(manifest, repo_root):
         raise SyncwheelError('the local manifest changed after the mergeable conflict; run handoff and resolve again')
-    latest = read_remote_coordination_state(repo_root, config, fetch=True)
+    latest = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
     if not latest['state'] or latest['tip'] != pending.get('remote_state'):
         raise SyncwheelError('remote coordination state changed after the mergeable conflict; run handoff and retry')
     base_tip = pending.get('base_state')
@@ -3357,7 +4656,9 @@ def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         return {'enabled': False, 'candidates': [], 'skipped': ['coordination is not active-active']}
-    state_info = state_info or read_remote_coordination_state(repo_root, config, fetch=fetch)
+    state_info = state_info or read_remote_coordination_state(
+        repo_root, config, fetch=fetch, local_manifest_version=manifest['version']
+    )
     if not state_info['state']:
         return {
             'enabled': True,
@@ -3571,7 +4872,9 @@ def command_handoff(args):
     if config:
         output['coordination'] = dict(config)
     if config and config.get('mode') == 'active-active':
-        state_info = read_remote_coordination_state(repo_root, config, fetch=args.fetch)
+        state_info = read_remote_coordination_state(
+            repo_root, config, fetch=args.fetch, local_manifest_version=manifest['version']
+        )
         ownership = coordination_ownership_conflicts(repo_root, config, managed_ref_names(manifest))
         profile, local_coordination = coordination_profile(repo_root)
         local_digest = coordination_manifest_digest(manifest, repo_root)
@@ -4286,7 +5589,7 @@ def collect_repo_snapshot(repo_root, manifest):
 def validate_manifest(repo_root, manifest):
     warnings = []
     errors = []
-    details = {'stacks': [], 'integration': {}, 'coordination': {}}
+    details = {'stacks': [], 'channels': [], 'integration': {}, 'coordination': {}}
     if manifest.get('repository_mode') == 'journal':
         journal = manifest['journal']
         details['journal'] = dict(journal)
@@ -4298,9 +5601,9 @@ def validate_manifest(repo_root, manifest):
             )
         return {'warnings': warnings, 'errors': errors, 'details': details}
     coordination = coordination_config(manifest)
-    if manifest.get('version') == MANIFEST_VERSION_COORDINATED:
+    if manifest.get('version') in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS}:
         if not coordination:
-            errors.append('manifest version 2 requires coordination')
+            errors.append(f"manifest version {manifest.get('version')} requires coordination")
         else:
             details['coordination'] = {
                 'mode': coordination['mode'],
@@ -4401,6 +5704,76 @@ def validate_manifest(repo_root, manifest):
             if integration_exists and not branch_contains(repo_root, integration_branch, commit):
                 item['missing_from_integration'].append(commit)
         details['stacks'].append(item)
+
+    for channel in manifest.get('channels', []):
+        item = {
+            'id': channel['id'],
+            'branch': channel['branch'],
+            'lifecycle': channel['lifecycle'],
+            'branch_exists': branch_exists(repo_root, channel['branch']),
+            'base_exists': ref_exists(repo_root, channel['base']),
+            'base_revision_exists': commit_exists(repo_root, channel['baseRevision']),
+            'base_drifted': ref_tip(repo_root, channel['base']) != channel['baseRevision'],
+            'remote_configured': remote_is_configured(repo_root, channel['remote']),
+            'composition_digest': channel_composition_digest(channel),
+            'drifted_stacks': [],
+            'missing_commits': [],
+            'expired': False,
+        }
+        if not item['base_exists']:
+            errors.append(f"channel {channel['id']} base ref does not exist: {channel['base']}")
+        if not item['base_revision_exists']:
+            errors.append(
+                f"channel {channel['id']} pinned base revision does not exist: "
+                f"{channel['baseRevision']}"
+            )
+        if coordination and channel['branch'] == coordination['state_branch']:
+            errors.append(
+                f"channel {channel['id']} branch overlaps coordination.state_branch"
+            )
+        if item['base_drifted']:
+            warnings.append(
+                f"channel {channel['id']} symbolic base moved; use channel refresh to repin deliberately"
+            )
+        if not item['remote_configured']:
+            errors.append(f"channel {channel['id']} remote is not configured: {channel['remote']}")
+        if not item['branch_exists']:
+            warnings.append(f"channel {channel['id']} branch missing locally: {channel['branch']}")
+        for entry in channel.get('composition', []):
+            for projection_error in channel_entry_projection_errors(repo_root, manifest, entry):
+                errors.append(
+                    f"channel {channel['id']} stack {entry['stack']}: {projection_error}"
+                )
+            if not commit_exists(repo_root, entry['branchRevision']):
+                item['missing_commits'].append(entry['branchRevision'])
+                errors.append(
+                    f"channel {channel['id']} references missing branch revision: "
+                    f"{entry['branchRevision']}"
+                )
+            for commit in entry['commits']:
+                if not commit_exists(repo_root, commit):
+                    item['missing_commits'].append(commit)
+                    errors.append(f"channel {channel['id']} references missing commit: {commit}")
+            current = ref_tip(repo_root, entry['branch'])
+            if current != entry['branchRevision']:
+                item['drifted_stacks'].append({
+                    'stack': entry['stack'],
+                    'pinned': entry['branchRevision'],
+                    'current': current,
+                })
+        if channel['lifecycle'] == 'ephemeral':
+            expires_at = datetime.datetime.fromisoformat(
+                channel['expiry']['expiresAt'].replace('Z', '+00:00')
+            )
+            if expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=datetime.timezone.utc)
+            item['expired'] = expires_at <= datetime.datetime.now(datetime.timezone.utc)
+            if item['expired']:
+                warnings.append(
+                    f"ephemeral channel {channel['id']} expired at {channel['expiry']['expiresAt']}; "
+                    'cleanup remains explicit with channel close'
+                )
+        details['channels'].append(item)
 
     integration_commits = []
     unmapped_commits = []
@@ -5399,10 +6772,18 @@ def command_init(args):
     if args.stdout:
         print(output, end='')
         return 0
-    if manifest_path.exists() and not args.force:
-        raise SyncwheelError(f'manifest already exists: {manifest_path}')
+    if manifest_path.exists():
+        existing_manifest, _ = load_manifest(repo_root, manifest_path)
+        if existing_manifest and existing_manifest.get('version') == MANIFEST_VERSION_CHANNELS:
+            raise SyncwheelError(
+                'init refuses to replace an existing manifest version 3; '
+                'close or migrate channel state through its governed commands'
+            )
+        if not args.force:
+            raise SyncwheelError(f'manifest already exists: {manifest_path}')
     shared_manifest = not args.personal and not args.manifest
     if shared_manifest:
+        require_manifest_transaction_current(manifest_path)
         primary = get_worktrees(repo_root)[0]
         primary_path = Path(primary['path'])
         current_branch = primary.get('branch', 'DETACHED')
@@ -5413,8 +6794,7 @@ def command_init(args):
             else:
                 start_point = manifest['integration']['base'] if ref_exists(repo_root, manifest['integration']['base']) else 'HEAD'
                 run(['git', '-C', str(primary_path), 'switch', '-c', integration_branch, start_point])
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(output)
+    save_manifest(manifest_path, manifest)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
     return 0
@@ -5439,7 +6819,7 @@ def command_coordination_init(args):
         raise SyncwheelError(f'coordination remote is not configured locally: {remote}')
     coordination_id = args.coordination_id or existing.get('id') or default_coordination_id(manifest_path)
     proposed = json.loads(json.dumps(manifest))
-    proposed['version'] = MANIFEST_VERSION_COORDINATED
+    proposed['version'] = max(manifest['version'], MANIFEST_VERSION_COORDINATED)
     proposed['defaults']['publication_remote'] = remote
     proposed['coordination'] = active_coordination_config(manifest_path, remote, coordination_id)
     if existing.get('gc'):
@@ -5477,7 +6857,7 @@ def command_coordination_disable(args):
     )
     if existing.get('gc'):
         disabled['gc'] = normalize_coordination_gc(existing['gc'])
-    proposed['version'] = MANIFEST_VERSION_COORDINATED
+    proposed['version'] = max(manifest['version'], MANIFEST_VERSION_COORDINATED)
     proposed['coordination'] = disabled
     if not args.apply:
         print(json.dumps({
@@ -5644,6 +7024,20 @@ def command_status(args):
             if item['missing_commits']:
                 summary.append(f"missing_commits={len(item['missing_commits'])}")
             print(f"  - {item['id']}: {', '.join(summary)}")
+        print('\nchannel state:')
+        if not validation['details']['channels']:
+            print('  - none')
+        for item in validation['details']['channels']:
+            summary = [
+                'branch=present' if item['branch_exists'] else 'branch=missing',
+                f"lifecycle={item['lifecycle']}",
+                f"drifted_stacks={len(item['drifted_stacks'])}",
+            ]
+            if item['base_drifted']:
+                summary.append('base_drifted=yes')
+            if item['expired']:
+                summary.append('expired=yes')
+            print(f"  - {item['id']}: {', '.join(summary)}")
         print('\nplan:')
         if output['plan']:
             for action in output['plan']:
@@ -5747,6 +7141,2046 @@ def command_check(args):
     return 1 if validation['errors'] else 0
 
 
+def channel_manifest_change_output(operation, manifest_path, channel, migration=False):
+    return {
+        'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+        'operation': operation,
+        'manifestPath': str(manifest_path),
+        'manifestMigration': '2-to-3' if migration else None,
+        'channel': manifest_channel_history_summary(channel),
+        'applyRequired': True,
+        'deploymentAsserted': False,
+    }
+
+
+def channel_summary_for_mutation(channel):
+    if channel is None:
+        return None
+    return manifest_channel_history_summary(channel)
+
+
+def build_channel_mutation_plan(
+    operation,
+    manifest_path,
+    observed_manifest_digest,
+    proposed_manifest,
+    channel,
+    context=None,
+    migration=False,
+    observation=None,
+    before_channel=None,
+    operation_id=None,
+):
+    proposed_channel = channel_summary_for_mutation(channel)
+    digest_channel = channel or before_channel
+    request_channel = (
+        proposed_channel.get('id') if proposed_channel
+        else (channel_summary_for_mutation(before_channel) or {}).get('id')
+    )
+    normalized_context = json.loads(json.dumps(context or {}))
+    proposal = {
+        'operation': operation,
+        'manifestDigest': observed_manifest_digest,
+        'proposedManifestDigest': manifest_digest(proposed_manifest),
+        'proposedChannel': proposed_channel,
+        'context': normalized_context,
+    }
+    observation_body = {
+        'manifestDigest': observed_manifest_digest,
+        **(observation or {}),
+    }
+    action_context = context or {}
+    if operation == 'close':
+        actions = []
+        if action_context.get('coordinationActive'):
+            actions.append({
+                'id': 'publish-coordination-state',
+                'type': 'publish-coordination-state',
+                'target': action_context.get('coordinationTarget'),
+                'before': (observation or {}).get('coordinationStateRevision'),
+                'intendedAfter': {
+                    'manifestDigest': action_context.get('coordinationManifestDigest'),
+                },
+            })
+        actions.append({
+            'id': 'update-channel-manifest',
+            'type': 'update-channel-manifest',
+            'target': str(manifest_path),
+            'before': observed_manifest_digest,
+            'intendedAfter': manifest_digest(proposed_manifest),
+        })
+        if action_context.get('deleteLocal'):
+            actions.append({
+                'id': 'delete-local-channel-ref',
+                'type': 'delete-local-channel-ref',
+                'target': action_context.get('localRef'),
+                'before': (observation or {}).get('localRevision'),
+                'intendedAfter': None,
+            })
+    else:
+        actions = [{
+            'id': 'update-channel-manifest',
+            'type': 'update-channel-manifest',
+            'target': str(manifest_path),
+            'before': observed_manifest_digest,
+            'intendedAfter': manifest_digest(proposed_manifest),
+        }]
+    plan = {
+        'kind': 'channelPlan',
+        'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+        'operation': operation,
+        'request': {
+            'operation': operation,
+            'channel': request_channel,
+            'parameters': normalized_context,
+        },
+        'manifestPath': str(manifest_path),
+        'manifestMigration': '2-to-3' if migration else None,
+        'channel': proposed_channel,
+        'observationRevision': canonical_json_digest(observation_body),
+        'manifestDigest': observed_manifest_digest,
+        'manifestDigestBefore': observed_manifest_digest,
+        'proposedManifestDigest': manifest_digest(proposed_manifest),
+        'proposedStateDigest': canonical_json_digest(proposal),
+        'context': normalized_context,
+        'observation': observation or {},
+        'actions': actions,
+        'before': {
+            'manifestDigest': observed_manifest_digest,
+            'channel': channel_summary_for_mutation(before_channel),
+        },
+        'after': {
+            'manifestDigest': manifest_digest(proposed_manifest),
+            'channel': proposed_channel,
+        },
+        'pinDigest': channel_pin_digest(digest_channel) if digest_channel else None,
+        'compositionDigest': (
+            channel_composition_digest(digest_channel) if digest_channel else None
+        ),
+        'applyRequired': True,
+        'deploymentAsserted': False,
+    }
+    return finalize_channel_plan(plan, operation_id)
+
+
+def verify_channel_mutation_plan(args, plan):
+    expected = getattr(args, 'plan_digest', None)
+    if not isinstance(expected, str) or not expected:
+        raise SyncwheelError('--plan-digest is required with --apply')
+    if expected != plan['planDigest']:
+        raise SyncwheelError(
+            'channel mutation plan is stale; generate a new preview and use its exact planDigest'
+        )
+
+
+def channel_operation_payload(plan, channel=None, mutation=None):
+    plan_channel = plan.get('channel')
+    plan_channel_id = (
+        plan_channel.get('id') if isinstance(plan_channel, dict) else plan_channel
+    )
+    payload = {
+        'operationId': plan['operationId'],
+        'planDigest': plan['planDigest'],
+        'operation': plan['operation'],
+        'channel': channel['id'] if channel else plan_channel_id,
+        'manifestDigest': plan.get('manifestDigest'),
+        'manifestDigestBefore': plan.get('manifestDigestBefore'),
+        'observationRevision': plan.get('observationRevision'),
+        'compositionDigest': plan.get('compositionDigest'),
+        'pinDigest': plan.get('pinDigest'),
+        'request': json.loads(json.dumps(plan.get('request') or {})),
+        'before': plan.get('before') or {},
+        'after': plan.get('after') or {},
+        'context': plan.get('context') or {},
+        'actions': list(plan.get('actions') or []),
+        'mutation': mutation or {},
+        'deploymentAsserted': False,
+    }
+    return payload
+
+
+def record_channel_operation_prepared(repo_root, manifest_path, plan, channel=None, mutation=None):
+    payload = channel_operation_payload(plan, channel, mutation)
+    existing = [
+        event for event in load_ledger_events(repo_root, manifest_path)
+        if event.get('type') in {
+            'channel_operation_started', 'channel_operation_prepared',
+            'channel_operation_receipt',
+        }
+        and (event.get('payload') or {}).get('operationId') == plan['operationId']
+    ]
+    mismatched = [
+        event for event in existing
+        if (event.get('payload') or {}).get('planDigest') != plan['planDigest']
+    ]
+    if mismatched:
+        raise SyncwheelError(
+            f'channel operation id collision: {plan["operationId"]} is bound to another plan'
+        )
+    terminal = next(
+        (event for event in reversed(existing)
+         if event.get('type') == 'channel_operation_receipt'),
+        None,
+    )
+    if terminal:
+        terminal_payload = terminal.get('payload') or payload
+        raise SyncwheelError(
+            f'channel operation {plan["operationId"]} is already terminal: '
+            f'{terminal_payload.get("status")}'
+        )
+    existing_types = {event.get('type') for event in existing}
+    if existing_types & {'channel_operation_started', 'channel_operation_prepared'}:
+        state = 'prepared' if 'channel_operation_prepared' in existing_types else 'started'
+        raise SyncwheelError(
+            f'channel operation {plan["operationId"]} is {state} without a terminal receipt; '
+            'use channel operation reconcile'
+        )
+    if 'channel_operation_started' not in existing_types:
+        started = dict(payload)
+        started.update({'status': 'started', 'startedAt': iso_utc_now()})
+        append_ledger_event(repo_root, 'channel_operation_started', started, manifest_path)
+    else:
+        started = next(
+            (event.get('payload') or {} for event in existing
+             if event.get('type') == 'channel_operation_started'),
+            {},
+        )
+    if 'channel_operation_prepared' not in existing_types:
+        prepared = dict(payload)
+        prepared.update({
+            'status': 'prepared',
+            'startedAt': started.get('startedAt'),
+            'preparedAt': iso_utc_now(),
+            'expectedAfter': mutation or {},
+        })
+        append_ledger_event(repo_root, 'channel_operation_prepared', prepared, manifest_path)
+    return payload
+
+
+def default_channel_action_outcomes(plan, status, evidence=None, detail=None):
+    actions = plan.get('actions', [])
+    outcomes = []
+    for index, action in enumerate(actions):
+        if status == 'succeeded':
+            action_status = 'succeeded'
+        elif status == 'partial':
+            action_status = 'succeeded' if index == 0 else (
+                'failed' if index == 1 else 'not-attempted'
+            )
+        elif index == 0:
+            action_status = status if status in {
+                'failed', 'unknown', 'cancelled'
+            } else 'unknown'
+        else:
+            action_status = 'not-attempted'
+        outcomes.append({
+            'id': action['id'],
+            'type': action['type'],
+            'target': action.get('target'),
+            'before': action.get('before'),
+            'intendedAfter': action.get('intendedAfter'),
+            'status': action_status,
+            'observedAfter': evidence or {},
+            'detail': detail,
+        })
+    return outcomes
+
+
+def reduce_channel_action_outcomes(action_outcomes, fallback='unknown'):
+    statuses = [outcome.get('status') for outcome in action_outcomes]
+    if not statuses:
+        return fallback
+    if all(status == 'succeeded' for status in statuses):
+        return 'succeeded'
+    if any(status == 'partial' for status in statuses):
+        return 'partial'
+    if any(status == 'unknown' for status in statuses):
+        return 'unknown'
+    if any(status == 'succeeded' for status in statuses):
+        return 'partial'
+    attempted = [status for status in statuses if status != 'not-attempted']
+    if attempted and all(status == 'cancelled' for status in attempted):
+        return 'cancelled'
+    if attempted and all(status == 'failed' for status in attempted):
+        return 'failed'
+    return fallback
+
+
+def validate_channel_action_outcomes(plan, action_outcomes):
+    actions = plan.get('actions') or []
+    expected_ids = [action.get('id') for action in actions]
+    observed_ids = [outcome.get('id') for outcome in action_outcomes]
+    if observed_ids != expected_ids or len(observed_ids) != len(set(observed_ids)):
+        raise SyncwheelError(
+            'channel operation receipt must contain exactly one ordered outcome per plan action'
+        )
+    allowed_statuses = {
+        'succeeded', 'failed', 'partial', 'unknown', 'cancelled', 'not-attempted',
+    }
+    for action, outcome in zip(actions, action_outcomes):
+        for field in ('id', 'type', 'target', 'before', 'intendedAfter'):
+            if outcome.get(field) != action.get(field):
+                raise SyncwheelError(
+                    f'channel operation outcome {action.get("id")} does not preserve action.{field}'
+                )
+        if outcome.get('status') not in allowed_statuses:
+            raise SyncwheelError(
+                f'channel operation outcome {action.get("id")} has invalid status'
+            )
+
+
+def record_channel_operation_receipt(
+    repo_root, manifest_path, plan, status, channel=None, detail=None, reconciled=False,
+    evidence=None, action_outcomes=None,
+):
+    if status not in {'succeeded', 'failed', 'partial', 'unknown', 'cancelled'}:
+        raise SyncwheelError(f'invalid channel operation terminal status: {status}')
+    payload = channel_operation_payload(plan, channel)
+    prepared = next(
+        (
+            event.get('payload') or {}
+            for event in reversed(load_ledger_events(repo_root, manifest_path))
+            if event.get('type') == 'channel_operation_prepared'
+            and (event.get('payload') or {}).get('operationId') == plan['operationId']
+        ),
+        {},
+    )
+    started = next(
+        (
+            event.get('payload') or {}
+            for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'channel_operation_started'
+            and (event.get('payload') or {}).get('operationId') == plan['operationId']
+        ),
+        {},
+    )
+    completed_at = iso_utc_now()
+    normalized_action_outcomes = (
+        action_outcomes
+        if action_outcomes is not None
+        else default_channel_action_outcomes(plan, status, evidence, detail)
+    )
+    validate_channel_action_outcomes(plan, normalized_action_outcomes)
+    terminal_status = reduce_channel_action_outcomes(normalized_action_outcomes, status)
+    payload.update({
+        'status': terminal_status,
+        'detail': detail,
+        'reconciled': bool(reconciled),
+        'evidence': evidence or {},
+        'before': prepared.get('before') or payload.get('before') or {},
+        'expectedAfter': (
+            prepared.get('expectedAfter') or prepared.get('mutation')
+            or plan.get('mutation') or {}
+        ),
+        'observedAfter': evidence or {},
+        'actionOutcomes': normalized_action_outcomes,
+        'startedAt': started.get('startedAt') or prepared.get('startedAt'),
+        'preparedAt': prepared.get('preparedAt'),
+        'completedAt': completed_at,
+        'recordedAt': completed_at,
+    })
+    if reconciled:
+        payload['reconciledAt'] = completed_at
+    append_ledger_event(repo_root, 'channel_operation_receipt', payload, manifest_path)
+    return payload
+
+
+def finish_channel_manifest_mutation(
+    repo_root, manifest_path, manifest, plan, channel, reason, context=None,
+    locked_check=None,
+):
+    mutation = {
+        'kind': 'manifest',
+        'proposedManifestDigest': manifest_digest(manifest),
+        'proposedChannelDigest': canonical_json_digest(
+            channel_summary_for_mutation(channel)
+        ) if channel else None,
+    }
+    channel_id = channel['id'] if channel else (plan.get('context') or {}).get('channel')
+    with manifest_write_transaction(repo_root, manifest_path, channel_id or 'manifest'):
+        require_locked_manifest_observation(repo_root, manifest_path, plan)
+        if locked_check:
+            locked_check()
+        record_channel_operation_prepared(repo_root, manifest_path, plan, channel, mutation)
+        try:
+            channel_mutation_checkpoint()
+        except (KeyboardInterrupt, SystemExit) as exc:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'cancelled', channel,
+                'cancelled before authoritative manifest mutation',
+                evidence={'manifestDigest': plan['manifestDigestBefore']},
+            )
+            raise SyncwheelError('channel mutation cancelled before authoritative change') from exc
+        require_manifest_transaction_current(manifest_path)
+        try:
+            save_manifest(manifest_path, manifest)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'unknown', channel,
+                'interrupted after authoritative manifest mutation began',
+                evidence={'manifestDigest': manifest_digest(load_manifest(repo_root, manifest_path)[0])},
+            )
+            raise SyncwheelError(
+                f'channel mutation outcome is unknown; operation {plan["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except Exception as exc:
+            if isinstance(exc, ManifestDurabilityError):
+                observed_manifest, _ = load_manifest(repo_root, manifest_path)
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'unknown', channel,
+                    str(exc)[:400],
+                    evidence={
+                        'manifestDigest': (
+                            manifest_digest(observed_manifest)
+                            if observed_manifest else None
+                        ),
+                    },
+                )
+                raise SyncwheelError(
+                    f'manifest durability is unknown; operation {plan["operationId"]} '
+                    'requires operation reconcile'
+                ) from exc
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'failed', channel, str(exc)[:400]
+            )
+            raise
+        try:
+            append_ledger_event(
+                repo_root, 'manifest_saved',
+                manifest_event_payload(manifest_path, manifest, reason, context), manifest_path,
+            )
+            receipt = record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'succeeded', channel,
+                evidence={'manifestDigest': manifest_digest(manifest)},
+            )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            try:
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'unknown', channel,
+                    'interrupted after manifest mutation completed',
+                    evidence={'manifestDigest': manifest_digest(manifest)},
+                )
+            except Exception:
+                pass
+            raise SyncwheelError(
+                f'channel mutation outcome is unknown; operation {plan["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except Exception as exc:
+            try:
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'unknown', channel,
+                    f'manifest changed; receipt recording failed: {str(exc)[:300]}',
+                    evidence={'manifestDigest': manifest_digest(manifest)},
+                )
+            except Exception:
+                pass
+            raise SyncwheelError(
+                f'manifest mutation may have succeeded but receipt recording failed; '
+                f'operation {plan["operationId"]} requires reconcile-outcome'
+            ) from exc
+    return receipt
+
+
+def command_channel_list(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    rows = []
+    for channel in manifest.get('channels', []):
+        observation = channel_observation(repo_root, manifest, channel, include_remote=False)
+        rows.append({
+            **manifest_channel_history_summary(channel),
+            'currentRevision': observation['currentRevision'],
+        })
+    if args.json:
+        print(json.dumps({'channels': rows}, indent=2))
+    else:
+        for channel in rows:
+            expiry = channel.get('expiry') or {}
+            suffix = f"\texpires={expiry.get('expiresAt')}" if expiry else ''
+            print(
+                f"{channel['id']}\t{channel['branch']}\t{channel['lifecycle']}"
+                f"\tstacks={len(channel['composition'])}{suffix}"
+            )
+    return 0
+
+
+def command_channel_show(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    channel = require_channel(manifest, args.channel)
+    output = manifest_channel_history_summary(channel)
+    output['observation'] = channel_observation(repo_root, manifest, channel)
+    output['deployment'] = {'asserted': False}
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def command_channel_create(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    if manifest['version'] == MANIFEST_VERSION_LEGACY:
+        raise SyncwheelError(
+            'channel create requires a coordinated version 2 manifest; run coordination init first'
+        )
+    if manifest['version'] not in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS}:
+        raise SyncwheelError('channel create requires manifest version 2 or 3')
+    if args.channel in channel_map(manifest):
+        raise SyncwheelError(f'channel already exists: {args.channel}')
+    branch = args.branch or f'channel/{safe_ref_segment(args.channel)}'
+    if any(channel['branch'] == branch for channel in manifest.get('channels', [])):
+        raise SyncwheelError(f'channel branch already exists in manifest: {branch}')
+    lifecycle = args.lifecycle
+    if lifecycle == 'ephemeral' and not args.expires_at:
+        raise SyncwheelError('ephemeral channel create requires --expires-at')
+    if lifecycle == 'shared' and args.expires_at:
+        raise SyncwheelError('--expires-at is valid only for ephemeral channels')
+    duplicate_stacks = sorted({
+        stack_id for stack_id in args.stack if args.stack.count(stack_id) > 1
+    })
+    if duplicate_stacks:
+        raise SyncwheelError(
+            'channel composition contains duplicate stack id(s): '
+            + ', '.join(duplicate_stacks)
+        )
+    migration = manifest['version'] == MANIFEST_VERSION_COORDINATED
+    channel_manifest = json.loads(json.dumps(manifest))
+    if migration:
+        channel_manifest['version'] = MANIFEST_VERSION_CHANNELS
+        derive_stack_dependencies(channel_manifest['stacks'])
+        validate_stack_dependency_graph(channel_manifest['stacks'])
+    channel = {
+        'id': args.channel,
+        'branch': branch,
+        'lifecycle': lifecycle,
+        'base': args.base or channel_manifest['defaults']['base_ref'],
+        'remote': args.remote or channel_manifest['defaults']['publication_remote'],
+        'composition': [
+            pin_stack_for_channel(repo_root, channel_manifest, item) for item in args.stack
+        ],
+    }
+    if (
+        coordination_is_active(channel_manifest)
+        and channel['remote'] != coordination_config(channel_manifest)['remote']
+    ):
+        raise SyncwheelError('active-active channel remote must match coordination.remote')
+    ownership_candidate = dict(channel_manifest)
+    ownership_candidate['channels'] = [*channel_manifest.get('channels', []), channel]
+    validate_channel_branch_ownership(ownership_candidate)
+    create_ref_observation = require_new_channel_ref_unowned(repo_root, channel)
+    if not ref_exists(repo_root, channel['base']):
+        raise SyncwheelError(f"channel base ref does not exist: {channel['base']}")
+    channel['baseRevision'] = commit_full_sha(repo_root, channel['base'])
+    if lifecycle == 'ephemeral':
+        channel['expiry'] = {
+            'createdAt': normalize_channel_timestamp(
+                git(repo_root, 'show', '-s', '--format=%cI', channel['baseRevision']).stdout.strip(),
+                f'channel {args.channel} expiry.createdAt',
+            ),
+            'expiresAt': normalize_channel_timestamp(
+                args.expires_at, f'channel {args.channel} expiry.expiresAt'
+            ),
+        }
+    proposed = channel_manifest
+    proposed.setdefault('channels', []).append(channel)
+    validate_channel_dependency_order(channel)
+    observed_digest = manifest_digest(manifest)
+    output = build_channel_mutation_plan(
+        'create', manifest_path, observed_digest, proposed, channel,
+        {'branch': branch}, migration=migration, before_channel=None,
+        observation={'newChannelRef': create_ref_observation},
+        operation_id=channel_operation_id_from_args(args),
+    )
+    if not args.apply:
+        print(json.dumps(output, indent=2))
+        return 0
+    verify_channel_mutation_plan(args, output)
+    receipt = finish_channel_manifest_mutation(
+        repo_root, manifest_path, proposed, output, channel, 'channel_create',
+        {'channel': args.channel, 'branch': branch, 'manifest_migration': output['manifestMigration']},
+        locked_check=lambda: require_new_channel_ref_unowned(
+            repo_root, channel, phase='create plan is stale;'
+        ),
+    )
+    output['applyRequired'] = False
+    output['applied'] = True
+    output['status'] = 'succeeded'
+    output['receipt'] = receipt
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def channel_edit_context(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    if manifest['version'] != MANIFEST_VERSION_CHANNELS:
+        raise SyncwheelError('channel edits require manifest version 3')
+    channel = require_channel(manifest, args.channel)
+    return (
+        repo_root, manifest, manifest_path, channel, manifest_digest(manifest),
+        json.loads(json.dumps(channel)),
+    )
+
+
+def save_or_plan_channel_edit(
+    args, repo_root, manifest, manifest_path, channel, operation, context=None,
+    observed_manifest_digest=None, observation=None, before_channel=None,
+):
+    validate_channel_dependency_order(channel)
+    require_channel_materialization_valid(repo_root, manifest, channel)
+    output = build_channel_mutation_plan(
+        operation, manifest_path, observed_manifest_digest, manifest, channel,
+        context, observation=observation, before_channel=before_channel,
+        operation_id=channel_operation_id_from_args(args),
+    )
+    if not args.apply:
+        print(json.dumps(output, indent=2))
+        return 0
+    verify_channel_mutation_plan(args, output)
+    receipt = finish_channel_manifest_mutation(
+        repo_root, manifest_path, manifest, output, channel, f'channel_{operation}',
+        {'channel': channel['id'], **(context or {})},
+    )
+    output['applyRequired'] = False
+    output['applied'] = True
+    output['status'] = 'succeeded'
+    output['receipt'] = receipt
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def command_channel_add(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root, manifest, manifest_path, channel, observed_digest, before = channel_edit_context(args)
+    if any(entry['stack'] == args.stack for entry in channel['composition']):
+        raise SyncwheelError(f"channel {args.channel} already contains stack {args.stack}")
+    entry = pin_stack_for_channel(repo_root, manifest, args.stack)
+    position = len(channel['composition']) if args.position is None else args.position
+    if position < 0 or position > len(channel['composition']):
+        raise SyncwheelError('--position is outside the channel composition')
+    channel['composition'].insert(position, entry)
+    channel.pop('resolution', None)
+    return save_or_plan_channel_edit(
+        args, repo_root, manifest, manifest_path, channel, 'add',
+        {'stack': args.stack, 'position': position},
+        observed_manifest_digest=observed_digest, before_channel=before,
+    )
+
+
+def command_channel_remove(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root, manifest, manifest_path, channel, observed_digest, before = channel_edit_context(args)
+    before_count = len(channel['composition'])
+    channel['composition'] = [
+        entry for entry in channel['composition'] if entry['stack'] != args.stack
+    ]
+    if len(channel['composition']) == before_count:
+        raise SyncwheelError(f"channel {args.channel} does not contain stack {args.stack}")
+    channel.pop('resolution', None)
+    return save_or_plan_channel_edit(
+        args, repo_root, manifest, manifest_path, channel, 'remove', {'stack': args.stack},
+        observed_manifest_digest=observed_digest, before_channel=before,
+    )
+
+
+def command_channel_replace(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root, manifest, manifest_path, channel, observed_digest, before = channel_edit_context(args)
+    if args.old_stack != args.new_stack and any(
+        entry['stack'] == args.new_stack for entry in channel['composition']
+    ):
+        raise SyncwheelError(f"channel {args.channel} already contains stack {args.new_stack}")
+    for index, entry in enumerate(channel['composition']):
+        if entry['stack'] == args.old_stack:
+            channel['composition'][index] = pin_stack_for_channel(repo_root, manifest, args.new_stack)
+            break
+    else:
+        raise SyncwheelError(f"channel {args.channel} does not contain stack {args.old_stack}")
+    channel.pop('resolution', None)
+    return save_or_plan_channel_edit(
+        args, repo_root, manifest, manifest_path, channel, 'replace',
+        {'old_stack': args.old_stack, 'new_stack': args.new_stack},
+        observed_manifest_digest=observed_digest, before_channel=before,
+    )
+
+
+def command_channel_refresh(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root, manifest, manifest_path, channel, observed_digest, before = channel_edit_context(args)
+    selected = set(args.stack or [entry['stack'] for entry in channel['composition']])
+    present = {entry['stack'] for entry in channel['composition']}
+    unknown = sorted(selected - present)
+    if unknown:
+        raise SyncwheelError('channel refresh references absent stack(s): ' + ', '.join(unknown))
+    channel['composition'] = [
+        pin_stack_for_channel(repo_root, manifest, entry['stack'])
+        if entry['stack'] in selected else entry
+        for entry in channel['composition']
+    ]
+    if not ref_exists(repo_root, channel['base']):
+        raise SyncwheelError(f"channel base ref does not exist: {channel['base']}")
+    channel['baseRevision'] = commit_full_sha(repo_root, channel['base'])
+    channel.pop('resolution', None)
+    return save_or_plan_channel_edit(
+        args, repo_root, manifest, manifest_path, channel, 'refresh',
+        {'stacks': sorted(selected)},
+        observed_manifest_digest=observed_digest, before_channel=before,
+    )
+
+
+def command_channel_promote(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    if manifest['version'] != MANIFEST_VERSION_CHANNELS:
+        raise SyncwheelError('channel promote requires manifest version 3')
+    source = require_channel(manifest, args.source)
+    target = require_channel(manifest, args.target)
+    observed_digest = manifest_digest(manifest)
+    before = json.loads(json.dumps(target))
+    target['base'] = source['base']
+    target['baseRevision'] = source['baseRevision']
+    target['composition'] = json.loads(json.dumps(source['composition']))
+    if source.get('resolution'):
+        target['resolution'] = json.loads(json.dumps(source['resolution']))
+    else:
+        target.pop('resolution', None)
+    return save_or_plan_channel_edit(
+        args, repo_root, manifest, manifest_path, target, 'promote',
+        {'source': source['id'], 'target': target['id'], 'copiedCompositionDigest': channel_composition_digest(source)},
+        observed_manifest_digest=observed_digest, before_channel=before,
+    )
+
+
+def command_channel_resolve(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root, manifest, manifest_path, channel, observed_digest, before = channel_edit_context(args)
+    if args.clear:
+        if 'resolution' not in channel:
+            raise SyncwheelError(f'channel {args.channel} has no resolution to clear')
+        cleared = channel.pop('resolution')
+        return save_or_plan_channel_edit(
+            args, repo_root, manifest, manifest_path, channel, 'resolve-clear',
+            {'clearedRevision': cleared['revision']},
+            observed_manifest_digest=observed_digest, before_channel=before,
+        )
+    revision = args.revision
+    if not isinstance(revision, str) or not re.fullmatch(r'[0-9a-f]{40}', revision):
+        raise SyncwheelError('--revision must be a full commit SHA')
+    if not commit_exists(repo_root, revision):
+        raise SyncwheelError(f'channel resolution revision does not exist: {revision}')
+    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', revision).stdout.split()
+    if len(parents) != 2 or parents[1] != channel['baseRevision']:
+        raise SyncwheelError(
+            'channel resolution revision must be single-parent directly on channel baseRevision'
+        )
+    channel['resolution'] = {
+        'forPinDigest': channel_pin_digest(channel),
+        'revision': revision,
+        'tree': ref_tree(repo_root, revision),
+        'parentRevision': channel['baseRevision'],
+    }
+    return save_or_plan_channel_edit(
+        args, repo_root, manifest, manifest_path, channel, 'resolve',
+        {'revision': revision, 'tree': channel['resolution']['tree']},
+        observed_manifest_digest=observed_digest, before_channel=before,
+    )
+
+
+def channel_operation_events(repo_root, manifest_path, operation_id=None):
+    allowed = {
+        'channel_operation_started', 'channel_operation_prepared',
+        'channel_operation_receipt',
+    }
+    return [
+        event for event in load_ledger_events(repo_root, manifest_path)
+        if event.get('type') in allowed
+        and (
+            operation_id is None
+            or (event.get('payload') or {}).get('operationId') == operation_id
+        )
+    ]
+
+
+def command_channel_operation_show(args):
+    repo_root = resolve_repo_root(args.repo)
+    _, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    events = channel_operation_events(repo_root, manifest_path, args.operation_id)
+    operations = {}
+    for event in events:
+        payload = event.get('payload') or {}
+        operation_id = payload.get('operationId')
+        if not operation_id:
+            continue
+        item = operations.setdefault(operation_id, {'operationId': operation_id, 'events': []})
+        item['events'].append({
+            'seq': event['seq'], 'ts': event['ts'], 'type': event['type'],
+            'payload': payload,
+        })
+        item.update({
+            'operation': payload.get('operation'), 'channel': payload.get('channel'),
+            'planDigest': payload.get('planDigest'),
+        })
+        if event['type'] == 'channel_operation_receipt':
+            item['status'] = payload.get('status')
+        elif event['type'] == 'channel_operation_started':
+            item.setdefault('status', 'pending')
+        elif event['type'] == 'channel_operation_prepared':
+            item['status'] = 'prepared'
+    if args.operation_id and args.operation_id not in operations:
+        raise SyncwheelError(f'unknown channel operation: {args.operation_id}')
+    selected = list(operations.values())
+    channel_filter = getattr(args, 'channel', None)
+    status_filter = getattr(args, 'status', None)
+    if channel_filter:
+        selected = [item for item in selected if item.get('channel') == channel_filter]
+    if status_filter:
+        selected = [item for item in selected if item.get('status') == status_filter]
+    output = (
+        operations[args.operation_id]
+        if args.operation_id else {'operations': selected[-20:]}
+    )
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def command_channel_operation_list(args):
+    args.operation_id = None
+    return command_channel_operation_show(args)
+
+
+def command_channel_receipt_show(args):
+    repo_root = resolve_repo_root(args.repo)
+    _, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    receipts = []
+    for event in load_ledger_events(repo_root, manifest_path):
+        if event.get('type') not in {
+            'channel_operation_receipt', 'channel_applied', 'channel_published',
+            'channel_closed',
+        }:
+            continue
+        payload = event.get('payload') or {}
+        if args.channel and payload.get('channel') != args.channel:
+            continue
+        receipts.append({
+            'seq': event['seq'], 'ts': event['ts'], 'type': event['type'],
+            'receipt': payload,
+        })
+    print(json.dumps({'receipts': receipts[-20:]}, indent=2))
+    return 0
+
+
+def command_channel_contract(args):
+    contract = {
+        'contractVersion': 1,
+        'manifestVersion': MANIFEST_VERSION_CHANNELS,
+        'coordinationStateSchemaVersion': COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
+        'schemas': {
+            'channel': {
+                'required': [
+                    'id', 'branch', 'lifecycle', 'base', 'baseRevision', 'remote',
+                    'composition',
+                ],
+                'compositionEntryRequired': [
+                    'stack', 'branch', 'stackBase', 'stackBaseRevision',
+                    'branchRevision', 'commits', 'dependsOn',
+                ],
+                'resolutionRequired': [
+                    'forPinDigest', 'revision', 'tree', 'parentRevision',
+                ],
+            },
+            'plan': {
+                'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+                'digest': 'sha256-canonical-json-without-planDigest-and-operationId',
+                'required': [
+                    'kind', 'request', 'manifestDigestBefore', 'before', 'after',
+                    'pinDigest', 'compositionDigest', 'actions', 'planDigest',
+                ],
+                'actionRequired': [
+                    'id', 'type', 'target', 'before', 'intendedAfter',
+                ],
+            },
+            'receipt': {
+                'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+                'boundBy': ['operationId', 'planDigest', 'observationRevision'],
+                'required': [
+                    'operationId', 'planDigest', 'observationRevision', 'request',
+                    'before', 'after', 'actions', 'actionOutcomes', 'status',
+                    'startedAt', 'completedAt',
+                ],
+                'actionOutcomeStatuses': [
+                    'succeeded', 'failed', 'partial', 'unknown', 'cancelled',
+                    'not-attempted',
+                ],
+            },
+            'operation': {
+                'schemaVersion': LEDGER_SCHEMA_VERSION,
+                'events': ['started', 'prepared', 'receipt'],
+                'terminalStatuses': [
+                    'succeeded', 'failed', 'partial', 'unknown', 'cancelled',
+                ],
+            },
+        },
+        'capabilities': [
+            'pinned-composition', 'dependency-order', 'digest-bound-mutations',
+            'local-materialization', 'exact-lease-publication',
+            'active-active-coordinated-publication', 'channel-resolution-snapshot',
+            'durable-operation-intent', 'observation-only-reconciliation',
+        ],
+        'truth': {
+            'publishedBranchIsDeploymentProof': False,
+            'remoteDeletionOnClose': False,
+            'reconcileRetriesMutation': False,
+        },
+    }
+    print(json.dumps(contract, indent=2))
+    return 0
+
+
+def channel_action_outcome(plan, action_id, status, observed_after=None, detail=None):
+    action = next(
+        (item for item in plan.get('actions', []) if item.get('id') == action_id),
+        None,
+    )
+    if not action:
+        raise SyncwheelError(f'channel plan is missing action id: {action_id}')
+    return {
+        'id': action['id'],
+        'type': action['type'],
+        'target': action.get('target'),
+        'before': action.get('before'),
+        'intendedAfter': action.get('intendedAfter'),
+        'status': status,
+        'observedAfter': observed_after or {},
+        'detail': detail,
+    }
+
+
+def observe_remote_ref_outcome(repo_root, remote, ref, expected, intended):
+    result = git(repo_root, 'ls-remote', '--heads', remote, ref, check=False)
+    if result.returncode != 0:
+        return {
+            'phase': 'unavailable', 'remote': remote, 'ref': ref,
+            'revision': None, 'detail': 'remote ref observation failed',
+        }
+    revision = None
+    for line in result.stdout.splitlines():
+        candidate, separator, observed_ref = line.partition('\t')
+        if separator and observed_ref == ref:
+            revision = candidate
+            break
+    if revision == intended:
+        phase = 'applied'
+    elif revision == expected:
+        phase = 'pre'
+    else:
+        phase = 'divergent'
+    return {
+        'phase': phase, 'remote': remote, 'ref': ref, 'revision': revision,
+        'detail': f'remote ref is {phase}',
+    }
+
+
+def observe_coordination_outcome(repo_root, mutation):
+    remote = mutation.get('coordinationRemote')
+    ref = mutation.get('coordinationStateRef')
+    expected = mutation.get('expectedCoordinationStateRevision')
+    intended_digest = mutation.get('intendedCoordinationManifestDigest')
+    if not remote or not ref or not intended_digest:
+        return {'phase': 'unavailable', 'detail': 'coordination intent is incomplete'}
+    result = git(repo_root, 'ls-remote', '--heads', remote, ref, check=False)
+    if result.returncode != 0:
+        return {
+            'phase': 'unavailable', 'remote': remote, 'ref': ref,
+            'detail': 'coordination state observation failed',
+        }
+    revision = None
+    for line in result.stdout.splitlines():
+        candidate, separator, observed_ref = line.partition('\t')
+        if separator and observed_ref == ref:
+            revision = candidate
+            break
+    if revision is None:
+        phase = 'pre' if expected is None else 'divergent'
+        return {
+            'phase': phase, 'remote': remote, 'ref': ref, 'revision': None,
+            'manifestDigest': None, 'detail': f'coordination state is {phase}',
+        }
+    fetched = git(repo_root, 'fetch', '--quiet', remote, ref, check=False)
+    if fetched.returncode != 0:
+        return {
+            'phase': 'unavailable', 'remote': remote, 'ref': ref,
+            'revision': revision, 'detail': 'coordination state fetch failed',
+        }
+    try:
+        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD')
+    except SyncwheelError as exc:
+        return {
+            'phase': 'unavailable', 'remote': remote, 'ref': ref,
+            'revision': revision, 'detail': str(exc)[:300],
+        }
+    observed_digest = state.get('manifest_digest')
+    if observed_digest == intended_digest:
+        phase = 'applied'
+    elif revision == expected:
+        phase = 'pre'
+    else:
+        phase = 'divergent'
+    return {
+        'phase': phase, 'remote': remote, 'ref': ref, 'revision': revision,
+        'manifestDigest': observed_digest, 'detail': f'coordination state is {phase}',
+    }
+
+
+def reduce_observed_phases(*phases):
+    if any(phase in {'unavailable', 'divergent'} for phase in phases):
+        return 'unknown'
+    if all(phase == 'applied' for phase in phases):
+        return 'succeeded'
+    if all(phase == 'pre' for phase in phases):
+        return 'failed'
+    return 'partial'
+
+
+def command_channel_reconcile_outcome(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    events = channel_operation_events(repo_root, manifest_path, args.operation_id)
+    prepared = next(
+        ((event.get('payload') or {}) for event in events
+         if event.get('type') == 'channel_operation_prepared'),
+        None,
+    )
+    started = next(
+        ((event.get('payload') or {}) for event in events
+         if event.get('type') == 'channel_operation_started'),
+        None,
+    )
+    intent = prepared or started
+    if not intent:
+        raise SyncwheelError(f'unknown channel operation: {args.operation_id}')
+    outcomes = [
+        event.get('payload') or {} for event in events
+        if event.get('type') == 'channel_operation_receipt'
+    ]
+    if outcomes and outcomes[-1].get('status') in {
+        'succeeded', 'failed', 'partial', 'cancelled'
+    }:
+        print(json.dumps(outcomes[-1], indent=2))
+        return 0
+    mutation = intent.get('mutation') or {}
+    kind = mutation.get('kind')
+    status = 'unknown'
+    detail = 'observation could not prove a terminal outcome'
+    observation = {'kind': kind}
+    action_outcomes = None
+    if kind == 'local-ref':
+        observed = ref_tip(repo_root, mutation.get('ref'))
+        observation.update({'ref': mutation.get('ref'), 'revision': observed})
+        if observed == mutation.get('intendedRevision'):
+            status, detail = 'succeeded', 'local ref matches intended revision'
+        elif observed == mutation.get('expectedRevision'):
+            status, detail = 'failed', 'local ref remains at expected pre-operation revision'
+    elif kind == 'remote-ref':
+        channel_observed = observe_remote_ref_outcome(
+            repo_root, mutation.get('remote'), mutation.get('ref'),
+            mutation.get('expectedRevision'), mutation.get('intendedRevision'),
+        )
+        observation['channelRef'] = channel_observed
+        if mutation.get('coordinationActive'):
+            state_observed = observe_coordination_outcome(repo_root, mutation)
+            observation['coordinationState'] = state_observed
+            status = reduce_observed_phases(
+                channel_observed['phase'], state_observed['phase']
+            )
+            detail = 'channel ref and coordination state were observed independently; no mutation retried'
+            phase_status = {
+                'applied': 'succeeded', 'pre': 'failed',
+                'divergent': 'unknown', 'unavailable': 'unknown',
+            }
+            action_outcomes = [
+                channel_action_outcome(
+                    intent, 'publish-channel-ref', phase_status[channel_observed['phase']],
+                    channel_observed, channel_observed['detail'],
+                ),
+                channel_action_outcome(
+                    intent, 'publish-coordination-state', phase_status[state_observed['phase']],
+                    state_observed, state_observed['detail'],
+                ),
+            ]
+        else:
+            status = reduce_observed_phases(channel_observed['phase'])
+            detail = channel_observed['detail'] + '; no mutation was retried'
+            action_outcomes = [channel_action_outcome(
+                intent, 'publish-channel-ref', {
+                    'applied': 'succeeded', 'pre': 'failed',
+                    'divergent': 'unknown', 'unavailable': 'unknown',
+                }[channel_observed['phase']], channel_observed, detail,
+            )]
+    elif kind == 'close':
+        active = channel_map(manifest).get(intent.get('channel'))
+        local = ref_tip(repo_root, mutation.get('ref'))
+        current_manifest_digest = manifest_digest(manifest)
+        if active is None and current_manifest_digest == mutation.get('proposedManifestDigest'):
+            local_phase = 'applied'
+        elif active is not None and current_manifest_digest == intent.get('manifestDigest'):
+            local_phase = 'pre'
+        else:
+            local_phase = 'divergent'
+        observation.update({
+            'manifestDigest': current_manifest_digest, 'channelPresent': active is not None,
+            'localRevision': local, 'manifestPhase': local_phase,
+        })
+        manifest_status = {
+            'applied': 'succeeded', 'pre': 'failed', 'divergent': 'unknown',
+        }[local_phase]
+        action_outcomes = []
+        if mutation.get('coordinationRemote'):
+            state_observed = observe_coordination_outcome(repo_root, mutation)
+            observation['coordinationState'] = state_observed
+            status = reduce_observed_phases(local_phase, state_observed['phase'])
+            state_status = {
+                'applied': 'succeeded', 'pre': 'failed',
+                'divergent': 'unknown', 'unavailable': 'unknown',
+            }[state_observed['phase']]
+            action_outcomes.append(channel_action_outcome(
+                intent, 'publish-coordination-state', state_status,
+                state_observed, state_observed['detail'],
+            ))
+        else:
+            status = reduce_observed_phases(local_phase)
+        action_outcomes.append(channel_action_outcome(
+            intent, 'update-channel-manifest', manifest_status,
+            {'manifestDigest': current_manifest_digest, 'channelPresent': active is not None},
+            f'manifest is {local_phase}',
+        ))
+        if mutation.get('deleteLocal'):
+            if local is None and local_phase == 'applied':
+                delete_status = 'succeeded'
+            elif local == mutation.get('expectedRevision') and local_phase == 'pre':
+                delete_status = 'not-attempted'
+            else:
+                delete_status = 'unknown'
+            action_outcomes.append(channel_action_outcome(
+                intent, 'delete-local-channel-ref', delete_status,
+                {'localRevision': local}, 'local deletion observed without retry',
+            ))
+            status = reduce_channel_action_outcomes(action_outcomes, status)
+        detail = 'close outcome observed across local and coordinated state; no mutation retried'
+    elif kind == 'manifest':
+        active = channel_map(manifest).get(intent.get('channel'))
+        observed_channel_digest = (
+            canonical_json_digest(channel_summary_for_mutation(active)) if active else None
+        )
+        if observed_channel_digest == mutation.get('proposedChannelDigest'):
+            status, detail = 'succeeded', 'manifest contains the intended channel state'
+        elif manifest_digest(manifest) == intent.get('manifestDigest'):
+            status, detail = 'failed', 'manifest remains at the pre-operation digest'
+        observation.update({
+            'manifestDigest': manifest_digest(manifest),
+            'channelDigest': observed_channel_digest,
+        })
+    reconcile_plan = {
+        'kind': 'channelPlan',
+        'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+        'operation': 'reconcile-outcome',
+        'request': {
+            'operation': 'reconcile-outcome',
+            'operationId': args.operation_id,
+        },
+        'targetOperationId': args.operation_id,
+        'targetPlanDigest': intent.get('planDigest'),
+        'manifestDigest': manifest_digest(manifest),
+        'manifestDigestBefore': manifest_digest(manifest),
+        'before': {
+            'operation': intent,
+            'observation': observation,
+        },
+        'after': {
+            'status': status,
+            'observation': observation,
+        },
+        'context': {
+            'targetOperationId': args.operation_id,
+            'targetPlanDigest': intent.get('planDigest'),
+            'mutationRetried': False,
+        },
+        'pinDigest': intent.get('pinDigest'),
+        'compositionDigest': intent.get('compositionDigest'),
+        'observation': observation,
+        'observationRevision': canonical_json_digest(observation),
+        'proposedStatus': status,
+        'detail': detail,
+        'actions': [{
+            'id': 'append-terminal-receipt',
+            'type': 'append-observed-terminal-outcome',
+            'target': args.operation_id,
+            'before': {
+                'status': outcomes[-1].get('status') if outcomes else 'pending',
+                'observation': observation,
+            },
+            'intendedAfter': {
+                'status': status,
+                'reconciled': True,
+                'mutationRetried': False,
+            },
+        }],
+        'mutationRetried': False,
+        'applyRequired': True,
+    }
+    reconcile_plan['planDigest'] = canonical_json_digest(reconcile_plan)
+    if not getattr(args, 'apply', False):
+        print(json.dumps(reconcile_plan, indent=2))
+        return 0
+    expected_digest = getattr(args, 'plan_digest', None)
+    if not expected_digest:
+        raise SyncwheelError('--plan-digest is required with --apply')
+    if expected_digest != reconcile_plan['planDigest']:
+        raise SyncwheelError(
+            'channel reconciliation plan is stale; observe again and use the exact planDigest'
+        )
+    outcome = record_channel_operation_receipt(
+        repo_root, manifest_path, intent, status, None, detail, reconciled=True,
+        evidence={
+            'reconciliationPlanDigest': reconcile_plan['planDigest'],
+            'observationRevision': reconcile_plan['observationRevision'],
+        },
+        action_outcomes=action_outcomes,
+    )
+    print(json.dumps(outcome, indent=2))
+    return 0
+
+
+def command_channel_diff(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    channel = require_channel(manifest, args.channel)
+    if args.other:
+        other = require_channel(manifest, args.other)
+        left = {entry['stack']: entry for entry in channel['composition']}
+        right = {entry['stack']: entry for entry in other['composition']}
+        output = {
+            'channel': channel['id'],
+            'otherChannel': other['id'],
+            'baseEqual': (
+                channel['base'] == other['base']
+                and channel['baseRevision'] == other['baseRevision']
+            ),
+            'compositionDigestEqual': (
+                channel_composition_digest(channel) == channel_composition_digest(other)
+            ),
+            'orderEqual': [entry['stack'] for entry in channel['composition']] == [
+                entry['stack'] for entry in other['composition']
+            ],
+            'added': sorted(set(right) - set(left)),
+            'removed': sorted(set(left) - set(right)),
+            'changed': sorted(
+                stack_id for stack_id in set(left) & set(right) if left[stack_id] != right[stack_id]
+            ),
+        }
+    else:
+        current = []
+        for entry in channel['composition']:
+            observed = ref_tip(repo_root, entry['branch'])
+            current.append({
+                'stack': entry['stack'],
+                'pinnedRevision': entry['branchRevision'],
+                'currentRevision': observed,
+                'drifted': observed != entry['branchRevision'],
+            })
+        output = {'channel': channel['id'], 'comparison': 'pinned-vs-current', 'stacks': current}
+    print(json.dumps(output, indent=2))
+    return 0
+
+
+def command_channel_plan(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    channel = require_channel(manifest, args.channel)
+    print(json.dumps(build_channel_plan(
+        repo_root, manifest, channel, args.operation, channel_operation_id_from_args(args)
+    ), indent=2))
+    return 0
+
+
+def command_channel_apply(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    channel = require_channel(manifest, args.channel)
+    if not args.apply:
+        print(json.dumps(build_channel_plan(
+            repo_root, manifest, channel, 'apply', channel_operation_id_from_args(args)
+        ), indent=2))
+        return 0
+    plan = verify_channel_plan_digest(
+        repo_root, manifest, channel, 'apply', args.plan_digest,
+        channel_operation_id_from_args(args),
+    )
+    with manifest_write_transaction(repo_root, manifest_path, channel['id']):
+        fresh_manifest = require_locked_manifest_observation(repo_root, manifest_path, plan)
+        fresh_channel = require_channel(fresh_manifest, args.channel)
+        fresh_plan = build_channel_plan(
+            repo_root, fresh_manifest, fresh_channel, 'apply',
+            channel_operation_id_from_args(args),
+        )
+        if fresh_plan['planDigest'] != plan['planDigest']:
+            raise SyncwheelError(
+                'channel plan is stale after lock acquisition; local channel ref was not updated'
+            )
+        channel = fresh_channel
+        tip = materialize_channel_tip(repo_root, channel, plan)
+        ref = f"refs/heads/{channel['branch']}"
+        expected = plan['currentRevision'] or ZERO_OBJECT_ID
+        record_channel_operation_prepared(
+            repo_root, manifest_path, plan, channel,
+            {
+                'kind': 'local-ref', 'ref': ref, 'expectedRevision': plan['currentRevision'],
+                'intendedRevision': tip,
+            },
+        )
+        try:
+            channel_mutation_checkpoint()
+        except (KeyboardInterrupt, SystemExit) as exc:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'cancelled', channel,
+                'cancelled before authoritative local ref mutation',
+                evidence={'localRevision': plan['currentRevision']},
+            )
+            raise SyncwheelError('channel apply cancelled before authoritative change') from exc
+        require_manifest_transaction_current(manifest_path)
+        try:
+            updated = git(repo_root, 'update-ref', ref, tip, expected, check=False)
+        except (KeyboardInterrupt, SystemExit) as exc:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'unknown', channel,
+                'interrupted after local ref mutation began',
+                evidence={'localRevision': ref_tip(repo_root, ref)},
+            )
+            raise SyncwheelError(
+                f'channel apply outcome is unknown; operation {plan["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        if updated.returncode != 0:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'failed', channel,
+                'local channel ref changed before atomic update',
+                evidence={'localRevision': ref_tip(repo_root, ref)},
+            )
+            raise SyncwheelError(
+                'channel local branch changed before atomic ref update; retry from a new plan'
+            )
+        receipt = channel_receipt(channel, plan, 'applied', tip=tip)
+        try:
+            append_ledger_event(repo_root, 'channel_applied', receipt, manifest_path)
+            operation_receipt = record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'succeeded', channel,
+                evidence={'localRevision': tip},
+            )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            try:
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'unknown', channel,
+                    'interrupted after local ref mutation completed',
+                    evidence={'localRevision': ref_tip(repo_root, ref)},
+                )
+            except Exception:
+                pass
+            raise SyncwheelError(
+                f'channel apply outcome is unknown; operation {plan["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except Exception as exc:
+            try:
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'unknown', channel,
+                    f'local ref updated; receipt recording failed: {str(exc)[:300]}',
+                    evidence={'localRevision': ref_tip(repo_root, ref)},
+                )
+            except Exception:
+                pass
+            raise SyncwheelError(
+                f'local channel ref updated but receipt recording failed; operation '
+                f'{plan["operationId"]} requires reconcile-outcome'
+            ) from exc
+    print(json.dumps({**receipt, **operation_receipt}, indent=2))
+    return 0
+
+
+def command_channel_publish(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    require_delivery_manifest(manifest)
+    channel = require_channel(manifest, args.channel)
+    if not args.apply:
+        print(json.dumps(build_channel_plan(
+            repo_root, manifest, channel, 'publish', channel_operation_id_from_args(args)
+        ), indent=2))
+        return 0
+    plan = verify_channel_plan_digest(
+        repo_root, manifest, channel, 'publish', args.plan_digest,
+        channel_operation_id_from_args(args),
+    )
+    with manifest_write_transaction(repo_root, manifest_path, channel['id']):
+        fresh_manifest = require_locked_manifest_observation(repo_root, manifest_path, plan)
+        fresh_channel = require_channel(fresh_manifest, args.channel)
+        fresh_plan = build_channel_plan(
+            repo_root, fresh_manifest, fresh_channel, 'publish',
+            channel_operation_id_from_args(args),
+        )
+        if fresh_plan['planDigest'] != plan['planDigest']:
+            raise SyncwheelError('channel publication plan changed under mutation lock')
+        manifest = fresh_manifest
+        channel = fresh_channel
+        if not plan['remoteObservationKnown']:
+            raise SyncwheelError('channel remote tip is unknown; refusing publication')
+        current = plan['currentRevision']
+        if not current:
+            raise SyncwheelError('channel has no local materialized branch; run channel apply first')
+        applied = latest_channel_event(repo_root, manifest_path, channel['id'], 'channel_applied')
+        if (
+            not applied
+            or applied.get('tip') != current
+            or applied.get('compositionDigest') != plan['compositionDigest']
+        ):
+            raise SyncwheelError('channel local branch lacks current plan-bound apply evidence')
+        ref = f"refs/heads/{channel['branch']}"
+        coordination_state = None
+        record_channel_operation_prepared(
+            repo_root, manifest_path, plan, channel,
+            {
+                'kind': 'remote-ref', 'remote': channel['remote'], 'ref': ref,
+                'expectedRevision': plan['remoteRevision'], 'intendedRevision': current,
+                'coordinationActive': bool(coordination_is_active(manifest)),
+                'expectedCoordinationStateRevision': plan.get('coordinationStateRevision'),
+                'intendedCoordinationManifestDigest': plan.get('coordinationManifestDigest'),
+                'coordinationRemote': (
+                    coordination_config(manifest)['remote']
+                    if coordination_is_active(manifest) else None
+                ),
+                'coordinationStateRef': (
+                    coordination_state_ref(coordination_config(manifest))
+                    if coordination_is_active(manifest) else None
+                ),
+            },
+        )
+        try:
+            channel_mutation_checkpoint()
+        except (KeyboardInterrupt, SystemExit) as exc:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'cancelled', channel,
+                'cancelled before authoritative remote mutation',
+                evidence={'remoteRevision': plan['remoteRevision']},
+            )
+            raise SyncwheelError('channel publish cancelled before authoritative change') from exc
+        require_manifest_transaction_current(manifest_path)
+        try:
+            if coordination_is_active(manifest):
+                with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
+                    result = coordinated_publish(
+                        repo_root, manifest, manifest_path, {ref: current},
+                        f"channel:{channel['id']}", 'channel-pinned-composition',
+                    )
+                coordination_state = result.get('state_tip')
+            else:
+                lease = f"--force-with-lease={ref}:{plan['remoteRevision'] or ''}"
+                pushed = git(
+                    repo_root, 'push', '--porcelain', lease, channel['remote'], f'{current}:{ref}',
+                    check=False,
+                )
+                if pushed.returncode != 0:
+                    detail = pushed.stderr.strip() or pushed.stdout.strip()
+                    record_channel_operation_receipt(
+                        repo_root, manifest_path, plan,
+                        'failed' if 'stale info' in detail.lower() else 'unknown', channel,
+                        detail[:400] or 'remote push failed',
+                        evidence={'remoteRevision': plan['remoteRevision']},
+                    )
+                    raise SyncwheelError(
+                        'channel publish lease lost or outcome is unknown; STOP without merge, '
+                        'reset, rebase, or force'
+                    )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            observed_remote = channel_remote_observation(repo_root, channel)
+            observed_after = {
+                'remoteKnown': observed_remote['known'],
+                'remoteRevision': observed_remote['revision'],
+            }
+            if coordination_is_active(manifest):
+                observed_after['coordinationState'] = observe_coordination_outcome(
+                    repo_root,
+                    {
+                        'coordinationRemote': coordination_config(manifest)['remote'],
+                        'coordinationStateRef': coordination_state_ref(
+                            coordination_config(manifest)
+                        ),
+                        'expectedCoordinationStateRevision': plan.get(
+                            'coordinationStateRevision'
+                        ),
+                        'intendedCoordinationManifestDigest': plan.get(
+                            'coordinationManifestDigest'
+                        ),
+                    },
+                )
+            action_outcomes = [
+                channel_action_outcome(
+                    plan, action['id'], 'unknown', observed_after,
+                    'interrupted after remote mutation began; no mutation was retried',
+                )
+                for action in plan['actions']
+            ]
+            record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'unknown', channel,
+                'interrupted after remote mutation began; no mutation was retried',
+                evidence=observed_after,
+                action_outcomes=action_outcomes,
+            )
+            raise SyncwheelError(
+                f'channel publication outcome is unknown; operation {plan["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except SyncwheelError as exc:
+            if coordination_is_active(manifest):
+                observed_after = {
+                    'remoteRevision': channel_remote_observation(repo_root, channel),
+                    'coordinationState': observe_coordination_outcome(
+                        repo_root,
+                        {
+                            'coordinationRemote': coordination_config(manifest)['remote'],
+                            'coordinationStateRef': coordination_state_ref(
+                                coordination_config(manifest)
+                            ),
+                            'expectedCoordinationStateRevision': plan.get(
+                                'coordinationStateRevision'
+                            ),
+                            'intendedCoordinationManifestDigest': plan.get(
+                                'coordinationManifestDigest'
+                            ),
+                        },
+                    ),
+                }
+                action_outcomes = [
+                    channel_action_outcome(
+                        plan, action['id'], 'unknown', observed_after, str(exc)[:400]
+                    )
+                    for action in plan['actions']
+                ]
+                try:
+                    record_channel_operation_receipt(
+                        repo_root, manifest_path, plan, 'unknown', channel,
+                        str(exc)[:400], evidence=observed_after,
+                        action_outcomes=action_outcomes,
+                    )
+                except Exception:
+                    pass
+            raise
+        except Exception as exc:
+            try:
+                observed_after = {
+                    'remoteRevision': channel_remote_observation(repo_root, channel),
+                }
+                if coordination_is_active(manifest):
+                    observed_after['coordinationState'] = observe_coordination_outcome(
+                        repo_root,
+                        {
+                            'coordinationRemote': coordination_config(manifest)['remote'],
+                            'coordinationStateRef': coordination_state_ref(
+                                coordination_config(manifest)
+                            ),
+                            'expectedCoordinationStateRevision': plan.get(
+                                'coordinationStateRevision'
+                            ),
+                            'intendedCoordinationManifestDigest': plan.get(
+                                'coordinationManifestDigest'
+                            ),
+                        },
+                    )
+                action_outcomes = [
+                    channel_action_outcome(
+                        plan, action['id'], 'unknown', observed_after, str(exc)[:400]
+                    )
+                    for action in plan['actions']
+                ]
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'unknown', channel, str(exc)[:400],
+                    evidence=observed_after, action_outcomes=action_outcomes,
+                )
+            except Exception:
+                pass
+            raise SyncwheelError(
+                f'channel publication outcome is unknown; operation {plan["operationId"]} '
+                'requires reconcile-outcome'
+            ) from exc
+        receipt = channel_receipt(
+            channel, plan, 'published', tip=current, published_revision=current,
+            coordination_state=coordination_state,
+        )
+        try:
+            append_ledger_event(repo_root, 'channel_published', receipt, manifest_path)
+            operation_receipt = record_channel_operation_receipt(
+                repo_root, manifest_path, plan, 'succeeded', channel,
+                evidence={
+                    'remoteRevision': current, 'coordinationState': coordination_state,
+                },
+            )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            terminal_recorded = False
+            try:
+                succeeded_after = {
+                    'remoteRevision': current,
+                    'coordinationState': coordination_state,
+                }
+                succeeded_outcomes = [
+                    channel_action_outcome(
+                        plan, action['id'], 'succeeded', succeeded_after,
+                        'authoritative publication completed before interruption',
+                    )
+                    for action in plan['actions']
+                ]
+                operation_receipt = record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'succeeded', channel,
+                    'interrupted after remote mutation completed',
+                    evidence=succeeded_after,
+                    action_outcomes=succeeded_outcomes,
+                )
+                terminal_recorded = True
+            except Exception:
+                pass
+            if terminal_recorded:
+                raise SyncwheelError(
+                    'channel publication succeeded and its terminal operation receipt was '
+                    'recorded before interruption handling completed'
+                ) from exc
+            raise SyncwheelError(
+                f'channel publication outcome is unknown; operation {plan["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except Exception as exc:
+            terminal_recorded = False
+            try:
+                succeeded_after = {
+                    'remoteRevision': current,
+                    'coordinationState': coordination_state,
+                }
+                succeeded_outcomes = [
+                    channel_action_outcome(
+                        plan, action['id'], 'succeeded', succeeded_after,
+                        'authoritative publication completed; compatibility ledger event failed',
+                    )
+                    for action in plan['actions']
+                ]
+                operation_receipt = record_channel_operation_receipt(
+                    repo_root, manifest_path, plan, 'succeeded', channel,
+                    f'authoritative publication completed; compatibility ledger event failed: '
+                    f'{str(exc)[:300]}',
+                    evidence=succeeded_after,
+                    action_outcomes=succeeded_outcomes,
+                )
+                terminal_recorded = True
+            except Exception:
+                pass
+            if terminal_recorded:
+                raise SyncwheelError(
+                    'channel publication succeeded and its terminal operation receipt was '
+                    'recorded, but the compatibility channel_published event failed'
+                ) from exc
+            raise SyncwheelError(
+                f'remote channel publication succeeded but receipt recording failed; operation '
+                f'{plan["operationId"]} requires reconcile-outcome'
+            ) from exc
+    print(json.dumps({**receipt, **operation_receipt}, indent=2))
+    return 0
+
+
+def close_channel_action_outcomes(
+    plan,
+    *,
+    coordination_status=None,
+    manifest_status=None,
+    local_delete_status=None,
+    observed_after=None,
+    detail=None,
+):
+    statuses = {
+        'publish-coordination-state': coordination_status,
+        'update-channel-manifest': manifest_status,
+        'delete-local-channel-ref': local_delete_status,
+    }
+    outcomes = []
+    for action in plan.get('actions', []):
+        status = statuses.get(action['id'])
+        if status is None:
+            status = 'not-attempted'
+        outcomes.append(channel_action_outcome(
+            plan, action['id'], status, observed_after, detail,
+        ))
+    return outcomes
+
+
+def command_channel_close(args):
+    if return_existing_channel_operation(args):
+        return 0
+    repo_root, manifest, manifest_path, channel, observed_digest, before = channel_edit_context(args)
+    branch = channel['branch']
+    ref = f'refs/heads/{branch}'
+    current = ref_tip(repo_root, branch)
+    if args.delete_local and current:
+        if find_worktree_for_branch(repo_root, branch):
+            raise SyncwheelError(f'cannot delete checked-out channel branch: {branch}')
+        applied = latest_channel_event(repo_root, manifest_path, channel['id'], 'channel_applied')
+        if not applied or applied.get('tip') != current:
+            raise SyncwheelError('local channel branch is not backed by matching apply evidence')
+    manifest['channels'] = [item for item in manifest['channels'] if item['id'] != channel['id']]
+    close_coordination_active = coordination_is_active(manifest)
+    close_coordination_config = (
+        coordination_config(manifest) if close_coordination_active else None
+    )
+    close_coordination_target = (
+        coordination_state_ref(close_coordination_config)
+        if close_coordination_config else None
+    )
+    close_coordination_manifest_digest = (
+        coordination_manifest_digest(manifest, repo_root)
+        if close_coordination_active else None
+    )
+    remote_observation = channel_remote_observation(repo_root, channel)
+    coordination_state_revision = None
+    if coordination_is_active(manifest):
+        close_config = coordination_config(manifest)
+        state_ref = coordination_state_ref(close_config)
+        coordination_state_revision = remote_ref_tips(
+            repo_root, close_config['remote'], [state_ref]
+        )[state_ref]
+    observation = {
+        'localRevision': current,
+        'remoteKnown': remote_observation['known'],
+        'remoteRevision': remote_observation['revision'],
+        'deleteLocal': bool(args.delete_local),
+        'reason': args.reason,
+        'coordinationStateRevision': coordination_state_revision,
+    }
+    output = build_channel_mutation_plan(
+        'close', manifest_path, observed_digest, manifest, None,
+        {
+            'channel': channel['id'], 'reason': args.reason,
+            'deleteLocal': bool(args.delete_local),
+            'remoteRefDeleted': False,
+            'localRef': ref,
+            'coordinationActive': close_coordination_active,
+            'coordinationTarget': (
+                f"{close_coordination_config['remote']}:{close_coordination_target}"
+                if close_coordination_config else None
+            ),
+            'coordinationManifestDigest': close_coordination_manifest_digest,
+        }, observation=observation, before_channel=before,
+        operation_id=channel_operation_id_from_args(args),
+    )
+    output['remoteRefDeleted'] = False
+    output['localRefDeletionRequested'] = bool(args.delete_local)
+    if not args.apply:
+        print(json.dumps(output, indent=2))
+        return 0
+    verify_channel_mutation_plan(args, output)
+    with manifest_write_transaction(repo_root, manifest_path, channel['id']):
+        require_locked_manifest_observation(repo_root, manifest_path, output)
+        if ref_tip(repo_root, branch) != current:
+            raise SyncwheelError('channel close plan is stale under mutation lock')
+        locked_remote_observation = channel_remote_observation(repo_root, channel)
+        if not remote_observation['known'] or not locked_remote_observation['known']:
+            raise SyncwheelError(
+                'channel close plan is stale: channel remote ref is unknown under mutation lock'
+            )
+        if locked_remote_observation['revision'] != remote_observation['revision']:
+            raise SyncwheelError(
+                'channel close plan is stale: channel remote ref changed under mutation lock'
+            )
+        if coordination_is_active(manifest):
+            locked_config = coordination_config(manifest)
+            locked_state_ref = coordination_state_ref(locked_config)
+            locked_state_revision = remote_ref_tips(
+                repo_root, locked_config['remote'], [locked_state_ref]
+            )[locked_state_ref]
+            if locked_state_revision != coordination_state_revision:
+                raise SyncwheelError(
+                    'channel close plan is stale: coordination state changed under mutation lock'
+                )
+        record_channel_operation_prepared(
+            repo_root, manifest_path, output, channel,
+            {
+                'kind': 'close', 'ref': ref, 'expectedRevision': current,
+                'deleteLocal': bool(args.delete_local),
+                'proposedManifestDigest': manifest_digest(manifest),
+                'remoteRevision': remote_observation['revision'],
+                'coordinationStateRevision': coordination_state_revision,
+                'expectedCoordinationStateRevision': coordination_state_revision,
+                'intendedCoordinationManifestDigest': close_coordination_manifest_digest,
+                'coordinationRemote': (
+                    close_coordination_config['remote'] if close_coordination_config else None
+                ),
+                'coordinationStateRef': close_coordination_target,
+            },
+        )
+        try:
+            channel_mutation_checkpoint()
+        except (KeyboardInterrupt, SystemExit) as exc:
+            record_channel_operation_receipt(
+                repo_root, manifest_path, output, 'cancelled', channel,
+                'cancelled before authoritative close mutation',
+                evidence={
+                    'manifestDigest': observed_digest,
+                    'localRevision': current,
+                    'coordinationState': coordination_state_revision,
+                },
+            )
+            raise SyncwheelError('channel close cancelled before authoritative change') from exc
+        require_manifest_transaction_current(manifest_path)
+        coordination_state = None
+        manifest_saved = False
+        local_deleted = False
+        coordination_attempted = False
+        manifest_attempted = False
+        local_delete_attempted = False
+        try:
+            if coordination_is_active(manifest):
+                coordination_attempted = True
+                config = coordination_config(manifest)
+                remote_tip = remote_ref_tips(repo_root, config['remote'], [ref])[ref]
+                with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
+                    result = coordinated_publish(
+                        repo_root, manifest, manifest_path, {}, f"channel-close:{channel['id']}", 'partial',
+                        tombstone={
+                            'channel': channel['id'], 'branch': branch, 'ref': ref,
+                            'reason': args.reason, 'closed_at': iso_utc_now(), 'remote_tip': remote_tip,
+                        },
+                    )
+                coordination_state = result.get('state_tip')
+            manifest_attempted = True
+            save_manifest(manifest_path, manifest)
+            manifest_saved = True
+            append_ledger_event(
+                repo_root, 'manifest_saved',
+                manifest_event_payload(
+                    manifest_path, manifest, 'channel_close',
+                    {'channel': channel['id'], 'branch': branch, 'reason': args.reason},
+                ), manifest_path,
+            )
+            if args.delete_local and current:
+                local_delete_attempted = True
+                deleted = git(repo_root, 'update-ref', '-d', ref, current, check=False)
+                if deleted.returncode != 0:
+                    raise SyncwheelError(
+                        'local channel branch changed before deletion; manifest was closed, ref retained'
+                    )
+                local_deleted = True
+        except (KeyboardInterrupt, SystemExit) as exc:
+            try:
+                observed_manifest, _ = load_manifest(repo_root, manifest_path)
+                observed_after = {
+                    'manifestDigest': manifest_digest(observed_manifest),
+                    'localRevision': ref_tip(repo_root, ref),
+                    'coordinationState': coordination_state,
+                }
+                action_outcomes = close_channel_action_outcomes(
+                    output,
+                    coordination_status=(
+                        'succeeded' if coordination_state else (
+                            'unknown' if coordination_attempted else None
+                        )
+                    ),
+                    manifest_status=(
+                        'succeeded' if manifest_saved else (
+                            'unknown' if manifest_attempted else 'not-attempted'
+                        )
+                    ),
+                    local_delete_status=(
+                        'succeeded' if local_deleted else (
+                            'unknown' if local_delete_attempted else 'not-attempted'
+                        )
+                    ),
+                    observed_after=observed_after,
+                    detail='interrupted after close mutation began; no mutation was retried',
+                )
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, output, 'unknown', channel,
+                    'interrupted after close mutation began; no mutation was retried',
+                    evidence=observed_after,
+                    action_outcomes=action_outcomes,
+                )
+            except Exception:
+                pass
+            raise SyncwheelError(
+                f'channel close outcome is unknown; operation {output["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except Exception as exc:
+            durability_unknown = isinstance(exc, ManifestDurabilityError)
+            observed_manifest, _ = load_manifest(repo_root, manifest_path)
+            observed_after = {
+                'manifestDigest': (
+                    manifest_digest(observed_manifest) if observed_manifest else None
+                ),
+                'localRevision': ref_tip(repo_root, ref),
+                'coordinationState': coordination_state,
+            }
+            action_outcomes = close_channel_action_outcomes(
+                output,
+                coordination_status=(
+                    'succeeded' if coordination_state else (
+                        'unknown' if coordination_attempted else None
+                    )
+                ),
+                manifest_status=(
+                    'succeeded' if manifest_saved else (
+                        'unknown' if durability_unknown else (
+                            'failed' if manifest_attempted else 'not-attempted'
+                        )
+                    )
+                ),
+                local_delete_status=(
+                    'succeeded' if local_deleted else (
+                        'failed' if local_delete_attempted else 'not-attempted'
+                    )
+                ),
+                observed_after=observed_after,
+                detail=str(exc)[:400],
+            )
+            status = reduce_channel_action_outcomes(action_outcomes)
+            try:
+                record_channel_operation_receipt(
+                    repo_root, manifest_path, output, status, channel, str(exc)[:400],
+                    evidence=observed_after,
+                    action_outcomes=action_outcomes,
+                )
+            except Exception:
+                pass
+            if isinstance(exc, SyncwheelError) and not durability_unknown:
+                raise
+            raise SyncwheelError(
+                f'channel close outcome is {status}; operation {output["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        receipt = {
+            'schemaVersion': CHANNEL_PLAN_SCHEMA_VERSION,
+            'operationId': output['operationId'],
+            'planDigest': output['planDigest'],
+            'channel': channel['id'],
+            'branch': branch,
+            'reason': args.reason,
+            'remoteRefDeleted': False,
+            'localRefDeleted': local_deleted,
+            'coordinationState': coordination_state,
+            'deploymentAsserted': False,
+            'recordedAt': iso_utc_now(),
+        }
+        try:
+            append_ledger_event(repo_root, 'channel_closed', receipt, manifest_path)
+            operation_receipt = record_channel_operation_receipt(
+                repo_root, manifest_path, output, 'succeeded', channel,
+                evidence={
+                    'manifestDigest': manifest_digest(manifest),
+                    'localRevision': ref_tip(repo_root, ref),
+                    'coordinationState': coordination_state,
+                },
+            )
+        except (KeyboardInterrupt, SystemExit) as exc:
+            terminal_recorded = False
+            try:
+                completed_after = {
+                    'manifestDigest': manifest_digest(manifest),
+                    'localRevision': ref_tip(repo_root, ref),
+                    'coordinationState': coordination_state,
+                }
+                completed_outcomes = close_channel_action_outcomes(
+                    output,
+                    coordination_status='succeeded' if close_coordination_active else None,
+                    manifest_status='succeeded',
+                    local_delete_status='succeeded' if args.delete_local else None,
+                    observed_after=completed_after,
+                    detail='authoritative close completed before interruption',
+                )
+                operation_receipt = record_channel_operation_receipt(
+                    repo_root, manifest_path, output, 'succeeded', channel,
+                    'interrupted after close mutation completed',
+                    evidence=completed_after,
+                    action_outcomes=completed_outcomes,
+                )
+                terminal_recorded = True
+            except Exception:
+                pass
+            if terminal_recorded:
+                raise SyncwheelError(
+                    'channel close succeeded and its terminal operation receipt was recorded '
+                    'before interruption handling completed'
+                ) from exc
+            raise SyncwheelError(
+                f'channel close outcome is unknown; operation {output["operationId"]} '
+                'requires operation reconcile'
+            ) from exc
+        except Exception as exc:
+            terminal_recorded = False
+            try:
+                completed_after = {
+                    'manifestDigest': manifest_digest(manifest),
+                    'localRevision': ref_tip(repo_root, ref),
+                    'coordinationState': coordination_state,
+                }
+                completed_outcomes = close_channel_action_outcomes(
+                    output,
+                    coordination_status='succeeded' if close_coordination_active else None,
+                    manifest_status='succeeded',
+                    local_delete_status='succeeded' if args.delete_local else None,
+                    observed_after=completed_after,
+                    detail='authoritative close completed; compatibility ledger event failed',
+                )
+                operation_receipt = record_channel_operation_receipt(
+                    repo_root, manifest_path, output, 'succeeded', channel,
+                    f'authoritative close completed; compatibility ledger event failed: '
+                    f'{str(exc)[:300]}',
+                    evidence=completed_after,
+                    action_outcomes=completed_outcomes,
+                )
+                terminal_recorded = True
+            except Exception:
+                pass
+            if terminal_recorded:
+                raise SyncwheelError(
+                    'channel close succeeded and its terminal operation receipt was recorded, '
+                    'but the compatibility channel_closed event failed'
+                ) from exc
+            raise SyncwheelError(
+                f'channel close applied but receipt recording failed; operation '
+                f'{output["operationId"]} requires reconcile-outcome'
+            ) from exc
+    print(json.dumps({**receipt, **operation_receipt}, indent=2))
+    return 0
+
+
 def command_stack_list(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -5772,6 +9206,25 @@ def command_stack_close(args):
     stack = require_stack(manifest, args.stack)
     branch = stack['branch']
     base_ref = stack.get('base') or manifest['defaults']['base_ref']
+
+    referencing_channels = channel_ids_referencing_stack(manifest, args.stack)
+    if referencing_channels:
+        raise SyncwheelError(
+            f"stack {args.stack} is referenced by active channel(s): "
+            + ', '.join(referencing_channels)
+            + '; remove or replace the stack in those channels, or close the channels first'
+        )
+    dependent_stacks = sorted(
+        candidate['id'] for candidate in manifest.get('stacks', [])
+        if candidate['id'] != args.stack
+        and args.stack in candidate.get('depends_on', [])
+    )
+    if dependent_stacks:
+        raise SyncwheelError(
+            f"stack {args.stack} is required by dependent stack(s): "
+            + ', '.join(dependent_stacks)
+            + '; close or update those dependent stacks first'
+        )
 
     # Check whether every commit in the stack is already reachable from base_ref.
     unmerged = []
@@ -5801,6 +9254,7 @@ def command_stack_close(args):
 
     reason = args.reason or ('merged' if not unmerged else 'closed')
     coordination_result = None
+    require_manifest_transaction_current(manifest_path)
     if coordination_is_active(manifest):
         config = coordination_config(manifest)
         closed_ref = f'refs/heads/{branch}'
@@ -5885,11 +9339,23 @@ def command_stack_create(args):
         'publication': {'enabled': not args.draft},
         'meta': {},
     }
+    if getattr(args, 'depends_on', None):
+        stack['depends_on'] = list(dict.fromkeys(args.depends_on))
+    if stack.get('depends_on') and manifest['version'] != MANIFEST_VERSION_CHANNELS:
+        raise SyncwheelError(
+            'stack create --depends-on requires manifest version 3; migrate explicitly '
+            'with channel create --apply first'
+        )
     if args.purpose:
         stack['meta'] = {'purpose': args.purpose}
-    if args.draft:
-        materialize_new_stack_branch(repo_root, stack)
     manifest['stacks'].append(stack)
+    validate_stack_dependency_graph(
+        manifest['stacks'],
+        require_declared_dependencies=manifest['version'] == MANIFEST_VERSION_CHANNELS,
+    )
+    if args.draft:
+        require_manifest_transaction_current(manifest_path)
+        materialize_new_stack_branch(repo_root, stack)
     integration_membership = manifest['defaults']['integration_membership']
     if (
         integration_membership == INTEGRATION_MEMBERSHIP_REQUIRED
@@ -5936,6 +9402,14 @@ def command_stack_promote(args):
         raise SyncwheelError(f"{args.stack}: cannot promote draft without a materialized branch: {from_branch}")
     to_branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
     if to_branch != from_branch:
+        referencing_channels = channel_ids_referencing_stack(manifest, args.stack)
+        if referencing_channels:
+            raise SyncwheelError(
+                f"stack {args.stack} promotion would change branch {from_branch!r} to "
+                f"{to_branch!r}, but it is pinned by active channel(s): "
+                + ', '.join(referencing_channels)
+                + '; remove or replace the stack in those channels, or close the channels first'
+            )
         if any(
             other['id'] != args.stack and other['branch'] == to_branch
             for other in manifest['stacks']
@@ -5956,6 +9430,7 @@ def command_stack_promote(args):
     renamed = False
     coordination_result = None
     try:
+        require_manifest_transaction_current(manifest_path)
         if to_branch != from_branch:
             run(['git', 'branch', '-m', from_branch, to_branch], cwd=repo_root)
             renamed = True
@@ -6043,10 +9518,25 @@ def command_stack_demote(args):
     github = stack.get('github')
     if isinstance(github, dict) and github.get('pr') not in (None, ''):
         raise SyncwheelError(f"{args.stack}: cannot demote while github.pr is set")
+    shared_channels = sorted(
+        channel['id'] for channel in manifest.get('channels', [])
+        if channel.get('lifecycle') == 'shared'
+        and any(
+            entry['stack'] == args.stack
+            for entry in channel.get('composition', [])
+        )
+    )
+    if shared_channels:
+        raise SyncwheelError(
+            f"stack {args.stack} cannot be demoted while referenced by shared channel(s): "
+            + ', '.join(shared_channels)
+            + '; remove or replace the stack in those channels, or close the channels first'
+        )
 
     stack['state'] = 'draft'
     stack['publication'] = {'enabled': False}
     coordination_result = None
+    require_manifest_transaction_current(manifest_path)
     if coordination_is_active(manifest):
         coordination_result = coordinated_publish(
             repo_root,
@@ -6124,6 +9614,7 @@ def command_stack_absorb(args):
         source = 'staged changes' if args.staged else 'working tree changes'
         raise SyncwheelError(f'no {source} to absorb')
 
+    require_manifest_transaction_current(manifest_path)
     stack_worktree = resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, args)
     ensure_clean_worktree(stack_worktree)
     apply_patch = run(['git', '-C', str(stack_worktree), 'apply', '--index'], input_text=patch, check=False)
@@ -6376,6 +9867,7 @@ def command_stack_capture_integration(args):
     # the stack ref before the manifest can record that ownership. The shared
     # executor creates the usual backup ref and ledger event; R4's ephemeral
     # mode removes its detached worktree before returning.
+    require_manifest_transaction_current(manifest_path)
     rebuild_stack_from_manifest(
         repo_root,
         manifest,
@@ -7042,6 +10534,7 @@ def command_reconcile(args):
     if manual_actions:
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
 
+    require_manifest_transaction_current(manifest_path)
     if is_external_manifest_path(repo_root, manifest_path):
         ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
     else:
@@ -7248,10 +10741,13 @@ def command_reconcile(args):
             )
     if coordinated_push:
         full_scope = not args.stack and not args.skip_integration
-        if full_scope and not local_manifest_projection_is_convergent(repo_root, manifest):
+        if full_scope and not local_manifest_projection_is_convergent(
+            repo_root, manifest, manifest_path
+        ):
             raise SyncwheelError(
                 'full coordinated publish requires every managed local ref to match the manifest projection'
             )
+        require_manifest_transaction_current(manifest_path)
         coordination_result = coordinated_publish(
             repo_root,
             manifest,
@@ -8215,6 +11711,162 @@ def build_parser():
     manifest_require_integration_p.add_argument('-j', '--json', action='store_true')
     manifest_require_integration_p.set_defaults(func=command_manifest_require_integration)
 
+    channel_p = sub.add_parser(
+        'channel', aliases=['ch'],
+        help='manage pinned, ordered, rebuildable deployment-channel branches',
+    )
+    channel_sub = channel_p.add_subparsers(dest='channel_command', required=True)
+
+    channel_list_p = channel_sub.add_parser('list', aliases=['ls'], parents=[common])
+    channel_list_p.add_argument('-j', '--json', action='store_true')
+    channel_list_p.set_defaults(func=command_channel_list)
+
+    channel_show_p = channel_sub.add_parser('show', aliases=['sh'], parents=[common])
+    channel_show_p.add_argument('channel')
+    channel_show_p.set_defaults(func=command_channel_show)
+
+    channel_contract_p = channel_sub.add_parser('contract')
+    channel_contract_p.set_defaults(func=command_channel_contract)
+
+    channel_create_p = channel_sub.add_parser('create', aliases=['new'], parents=[common])
+    channel_create_p.add_argument('channel')
+    channel_create_p.add_argument('-b', '--branch')
+    channel_create_p.add_argument('-B', '--base')
+    channel_create_p.add_argument('-R', '--remote')
+    channel_create_p.add_argument(
+        '-L', '--lifecycle', choices=sorted(CHANNEL_LIFECYCLES), default='shared'
+    )
+    channel_create_p.add_argument('--expires-at')
+    channel_create_p.add_argument('-s', '--stack', action='append', default=[])
+    channel_create_p.add_argument('--operation-id')
+    channel_create_p.add_argument('--plan-digest')
+    channel_create_p.add_argument('-a', '--apply', action='store_true')
+    channel_create_p.set_defaults(func=command_channel_create)
+
+    channel_add_p = channel_sub.add_parser('add', parents=[common])
+    channel_add_p.add_argument('channel')
+    channel_add_p.add_argument('stack')
+    channel_add_p.add_argument('--position', type=int)
+    channel_add_p.add_argument('--operation-id')
+    channel_add_p.add_argument('--plan-digest')
+    channel_add_p.add_argument('-a', '--apply', action='store_true')
+    channel_add_p.set_defaults(func=command_channel_add)
+
+    channel_remove_p = channel_sub.add_parser('remove', aliases=['rm'], parents=[common])
+    channel_remove_p.add_argument('channel')
+    channel_remove_p.add_argument('stack')
+    channel_remove_p.add_argument('--operation-id')
+    channel_remove_p.add_argument('--plan-digest')
+    channel_remove_p.add_argument('-a', '--apply', action='store_true')
+    channel_remove_p.set_defaults(func=command_channel_remove)
+
+    channel_replace_p = channel_sub.add_parser('replace', parents=[common])
+    channel_replace_p.add_argument('channel')
+    channel_replace_p.add_argument('old_stack')
+    channel_replace_p.add_argument('new_stack')
+    channel_replace_p.add_argument('--operation-id')
+    channel_replace_p.add_argument('--plan-digest')
+    channel_replace_p.add_argument('-a', '--apply', action='store_true')
+    channel_replace_p.set_defaults(func=command_channel_replace)
+
+    channel_refresh_p = channel_sub.add_parser('refresh', parents=[common])
+    channel_refresh_p.add_argument('channel')
+    channel_refresh_p.add_argument('-s', '--stack', action='append')
+    channel_refresh_p.add_argument('--operation-id')
+    channel_refresh_p.add_argument('--plan-digest')
+    channel_refresh_p.add_argument('-a', '--apply', action='store_true')
+    channel_refresh_p.set_defaults(func=command_channel_refresh)
+
+    channel_diff_p = channel_sub.add_parser('diff', parents=[common])
+    channel_diff_p.add_argument('channel')
+    channel_diff_p.add_argument('-O', '--other')
+    channel_diff_p.set_defaults(func=command_channel_diff)
+
+    channel_promote_p = channel_sub.add_parser('promote', parents=[common])
+    channel_promote_p.add_argument('source')
+    channel_promote_p.add_argument('target')
+    channel_promote_p.add_argument('--operation-id')
+    channel_promote_p.add_argument('--plan-digest')
+    channel_promote_p.add_argument('-a', '--apply', action='store_true')
+    channel_promote_p.set_defaults(func=command_channel_promote)
+
+    channel_resolve_p = channel_sub.add_parser('resolve', parents=[common])
+    channel_resolve_p.add_argument('channel')
+    channel_resolve_choice = channel_resolve_p.add_mutually_exclusive_group(required=True)
+    channel_resolve_choice.add_argument('--revision')
+    channel_resolve_choice.add_argument('--clear', action='store_true')
+    channel_resolve_p.add_argument('--operation-id')
+    channel_resolve_p.add_argument('--plan-digest')
+    channel_resolve_p.add_argument('-a', '--apply', action='store_true')
+    channel_resolve_p.set_defaults(func=command_channel_resolve)
+
+    channel_plan_p = channel_sub.add_parser('plan', parents=[common])
+    channel_plan_p.add_argument('channel')
+    channel_plan_p.add_argument('--operation', choices=('apply', 'publish'), default='apply')
+    channel_plan_p.add_argument('--operation-id')
+    channel_plan_p.set_defaults(func=command_channel_plan)
+
+    channel_apply_p = channel_sub.add_parser('apply', parents=[common])
+    channel_apply_p.add_argument('channel')
+    channel_apply_p.add_argument('--operation-id')
+    channel_apply_p.add_argument('--plan-digest')
+    channel_apply_p.add_argument('-a', '--apply', action='store_true')
+    channel_apply_p.set_defaults(func=command_channel_apply)
+
+    channel_publish_p = channel_sub.add_parser('publish', parents=[common])
+    channel_publish_p.add_argument('channel')
+    channel_publish_p.add_argument('--operation-id')
+    channel_publish_p.add_argument('--plan-digest')
+    channel_publish_p.add_argument('-a', '--apply', action='store_true')
+    channel_publish_p.set_defaults(func=command_channel_publish)
+
+    channel_close_p = channel_sub.add_parser('close', parents=[common])
+    channel_close_p.add_argument('channel')
+    channel_close_p.add_argument('-R', '--reason', default='closed')
+    channel_close_p.add_argument('--delete-local', action='store_true')
+    channel_close_p.add_argument('--operation-id')
+    channel_close_p.add_argument('--plan-digest')
+    channel_close_p.add_argument('-a', '--apply', action='store_true')
+    channel_close_p.set_defaults(func=command_channel_close)
+
+    channel_operation_p = channel_sub.add_parser('operation')
+    channel_operation_sub = channel_operation_p.add_subparsers(
+        dest='channel_operation_command', required=True
+    )
+    channel_operation_list_p = channel_operation_sub.add_parser('list', parents=[common])
+    channel_operation_list_p.add_argument('--channel')
+    channel_operation_list_p.add_argument(
+        '--status', choices=(
+            'pending', 'prepared', 'succeeded', 'failed', 'partial', 'unknown',
+            'cancelled',
+        )
+    )
+    channel_operation_list_p.set_defaults(func=command_channel_operation_list)
+    channel_operation_show_p = channel_operation_sub.add_parser('show', parents=[common])
+    channel_operation_show_p.add_argument('operation_id')
+    channel_operation_show_p.set_defaults(func=command_channel_operation_show)
+    channel_operation_reconcile_p = channel_operation_sub.add_parser(
+        'reconcile', parents=[common]
+    )
+    channel_operation_reconcile_p.add_argument('operation_id')
+    channel_operation_reconcile_p.add_argument('--plan-digest')
+    channel_operation_reconcile_p.add_argument('-a', '--apply', action='store_true')
+    channel_operation_reconcile_p.set_defaults(func=command_channel_reconcile_outcome)
+
+    channel_receipt_p = channel_sub.add_parser('receipt')
+    channel_receipt_sub = channel_receipt_p.add_subparsers(
+        dest='channel_receipt_command', required=True
+    )
+    channel_receipt_show_p = channel_receipt_sub.add_parser('show', parents=[common])
+    channel_receipt_show_p.add_argument('channel', nargs='?')
+    channel_receipt_show_p.set_defaults(func=command_channel_receipt_show)
+
+    channel_reconcile_p = channel_sub.add_parser('reconcile-outcome', parents=[common])
+    channel_reconcile_p.add_argument('operation_id')
+    channel_reconcile_p.add_argument('--plan-digest')
+    channel_reconcile_p.add_argument('-a', '--apply', action='store_true')
+    channel_reconcile_p.set_defaults(func=command_channel_reconcile_outcome)
+
     journal_p = sub.add_parser(
         'journal', help='inspect, snapshot, publish, or schedule a journal repository'
     )
@@ -8256,6 +11908,10 @@ def build_parser():
     stack_create_p.add_argument('-T', '--target-branch')
     stack_create_p.add_argument('-I', '--integration-branch')
     stack_create_p.add_argument('-P', '--purpose')
+    stack_create_p.add_argument(
+        '--depends-on', action='append', default=[],
+        help='declare one prerequisite stack; may be repeated',
+    )
     stack_create_p.add_argument(
         '--draft',
         action='store_true',
@@ -8590,6 +12246,65 @@ def command_self_mode(args):
     return 0
 
 
+def manifest_mutation_requested(args):
+    always = {
+        command_stack_close,
+        command_stack_create,
+        command_stack_promote,
+        command_stack_demote,
+        command_stack_sync,
+        command_stack_absorb,
+        command_stack_set,
+        command_stack_resolve_integration,
+        command_stack_add,
+        command_stack_capture_integration,
+    }
+    if args.func in always:
+        return True
+    if args.func == command_init:
+        return not getattr(args, 'stdout', False)
+    if args.func in {
+        command_coordination_init,
+        command_coordination_disable,
+        command_manifest_require_integration,
+        command_repo_tracking_set,
+    }:
+        return bool(getattr(args, 'apply', False))
+    if args.func in {command_reconcile, command_resume, command_sync, command_publish}:
+        return bool(getattr(args, 'apply', False))
+    if args.func == command_stack_rebuild:
+        return bool(getattr(args, 'update_manifest', False))
+    if args.func in {
+        command_channel_create,
+        command_channel_add,
+        command_channel_remove,
+        command_channel_replace,
+        command_channel_refresh,
+        command_channel_promote,
+        command_channel_resolve,
+        command_channel_apply,
+        command_channel_publish,
+        command_channel_close,
+        command_channel_reconcile_outcome,
+    }:
+        return bool(getattr(args, 'apply', False))
+    return False
+
+
+def execute_parsed_command(args):
+    if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
+        repo_root = resolve_repo_root(args.repo)
+        manifest_path = resolve_manifest_path(
+            repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+        )
+        manifest, _ = load_manifest(repo_root, manifest_path)
+        if manifest and manifest.get('repository_mode') == 'journal':
+            raise SyncwheelError(
+                f'{args.command} is forbidden for repository_mode="journal"; use journal commands'
+            )
+    return args.func(args)
+
+
 def main():
     parser = build_parser()
     raw_args = sys.argv[1:]
@@ -8602,17 +12317,14 @@ def main():
     args.git_args = passthrough
     try:
         maybe_handle_startup_update_policy(args)
-        if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
+        if manifest_mutation_requested(args) and hasattr(args, 'repo'):
             repo_root = resolve_repo_root(args.repo)
             manifest_path = resolve_manifest_path(
                 repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
             )
-            manifest, _ = load_manifest(repo_root, manifest_path)
-            if manifest and manifest.get('repository_mode') == 'journal':
-                raise SyncwheelError(
-                    f'{args.command} is forbidden for repository_mode="journal"; use journal commands'
-                )
-        return args.func(args)
+            with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
+                return execute_parsed_command(args)
+        return execute_parsed_command(args)
     except SyncwheelError as exc:
         print(f'error: {exc}', file=sys.stderr)
         return 2

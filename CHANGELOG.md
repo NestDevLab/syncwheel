@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.33.0 - 2026-08-15
+
+- Add manifest version 3 deployment channels: ordered, pinned stack
+  compositions materialized as rebuildable Git branches without treating branch
+  publication as proof of an environment deployment.
+- Add plan-first channel create, add, remove, replace, refresh, promote,
+  channel-local resolve, apply, publish, and close lifecycles with deterministic
+  plan digests, durable operation intent, terminal receipts, and
+  observation-only reconciliation.
+- Publish channel refs with exact leases and active-active coordination state;
+  reject stale plans, changed refs, conflicts, and unknown outcomes instead of
+  silently replaying them.
+- Add shared and explicitly expiring ephemeral channels, exact dependency and
+  stack-pin provenance, deterministic diff and inspection output, and bounded
+  ledger evidence for channel operations.
+- Document the difference between stacks, the full integration branch, pinned
+  channels, and deployment-provider state across the CLI, agent contract, and
+  public site.
+
 ## 0.32.0 - 2026-08-14
 
 - Add manifest `repository_mode: "journal"` with explicit branch, remote,

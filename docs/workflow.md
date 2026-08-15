@@ -2,17 +2,20 @@
 
 ## Intended branch model
 
-`syncwheel` assumes a repository with four separate concerns:
+`syncwheel` keeps five separate concerns:
 - canonical upstream history
 - publication remote history
 - integration/runtime history
 - PR review surfaces
+- pinned channel compositions used as deployment inputs
 
 Default operating stance:
 - day-to-day work happens on `main-integration`
 - every persistent integration change should map to one PR stack
 - each stack maps to one `pr/*` branch
 - integration is rebuilt as an ordered replay of declared stacks
+- channels are optional selected compositions whose exact stack revisions move
+  only through explicit channel operations
 
 ## Why the manifest matters
 
@@ -84,6 +87,31 @@ from coordination state, because it changes how a ref was produced, not what it
 contains. Each rebuild records the mode it used in its ledger event, and
 `plan --json` names the mode a rebuild would take.
 
+## Deployment-channel workflow
+
+Use a channel when CI/CD or a human needs a stable branch containing a selected
+set of stacks rather than the full moving integration projection:
+
+1. create a shared or ephemeral channel;
+2. add, remove, replace, or refresh its pinned stack entries; refresh also
+   advances the exact pinned base revision;
+3. preserve dependency closure/order and use a channel-local resolution
+   snapshot only for conflicts;
+4. inspect `channel diff`; preview every mutation and apply only its exact
+   `planDigest`;
+5. validate the resulting branch, then publish it with an exact lease;
+6. obtain separate evidence from CI/CD before reporting an environment as
+   deployed;
+7. close the channel explicitly when it is no longer an external deployment
+   input.
+
+The plan is invalid after any relevant manifest, stack, base, local branch, or
+remote observation changes. Re-plan instead of retrying a stale apply or
+publication. If an outcome is uncertain, `channel operation reconcile` only
+observes current state and appends a digest-bound terminal receipt; it never
+retries the mutation. See [deployment-channels.md](deployment-channels.md) for
+commands and failure behavior.
+
 If `plan` identifies an integration commit with no owner and the PR shape is
 still undecided, create a draft and capture it instead of leaving it on
 integration:
@@ -104,6 +132,9 @@ the next `int rebuild` reprojects integration from the now-owned commit.
 - `integration.stacks`: replay order of logical stacks into integration
 - `stacks[].branch`: PR branch for that stack
 - `stacks[].commits`: exact commit list for that logical stack
+- `channels[].composition`: exact stack pins in channel replay order
+- `channels[].baseRevision`: exact base commit, changed only by explicit refresh
+- `channels[].resolution`: optional exact snapshot bound to the current raw pins
 
 For a captured integration-first commit, the manifest retains the integration
 SHA. Deterministic replay on an unchanged base reproduces that SHA on the stack

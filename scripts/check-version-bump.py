@@ -14,6 +14,7 @@ REQUIRED_FILES = {
     'VERSION',
     'CHANGELOG.md',
     'README.md',
+    'openpack.json',
 }
 
 

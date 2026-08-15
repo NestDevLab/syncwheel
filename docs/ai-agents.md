@@ -14,6 +14,8 @@ The AI agent owns:
 - deciding whether a temporary integration-only commit is acceptable
 - running project-specific validation after branch rebuilds
 - communicating risks and blockers clearly
+- deciding which exact stack revisions belong in a deployment channel and
+  obtaining separate evidence for any external deployment
 
 ## Recommended prompt flow
 
@@ -22,6 +24,7 @@ A human should be able to write:
 - `rebuild integration and all PR branches`
 - `validate stack drift and tell me what is missing`
 - `reconcile this shared integration branch with the manifest`
+- `show how channel test differs, plan it, and stop before applying`
 
 An AI agent should then:
 1. run `python3 scripts/syncwheel.py reconcile`
@@ -34,16 +37,35 @@ An AI agent should then:
 5. rerun `check` or `reconcile`
 6. summarize what changed and what still needs a human
 
-For an active-active version 2 manifest, insert `python3 scripts/syncwheel.py
+For an active-active version 2 or 3 manifest, insert `python3 scripts/syncwheel.py
 handoff` before planning or publication. It is a read-only diagnostic of the
 published state, ownership boundary, local locks, pending merge decision, and
 eligible cleanup. Use `publish` rather than a raw Git push so all managed refs
 and the coordination state receive one atomic, leased publication.
 
+For channels, inspect `channel contract`, `channel list`, `channel show`, and
+`channel diff` first. Every mutation previews a `channelPlan`; repeat the same
+command only with its exact `--plan-digest ... --apply` and optional stable
+`--operation-id`. Use `channel plan` for materialization/publication. Publish
+with `channel publish`; never replace its exact lease with a raw Git push. Under
+active-active coordination the channel ref and state publish atomically. A
+published branch is only a deployment input, not proof that an environment was
+deployed.
+
+The channel base is an exact pin. Treat `baseDrifted` as information, not an
+instruction to follow the symbolic base; only an explicit `channel refresh`
+advances it. Preserve every stack's exact `depends_on` closure and order. A
+channel-local resolution snapshot is bound to `forPinDigest`; composition edits
+invalidate it and promotion copies it with the source pins. Shared channels
+refuse draft-stack publication, while ephemeral channels may carry drafts. An
+active-active channel must use the coordination remote.
+
 ## Safety rules
 
 - do not mutate branches from a dirty worktree
-- prefer dedicated worktrees for every rebuild step
+- let automatic replay choose plumbing or a self-removing temporary worktree;
+  request `--replay-mode desk` only for conflict resolution or isolated
+  build/test work
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback
@@ -57,6 +79,15 @@ and the coordination state receive one atomic, leased publication.
   artifacts and never deletes a remote branch
 - if manifest and Git disagree, fix the manifest or call out the conflict explicitly
 - do not claim a repo is aligned if integration and PR branches still disagree
+- stop on a stale channel plan, replay conflict, unknown required observation,
+  post-plan remote change, or lease loss; re-observe instead of forcing the ref
+- after an uncertain ref or remote outcome, inspect `channel operation show`
+  and use digest-bound `channel operation reconcile`; it only observes and
+  appends a terminal receipt, never retries the mutation
+- treat `cancelled` before the authoritative boundary as terminal; an interrupt
+  at or after that boundary is `unknown` until reconciliation
+- close expired or obsolete channels explicitly; expiry is not automatic
+  branch deletion
 
 ## Manifest tracking
 

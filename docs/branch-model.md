@@ -2,11 +2,12 @@
 
 ## Intent
 
-Keep four concerns separate:
+Keep five concerns separate:
 - canonical upstream history
 - publication remote history
 - integration/runtime history
 - PR review surfaces
+- pinned channel compositions used as deployment inputs
 
 ## Default model
 
@@ -19,6 +20,8 @@ Unless a repo documents otherwise:
 - draft source branches use `syncwheel/draft/<stack-id>` and are materialized
   like any other stack branch; published stacks normally use `pr/<stack-id>`
 - integration should not be the only home of long-lived product changes
+- `channel/*` branches are optional pinned compositions; they are neither PR
+  surfaces nor proof of a deployed environment
 
 ## Deterministic mapping
 
@@ -31,6 +34,33 @@ The important step is not just naming branches. It is declaring:
 Without that mapping, Git can only infer ownership heuristically.
 
 With that mapping, syncwheel becomes scriptable.
+
+## Channel branches
+
+A channel branch is rebuilt from its pinned base revision and ordered
+composition rather than from `integration.stacks`. Its entries pin full stack
+base provenance, branch revisions, exact commit lists, and dependency order, so
+ongoing base or stack work does not move the channel automatically. `channel
+refresh` is the explicit re-pin.
+
+Use a `shared` channel for a durable team input and an `ephemeral` channel with
+explicit expiry metadata for temporary feature testing. Expiry is a signal,
+not branch deletion. Refresh pins and close channels explicitly.
+
+Every channel mutation previews a digest-bound plan and produces durable
+operation evidence when applied. Publishing uses an exact remote lease; under
+active-active coordination the channel ref and state move atomically. An
+external deployer may consume that ref, but Syncwheel does not manage or attest
+the environment itself.
+
+Shared channels reject publication when they contain draft stacks. Ephemeral
+channels may include drafts for temporary testing. Under active-active
+coordination every channel uses the coordination remote.
+
+A conflict resolution is channel-local: one snapshot commit directly on the
+pinned base, bound to the raw pin digest. Composition edits invalidate it;
+promotion copies it only with the exact source pins. On Git older than 2.38,
+ordinary channel materialization uses a self-removing temporary worktree.
 
 ## Draft lifecycle
 

@@ -46,6 +46,7 @@ jobs:
           python scripts/syncwheel.py validate --help
           python scripts/syncwheel.py plan --help
           python scripts/syncwheel.py check --help
+          python scripts/syncwheel.py channel --help
           python scripts/syncwheel.py stack --help
           python scripts/syncwheel.py int --help
           python scripts/syncwheel.py self --help

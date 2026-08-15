@@ -1704,7 +1704,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
         (self.repo / 'VERSION').write_text('9.9.9\n')
         (self.repo / 'CHANGELOG.md').write_text('# Changelog\n\n## 9.9.9\n\n- Demo.\n')
         (self.repo / 'README.md').write_text('Current version: `9.9.9`\n')
-        self.git('add', 'scripts/demo.py', 'VERSION', 'CHANGELOG.md', 'README.md')
+        (self.repo / 'openpack.json').write_text('{"version": "9.9.9"}\n')
+        self.git(
+            'add', 'scripts/demo.py', 'VERSION', 'CHANGELOG.md', 'README.md',
+            'openpack.json',
+        )
         self.git('commit', '-q', '-m', 'feat: add demo script')
 
         result = self.run_script(

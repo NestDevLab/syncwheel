@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.32.0`
+Current version: `0.33.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -17,6 +17,8 @@ It is especially useful when you:
 - want to send several pull requests while working in a single checkout, without
   a worktree per branch
 - need to own a commit before you know which pull request it belongs to
+- need a repeatable branch that combines selected feature stacks for a shared
+  or temporary deployment flow
 - work across multiple devices or AI agents without one checkout becoming the
   hidden source of truth
 - want branch recovery to follow a manifest, not memory
@@ -38,6 +40,8 @@ Syncwheel adds that missing control plane:
 - one manifest declares commit ownership
 - each stack maps to one PR branch
 - integration is a disposable projection of the manifest
+- deployment channels pin selected stack revisions into ordered, rebuildable
+  branch compositions
 - `reconcile` compares local branches, remote tips, and manifest projections
 - humans, scripts, and AI agents can all run the same lifecycle
 
@@ -67,7 +71,7 @@ Default behavior is conservative:
   available for explicit scripting
 - legacy manifests use `--force-with-lease` by default, because managed
   branches are often rewritten by deterministic rebuilds
-- active-active version 2 manifests publish managed refs and state together
+- active-active version 2 or 3 manifests publish managed refs and state together
   with atomic, exact leases; unsupported remotes fail closed
 - public coordination state uses typed canonical and publication remote roles,
   rejects ambiguous aliases that cannot be normalized safely, and makes a
@@ -90,7 +94,7 @@ through `.git/info/exclude`. New managed worktrees default to repo-relative
 
 ## Active-active coordination
 
-Manifest version 2 can safely coordinate the same integration branch from
+Manifest versions 2 and 3 can safely coordinate the same integration branch from
 multiple independent devices or agents. New `git-tracked` manifests enable it
 when their publication remote is configured:
 
@@ -173,13 +177,51 @@ the stack already records an open pull request.
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.
 
+## Deployment channels
+
+A channel pins an exact base revision plus a selected, ordered composition of
+stacks pinned to exact branch revisions, commit lists, base provenance, and
+`depends_on` closure/order. It is intentionally separate from:
+
+- a stack, which owns one change stream;
+- the integration branch, which represents the full current integration
+  projection;
+- a deployment, which is external environment state managed by CI/CD or
+  another system.
+
+Channels may be `shared` (for example a stable test input) or `ephemeral` (for
+example a short-lived feature input with explicit expiry metadata). They do not
+follow base or stack tips automatically: `channel refresh` updates pins
+deliberately.
+
+Explicit `depends_on` metadata is version 3-only. The reviewed v2-to-v3 channel
+migration derives direct dependencies from existing stack base chains.
+
+Every mutation previews a `channelPlan`; `--apply` requires its exact
+`planDigest`. Durable operations record started/prepared/receipt evidence, and
+publishing uses an exact lease. A channel-local resolution snapshot can capture
+a resolved composition without rewriting its stacks; composition edits
+invalidate it. Expiry never deletes a branch automatically; use `channel close`
+for explicit cleanup.
+
+Shared channels refuse publication when they contain draft stacks. Ephemeral
+channels may include drafts for temporary testing. Under active-active
+coordination, every channel uses the coordination remote so its branch and
+coordination state publish atomically.
+
+Publishing `channel/test` proves only that a specific Git composition is
+available on that branch. It does **not** prove that an environment has deployed
+or is healthy. See [deployment channels](docs/deployment-channels.md) for the
+complete CLI, failure, and CI/CD boundary.
+
 ## System flow (visual)
 
-syncwheel has four pieces:
+syncwheel has six pieces:
 - **base branch** (`upstream/main` or similar)
 - **PR stacks** mapped to `pr/*` branches
 - **manifest** (`.syncwheel/manifest.json`) as source of truth
 - **integration branch** (`main-integration` by default) for combined testing
+- optional **deployment channels** for pinned, selected compositions
 - **ledger** (`.syncwheel/ledger/` by default, or a sibling `<manifest-name>-ledger/`
   directory when the manifest lives outside the repo) as append-only
   operational history plus a replay checkpoint for cross-machine recovery
@@ -227,8 +269,12 @@ Practical meaning:
   integration checkout.
 - `stack rebuild` rebuilds one PR branch from the manifest.
 - `int rebuild` rebuilds integration from ordered stacks.
+- `channel plan` previews channel materialization or publication; every channel
+  mutation requires its exact digest, and `channel publish` uses an exact lease.
+- `channel operation list/show/reconcile` exposes durable operation intent and
+  observes uncertain outcomes without retrying a mutation.
 - `stack push` and `int push` are targeted publication commands. On active
-  version 2 manifests they publish a partial atomic state snapshot; legacy
+  version 2 or 3 manifests they publish a partial atomic state snapshot; legacy
   manifests retain the direct Git push wrapper and its optional arguments.
 - `reconcile` is the preferred multi-device maintenance entrypoint: it compares
   manifest ownership, stack branches, integration, and remote tips; reports a
@@ -664,7 +710,7 @@ python3 scripts/syncwheel.py sync --no-align-local-to-remote
 
 Legacy `publish` and `reconcile --push` use `--force-with-lease` by default
 because rebuilt managed branches commonly replace older remote history in
-multi-device workflows. Active version 2 manifests instead use the coordinated
+multi-device workflows. Active version 2 or 3 manifests instead use the coordinated
 atomic publisher and reject manual force, lease, or remote overrides.
 
 Use `--json` for automation, `--stack <id>` to limit stack work, `--remote` to
@@ -755,6 +801,7 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
+- `docs/deployment-channels.md`: pinned channel model, CLI, receipts, and CI/CD boundary
 - `docs/ai-agents.md`: short AI behavior contract
 - `docs/agent-procedure.md`: extended AI execution guidance
 - `docs/workflow-longform.md`: long-form practical workflow guide
@@ -783,6 +830,9 @@ python3 scripts/syncwheel.py journal status --help
 python3 scripts/syncwheel.py journal snapshot --help
 python3 scripts/syncwheel.py journal publish --help
 python3 scripts/syncwheel.py journal schedule --help
+python3 scripts/syncwheel.py channel --help
+python3 scripts/syncwheel.py channel contract
+python3 scripts/syncwheel.py channel operation --help
 python3 scripts/syncwheel.py stack --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help
@@ -820,6 +870,7 @@ Common aliases:
 - `validate` -> `v`
 - `plan` -> `pl`
 - `reconcile` -> `rec`
+- `channel` -> `ch`
 - `stack` -> `s`, `spoke`
 - `int` -> `i`
 - `stack create` -> `s new`

@@ -1,7 +1,8 @@
 # Syncwheel For AI Agents
 
-Use Syncwheel for deterministic Git maintenance in repositories with PR stacks, integration branches,
-dedicated worktrees, forks, or more than one human/agent touching branches.
+Use Syncwheel for deterministic Git maintenance in repositories with PR stacks,
+integration branches, pinned deployment channels, dedicated worktrees, forks,
+or more than one human/agent touching branches.
 
 ## First Checks
 
@@ -17,7 +18,7 @@ syncwheel reconcile
 If `syncwheel_tracking` is missing, stop and ask whether the repo should be `git-tracked` or
 `local-only`. Persist the answer with `syncwheel repo tracking set ... --apply` before continuing.
 
-For a version 2 manifest with `coordination.mode: "active-active"`, run this
+For a version 2 or 3 manifest with `coordination.mode: "active-active"`, run this
 read-only handoff check before planning a mutation or taking over from another
 device:
 
@@ -35,6 +36,27 @@ install/remove is also plan-first and Linux-only.
 - `reconcile` is read-only by default.
 - `sync`, `publish`, `reconcile --apply`, stack rebuilds, integration rebuilds, branch deletion, and
   pushes are mutations.
+- `channel contract`, `channel list`, `channel show`, `channel diff`, `channel
+  plan`, `channel operation list/show`, and `channel receipt show` are
+  read-only. `channel operation reconcile` is also read-only until `--apply`
+  appends a receipt. Every channel mutation previews a `channelPlan`; run it
+  only with the exact `--plan-digest ... --apply`. A stable optional
+  `--operation-id` is excluded from the digest and binds
+  started/prepared/receipt evidence.
+- Treat `channel publish` as an exact-lease operation; a published channel
+  branch is not evidence of an environment deployment.
+- `channel create` claims only a new, unowned ref. It refuses existing local or
+  remote refs and protected base, integration, stack, target, and coordination
+  branches; v0.33 has no implicit adoption path.
+- After an uncertain local-ref or remote outcome, inspect the operation and run
+  digest-bound `channel operation reconcile`. Reconciliation only observes and
+  appends a terminal receipt; it never retries the mutation.
+- A channel pins its base as well as its stack revisions. Only `channel refresh`
+  advances the base pin. Preserve exact `depends_on` closure/order. A
+  channel-local resolution is bound to the raw pins; composition edits
+  invalidate it and promotion copies it with the source pins. Shared channels
+  refuse draft-stack publication; ephemeral channels may use drafts, and
+  active-active channels must use the coordination remote.
 - Never mutate branches from a dirty checkout.
 - Rebuilds do not create a worktree. Ask for one with `--replay-mode desk` only when you need to
   resolve a conflict or build/test a branch in isolation, and put it under the declared Syncwheel
@@ -79,4 +101,5 @@ End with:
 - Agent procedure: `docs/agent-procedure.md`
 - Manifest tracking: `docs/manifest-tracking.md`
 - Active-active protocol: `docs/design/active-active-coordination.md`
+- Deployment channels: `docs/deployment-channels.md`
 - Core procedure: `docs/core-procedure.md`
