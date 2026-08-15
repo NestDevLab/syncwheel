@@ -1,13 +1,15 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "938cac8ea20c60fdbd4b85aaca035bedb2ae422e"
+    "refs/heads/main-integration": "a13b454c880ee9c40916712f0d255df6e7560608",
+    "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-14T08:37:56+00:00",
+  "created_at": "2026-08-15T15:05:58+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "938cac8ea20c60fdbd4b85aaca035bedb2ae422e",
+    "refs/heads/main-integration": "a13b454c880ee9c40916712f0d255df6e7560608",
+    "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
@@ -37,17 +39,35 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "deployment-channels"
+      ],
       "strategy": "cherry-pick"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/deployment-channels",
+        "commits": [
+          "c5617c45378b89076b8b8ccceb87cc5a2acee482",
+          "a13b454c880ee9c40916712f0d255df6e7560608"
+        ],
+        "id": "deployment-channels",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "5f33571cb4f46ce3e5e7fdf1a4370bbafcdef2c4",
-  "projection_status": "partial",
-  "publication_id": "227fab90-07d0-461a-971e-4b9ce2e5416e",
-  "publication_scope": "integration",
+  "manifest_digest": "40fb26d1fc5a5fd6ccece0878a23e2b78b7c9acbad0b5e4f85cfc9ffe7be50eb",
+  "parent_state": "5ba89c00575c8a2edad4ddfcaeb97b54c8f24cae",
+  "projection_status": "convergent",
+  "publication_id": "114db18f-a397-41ad-9818-529d09e6c707",
+  "publication_scope": "full",
   "schema_version": 2,
   "syncwheel_version": "0.32.0",
   "tombstones": [
