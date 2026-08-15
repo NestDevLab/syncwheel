@@ -39,21 +39,28 @@ With that mapping, syncwheel becomes scriptable.
 
 A channel branch is rebuilt from its pinned base revision and ordered
 composition rather than from `integration.stacks`. Its entries pin full stack
-branch revisions and exact commit lists, so ongoing base or stack work does not
-move the channel automatically. `channel refresh` is the explicit re-pin.
+base provenance, branch revisions, exact commit lists, and dependency order, so
+ongoing base or stack work does not move the channel automatically. `channel
+refresh` is the explicit re-pin.
 
 Use a `shared` channel for a durable team input and an `ephemeral` channel with
 explicit expiry metadata for temporary feature testing. Expiry is a signal,
 not branch deletion. Refresh pins and close channels explicitly.
 
-Applying a channel is plan-bound and produces a receipt. Publishing uses an
-exact remote lease; under active-active coordination the channel ref and state
-move atomically. An external deployer may consume that ref, but Syncwheel does
-not manage or attest the environment itself.
+Every channel mutation previews a digest-bound plan and produces durable
+operation evidence when applied. Publishing uses an exact remote lease; under
+active-active coordination the channel ref and state move atomically. An
+external deployer may consume that ref, but Syncwheel does not manage or attest
+the environment itself.
 
 Shared channels reject publication when they contain draft stacks. Ephemeral
 channels may include drafts for temporary testing. Under active-active
 coordination every channel uses the coordination remote.
+
+A conflict resolution is channel-local: one snapshot commit directly on the
+pinned base, bound to the raw pin digest. Composition edits invalidate it;
+promotion copies it only with the exact source pins. On Git older than 2.38,
+ordinary channel materialization uses a self-removing temporary worktree.
 
 ## Draft lifecycle
 

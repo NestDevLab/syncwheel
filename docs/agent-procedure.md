@@ -24,16 +24,20 @@ use the coordinated `publish`, `stack push`, or `int push` commands rather than
 raw Git pushes. A mergeable lease race still requires an explicit reviewed
 `publish --accept-merge`.
 
-For deployment channels, inspect list/show/diff first. Composition changes,
-promotion, apply, publish, and close need mutation authority. Apply only a fresh
-channel plan whose observation revision and digest still match; publish only
-with the exact lease owned by `channel publish`. A channel branch is a pinned
-Git composition, not proof that an external environment was deployed.
+For deployment channels, inspect contract/list/show/diff first. Every mutation
+needs authority and first emits a `channelPlan`; repeat it only with the exact
+`--plan-digest ... --apply` and optional stable `--operation-id`. Use `channel
+plan` for apply/publish previews, and publish only with the exact lease owned by
+`channel publish`. A channel branch is a pinned Git composition, not proof that
+an external environment was deployed.
 
 The base is pinned to a full commit and advances only through explicit
-`channel refresh`; `baseDrifted` alone is not authority to refresh. Shared
-channels refuse draft-stack publication. Ephemeral channels may carry drafts,
-and active-active channels must use the coordination remote.
+`channel refresh`; `baseDrifted` alone is not authority to refresh. Preserve
+the exact stack `depends_on` closure/order. A channel-local resolution is bound
+to `forPinDigest`; composition edits invalidate it and promotion copies it with
+the exact source pins. Shared channels refuse draft-stack publication.
+Ephemeral channels may carry drafts, and active-active channels must use the
+coordination remote.
 
 The agent should not improvise branch ownership if:
 - the manifest is missing
@@ -101,8 +105,11 @@ Given one of those prompts, the agent should:
 - If a channel plan is stale, replay conflicts, or publication observes unknown
   required state, a post-plan remote change, or lease loss, stop and re-plan.
   Do not force or silently retry.
-- If a ref or remote outcome is uncertain, inspect the actual ref and latest
-  channel ledger receipt before deciding whether a new plan is safe.
+- If a ref or remote outcome is uncertain, inspect `channel operation show` and
+  use digest-bound `channel operation reconcile`. It appends observed terminal
+  evidence and never retries the mutation.
+- Treat an operation cancelled before its authoritative boundary as terminal;
+  an interruption at or after that boundary needs reconciliation.
 - **A rebuild reconstructs a branch from the manifest's commit projection, NOT from the
   branch's current remote tip.** If the manifest points at a pre-cleanup commit (or a
   range that misses a later fix), `stack rebuild` / `int rebuild` will silently **revert

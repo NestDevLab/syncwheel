@@ -8,9 +8,11 @@ Journal mode is the plan-first single-branch alternative for safe allowlisted
 snapshots, exact-lease publication, and an optional Linux systemd user timer.
 
 Delivery manifest version 3 adds channels: an exact base plus selected stack
-revisions pinned into ordered, rebuildable branches with digest-bound apply
-receipts and exact-lease publication. Channel publication is not an environment
-deployment.
+revisions pinned with base and dependency provenance into ordered, rebuildable
+branches. Every mutation is preview-first and digest-bound; durable operations
+and observation-only reconciliation make uncertain outcomes recoverable.
+Channel-local resolution snapshots preserve source stacks, and publication uses
+an exact lease. Channel publication is not an environment deployment.
 
 ## Start Here
 

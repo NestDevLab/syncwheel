@@ -180,8 +180,8 @@ new draft as the remedy.
 ## Deployment channels
 
 A channel pins an exact base revision plus a selected, ordered composition of
-stacks pinned to exact branch revisions and commit lists. It is intentionally
-separate from:
+stacks pinned to exact branch revisions, commit lists, base provenance, and
+`depends_on` closure/order. It is intentionally separate from:
 
 - a stack, which owns one change stream;
 - the integration branch, which represents the full current integration
@@ -193,9 +193,16 @@ Channels may be `shared` (for example a stable test input) or `ephemeral` (for
 example a short-lived feature input with explicit expiry metadata). They do not
 follow base or stack tips automatically: `channel refresh` updates pins
 deliberately.
-Materialization is plan-bound, produces a digest-linked receipt, and publishing
-uses an exact lease. Expiry never deletes a branch automatically; use `channel
-close` for explicit cleanup.
+
+Explicit `depends_on` metadata is version 3-only. The reviewed v2-to-v3 channel
+migration derives direct dependencies from existing stack base chains.
+
+Every mutation previews a `channelPlan`; `--apply` requires its exact
+`planDigest`. Durable operations record started/prepared/receipt evidence, and
+publishing uses an exact lease. A channel-local resolution snapshot can capture
+a resolved composition without rewriting its stacks; composition edits
+invalidate it. Expiry never deletes a branch automatically; use `channel close`
+for explicit cleanup.
 
 Shared channels refuse publication when they contain draft stacks. Ephemeral
 channels may include drafts for temporary testing. Under active-active
@@ -262,8 +269,10 @@ Practical meaning:
   integration checkout.
 - `stack rebuild` rebuilds one PR branch from the manifest.
 - `int rebuild` rebuilds integration from ordered stacks.
-- `channel plan` and `channel apply` rebuild one pinned channel composition;
-  `channel publish` publishes the applied revision with an exact lease.
+- `channel plan` previews channel materialization or publication; every channel
+  mutation requires its exact digest, and `channel publish` uses an exact lease.
+- `channel operation list/show/reconcile` exposes durable operation intent and
+  observes uncertain outcomes without retrying a mutation.
 - `stack push` and `int push` are targeted publication commands. On active
   version 2 or 3 manifests they publish a partial atomic state snapshot; legacy
   manifests retain the direct Git push wrapper and its optional arguments.
@@ -822,6 +831,8 @@ python3 scripts/syncwheel.py journal snapshot --help
 python3 scripts/syncwheel.py journal publish --help
 python3 scripts/syncwheel.py journal schedule --help
 python3 scripts/syncwheel.py channel --help
+python3 scripts/syncwheel.py channel contract
+python3 scripts/syncwheel.py channel operation --help
 python3 scripts/syncwheel.py stack --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help

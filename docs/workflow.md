@@ -95,8 +95,10 @@ set of stacks rather than the full moving integration projection:
 1. create a shared or ephemeral channel;
 2. add, remove, replace, or refresh its pinned stack entries; refresh also
    advances the exact pinned base revision;
-3. inspect `channel diff` and create a plan;
-4. apply only that plan and retain the digest-linked receipt;
+3. preserve dependency closure/order and use a channel-local resolution
+   snapshot only for conflicts;
+4. inspect `channel diff`; preview every mutation and apply only its exact
+   `planDigest`;
 5. validate the resulting branch, then publish it with an exact lease;
 6. obtain separate evidence from CI/CD before reporting an environment as
    deployed;
@@ -105,8 +107,10 @@ set of stacks rather than the full moving integration projection:
 
 The plan is invalid after any relevant manifest, stack, base, local branch, or
 remote observation changes. Re-plan instead of retrying a stale apply or
-publication. See [deployment-channels.md](deployment-channels.md) for commands
-and failure behavior.
+publication. If an outcome is uncertain, `channel operation reconcile` only
+observes current state and appends a digest-bound terminal receipt; it never
+retries the mutation. See [deployment-channels.md](deployment-channels.md) for
+commands and failure behavior.
 
 If `plan` identifies an integration commit with no owner and the PR shape is
 still undecided, create a draft and capture it instead of leaving it on
@@ -130,6 +134,7 @@ the next `int rebuild` reprojects integration from the now-owned commit.
 - `stacks[].commits`: exact commit list for that logical stack
 - `channels[].composition`: exact stack pins in channel replay order
 - `channels[].baseRevision`: exact base commit, changed only by explicit refresh
+- `channels[].resolution`: optional exact snapshot bound to the current raw pins
 
 For a captured integration-first commit, the manifest retains the integration
 SHA. Deterministic replay on an unchanged base reproduces that SHA on the stack

@@ -43,19 +43,22 @@ published state, ownership boundary, local locks, pending merge decision, and
 eligible cleanup. Use `publish` rather than a raw Git push so all managed refs
 and the coordination state receive one atomic, leased publication.
 
-For channels, inspect `channel list`, `channel show`, and `channel diff` before
-changing a composition. Applying is plan-bound: use a fresh `channel plan`,
-preserve its observation revision and digest, and apply only that exact plan.
-Publish with `channel publish`; never replace its exact lease with a raw Git
-push. Under active-active coordination the channel ref and state publish
-atomically. A published branch is only a deployment input, not proof that an
-environment was deployed.
+For channels, inspect `channel contract`, `channel list`, `channel show`, and
+`channel diff` first. Every mutation previews a `channelPlan`; repeat the same
+command only with its exact `--plan-digest ... --apply` and optional stable
+`--operation-id`. Use `channel plan` for materialization/publication. Publish
+with `channel publish`; never replace its exact lease with a raw Git push. Under
+active-active coordination the channel ref and state publish atomically. A
+published branch is only a deployment input, not proof that an environment was
+deployed.
 
 The channel base is an exact pin. Treat `baseDrifted` as information, not an
 instruction to follow the symbolic base; only an explicit `channel refresh`
-advances it. Shared channels refuse draft-stack publication, while ephemeral
-channels may carry drafts. An active-active channel must use the coordination
-remote.
+advances it. Preserve every stack's exact `depends_on` closure and order. A
+channel-local resolution snapshot is bound to `forPinDigest`; composition edits
+invalidate it and promotion copies it with the source pins. Shared channels
+refuse draft-stack publication, while ephemeral channels may carry drafts. An
+active-active channel must use the coordination remote.
 
 ## Safety rules
 
@@ -78,8 +81,11 @@ remote.
 - do not claim a repo is aligned if integration and PR branches still disagree
 - stop on a stale channel plan, replay conflict, unknown required observation,
   post-plan remote change, or lease loss; re-observe instead of forcing the ref
-- after an uncertain ref or remote outcome, inspect the actual ref and latest
-  channel ledger receipt before re-planning; never retry blindly
+- after an uncertain ref or remote outcome, inspect `channel operation show`
+  and use digest-bound `channel operation reconcile`; it only observes and
+  appends a terminal receipt, never retries the mutation
+- treat `cancelled` before the authoritative boundary as terminal; an interrupt
+  at or after that boundary is `unknown` until reconciliation
 - close expired or obsolete channels explicitly; expiry is not automatic
   branch deletion
 

@@ -1774,10 +1774,18 @@
             <span class="light"></span><span class="light"></span><span class="light"></span>
             <span>channel flow</span>
           </div>
-          <pre><code><span class="prompt">$</span> syncwheel channel create dev --lifecycle shared --stack core-api --apply
-<span class="prompt">$</span> syncwheel channel add dev checkout-v2 --apply
-<span class="prompt">$</span> syncwheel channel plan dev
-<span class="prompt">$</span> syncwheel channel publish dev --plan-digest sha256:&lt;reviewed-digest&gt; --apply</code></pre>
+          <pre><code><span class="prompt">$</span> create_plan="$(syncwheel channel create dev --lifecycle shared --stack core-api --operation-id create-dev-001)"
+<span class="prompt">$</span> create_digest="$(printf '%s' "$create_plan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["planDigest"])')"
+<span class="prompt">$</span> syncwheel channel create dev --lifecycle shared --stack core-api --operation-id create-dev-001 --plan-digest "$create_digest" --apply
+<span class="prompt">$</span> add_plan="$(syncwheel channel add dev checkout-v2 --operation-id add-checkout-001)"
+<span class="prompt">$</span> add_digest="$(printf '%s' "$add_plan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["planDigest"])')"
+<span class="prompt">$</span> syncwheel channel add dev checkout-v2 --operation-id add-checkout-001 --plan-digest "$add_digest" --apply
+<span class="prompt">$</span> apply_plan="$(syncwheel channel plan dev --operation apply --operation-id apply-dev-001)"
+<span class="prompt">$</span> apply_digest="$(printf '%s' "$apply_plan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["planDigest"])')"
+<span class="prompt">$</span> syncwheel channel apply dev --operation-id apply-dev-001 --plan-digest "$apply_digest" --apply
+<span class="prompt">$</span> publish_plan="$(syncwheel channel plan dev --operation publish --operation-id publish-dev-001)"
+<span class="prompt">$</span> publish_digest="$(printf '%s' "$publish_plan" | python3 -c 'import json,sys; print(json.load(sys.stdin)["planDigest"])')"
+<span class="prompt">$</span> syncwheel channel publish dev --operation-id publish-dev-001 --plan-digest "$publish_digest" --apply</code></pre>
         </div>
         <p class="inline-note">Promotion copies exact tested pins; ephemeral previews expire as visible cleanup candidates and are never deleted remotely by surprise. Read the
           <a href="https://github.com/NestDevLab/syncwheel/blob/main/docs/deployment-channels.md">deployment channel guide</a>.</p>

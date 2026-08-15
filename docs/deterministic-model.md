@@ -18,6 +18,7 @@ In syncwheel, a PR stack is a logical change stream that should be reviewable as
 - one stack id (for example `feature-a`)
 - one `pr/*` branch mapped to that stack
 - one declared commit list that defines stack membership
+- optional `depends_on` ids that declare prerequisite stacks
 
 This avoids guessing ownership from branch names or memory.
 
@@ -27,8 +28,10 @@ A channel pins the full revision of its symbolic base plus an ordered branch
 composition of selected stacks. Each entry pins:
 
 - the stack id and branch;
+- the symbolic stack base and pinned full base revision;
 - the full observed stack branch revision;
-- the exact ordered full commit list.
+- the exact ordered full commit list;
+- the exact dependency declaration.
 
 Those pins make the channel rebuildable even when the stack branches later
 move. A refresh is explicit; the channel never follows a stack tip implicitly.
@@ -82,6 +85,8 @@ Suggested shape:
 - `channels[].composition`: selected stack pins in channel replay order
 - `channels[].baseRevision`: exact base commit used by materialization;
   `channel refresh` advances it deliberately
+- `channels[].resolution`: optional channel-local snapshot bound to the raw
+  `pinDigest`; it contributes to `compositionDigest`
 
 ## Operational rule
 
@@ -98,8 +103,12 @@ Given the manifest, `syncwheel.py` can verify deterministically:
 - whether replaying a declared commit onto its unchanged base preserves its SHA
 - whether a channel's pinned stack revision and exact commit list still match
   its declared observation
-- whether a plan digest still matches the observed base, composition, local
-  branch, remote ref, and manifest revision before apply or publish
+- whether every pinned dependency is present earlier in channel order
+- whether a resolution's parent, tree, objects, and `forPinDigest` match
+- whether a plan digest still matches the complete observed before/after state
+  for every channel mutation
+- whether an uncertain operation outcome can be classified from current state
+  without retrying the mutation
 
 ## What still remains heuristic
 

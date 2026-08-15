@@ -149,8 +149,9 @@ publication and recovery protocol.
 
 Version 3 adds `channels` to delivery manifests. A channel is an ordered branch
 composition pinned to exact stack revisions and commit lists; it is not an
-environment deployment. Version 2 clients fail closed on version 3 instead of
-publishing coordination state without its channel refs.
+environment deployment. Clients that understand only manifest version 2,
+including Syncwheel 0.32, fail closed on version 3 instead of publishing
+coordination state without its channel refs.
 
 The excerpt below is added alongside the version 2 defaults, integration,
 stacks, and coordination fields shown above:
@@ -170,8 +171,11 @@ stacks, and coordination fields shown above:
         {
           "stack": "feature-a",
           "branch": "pr/feature-a",
+          "stackBase": "origin/main",
+          "stackBaseRevision": "9999999999999999999999999999999999999999",
           "branchRevision": "1111111111111111111111111111111111111111",
-          "commits": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+          "commits": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+          "dependsOn": []
         }
       ]
     }
@@ -179,13 +183,29 @@ stacks, and coordination fields shown above:
 }
 ```
 
-The first `channel create ... --apply` migrates an eligible version 2 delivery
-manifest to version 3. Review and commit that manifest change with the channel
-change. Journal mode rejects channels.
+The first exact-digest application of a `channel create` preview migrates an
+eligible version 2 delivery manifest to version 3. Review and commit that
+manifest change with the channel change. Journal mode rejects channels.
+Explicit stack `depends_on` metadata is also version 3-only. Existing version 1
+and 2 stack base chains remain readable; migration derives direct dependencies
+from bases owned by other declared stacks before the v3 manifest is saved.
 
 `shared` channels have no expiry. `ephemeral` channels require ISO-8601
 `expiry.createdAt` and `expiry.expiresAt`; expiry is observable metadata, not an
 automatic deletion. Both lifecycles use explicit `channel close` cleanup.
+
+Every channel mutation previews a `channelPlan`. Applying requires its exact
+`planDigest`; an optional `operationId` supplies durable idempotency but is
+excluded from the digest. Applied work records `started`, `prepared`, and a
+terminal receipt (`succeeded`, `failed`, `partial`, `unknown`, or `cancelled`).
+`channel operation reconcile` only observes an uncertain outcome and appends a
+digest-bound receipt; it never retries the original mutation.
+
+Each composition entry must preserve the stack's complete `depends_on` closure
+in order, and its commit list must equal the exact pinned
+`stackBaseRevision..branchRevision` range. An optional channel `resolution`
+stores `forPinDigest`, `revision`, `tree`, and `parentRevision`; edits invalidate
+it, while promotion copies a still-valid resolution with the source pins.
 
 See [deployment-channels.md](deployment-channels.md) for the CLI and safety
 contract.
@@ -263,8 +283,8 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 
 ## Rules
 
-- `version` is `1` for legacy manifests or `2` for manifests with a required
-  `coordination` block
+- `version` is `1` for legacy manifests, `2` for manifests with a required
+  `coordination` block, or `3` for channel-aware delivery manifests
 - `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
 - new manifests set `defaults.integration_membership` to `required`; legacy
@@ -290,10 +310,17 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - every channel pins the full `baseRevision` resolved from its symbolic `base`;
   `channel refresh` is the explicit operation that advances this pin
 - each channel composition entry pins one unique stack with its branch, full
-  observed branch revision, and exact ordered full commit list
+  stack base provenance, observed branch revision, exact ordered full commit
+  list, and exact `dependsOn` declaration
 - channel order is significant and independent of `integration.stacks`
+- every pinned `dependsOn` stack must appear earlier in the same channel;
+  pinning fails unless each stack's declared commit list exactly equals its
+  pinned base-to-branch range
 - active-active channels must publish to `coordination.remote`; shared channel
   publication refuses draft stacks, while ephemeral channels may contain them
+- an optional channel `resolution` contains `forPinDigest`, `revision`, `tree`,
+  and `parentRevision`; it is valid only for the exact raw pins, is cleared by
+  composition/refresh edits, and is copied by promotion with those pins
 - every stack id must be unique
 - every stack branch must be unique
 - `state` is `draft` or `published` and defaults to `published`; `publication`
@@ -317,7 +344,10 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - manifest structure
 - channel version, delivery-mode, lifecycle, expiry, and uniqueness rules
 - existence of each channel symbolic base, pinned base revision, configured
-  remote, full pinned stack branch revision, and full pinned commit list
+  remote, stack-base provenance, full pinned stack branch revision, and exact
+  pinned commit range
+- channel dependency closure/order and channel-local resolution binding, parent,
+  tree, and object availability
 - current stack-pin drift and expired ephemeral channels (reported without
   automatic cleanup)
 - existence of integration base ref
