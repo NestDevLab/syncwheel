@@ -3,8 +3,8 @@
 Use this file when a user gives an AI agent a markdown install prompt and asks it to install or
 bootstrap Syncwheel.
 
-Syncwheel is a deterministic Git maintenance tool for PR stacks, integration branches, and
-multi-agent worktrees.
+Syncwheel is a deterministic Git maintenance tool for PR stacks, integration
+branches, pinned deployment-channel branches, and multi-agent worktrees.
 
 ## What To Do
 
@@ -79,3 +79,6 @@ agentwheel install github:NestDevLab/syncwheel --adapter claude --user --skill s
 - `syncwheel repo tracking status` runs in the target repo.
 - The companion skill is installed if the user requested it and Agentwheel is available.
 - Any branch, worktree, integration, or push mutation was explicitly requested.
+- Channel composition edits, apply, publish, promotion, and close were run only
+  when that exact mutation was requested; channel publication was not reported
+  as an environment deployment.

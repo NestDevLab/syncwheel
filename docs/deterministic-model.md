@@ -21,6 +21,20 @@ In syncwheel, a PR stack is a logical change stream that should be reviewable as
 
 This avoids guessing ownership from branch names or memory.
 
+## What a deployment channel means here
+
+A channel pins the full revision of its symbolic base plus an ordered branch
+composition of selected stacks. Each entry pins:
+
+- the stack id and branch;
+- the full observed stack branch revision;
+- the exact ordered full commit list.
+
+Those pins make the channel rebuildable even when the stack branches later
+move. A refresh is explicit; the channel never follows a stack tip implicitly.
+It is distinct from the full integration projection and from any external
+environment deployment.
+
 ## Preferred source of truth
 
 Create:
@@ -65,6 +79,9 @@ Suggested shape:
 - `integration.stacks`: replay order for the integration branch
 - `stacks[].branch`: the PR branch that should contain exactly that stack’s commits on top of its base
 - `stacks[].commits`: the declared commit list for that logical change set
+- `channels[].composition`: selected stack pins in channel replay order
+- `channels[].baseRevision`: exact base commit used by materialization;
+  `channel refresh` advances it deliberately
 
 ## Operational rule
 
@@ -79,6 +96,10 @@ Given the manifest, `syncwheel.py` can verify deterministically:
 - whether integration contains the declared commits
 - whether integration references unknown stacks
 - whether replaying a declared commit onto its unchanged base preserves its SHA
+- whether a channel's pinned stack revision and exact commit list still match
+  its declared observation
+- whether a plan digest still matches the observed base, composition, local
+  branch, remote ref, and manifest revision before apply or publish
 
 ## What still remains heuristic
 
@@ -86,5 +107,9 @@ These remain outside pure Git determinism unless you add more metadata:
 - whether a commit should be split into multiple PRs
 - whether independently created commits with different SHAs are conceptually the same fix
 - whether an integration-only reconciliation commit should become public
+- whether publishing a channel should trigger or has triggered a deployment
+
+The last point belongs to CI/CD. Syncwheel proves a channel Git revision and its
+plan-bound receipt, not environment state.
 
 For those cases, the manifest should be updated deliberately.

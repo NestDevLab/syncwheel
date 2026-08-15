@@ -1,6 +1,6 @@
 ---
 name: syncwheel
-description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, and integration branches, all from a single checkout. Use whenever you are about to create a PR branch, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
+description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, integration branches, and pinned deployment-channel branches, all from a single checkout. Use whenever you are about to create a PR branch, compose a deployment channel, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
 allowed-tools: [Bash]
 ---
 
@@ -45,6 +45,14 @@ When the manifest declares `repository_mode: "journal"`, use only
 and `journal schedule`. Add `--apply` only with mutation authority. Journal mode
 forbids stack, integration, reconcile, sync, and delivery publish commands; its
 publisher stops on remote-ahead, divergence, or lease loss without history surgery.
+
+A deployment channel pins an exact base revision plus an ordered branch
+composition of exact stack revisions and commit lists. It is separate from a
+stack, from the full integration projection, and from an actual environment
+deployment. Inspect and plan freely; composition edits, promotion, apply,
+publish, and close are mutations. Apply only a fresh digest-bound plan, publish
+only through the exact lease owned by `channel publish`, and never claim that
+branch publication proves an environment was deployed.
 
 The script owns: repo-state discovery, manifest validation, deterministic branch
 and integration reconstruction. The agent owns: judgment, communication,
@@ -101,7 +109,7 @@ syncwheel reconcile --apply --worktree-root <path> --push   # publish shared bra
 syncwheel check                   # re-verify
 ```
 
-When a version 2 manifest has `coordination.mode: "active-active"`, add a
+When a version 2 or 3 manifest has `coordination.mode: "active-active"`, add a
 read-only handoff before planning mutations or publishing from a different
 device/agent:
 
@@ -124,6 +132,27 @@ syncwheel reconcile -a -W .syncwheel/wt
 syncwheel reconcile -a -P -W .syncwheel/wt
 syncwheel repo tracking set git-tracked -a
 ```
+
+For a channel, start with read-only inspection and a fresh plan:
+
+```bash
+syncwheel channel list
+syncwheel channel show <id>
+syncwheel channel diff <id>
+syncwheel channel plan <id>
+```
+
+Stop on a stale observation, replay conflict, unknown required state, post-plan
+remote change, or lease loss. Re-observe and re-plan; do not substitute raw Git
+or force publication. Channel expiry is only metadata, so cleanup remains an
+explicit `channel close` operation.
+
+If a local-ref or remote outcome is uncertain, inspect the actual ref and the
+latest channel ledger receipt before re-planning. Never retry blindly.
+
+Only `channel refresh` advances a channel's base pin. Shared channels refuse
+draft-stack publication; ephemeral channels may use drafts. Under active-active
+coordination a channel must use the coordination remote.
 
 `syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
 wheel metaphor helps, but the manifest field remains `stacks`.
@@ -234,6 +263,10 @@ release branch, but it must not be `main-integration`.
 
 `main-integration` is a coordination branch for assembling and testing stacks
 before delivery. Do not treat it as a PR target or deployment branch.
+
+A channel branch may be an input to CI/CD, but it remains a pinned Git
+composition. `channel publish` proves only the exact published revision and its
+receipt. Environment rollout and health require separate deployer evidence.
 
 After the PR merges, fetch the target and prove absorption against the
 candidate's own HEAD: check ancestry and require `git cherry <delivery_ref>
@@ -382,7 +415,8 @@ state with `syncwheel resume` instead of improvising branch ownership.
 
 ## More
 
-See `docs/manifest-tracking.md` for the full tracking policy, `docs/ai-agents.md`
+See `docs/deployment-channels.md` for the channel lifecycle,
+`docs/manifest-tracking.md` for the full tracking policy, `docs/ai-agents.md`
 and `docs/agent-procedure.md` for the agent contract, and `docs/core-procedure.md`
 for the canonical recovery procedure. An automated post-merge cleanup path is
 specified in `docs/design/housekeeping-after-merge.md`.

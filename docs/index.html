@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Work from one branch; syncwheel projects it into many clean, rebuildable PR branches from one manifest — deterministic, multi-device, multi-agent-safe.">
+  <meta name="description" content="Deterministic Git coordination for human and AI teams: rebuild clean PR branches and pinned deployment-channel compositions from one manifest.">
   <title>syncwheel — One branch. Many PRs.</title>
   <link rel="icon" type="image/png" href="assets/syncwheel-logo.png">
   <style>
@@ -1141,6 +1141,7 @@
         <a href="#story">Story</a>
         <a href="#lifecycle">Lifecycle</a>
         <a href="#concepts">Concepts</a>
+        <a href="#channels">Channels</a>
         <a href="#agents">Agents</a>
         <a href="#docs">Docs</a>
         <a href="#get-started">Get started</a>
@@ -1164,9 +1165,9 @@
       <section class="hero">
         <img class="hero-logo" src="assets/syncwheel-logo.png" alt="" width="124" height="127">
         <div>
-          <span class="eyebrow"><span class="dot"></span> v<!-- syncwheel-version:start -->0.32.0<!-- syncwheel-version:end --> — reconcile · resume · ledger</span>
+          <span class="eyebrow"><span class="dot"></span> v<!-- syncwheel-version:start -->0.33.0<!-- syncwheel-version:end --> — deterministic Git coordination for human and AI teams</span>
           <h1><span class="title-line">One branch.</span><span class="title-line accent"><span class="accent-sky">Many</span> PRs.</span></h1>
-          <p class="subhead">Hack in one place. Syncwheel rebuilds, reconciles, and publishes every PR branch from one declared manifest.</p>
+          <p class="subhead">Declare PR stacks once. Rebuild clean review branches and pinned channel compositions from one manifest—then hand the exact tested digest to the deployment platform you already use.</p>
           <div class="actions">
             <a class="button primary" href="#get-started">Get started</a>
             <a class="button secondary icon-only" href="https://github.com/NestDevLab/syncwheel" aria-label="syncwheel on GitHub">
@@ -1746,6 +1747,42 @@
         </div>
       </section>
 
+      <section id="channels">
+        <h2 class="section-title">Compose what you deploy. Keep deployment honest.</h2>
+        <p class="section-lead">A channel is an ordered snapshot of exact stack revisions. Syncwheel rebuilds and publishes the Git branch; your deployment platform remains the authority for the environment.</p>
+        <div class="grid">
+          <article class="card">
+            <h3>Stacks are review units</h3>
+            <p>Each stack owns the commits and PR branch for one change. Updating a stack does not silently move an existing channel pin.</p>
+          </article>
+          <article class="card">
+            <h3>Integration is the whole workspace</h3>
+            <p><code>main-integration</code> combines every active stack for daily work. It is disposable and rebuildable, not an environment contract.</p>
+          </article>
+          <article class="card">
+            <h3>Channels are pinned compositions</h3>
+            <p><code>dev</code>, <code>test</code>, or a preview branch can contain only the selected stack revisions, in a declared order.</p>
+          </article>
+          <article class="card">
+            <h3>Deployment stays external</h3>
+            <p>A published channel proves a Git ref and composition digest. It never claims that a runtime deployed or became healthy.</p>
+          </article>
+        </div>
+
+        <div class="code" aria-label="Pinned deployment channel example">
+          <div class="codebar">
+            <span class="light"></span><span class="light"></span><span class="light"></span>
+            <span>channel flow</span>
+          </div>
+          <pre><code><span class="prompt">$</span> syncwheel channel create dev --lifecycle shared --stack core-api --apply
+<span class="prompt">$</span> syncwheel channel add dev checkout-v2 --apply
+<span class="prompt">$</span> syncwheel channel plan dev
+<span class="prompt">$</span> syncwheel channel publish dev --plan-digest sha256:&lt;reviewed-digest&gt; --apply</code></pre>
+        </div>
+        <p class="inline-note">Promotion copies exact tested pins; ephemeral previews expire as visible cleanup candidates and are never deleted remotely by surprise. Read the
+          <a href="https://github.com/NestDevLab/syncwheel/blob/main/docs/deployment-channels.md">deployment channel guide</a>.</p>
+      </section>
+
       <section id="agents">
         <div class="agents-strip">
           <svg viewBox="0 0 150 72" aria-hidden="true">
@@ -1787,7 +1824,11 @@
           </a>
           <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/workflow.md">
             <strong>Workflow model</strong>
-            <span>Stacks, manifest, integration, lifecycle.</span>
+            <span>Stacks, integration, channels, lifecycle.</span>
+          </a>
+          <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/deployment-channels.md">
+            <strong>Deployment channels</strong>
+            <span>Pinned compositions, exact plans, receipts, and deployment boundaries.</span>
           </a>
           <a class="doc-link" href="https://github.com/NestDevLab/syncwheel/blob/main/docs/deterministic-model.md">
             <strong>Deterministic model</strong>
@@ -1882,7 +1923,7 @@
     </main>
 
     <footer>
-      <span>syncwheel v<!-- syncwheel-version:start -->0.32.0<!-- syncwheel-version:end --> · MIT · a NestDevLab project</span>
+      <span>syncwheel v<!-- syncwheel-version:start -->0.33.0<!-- syncwheel-version:end --> · MIT · a NestDevLab project</span>
       <a class="logo-link" href="https://www.nestdev.it/" aria-label="NestDevLab">
         <img src="https://www.nestdev.it/assets/logo-nestdev.png" width="22" height="22" alt="">
       </a>

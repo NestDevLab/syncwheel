@@ -1,11 +1,16 @@
 # syncwheel
 
-> Deterministic Git maintenance for PR stacks, draft stacks, integration branches, and multi-agent
-> repositories — several pull requests built and published from one checkout, without a worktree per
-> branch.
+> Deterministic Git maintenance for PR stacks, draft stacks, integration branches, pinned deployment
+> channels, and multi-agent repositories — several pull requests built and published from one
+> checkout, without a worktree per branch.
 
 Journal mode is the plan-first single-branch alternative for safe allowlisted
 snapshots, exact-lease publication, and an optional Linux systemd user timer.
+
+Delivery manifest version 3 adds channels: an exact base plus selected stack
+revisions pinned into ordered, rebuildable branches with digest-bound apply
+receipts and exact-lease publication. Channel publication is not an environment
+deployment.
 
 ## Start Here
 
@@ -20,6 +25,7 @@ snapshots, exact-lease publication, and an optional Linux systemd user timer.
 - Core procedure: https://github.com/NestDevLab/syncwheel/blob/main/docs/core-procedure.md
 - Manifest tracking: https://github.com/NestDevLab/syncwheel/blob/main/docs/manifest-tracking.md
 - Active-active coordination: https://github.com/NestDevLab/syncwheel/blob/main/docs/design/active-active-coordination.md
+- Deployment channels: https://github.com/NestDevLab/syncwheel/blob/main/docs/deployment-channels.md
 - Workflow: https://github.com/NestDevLab/syncwheel/blob/main/docs/workflow.md
 - Branch model: https://github.com/NestDevLab/syncwheel/blob/main/docs/branch-model.md
 

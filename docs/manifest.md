@@ -145,6 +145,51 @@ branch is always `syncwheel/state/<coordination-id>`. See
 [active-active-coordination.md](design/active-active-coordination.md) for the
 publication and recovery protocol.
 
+### Version 3 deployment channels
+
+Version 3 adds `channels` to delivery manifests. A channel is an ordered branch
+composition pinned to exact stack revisions and commit lists; it is not an
+environment deployment. Version 2 clients fail closed on version 3 instead of
+publishing coordination state without its channel refs.
+
+The excerpt below is added alongside the version 2 defaults, integration,
+stacks, and coordination fields shown above:
+
+```json
+{
+  "version": 3,
+  "channels": [
+    {
+      "id": "dev",
+      "branch": "channel/dev",
+      "lifecycle": "shared",
+      "base": "origin/main",
+      "baseRevision": "9999999999999999999999999999999999999999",
+      "remote": "origin",
+      "composition": [
+        {
+          "stack": "feature-a",
+          "branch": "pr/feature-a",
+          "branchRevision": "1111111111111111111111111111111111111111",
+          "commits": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The first `channel create ... --apply` migrates an eligible version 2 delivery
+manifest to version 3. Review and commit that manifest change with the channel
+change. Journal mode rejects channels.
+
+`shared` channels have no expiry. `ephemeral` channels require ISO-8601
+`expiry.createdAt` and `expiry.expiresAt`; expiry is observable metadata, not an
+automatic deletion. Both lifecycles use explicit `channel close` cleanup.
+
+See [deployment-channels.md](deployment-channels.md) for the CLI and safety
+contract.
+
 Create a personal local manifest:
 
 ```bash
@@ -234,9 +279,21 @@ python3 scripts/syncwheel.py manifest require-integration --apply
   `--replay-mode` on the command overrides both. Omitted means `auto`.
   It is deliberately absent from coordination state: it changes how a ref was
   produced, not what it contains, so it is not shared topology.
-- version 2 `coordination.mode` is `active-active` or persisted `disabled`
-- version 2 coordination must use the same named remote as
+- version 2 or 3 `coordination.mode` is `active-active` or persisted `disabled`
+- version 2 or 3 coordination must use the same named remote as
   `defaults.publication_remote`
+- version 3 is required when `channels` is non-empty; channels are valid only in
+  delivery mode
+- every channel id and channel branch must be unique
+- channel lifecycle is `shared` or `ephemeral`; only ephemeral channels carry
+  expiry metadata
+- every channel pins the full `baseRevision` resolved from its symbolic `base`;
+  `channel refresh` is the explicit operation that advances this pin
+- each channel composition entry pins one unique stack with its branch, full
+  observed branch revision, and exact ordered full commit list
+- channel order is significant and independent of `integration.stacks`
+- active-active channels must publish to `coordination.remote`; shared channel
+  publication refuses draft stacks, while ephemeral channels may contain them
 - every stack id must be unique
 - every stack branch must be unique
 - `state` is `draft` or `published` and defaults to `published`; `publication`
@@ -258,6 +315,11 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 
 `syncwheel.py validate` checks:
 - manifest structure
+- channel version, delivery-mode, lifecycle, expiry, and uniqueness rules
+- existence of each channel symbolic base, pinned base revision, configured
+  remote, full pinned stack branch revision, and full pinned commit list
+- current stack-pin drift and expired ephemeral channels (reported without
+  automatic cleanup)
 - existence of integration base ref
 - existence of PR branches
 - existence of declared commits

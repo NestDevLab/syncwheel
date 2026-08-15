@@ -1,7 +1,8 @@
 # Syncwheel For AI Agents
 
-Use Syncwheel for deterministic Git maintenance in repositories with PR stacks, integration branches,
-dedicated worktrees, forks, or more than one human/agent touching branches.
+Use Syncwheel for deterministic Git maintenance in repositories with PR stacks,
+integration branches, pinned deployment channels, dedicated worktrees, forks,
+or more than one human/agent touching branches.
 
 ## First Checks
 
@@ -17,7 +18,7 @@ syncwheel reconcile
 If `syncwheel_tracking` is missing, stop and ask whether the repo should be `git-tracked` or
 `local-only`. Persist the answer with `syncwheel repo tracking set ... --apply` before continuing.
 
-For a version 2 manifest with `coordination.mode: "active-active"`, run this
+For a version 2 or 3 manifest with `coordination.mode: "active-active"`, run this
 read-only handoff check before planning a mutation or taking over from another
 device:
 
@@ -35,6 +36,19 @@ install/remove is also plan-first and Linux-only.
 - `reconcile` is read-only by default.
 - `sync`, `publish`, `reconcile --apply`, stack rebuilds, integration rebuilds, branch deletion, and
   pushes are mutations.
+- `channel list`, `channel show`, `channel diff`, and `channel plan` are
+  inspection/planning operations. Composition edits, `channel apply`, `channel
+  publish`, promotion, and close are mutations.
+- Treat channel apply as plan-bound: never reuse a stale plan or bypass its
+  observation revision and digest. Treat channel publish as an exact-lease
+  operation; a published channel branch is not evidence of an environment
+  deployment.
+- After an uncertain local-ref or remote outcome, inspect the actual ref and
+  latest channel ledger receipt before creating a new plan. Never retry blindly.
+- A channel pins its base as well as its stack revisions. Only `channel refresh`
+  advances the base pin. Shared channels refuse draft-stack publication;
+  ephemeral channels may use drafts, and active-active channels must use the
+  coordination remote.
 - Never mutate branches from a dirty checkout.
 - Rebuilds do not create a worktree. Ask for one with `--replay-mode desk` only when you need to
   resolve a conflict or build/test a branch in isolation, and put it under the declared Syncwheel
@@ -79,4 +93,5 @@ End with:
 - Agent procedure: `docs/agent-procedure.md`
 - Manifest tracking: `docs/manifest-tracking.md`
 - Active-active protocol: `docs/design/active-active-coordination.md`
+- Deployment channels: `docs/deployment-channels.md`
 - Core procedure: `docs/core-procedure.md`
