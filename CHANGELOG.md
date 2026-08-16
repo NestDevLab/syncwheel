@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.33.2 - 2026-08-16
+
+- Add plan-first `hooks status|install|remove` lifecycle for a composable managed-ref pre-push guard.
+- Derive protected integration, stack/draft source, channel, coordination-state, historical owned, and journal refs dynamically.
+- Scope publisher bypass to a short-lived, single-use remote/refset authorization and route every Syncwheel publisher through it.
+- Document the local `--no-verify` limitation and GitHub ruleset/App hardening path.
+- Make the guard required-by-default for owned `git-tracked` clones, with visible
+  compatible migration, fail-closed mutation enforcement after activation, and a
+  persisted reason-required opt-out.
+- Permit fail-closed partial adoption of real new stack refs without rebuilding
+  integration when integration shape and existing membership are unchanged.
+
 ## 0.33.1 - 2026-08-16
 
 - Add plan-first `coordination repair` with a serialized reviewed plan, exact

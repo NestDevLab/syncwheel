@@ -119,6 +119,11 @@ syncwheel handoff
 
 Use `publish`, `stack push`, or `int push` for that manifest's managed refs.
 They publish atomic state with exact leases; do not substitute a raw `git push`.
+Install the plan-first managed-ref guard in each clone with `syncwheel hooks
+install`, review the reported hook/chaining path and digest, then apply with
+`syncwheel hooks install --apply`. The guard is composable and catches accidental
+raw pushes, but `--no-verify` remains a local bypass and the hook is not a security
+boundary.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.
