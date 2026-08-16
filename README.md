@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.33.0`
+Current version: `0.33.1`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -111,6 +111,21 @@ push support and never falls back to serial pushes. See
 [the active-active protocol](docs/design/active-active-coordination.md) for the
 state model, lease handling, explicit merge acceptance, privacy contract, and
 local cleanup safeguards.
+
+When a managed branch is correct but coordination state recorded the wrong tip,
+use the reviewed repair protocol:
+
+```bash
+syncwheel coordination repair --ref refs/heads/main-integration > repair-plan.json
+syncwheel coordination repair --apply --plan-file repair-plan.json
+```
+
+Apply rechecks the exact plan, ownership, pending merges, and every guarded ref.
+Ordinary Git drops an unchanged no-op refspec, so there is no Git push fallback.
+GitHub branch locks are not sufficient: administrators can bypass or change
+them concurrently, so `github-lock` stops as unsupported before any state
+update. Apply remains unavailable until a backend can hold a continuous
+server-side transaction across the state ref and every guarded ref.
 
 ## Common Short Flags
 

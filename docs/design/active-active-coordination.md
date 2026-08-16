@@ -202,3 +202,30 @@ syncwheel gc --apply
 ```
 
 A lock can be released by stack ID even after that stack has been closed.
+
+## Repairing incorrect state evidence
+
+`coordination repair` is a narrow recovery protocol for a managed branch whose
+remote tip is already authoritative while the latest state commit records a
+different tip. Planning is read-only and emits a digest-bound JSON document.
+Apply requires that exact reviewed document, repeats ownership and pending-merge
+checks, and stops on any state or managed-ref drift.
+
+The child state is built directly from the validated parent rather than from the
+local manifest. It preserves the parent manifest and digest, tombstones, and all
+other managed refs, including refs no longer adopted locally. Only publication
+identity/evidence fields and the selected managed-ref tip change. The child has
+the previous state commit as its sole parent, making both repair and rollback
+append-only. Replanning an already repaired ref produces an idempotent no-op.
+
+Ordinary `git push --atomic` cannot provide the required transaction: Git omits
+an unchanged managed-ref refspec as up to date, so its lease is never sent. The
+apply boundary therefore requires an externally verified write freeze or a
+server-side transaction that continuously guards the state ref and every
+managed ref. GitHub branch locks do not meet that contract: administrators can
+bypass or change them during the operation. The `github-lock` backend therefore
+stops as unsupported before any state update. A future backend must hold its
+serialization primitive through CAS and post-verification. After apply,
+Syncwheel observes the new state tip, every guarded ref, the child Git parent,
+the child's declared state parent, and the repaired value before it reports
+success. An ambiguous observation is an unknown outcome, never a retry.
