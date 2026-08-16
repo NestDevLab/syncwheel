@@ -1145,3 +1145,194 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         module.run_coordination_gc(repo, manifest, apply=True, fetch=False, state_info=state_info)
         self.assertFalse(worktree.exists())
         self.assertNotEqual(self.git(repo, 'show-ref', '--verify', '--quiet', 'refs/heads/pr/stale', expected=1).returncode, 0)
+
+    def test_repair_is_reviewed_exact_cas_and_preserves_parent_payload(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'repair')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        parent_tip, parent = self.remote_state(origin)
+        branch = 'integration/shared'
+        (repo / 'after-state.txt').write_text('advanced under fixture freeze\n')
+        self.git(repo, 'add', 'after-state.txt')
+        self.git(repo, 'commit', '-qm', 'test: advance managed ref')
+        advanced = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'push', 'origin', branch)
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        ref = f'refs/heads/{branch}'
+        plan, _ = module.coordination_repair_plan(repo, manifest, ref, 'fixture-freeze')
+        self.assertEqual(plan['status'], 'repair-required')
+        self.assertEqual(plan['expectedStateTip'], parent_tip)
+        self.assertEqual(plan['expectedRemoteTip'], advanced)
+
+        class FrozenFixtureBackend(module.CoordinationRepairBackend):
+            name = 'fixture-freeze'
+
+            def preflight(self, **_kwargs):
+                return {'freeze': 'verified-fixture'}
+
+            postflight = preflight
+
+            def apply(self, **kwargs):
+                observed = module.remote_ref_tips(
+                    kwargs['repo_root'], kwargs['remote'], list(kwargs['guarded_refs'])
+                )
+                if observed != kwargs['guarded_refs']:
+                    raise module.SyncwheelError('fixture freeze lost before state CAS')
+                result = module.git(
+                    kwargs['repo_root'],
+                    'push',
+                    f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
+                    kwargs['remote'],
+                    f"{kwargs['new_state_tip']}:{kwargs['state_ref']}",
+                    check=False,
+                )
+                if result.returncode:
+                    raise module.SyncwheelError('fixture state CAS rejected')
+                return {'freeze': 'verified-fixture'}
+
+        result = module.apply_coordination_repair_plan(
+            repo, manifest, plan, backend=FrozenFixtureBackend()
+        )
+        self.assertEqual(result['status'], 'repaired')
+        child_tip, child = self.remote_state(origin)
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], parent_tip)
+        self.assertEqual(child['managed_refs'][ref], advanced)
+        for key in ('manifest', 'manifest_digest', 'tombstones'):
+            self.assertEqual(child[key], parent[key])
+        for managed_ref, tip in parent['managed_refs'].items():
+            if managed_ref != ref:
+                self.assertEqual(child['managed_refs'][managed_ref], tip)
+
+        noop, _ = module.coordination_repair_plan(repo, manifest, ref, 'fixture-freeze')
+        self.assertEqual(noop['status'], 'noop')
+        noop_result = module.apply_coordination_repair_plan(
+            repo, manifest, noop, backend=FrozenFixtureBackend()
+        )
+        self.assertEqual(noop_result['status'], 'noop')
+        self.assertEqual(self.remote_state(origin)[0], child_tip)
+        self.run_cli(repo, 'int', 'push')
+
+        stack_tip = self.commit_on_branch(repo, 'pr/after-repair', 'after-repair.txt')
+        self.run_cli(
+            repo,
+            'stack',
+            'create',
+            'after-repair',
+            stack_tip,
+            '--branch',
+            'pr/after-repair',
+        )
+        self.run_cli(repo, 'stack', 'push', 'after-repair')
+        self.run_cli(repo, 'stack', 'close', 'after-repair', '--force')
+        _, closed_state = self.remote_state(origin)
+        self.assertTrue(
+            any(item.get('stack') == 'after-repair' for item in closed_state['tombstones'])
+        )
+
+    def test_repair_rejects_plan_drift_wrong_lease_and_unsupported_github(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'repair-races')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        no_op = self.git(
+            repo,
+            'push',
+            '--atomic',
+            '--dry-run',
+            '--force-with-lease=refs/heads/integration/shared:' + ('0' * 40),
+            'origin',
+            'refs/heads/integration/shared:refs/heads/integration/shared',
+        )
+        self.assertIn('up-to-date', (no_op.stdout + no_op.stderr).lower())
+        (repo / 'race.txt').write_text('race\n')
+        self.git(repo, 'add', 'race.txt')
+        self.git(repo, 'commit', '-qm', 'test: race')
+        self.git(repo, 'push', 'origin', 'integration/shared')
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        ref = 'refs/heads/integration/shared'
+        github_plan, _ = module.coordination_repair_plan(repo, manifest, ref)
+
+        def backend_plan(name):
+            candidate = json.loads(json.dumps(github_plan))
+            candidate['freezeBackend'] = name
+            unsigned = {key: value for key, value in candidate.items() if key != 'planDigest'}
+            candidate['planDigest'] = module.canonical_json_digest(unsigned)
+            return candidate
+
+        plan = backend_plan('fixture-wrong-lease')
+
+        tampered = json.loads(json.dumps(plan))
+        tampered['expectedRemoteTip'] = '0' * 40
+        with self.assertRaisesRegex(module.SyncwheelError, 'digest'):
+            module.apply_coordination_repair_plan(repo, manifest, tampered)
+        with self.assertRaisesRegex(module.SyncwheelError, 'GitHub branch locks can be bypassed'):
+            module.apply_coordination_repair_plan(repo, manifest, github_plan)
+
+        class WrongLeaseBackend(module.CoordinationRepairBackend):
+            name = 'fixture-wrong-lease'
+
+            def preflight(self, **_kwargs):
+                return {'freeze': 'verified-fixture'}
+
+            postflight = preflight
+
+            def apply(self, **_kwargs):
+                raise module.SyncwheelError('fixture state CAS rejected: wrong lease')
+
+        state_before = self.remote_state(origin)[0]
+        with self.assertRaisesRegex(module.SyncwheelError, 'wrong lease'):
+            module.apply_coordination_repair_plan(
+                repo, manifest, plan, backend=WrongLeaseBackend()
+            )
+        self.assertEqual(self.remote_state(origin)[0], state_before)
+
+        class LostOutcomeBackend(module.CoordinationRepairBackend):
+            name = 'fixture-lost-outcome'
+
+            def preflight(self, **_kwargs):
+                return {'freeze': 'verified-fixture'}
+
+            postflight = preflight
+
+            def apply(self, **_kwargs):
+                return {'claimed': 'success'}
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'outcome is unknown'):
+            module.apply_coordination_repair_plan(
+                repo, manifest, backend_plan('fixture-lost-outcome'), backend=LostOutcomeBackend()
+            )
+
+        stale = json.loads(json.dumps(plan))
+        stale['expectedStateTip'] = '1' * 40
+        unsigned = {key: value for key, value in stale.items() if key != 'planDigest'}
+        stale['planDigest'] = module.canonical_json_digest(unsigned)
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_repair_plan(
+                repo, manifest, stale, backend=WrongLeaseBackend()
+            )
+
+    def test_github_lock_backend_stops_before_state_cas(self):
+        module = self.load_module()
+        with self.assertRaisesRegex(module.SyncwheelError, 'GitHub branch locks can be bypassed'):
+            module.GitHubLockCoordinationRepairBackend().preflight()
+
+    def test_repair_rejects_malformed_reviewed_plan(self):
+        module = self.load_module()
+        with self.assertRaisesRegex(module.SyncwheelError, 'must be a JSON object'):
+            module.apply_coordination_repair_plan(Path('.'), {}, [])
+        with self.assertRaisesRegex(module.SyncwheelError, 'plan is missing'):
+            module.apply_coordination_repair_plan(Path('.'), {}, {})
+        origin = self.create_remote()
+        repo = self.clone(origin, 'malformed-repair-plan')
+        self.init_coordinated(repo)
+        plan_path = repo / 'repair-plan.json'
+        plan_path.write_text('[]\n')
+        result = self.run_cli(
+            repo, 'coordination', 'repair', '--apply', '--plan-file', str(plan_path), expected=2
+        )
+        self.assertIn('plan must be a JSON object', result.stderr)

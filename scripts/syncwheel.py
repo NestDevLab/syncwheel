@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import contextlib
 import datetime
 import fnmatch
@@ -65,6 +66,7 @@ COORDINATION_STATE_PREFIX = 'syncwheel/state/'
 COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
 COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
 COORDINATION_LEASE_SECONDS = 5 * 60
+COORDINATION_REPAIR_PLAN_SCHEMA_VERSION = 1
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel Coordination',
@@ -3778,6 +3780,217 @@ def build_coordination_state(repo_root, manifest, config, previous, observed_ref
     }
 
 
+def build_coordination_repair_state(previous_state, previous_tip, repaired_ref, repaired_tip, installation):
+    """Build an append-only repair child without re-projecting prior public state.
+
+    A repair corrects transport evidence, not topology.  Deep-copying the
+    validated parent is deliberate: the manifest snapshot and digest,
+    tombstones, and every unmentioned (including no-longer-adopted) managed ref
+    remain byte-for-byte equal when encoded as their JSON values.
+    """
+    validate_coordination_state(previous_state)
+    if not isinstance(previous_tip, str) or not re.fullmatch(r'[0-9a-f]{40}', previous_tip):
+        raise SyncwheelError('coordination repair requires an exact 40-hex parent state tip')
+    if not is_valid_coordination_branch_ref(repaired_ref):
+        raise SyncwheelError(f'coordination repair ref must be a full branch ref: {repaired_ref!r}')
+    if not isinstance(repaired_tip, str) or not re.fullmatch(r'[0-9a-f]{40}', repaired_tip):
+        raise SyncwheelError('coordination repair requires an exact 40-hex managed ref tip')
+    if repaired_ref not in previous_state['managed_refs']:
+        raise SyncwheelError(
+            f'coordination repair refuses unadopted ref {repaired_ref}; publish ownership first'
+        )
+    child = copy.deepcopy(previous_state)
+    child['publication_id'] = str(uuid.uuid4())
+    child['parent_state'] = previous_tip
+    child['created_at'] = iso_utc_now()
+    child['syncwheel_version'] = VERSION
+    child['installation_id'] = installation
+    child['managed_refs'][repaired_ref] = repaired_tip
+    child['changed_refs'] = {repaired_ref: repaired_tip}
+    child['publication_scope'] = f'repair:{repaired_ref}'
+    child['projection_status'] = previous_state.get('projection_status')
+    return validate_coordination_state(child, previous_state['coordination_id'])
+
+
+def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='github-lock'):
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        raise SyncwheelError('coordination repair requires active-active coordination')
+    profile, local_coordination = coordination_profile(repo_root)
+    pending = local_coordination.get('pending_merge')
+    if isinstance(pending, dict) and pending.get('coordination_id') == config['id']:
+        raise SyncwheelError('coordination repair STOP: a pending coordination merge must be resolved first')
+    previous = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    if not previous['state'] or not previous['tip']:
+        raise SyncwheelError('coordination repair requires an existing remote coordination state')
+    for owned_ref, owned_tip in previous['state']['managed_refs'].items():
+        if not is_valid_coordination_branch_ref(owned_ref):
+            raise SyncwheelError(f'coordination repair state has an invalid managed ref: {owned_ref!r}')
+        if not isinstance(owned_tip, str) or not re.fullmatch(r'[0-9a-f]{40}', owned_tip):
+            raise SyncwheelError(
+                f'coordination repair state lacks an exact tip for managed ref: {owned_ref}'
+            )
+    require_exclusive_coordination_ownership(
+        repo_root, config, previous['state']['managed_refs']
+    )
+    if repaired_ref not in previous['state']['managed_refs']:
+        raise SyncwheelError(f'coordination repair refuses unowned ref: {repaired_ref}')
+    observed_refs = remote_ref_tips(
+        repo_root, config['remote'], list(previous['state']['managed_refs'])
+    )
+    observed = observed_refs[repaired_ref]
+    if not observed:
+        raise SyncwheelError(f'coordination repair managed ref is absent: {repaired_ref}')
+    expected_recorded = previous['state']['managed_refs'][repaired_ref]
+    payload = {
+        'schemaVersion': COORDINATION_REPAIR_PLAN_SCHEMA_VERSION,
+        'operation': 'coordination-repair',
+        'coordinationId': config['id'],
+        'remote': config['remote'],
+        'stateRef': coordination_state_ref(config),
+        'expectedStateTip': previous['tip'],
+        'repairedRef': repaired_ref,
+        'expectedRecordedTip': expected_recorded,
+        'expectedRemoteTip': observed,
+        'guardedRefs': dict(sorted(observed_refs.items())),
+        'localManifestDigest': coordination_manifest_digest(manifest, repo_root),
+        'status': 'noop' if expected_recorded == observed else 'repair-required',
+        'precondition': 'externally-verified-write-freeze-or-server-transaction',
+        'freezeBackend': freeze_backend,
+    }
+    payload['planDigest'] = canonical_json_digest(payload)
+    return payload, previous
+
+
+class CoordinationRepairBackend:
+    """Server-side serialization seam; ordinary Git push is intentionally absent."""
+
+    name = 'unsupported'
+
+    def preflight(self, **_kwargs):
+        raise SyncwheelError(
+            'coordination repair STOP unsupported: no verified write-freeze backend is selected'
+        )
+
+    def apply(self, **_kwargs):
+        raise SyncwheelError('coordination repair backend cannot apply state CAS')
+
+    def postflight(self, **kwargs):
+        return self.preflight(**kwargs)
+
+    def observe(self, repo_root, remote, refs):
+        return remote_ref_tips(repo_root, remote, refs)
+
+
+class GitHubLockCoordinationRepairBackend(CoordinationRepairBackend):
+    name = 'github-lock'
+
+    def preflight(self, **_kwargs):
+        raise SyncwheelError(
+            'coordination repair STOP unsupported: GitHub branch locks can be bypassed or '
+            'changed concurrently and do not provide a continuous server-side transaction'
+        )
+
+
+def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
+    if not isinstance(plan, dict):
+        raise SyncwheelError('coordination repair plan must be a JSON object')
+    required_plan_keys = {
+        'schemaVersion', 'operation', 'coordinationId', 'remote', 'stateRef',
+        'expectedStateTip', 'repairedRef', 'expectedRecordedTip',
+        'expectedRemoteTip', 'guardedRefs', 'localManifestDigest', 'status',
+        'precondition', 'freezeBackend', 'planDigest',
+    }
+    missing = sorted(required_plan_keys - set(plan))
+    if missing:
+        raise SyncwheelError('coordination repair plan is missing: ' + ', '.join(missing))
+    if backend is None:
+        backend = (
+            GitHubLockCoordinationRepairBackend()
+            if plan.get('freezeBackend') == 'github-lock'
+            else CoordinationRepairBackend()
+        )
+    supplied_digest = plan.get('planDigest')
+    unsigned = {key: value for key, value in plan.items() if key != 'planDigest'}
+    if supplied_digest != canonical_json_digest(unsigned):
+        raise SyncwheelError('coordination repair plan digest is invalid')
+    if plan.get('schemaVersion') != COORDINATION_REPAIR_PLAN_SCHEMA_VERSION:
+        raise SyncwheelError('unsupported coordination repair plan schema')
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        raise SyncwheelError('coordination repair requires active-active coordination')
+    if plan.get('coordinationId') != config['id'] or plan.get('remote') != config['remote']:
+        raise SyncwheelError('coordination repair plan does not match the active coordination domain')
+    if plan.get('freezeBackend') != backend.name:
+        raise SyncwheelError('coordination repair backend does not match the reviewed plan')
+    if plan.get('localManifestDigest') != coordination_manifest_digest(manifest, repo_root):
+        raise SyncwheelError('coordination repair STOP: local manifest changed after review')
+    current_plan, previous = coordination_repair_plan(
+        repo_root, manifest, plan['repairedRef'], plan['freezeBackend']
+    )
+    for key in ('stateRef', 'expectedStateTip', 'expectedRecordedTip', 'expectedRemoteTip', 'guardedRefs', 'localManifestDigest'):
+        if current_plan.get(key) != plan.get(key):
+            raise SyncwheelError(f'coordination repair STOP: reviewed plan drifted at {key}')
+    if plan.get('status') == 'noop':
+        return {'status': 'noop', 'state_tip': previous['tip'], 'plan_digest': supplied_digest}
+    backend.preflight(
+        repo_root=repo_root,
+        remote=config['remote'],
+        state_ref=plan['stateRef'],
+        expected_state_tip=plan['expectedStateTip'],
+        guarded_refs=plan['guardedRefs'],
+    )
+    installation = installation_id(create=True)
+    child = build_coordination_repair_state(
+        previous['state'], previous['tip'], plan['repairedRef'], plan['expectedRemoteTip'], installation
+    )
+    child_tip = create_coordination_state_commit(repo_root, child, previous['tip'])
+    result = backend.apply(
+        repo_root=repo_root,
+        remote=config['remote'],
+        state_ref=plan['stateRef'],
+        expected_state_tip=plan['expectedStateTip'],
+        new_state_tip=child_tip,
+        guarded_refs=plan['guardedRefs'],
+    )
+    observed = backend.observe(
+        repo_root, config['remote'], [plan['stateRef'], *plan['guardedRefs']]
+    )
+    if observed.get(plan['stateRef']) != child_tip:
+        raise SyncwheelError('coordination repair outcome is unknown: state CAS was not observed')
+    drifted = {
+        ref: (tip, observed.get(ref)) for ref, tip in plan['guardedRefs'].items()
+        if observed.get(ref) != tip
+    }
+    if drifted:
+        raise SyncwheelError('coordination repair post-verification failed: guarded refs drifted')
+    backend.postflight(
+        repo_root=repo_root,
+        remote=config['remote'],
+        state_ref=plan['stateRef'],
+        expected_state_tip=child_tip,
+        guarded_refs=plan['guardedRefs'],
+    )
+    verified = coordination_state_from_commit(repo_root, child_tip, config['id'])
+    git_parent = git(repo_root, 'rev-parse', f'{child_tip}^').stdout.strip()
+    if (
+        git_parent != previous['tip']
+        or verified['parent_state'] != previous['tip']
+        or verified['managed_refs'][plan['repairedRef']] != plan['expectedRemoteTip']
+    ):
+        raise SyncwheelError('coordination repair post-verification failed: invalid child state')
+    return {
+        'status': 'repaired',
+        'state_tip': child_tip,
+        'parent_state': previous['tip'],
+        'plan_digest': supplied_digest,
+        'backend': backend.name,
+        'backend_result': result,
+    }
+
+
 def create_coordination_state_commit(repo_root, state, parent_tip=None):
     encoded = json.dumps(state, indent=2, sort_keys=True) + '\n'
     blob = run(['git', 'hash-object', '-w', '--stdin'], cwd=repo_root, input_text=encoded).stdout.strip()
@@ -6875,6 +7088,36 @@ def command_coordination_disable(args):
         {'previous_mode': existing.get('mode', 'legacy')},
     )
     print('coordination disabled; no remote state branch was deleted')
+    return 0
+
+
+def command_coordination_repair(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if not args.apply:
+        if not args.ref:
+            raise SyncwheelError('coordination repair planning requires --ref')
+        if args.plan_file:
+            raise SyncwheelError('--plan-file is only valid with --apply')
+        plan, _ = coordination_repair_plan(repo_root, manifest, args.ref, args.freeze_backend)
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    if not args.plan_file:
+        raise SyncwheelError(
+            'coordination repair --apply requires --plan-file with the exact reviewed plan'
+        )
+    try:
+        plan = json.loads(Path(args.plan_file).read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(f'cannot read coordination repair plan: {exc}') from exc
+    if not isinstance(plan, dict):
+        raise SyncwheelError('coordination repair plan must be a JSON object')
+    if args.ref and args.ref != plan.get('repairedRef'):
+        raise SyncwheelError('--ref does not match the reviewed repair plan')
+    if args.freeze_backend != plan.get('freezeBackend'):
+        raise SyncwheelError('--freeze-backend does not match the reviewed repair plan')
+    result = apply_coordination_repair_plan(repo_root, manifest, plan)
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
@@ -11596,6 +11839,29 @@ def build_parser():
     coordination_disable_p = coordination_sub.add_parser('disable', parents=[common])
     coordination_disable_p.add_argument('-a', '--apply', action='store_true')
     coordination_disable_p.set_defaults(func=command_coordination_disable)
+
+    coordination_repair_p = coordination_sub.add_parser(
+        'repair',
+        parents=[common],
+        help='plan or apply a serialized coordination-state repair under an external write freeze',
+    )
+    coordination_repair_p.add_argument(
+        '--ref',
+        required=False,
+        help='full already-owned managed branch ref to repair (required while planning)',
+    )
+    coordination_repair_p.add_argument('-a', '--apply', action='store_true')
+    coordination_repair_p.add_argument(
+        '--freeze-backend',
+        choices=['github-lock'],
+        default='github-lock',
+        help='reviewed external serialization backend (default: github-lock)',
+    )
+    coordination_repair_p.add_argument(
+        '--plan-file',
+        help='exact reviewed JSON plan; required with --apply',
+    )
+    coordination_repair_p.set_defaults(func=command_coordination_repair)
 
     handoff_p = sub.add_parser(
         'handoff',

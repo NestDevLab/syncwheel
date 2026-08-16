@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.33.1 - 2026-08-16
+
+- Add plan-first `coordination repair` with a serialized reviewed plan, exact
+  coordination-state CAS, append-only byte-preserving child state, ownership
+  and pending-merge stops, idempotency, and post-application verification.
+- Require a continuous external write freeze or transactional backend for
+  apply; reject GitHub branch locks as unsupported because administrators can
+  bypass or change them concurrently.
+
 ## 0.33.0 - 2026-08-15
 
 - Add manifest version 3 deployment channels: ordered, pinned stack
