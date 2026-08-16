@@ -110,6 +110,10 @@ AGENTWHEEL_SYNCWHEEL_ADAPTER = 'codex'
 AGENTWHEEL_SYNCWHEEL_INSTALLATION_TYPE = 'local'
 AGENTWHEEL_DOCTOR_TIMEOUT_SECONDS = 10
 SYNCWHEEL_HOOKS_PATH = 'githooks'
+MANAGED_PUSH_HOOK_MARKER = '# syncwheel-managed-ref-guard v1'
+MANAGED_PUSH_AUTH_ENV = 'SYNCWHEEL_PUSH_AUTH_FILE'
+MANAGED_PUSH_SECRET_ENV = 'SYNCWHEEL_PUSH_AUTH_SECRET'
+MANAGED_PUSH_AUTH_TTL_SECONDS = 60
 FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel',
@@ -626,6 +630,303 @@ def install_syncwheel_hooks(root=None, dry_run=False):
         return status
     run(command, cwd=root)
     return install_hooks_status(root)
+
+
+def git_common_dir(repo_root):
+    result = git(repo_root, 'rev-parse', '--git-common-dir')
+    path = Path(result.stdout.strip())
+    return (repo_root / path).resolve() if not path.is_absolute() else path.resolve()
+
+
+def active_hooks_dir(repo_root):
+    configured = git(repo_root, 'config', '--get', 'core.hooksPath', check=False).stdout.strip()
+    if configured:
+        path = Path(configured)
+        return ((repo_root / path).resolve() if not path.is_absolute() else path.resolve()), configured
+    return git_common_dir(repo_root) / 'hooks', None
+
+
+def managed_push_hook_paths(repo_root):
+    hooks_dir, configured = active_hooks_dir(repo_root)
+    hook = hooks_dir / 'pre-push'
+    backup = hooks_dir / 'pre-push.syncwheel-chain'
+    return hooks_dir, hook, backup, configured
+
+
+def managed_push_hook_content(backup_exists):
+    chain = (
+        'if [ -x "$hook_dir/pre-push.syncwheel-chain" ]; then\n'
+        '  "$hook_dir/pre-push.syncwheel-chain" "$@" <"$input"\n'
+        'fi\n'
+        if backup_exists else ''
+    )
+    return (
+        '#!/bin/sh\n'
+        f'{MANAGED_PUSH_HOOK_MARKER}\n'
+        'set -eu\n'
+        'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+        'input=$(mktemp "${TMPDIR:-/tmp}/syncwheel-pre-push.XXXXXX")\n'
+        'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
+        'cat >"$input"\n'
+        + chain +
+        'syncwheel hooks guard --remote-name "${1:-}" --remote-url "${2:-}" <"$input"\n'
+    )
+
+
+def managed_push_hook_status(repo_root):
+    hooks_dir, hook, backup, configured = managed_push_hook_paths(repo_root)
+    metadata_path = hooks_dir / 'pre-push.syncwheel-meta.json'
+    existing = hook.read_text() if hook.is_file() else None
+    marker = bool(existing and existing.startswith('#!/bin/sh\n' + MANAGED_PUSH_HOOK_MARKER))
+    digest = hashlib.sha256(existing.encode()).hexdigest() if existing is not None else None
+    try:
+        metadata = json.loads(metadata_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        metadata = None
+    chained_digest = hashlib.sha256(backup.read_bytes()).hexdigest() if backup.is_file() else None
+    chain_matches = bool(
+        metadata
+        and metadata.get('chainedDigest') == chained_digest
+        and (backup.exists() == (metadata.get('chainedDigest') is not None))
+    )
+    owned = bool(marker and metadata and metadata.get('digest') == digest and chain_matches)
+    return {
+        'hooksPath': configured,
+        'hooksDir': str(hooks_dir),
+        'hook': str(hook),
+        'exists': hook.exists(),
+        'owned': owned,
+        'marker': marker,
+        'digest': digest,
+        'metadata': str(metadata_path),
+        'chained': backup.exists(),
+        'chainedDigest': chained_digest,
+        'chainMatches': chain_matches,
+        'status': 'installed' if owned else ('conflict' if hook.exists() or metadata_path.exists() else 'absent'),
+    }
+
+
+def managed_push_guard_policy(repo_root, manifest):
+    profile = load_repo_profile(repo_root)
+    hooks = profile.get('hooks') or {}
+    if not isinstance(hooks, dict):
+        raise SyncwheelError('syncwheel profile hooks state must be an object')
+    disabled = hooks.get('mode') == 'disabled'
+    enforced = hooks.get('mode') == 'required'
+    reason = hooks.get('reason')
+    if disabled and (not isinstance(reason, str) or not reason.strip()):
+        raise SyncwheelError('hooks.mode=disabled requires a non-empty persisted reason')
+    tracking = manifest.get('syncwheel_tracking')
+    required = tracking == SYNCWHEEL_TRACKING_GIT_TRACKED and bool(
+        managed_ref_names(manifest)
+        or coordination_is_active(manifest)
+        or manifest.get('repository_mode') == 'journal'
+    )
+    hook = managed_push_hook_status(repo_root)
+    expected = hashlib.sha256(managed_push_hook_content(hook['chained']).encode()).hexdigest()
+    ready = hook['owned'] and hook['digest'] == expected
+    return {
+        'required': required,
+        'disabled': disabled,
+        'enforced': enforced,
+        'migrationPending': required and not disabled and not enforced,
+        'disabledReason': reason if disabled else None,
+        'ready': ready,
+        'expectedDigest': expected,
+        'hook': hook,
+        'mode': (
+            'disabled' if disabled else
+            ('required' if enforced else ('required-pending-migration' if required else 'optional'))
+        ),
+    }
+
+
+def require_managed_push_guard(repo_root, manifest):
+    policy = managed_push_guard_policy(repo_root, manifest)
+    if policy['required'] and policy['enforced'] and not policy['ready']:
+        raise SyncwheelError(
+            'managed-ref guard is required but missing, stale, or tampered; '
+            'review `syncwheel hooks install`, then run `syncwheel hooks install --apply`'
+        )
+    return policy
+
+
+def install_managed_push_hook(repo_root, apply=False):
+    status = managed_push_hook_status(repo_root)
+    if status['owned']:
+        if apply:
+            profile = load_repo_profile(repo_root)
+            profile['hooks'] = {'mode': 'required'}
+            save_repo_profile(repo_root, profile)
+        return {'action': 'none', **status}
+    if status['status'] == 'conflict' and not status['exists']:
+        raise SyncwheelError(f"hook metadata conflict: {status['metadata']}")
+    hooks_dir, hook, backup, _ = managed_push_hook_paths(repo_root)
+    metadata_path = hooks_dir / 'pre-push.syncwheel-meta.json'
+    if backup.exists():
+        raise SyncwheelError(f'hook chaining conflict: retained backup already exists: {backup}')
+    content = managed_push_hook_content(status['exists'])
+    plan = {
+        'action': 'install', 'hook': str(hook), 'chainExisting': status['exists'],
+        'digest': hashlib.sha256(content.encode()).hexdigest(), 'apply': apply,
+    }
+    if not apply:
+        return plan
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    if status['exists']:
+        os.replace(hook, backup)
+    try:
+        hook.write_text(content)
+        hook.chmod(0o755)
+        metadata_path.write_text(json.dumps({
+            'version': 1,
+            'owner': 'syncwheel-managed-ref-guard',
+            'digest': hashlib.sha256(content.encode()).hexdigest(),
+            'chainedDigest': (
+                hashlib.sha256(backup.read_bytes()).hexdigest() if backup.exists() else None
+            ),
+        }, indent=2, sort_keys=True) + '\n')
+    except BaseException:
+        try:
+            metadata_path.unlink()
+        except FileNotFoundError:
+            pass
+        if hook.exists():
+            hook.unlink()
+        if backup.exists():
+            os.replace(backup, hook)
+        raise
+    profile = load_repo_profile(repo_root)
+    profile['hooks'] = {'mode': 'required'}
+    save_repo_profile(repo_root, profile)
+    return {'action': 'installed', **managed_push_hook_status(repo_root)}
+
+
+def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None):
+    status = managed_push_hook_status(repo_root)
+    if not status['owned']:
+        if status['exists']:
+            raise SyncwheelError('pre-push hook is not owned by Syncwheel; refusing removal')
+        if disable:
+            if not isinstance(reason, str) or not reason.strip():
+                raise SyncwheelError('--disable requires --reason')
+            if apply:
+                profile = load_repo_profile(repo_root)
+                profile['hooks'] = {'mode': 'disabled', 'reason': reason.strip()}
+                save_repo_profile(repo_root, profile)
+            return {
+                'action': 'disable' if apply else 'plan-disable',
+                'reason': reason, **status,
+            }
+        return {'action': 'none', **status}
+    _, hook, backup, _ = managed_push_hook_paths(repo_root)
+    metadata_path = hook.with_name('pre-push.syncwheel-meta.json')
+    if disable and (not isinstance(reason, str) or not reason.strip()):
+        raise SyncwheelError('--disable requires --reason')
+    plan = {
+        'action': 'remove', 'hook': str(hook), 'restoreChained': backup.exists(),
+        'disable': disable, 'reason': reason if disable else None, 'apply': apply,
+    }
+    if not apply:
+        return plan
+    hook.unlink()
+    metadata_path.unlink()
+    if backup.exists():
+        os.replace(backup, hook)
+    if disable:
+        profile = load_repo_profile(repo_root)
+        profile['hooks'] = {'mode': 'disabled', 'reason': reason.strip()}
+        save_repo_profile(repo_root, profile)
+    return {'action': 'removed', **managed_push_hook_status(repo_root)}
+
+
+def managed_push_refs(repo_root, manifest):
+    refs = set(managed_ref_names(manifest))
+    config = coordination_config(manifest)
+    if config and config.get('mode') == 'active-active':
+        refs.add(coordination_state_ref(config))
+        previous = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        if previous.get('state'):
+            refs.update(previous['state'].get('managed_refs') or {})
+    if manifest.get('repository_mode') == 'journal':
+        refs.add(f"refs/heads/{manifest['journal']['branch']}")
+    return refs
+
+
+def parse_pre_push_updates(stream):
+    updates = []
+    for number, raw in enumerate(stream, 1):
+        fields = raw.rstrip('\n').split()
+        if len(fields) != 4:
+            raise SyncwheelError(f'invalid pre-push input at line {number}')
+        updates.append({'localRef': fields[0], 'localSha': fields[1], 'remoteRef': fields[2], 'remoteSha': fields[3]})
+    return updates
+
+
+def push_auth_digest(payload, secret):
+    encoded = json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()
+    return hashlib.sha256(secret.encode() + b'\0' + encoded).hexdigest()
+
+
+def authorize_syncwheel_push(repo_root, remote, refs):
+    auth_dir = git_common_dir(repo_root) / 'syncwheel-push-auth'
+    auth_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    secret = uuid.uuid4().hex + uuid.uuid4().hex
+    payload = {
+        'version': 1, 'remote': remote, 'refs': sorted(set(refs)),
+        'expiresAt': time.time() + MANAGED_PUSH_AUTH_TTL_SECONDS, 'nonce': uuid.uuid4().hex,
+    }
+    record = {'payload': payload, 'digest': push_auth_digest(payload, secret)}
+    path = auth_dir / f"{payload['nonce']}.json"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, 'w') as handle:
+        json.dump(record, handle, sort_keys=True)
+    return path, secret
+
+
+def run_authorized_push(repo_root, command, remote, refs, check=True):
+    path, secret = authorize_syncwheel_push(repo_root, remote, refs)
+    env = {MANAGED_PUSH_AUTH_ENV: str(path), MANAGED_PUSH_SECRET_ENV: secret}
+    try:
+        if command[:2] == ['git', 'push']:
+            return git(repo_root, *command[1:], env=env, check=check)
+        return run(command, cwd=repo_root, env=env, check=check)
+    finally:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def verify_managed_push_authorization(repo_root, remote, refs):
+    path_value = os.environ.get(MANAGED_PUSH_AUTH_ENV)
+    secret = os.environ.get(MANAGED_PUSH_SECRET_ENV)
+    if not path_value or not secret:
+        return False
+    path = Path(path_value).resolve()
+    auth_dir = (git_common_dir(repo_root) / 'syncwheel-push-auth').resolve()
+    if path.parent != auth_dir or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
+        return False
+    try:
+        record = json.loads(path.read_text())
+        payload = record['payload']
+        valid = (
+            record.get('digest') == push_auth_digest(payload, secret)
+            and payload.get('version') == 1
+            and payload.get('remote') == remote
+            and set(refs).issubset(set(payload.get('refs') or []))
+            and bool(refs)
+            and float(payload.get('expiresAt', 0)) >= time.time()
+        )
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        valid = False
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    return valid
 
 
 def shell_command(command):
@@ -4336,6 +4637,24 @@ def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local
     return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, local_tip, check=False).returncode == 0
 
 
+def integration_partial_stack_adoption_allowed(
+    remote_integration, local_integration, added, changed_stack_refs, tombstone=None
+):
+    remote_shape = dict(remote_integration or {})
+    local_shape = dict(local_integration or {})
+    remote_members = remote_shape.pop('stacks', None)
+    local_members = local_shape.pop('stacks', None)
+    return (
+        not tombstone
+        and remote_shape == local_shape
+        and isinstance(remote_members, list)
+        and isinstance(local_members, list)
+        and [item for item in local_members if item not in added] == remote_members
+        and all(stack_id in local_members for stack_id in added)
+        and all(stack_id in changed_stack_refs for stack_id in added)
+    )
+
+
 def validate_coordination_publication_base(
     repo_root,
     manifest,
@@ -4558,6 +4877,11 @@ def validate_coordination_publication_base(
     local_integration = local_snapshot.get('integration')
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     if remote_integration != local_integration:
+        partial_stack_adoption = integration_partial_stack_adoption_allowed(
+            remote_integration, local_integration, added, changed_stack_refs, tombstone
+        )
+        if partial_stack_adoption:
+            return
         if not tombstone and integration_ref not in changed_refs:
             raise SyncwheelError(
                 'local integration configuration differs from published state without publishing integration'
@@ -4667,7 +4991,9 @@ def coordinated_publish(
     try:
         atomic_push_capability_probe(repo_root, config['remote'])
         command = ['git', 'push', '--atomic', *lease_args, config['remote'], *refspecs]
-        result = run(command, cwd=repo_root, check=False)
+        result = run_authorized_push(
+            repo_root, command, config['remote'], [*changed_refs, state_ref], check=False
+        )
         if result.returncode != 0:
             race = classify_coordination_race(
                 repo_root,
@@ -5680,7 +6006,13 @@ def command_journal_publish(args):
     if tip != observed:
         refspec = f'{tip}:refs/heads/{journal["branch"]}'
         lease = f'--force-with-lease=refs/heads/{journal["branch"]}:{observed}'
-        pushed = git(repo_root, 'push', '--porcelain', lease, journal['remote'], refspec, check=False)
+        pushed = run_authorized_push(
+            repo_root,
+            ['git', 'push', '--porcelain', lease, journal['remote'], refspec],
+            journal['remote'],
+            [f'refs/heads/{journal["branch"]}'],
+            check=False,
+        )
         if pushed.returncode != 0:
             raise SyncwheelError('journal publish lease lost; STOP without merge, reset, rebase, or force')
     snapshot.update({'remote': journal['remote'], 'expected_remote_tip': expected_parent, 'published_tip': tip})
@@ -5747,6 +6079,8 @@ def command_journal_schedule(args):
         'service_path': str(service_path), 'timer_path': str(timer_path),
         'command': args.schedule_command,
     }
+    if args.schedule_command == 'install':
+        payload['managed_ref_guard'] = install_managed_push_hook(repo_root, apply=False)
     if args.schedule_command == 'status':
         payload['installed'] = service_path.read_text() == service if service_path.exists() else False
         payload['timer_installed'] = timer_path.read_text() == timer if timer_path.exists() else False
@@ -5756,6 +6090,7 @@ def command_journal_schedule(args):
         conflicts = [str(path) for path, content in managed_files if path.exists() and path.read_text() != content]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing overwrite: ' + ', '.join(conflicts))
+        payload['managed_ref_guard'] = install_managed_push_hook(repo_root, apply=True)
         service_path.parent.mkdir(parents=True, exist_ok=True)
         service_path.write_text(service)
         timer_path.write_text(timer)
@@ -5803,6 +6138,19 @@ def validate_manifest(repo_root, manifest):
     warnings = []
     errors = []
     details = {'stacks': [], 'channels': [], 'integration': {}, 'coordination': {}}
+    hooks = managed_push_guard_policy(repo_root, manifest)
+    details['hooks'] = hooks
+    if hooks['disabled']:
+        warnings.append(f"managed-ref guard explicitly disabled: {hooks['disabledReason']}")
+    elif hooks['migrationPending']:
+        warnings.append(
+            'managed-ref guard required; existing clone is pending explicit migration: '
+            'syncwheel hooks install --apply'
+        )
+    elif hooks['required'] and not hooks['ready']:
+        warnings.append(
+            'managed-ref guard is missing, stale, or tampered; Syncwheel mutations are blocked'
+        )
     if manifest.get('repository_mode') == 'journal':
         journal = manifest['journal']
         details['journal'] = dict(journal)
@@ -7010,6 +7358,9 @@ def command_init(args):
     save_manifest(manifest_path, manifest)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
+    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        hook_result = install_managed_push_hook(repo_root, apply=True)
+        print('managed-ref guard: ' + json.dumps(hook_result, sort_keys=True))
     return 0
 
 
@@ -7043,9 +7394,13 @@ def command_coordination_init(args):
             'migration': 'active-active',
             'coordination': proposed['coordination'],
             'remote_state_created': False,
+            'managed_ref_guard': install_managed_push_hook(repo_root, apply=False),
             'dry_run': True,
         }, indent=2))
         return 0
+    hook_result = None
+    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        hook_result = install_managed_push_hook(repo_root, apply=True)
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
@@ -7054,6 +7409,8 @@ def command_coordination_init(args):
         {'coordination_id': proposed['coordination']['id'], 'remote': remote},
     )
     print(f"coordination enabled: {proposed['coordination']['id']}")
+    if hook_result:
+        print('managed-ref guard: ' + json.dumps(hook_result, sort_keys=True))
     print('remote state will be created by the first successful coordinated publish')
     return 0
 
@@ -8853,9 +9210,10 @@ def command_channel_publish(args):
                 coordination_state = result.get('state_tip')
             else:
                 lease = f"--force-with-lease={ref}:{plan['remoteRevision'] or ''}"
-                pushed = git(
-                    repo_root, 'push', '--porcelain', lease, channel['remote'], f'{current}:{ref}',
-                    check=False,
+                pushed = run_authorized_push(
+                    repo_root,
+                    ['git', 'push', '--porcelain', lease, channel['remote'], f'{current}:{ref}'],
+                    channel['remote'], [ref], check=False,
                 )
                 if pushed.returncode != 0:
                     detail = pushed.stderr.strip() or pushed.stdout.strip()
@@ -10194,7 +10552,7 @@ def command_stack_push(args):
     if args.dry_run:
         print(quoted(command))
         return 0
-    run(command, cwd=repo_root)
+    run_authorized_push(repo_root, command, remote, [f"refs/heads/{stack['branch']}"])
     print(quoted(command))
     append_ledger_event(
         repo_root,
@@ -10869,7 +11227,9 @@ def command_reconcile(args):
                 continue
             remote = stack_push_remote(manifest, stack, args.remote)
             command = ['git', 'push', *push_args, remote, stack['branch']]
-            run(command, cwd=repo_root)
+            run_authorized_push(
+                repo_root, command, remote, [f"refs/heads/{stack['branch']}"]
+            )
             print(quoted(command))
             append_ledger_event(
                 repo_root,
@@ -10970,7 +11330,10 @@ def command_reconcile(args):
                 continue
             remote = args.remote or manifest['defaults']['publication_remote']
             command = ['git', 'push', *push_args, remote, manifest['integration']['branch']]
-            run(command, cwd=repo_root)
+            run_authorized_push(
+                repo_root, command, remote,
+                [f"refs/heads/{manifest['integration']['branch']}"],
+            )
             print(quoted(command))
             append_ledger_event(
                 repo_root,
@@ -11205,7 +11568,9 @@ def command_int_push(args):
     if args.dry_run:
         print(quoted(command))
         return 0
-    run(command, cwd=repo_root)
+    run_authorized_push(
+        repo_root, command, remote, [f"refs/heads/{integration['branch']}"]
+    )
     print(quoted(command))
     append_ledger_event(
         repo_root,
@@ -11792,6 +12157,23 @@ def build_parser():
     self_mode_p = self_sub.add_parser('mode', help='show or set automatic update policy: off, notify, auto')
     self_mode_p.add_argument('mode', nargs='?', choices=sorted(UPDATE_MODES))
     self_mode_p.set_defaults(func=command_self_mode)
+
+    hooks_p = sub.add_parser('hooks', help='plan, install, or remove the managed-ref pre-push guard')
+    hooks_sub = hooks_p.add_subparsers(dest='hooks_command', required=True)
+    hooks_status_p = hooks_sub.add_parser('status', parents=[common])
+    hooks_status_p.set_defaults(func=command_hooks_status)
+    hooks_install_p = hooks_sub.add_parser('install', parents=[common])
+    hooks_install_p.add_argument('-a', '--apply', action='store_true')
+    hooks_install_p.set_defaults(func=command_hooks_install)
+    hooks_remove_p = hooks_sub.add_parser('remove', parents=[common])
+    hooks_remove_p.add_argument('-a', '--apply', action='store_true')
+    hooks_remove_p.add_argument('--disable', action='store_true', help='persist an explicit clone-local opt-out')
+    hooks_remove_p.add_argument('--reason', help='required explanation for --disable')
+    hooks_remove_p.set_defaults(func=command_hooks_remove)
+    hooks_guard_p = hooks_sub.add_parser('guard', parents=[common], help=argparse.SUPPRESS)
+    hooks_guard_p.add_argument('--remote-name', required=True)
+    hooks_guard_p.add_argument('--remote-url', required=True)
+    hooks_guard_p.set_defaults(func=command_hooks_guard)
 
     use_p = sub.add_parser('use', help='show or set the repo-local default syncwheel profile', parents=[common])
     use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
@@ -12502,6 +12884,70 @@ def command_self_install_hooks(args):
     return 0
 
 
+def command_hooks_status(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    print(json.dumps(managed_push_guard_policy(repo_root, manifest), indent=2, sort_keys=True))
+    return 0
+
+
+def command_hooks_install(args):
+    repo_root = resolve_repo_root(args.repo)
+    require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    print(json.dumps(install_managed_push_hook(repo_root, apply=args.apply), indent=2, sort_keys=True))
+    return 0
+
+
+def command_hooks_remove(args):
+    repo_root = resolve_repo_root(args.repo)
+    require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    print(json.dumps(remove_managed_push_hook(
+        repo_root, apply=args.apply, disable=args.disable, reason=args.reason
+    ), indent=2, sort_keys=True))
+    return 0
+
+
+def command_hooks_guard(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    updates = parse_pre_push_updates(sys.stdin)
+    destinations = sorted({item['remoteRef'] for item in updates})
+    protected = sorted(set(destinations).intersection(managed_push_refs(repo_root, manifest)))
+    if not protected:
+        return 0
+    if verify_managed_push_authorization(repo_root, args.remote_name, destinations):
+        return 0
+    remedies = []
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+    state_ref = coordination_state_ref(coordination_config(manifest)) if coordination_config(manifest) else None
+    stack_refs = {
+        f"refs/heads/{stack['branch']}"
+        for stack in manifest.get('stacks', [])
+        if stack.get('branch')
+    }
+    for ref in protected:
+        if ref == integration_ref:
+            remedies.append('syncwheel int push')
+        elif ref == state_ref:
+            remedies.append('syncwheel publish (or the reviewed coordination repair workflow)')
+        elif manifest.get('repository_mode') == 'journal' and ref == f"refs/heads/{manifest['journal']['branch']}":
+            remedies.append('syncwheel journal publish --apply')
+        elif any(ref == f"refs/heads/{channel['branch']}" for channel in manifest.get('channels', [])):
+            remedies.append('syncwheel channel publish <channel> --apply --plan-file <reviewed-plan>')
+        elif ref in stack_refs:
+            remedies.append('syncwheel stack push <stack>')
+        else:
+            remedies.append(
+                'syncwheel handoff, then use the reviewed historical-ref adoption/closure workflow'
+            )
+    raise SyncwheelError(
+        'raw git push blocked for Syncwheel-managed ref(s): '
+        + ', '.join(protected)
+        + '. Use: ' + '; '.join(dict.fromkeys(remedies))
+        + '. This local hook is a safety guard, not a security boundary; git push --no-verify bypasses it.'
+    )
+
+
 def command_self_mode(args):
     if not args.mode:
         settings = load_update_settings()
@@ -12568,6 +13014,25 @@ def execute_parsed_command(args):
             raise SyncwheelError(
                 f'{args.command} is forbidden for repository_mode="journal"; use journal commands'
             )
+    guarded_publishers = {
+        command_stack_push, command_int_push, command_journal_publish,
+        command_channel_publish, command_reconcile, command_resume,
+        command_sync, command_publish,
+    }
+    if args.func in guarded_publishers and hasattr(args, 'repo'):
+        mutating = (
+            args.func in {command_stack_push, command_int_push}
+            and not getattr(args, 'dry_run', False)
+        ) or (
+            args.func not in {command_stack_push, command_int_push}
+            and bool(getattr(args, 'apply', False))
+        )
+        if mutating:
+            repo_root = resolve_repo_root(args.repo)
+            manifest, _ = require_manifest(
+                repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+            )
+            require_managed_push_guard(repo_root, manifest)
     return args.func(args)
 
 
@@ -12588,6 +13053,10 @@ def main():
             manifest_path = resolve_manifest_path(
                 repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
             )
+            if args.func != command_init and manifest_path.exists():
+                existing_manifest, _ = load_manifest(repo_root, manifest_path)
+                if existing_manifest:
+                    require_managed_push_guard(repo_root, existing_manifest)
             with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
                 return execute_parsed_command(args)
         return execute_parsed_command(args)

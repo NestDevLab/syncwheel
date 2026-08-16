@@ -788,6 +788,67 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(rebuilt['state'], 'draft')
         self.assertEqual(len(rebuilt['commits']), 1)
 
+    def test_partial_publish_can_adopt_new_stack_without_rebuilding_integration(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'partial-stack-adoption')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        integration_before = self.git(
+            repo, 'ls-remote', 'origin', 'refs/heads/integration/shared'
+        ).stdout.split()[0]
+
+        stack_tip = self.commit_on_branch(repo, 'scratch/new-stack', 'new-stack.txt')
+        self.git(repo, 'branch', 'pr/new-stack', stack_tip)
+        self.run_cli(
+            repo, 'stack', 'create', 'new-stack', stack_tip,
+            '--branch', 'pr/new-stack',
+        )
+        self.run_cli(
+            repo, 'reconcile', '--apply', '--push', '--stack', 'new-stack',
+            '--skip-integration', '--rebuild', 'none',
+        )
+
+        _, state = self.remote_state(origin)
+        self.assertEqual(state['projection_status'], 'partial')
+        self.assertEqual(
+            state['managed_refs']['refs/heads/pr/new-stack'], stack_tip
+        )
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/integration/shared').stdout.split()[0],
+            integration_before,
+        )
+
+    def test_partial_stack_adoption_predicate_fails_closed(self):
+        module = self.load_module()
+        remote = {
+            'branch': 'integration/shared', 'base': 'origin/main',
+            'strategy': 'cherry-pick', 'stacks': ['existing-a', 'existing-b'],
+        }
+        local = {
+            **remote, 'stacks': ['existing-a', 'existing-b', 'new-stack'],
+        }
+        self.assertTrue(module.integration_partial_stack_adoption_allowed(
+            remote, local, {'new-stack'}, {'new-stack'}
+        ))
+
+        changed_shape = {**local, 'strategy': 'merge-stacks'}
+        self.assertFalse(module.integration_partial_stack_adoption_allowed(
+            remote, changed_shape, {'new-stack'}, {'new-stack'}
+        ))
+        reordered = {**local, 'stacks': ['existing-b', 'existing-a', 'new-stack']}
+        self.assertFalse(module.integration_partial_stack_adoption_allowed(
+            remote, reordered, {'new-stack'}, {'new-stack'}
+        ))
+        removed = {**local, 'stacks': ['existing-a', 'new-stack']}
+        self.assertFalse(module.integration_partial_stack_adoption_allowed(
+            remote, removed, {'new-stack'}, {'new-stack'}
+        ))
+        self.assertFalse(module.integration_partial_stack_adoption_allowed(
+            remote, local, {'new-stack'}, set()
+        ))
+        self.assertFalse(module.integration_partial_stack_adoption_allowed(
+            remote, local, {'new-stack'}, {'new-stack'}, {'stack': 'existing-a'}
+        ))
     def test_draft_push_to_the_target_remote_is_refused_by_state(self):
         origin = self.create_remote()
         forge = self.create_remote('forge')
@@ -1157,7 +1218,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.git(repo, 'add', 'after-state.txt')
         self.git(repo, 'commit', '-qm', 'test: advance managed ref')
         advanced = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
-        self.git(repo, 'push', 'origin', branch)
+        self.git(repo, 'push', '--no-verify', 'origin', branch)
 
         module = self.load_module()
         manifest, _ = module.load_manifest(repo)
@@ -1184,6 +1245,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
                 result = module.git(
                     kwargs['repo_root'],
                     'push',
+                    '--no-verify',
                     f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
                     kwargs['remote'],
                     f"{kwargs['new_state_tip']}:{kwargs['state_ref']}",
@@ -1251,7 +1313,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         (repo / 'race.txt').write_text('race\n')
         self.git(repo, 'add', 'race.txt')
         self.git(repo, 'commit', '-qm', 'test: race')
-        self.git(repo, 'push', 'origin', 'integration/shared')
+        self.git(repo, 'push', '--no-verify', 'origin', 'integration/shared')
         module = self.load_module()
         manifest, _ = module.load_manifest(repo)
         ref = 'refs/heads/integration/shared'
