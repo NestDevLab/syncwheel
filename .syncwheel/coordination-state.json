@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/managed-ref-guard": "39edf3c790f10e20542389da5c0b4e093762416c"
+    "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-16T10:08:04+00:00",
+  "created_at": "2026-08-16T10:14:43+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -11,7 +11,7 @@
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
-    "refs/heads/pr/managed-ref-guard": "39edf3c790f10e20542389da5c0b4e093762416c",
+    "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
   "manifest": {
@@ -54,7 +54,8 @@
         },
         "branch": "pr/managed-ref-guard",
         "commits": [
-          "39edf3c790f10e20542389da5c0b4e093762416c"
+          "39edf3c790f10e20542389da5c0b4e093762416c",
+          "70ce3ad8de680934bde7bbd1868230c7f15ac5f6"
         ],
         "id": "managed-ref-guard",
         "integration_branch": "main-integration",
@@ -63,10 +64,10 @@
     ],
     "version": 2
   },
-  "manifest_digest": "5f05c2f7abc7231156f947d6a53ff5cee369a6ed400c30efdbd5d2de22feb8ee",
-  "parent_state": "a157880a77b9e01b56fccd9692de75819e67c7b9",
+  "manifest_digest": "671cda39ba1ff981671226b490fcb5592ef692fa8d3d1dc6ca9055e1264dba60",
+  "parent_state": "a52d51d74b437ef6aef987a6c68cda5ac25a7b94",
   "projection_status": "partial",
-  "publication_id": "f220e72c-8923-49ce-9af6-f857999fe1ad",
+  "publication_id": "51f50b0a-d1b3-4f4a-8297-e59a0d0d7227",
   "publication_scope": "partial",
   "schema_version": 2,
   "syncwheel_version": "0.33.2",
