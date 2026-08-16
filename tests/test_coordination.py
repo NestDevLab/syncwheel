@@ -18,12 +18,16 @@ CLI = REPO_ROOT / 'scripts' / 'syncwheel.py'
 class ActiveActiveCoordinationTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-coordination-test-'))
+        self.bin_dir = self.tmp / 'bin'
+        self.bin_dir.mkdir()
+        (self.bin_dir / 'syncwheel').symlink_to(CLI)
         self.settings = self.tmp / 'settings.json'
         self.registry = self.tmp / 'repos.json'
         self.environment = {
             'SYNCWHEEL_UPDATE_MODE': 'off',
             'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(self.settings),
             'SYNCWHEEL_REPO_REGISTRY': str(self.registry),
+            'PATH': f"{self.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         }
         self.environment_patch = mock.patch.dict(os.environ, self.environment, clear=False)
         self.environment_patch.start()
