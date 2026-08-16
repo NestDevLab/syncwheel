@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-16T10:14:43+00:00",
+  "created_at": "2026-08-16T10:19:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -40,35 +38,17 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "managed-ref-guard"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/managed-ref-guard",
-        "commits": [
-          "39edf3c790f10e20542389da5c0b4e093762416c",
-          "70ce3ad8de680934bde7bbd1868230c7f15ac5f6"
-        ],
-        "id": "managed-ref-guard",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "671cda39ba1ff981671226b490fcb5592ef692fa8d3d1dc6ca9055e1264dba60",
-  "parent_state": "a52d51d74b437ef6aef987a6c68cda5ac25a7b94",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "6d6110bd1b4f55c681d030616eb3184e52618449",
   "projection_status": "partial",
-  "publication_id": "51f50b0a-d1b3-4f4a-8297-e59a0d0d7227",
-  "publication_scope": "partial",
+  "publication_id": "cbb58151-669a-45fa-b3c5-c66192d89966",
+  "publication_scope": "close:managed-ref-guard",
   "schema_version": 2,
   "syncwheel_version": "0.33.2",
   "tombstones": [
@@ -111,6 +91,14 @@
       "ref": "refs/heads/pr/coordination-repair",
       "remote_tip": "f55445c9164864e9bca2848165e3da9f87beff16",
       "stack": "coordination-repair"
+    },
+    {
+      "branch": "pr/managed-ref-guard",
+      "closed_at": "2026-08-16T10:19:20+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/managed-ref-guard",
+      "remote_tip": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
+      "stack": "managed-ref-guard"
     }
   ]
 }
