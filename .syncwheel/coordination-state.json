@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "ba10b46f17681d6738eb4b9c1c2890a57ff6cd8c"
+    "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-20T14:22:14+00:00",
+  "created_at": "2026-08-20T14:32:40+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -14,7 +14,7 @@
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
-    "refs/heads/pr/reconcile-preflight-atomicity": "a3285d02008f581028e17ad0a0d21d0620077262",
+    "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
   "manifest": {
@@ -57,7 +57,8 @@
         },
         "branch": "pr/reconcile-preflight-atomicity",
         "commits": [
-          "23737c55a3a2b99c965ea4d420dc6544b44803b2"
+          "23737c55a3a2b99c965ea4d420dc6544b44803b2",
+          "32d406f4f2f5502d985b405ae52995a3493be971"
         ],
         "id": "reconcile-preflight-atomicity",
         "integration_branch": "main-integration",
@@ -66,11 +67,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "9b68adeb0813a3f72dd615aedba88f49188f8cd0252c41891078b129b3473be1",
-  "parent_state": "cc89f7a6adf0ce9305aec6c455c5f672576dd8bc",
+  "manifest_digest": "d1aa828972e404695a3f145305ecfbd811c416b988a83057927ae4dc0409913e",
+  "parent_state": "e12d40460af1d4e40d80fe011803fb9b8146b9b0",
   "projection_status": "partial",
-  "publication_id": "f1d6eee2-f089-4b31-84f7-c185aae815e5",
-  "publication_scope": "integration",
+  "publication_id": "0a823e04-2104-4ce3-a7ac-226955175c24",
+  "publication_scope": "stack:reconcile-preflight-atomicity",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
