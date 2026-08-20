@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "b7a6b6ba8bab3e3e955224ce58fa50463dd204a7"
+    "refs/heads/pr/primary-checkout-hooks": "aa89201f9b8446442f568139e9eb4729f387a1ce"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-16T10:20:47+00:00",
+  "created_at": "2026-08-20T12:19:58+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -12,6 +12,7 @@
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
+    "refs/heads/pr/primary-checkout-hooks": "aa89201f9b8446442f568139e9eb4729f387a1ce",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
   "manifest": {
@@ -40,19 +41,36 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "primary-checkout-hooks"
+      ],
       "strategy": "cherry-pick"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/primary-checkout-hooks",
+        "commits": [
+          "aa89201f9b8446442f568139e9eb4729f387a1ce"
+        ],
+        "id": "primary-checkout-hooks",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "02fa236b72f7bdc1ed6f9ce66a61227dcbbffe23",
+  "manifest_digest": "ae79e56fb5b44f2b55576037dc19fa945887767d0cec9b554a46ef315f5fbecd",
+  "parent_state": "e450ed014da95e5b73ce4164e2bbc001c62088d0",
   "projection_status": "partial",
-  "publication_id": "f730b196-5e4f-4dc3-a572-3327d9f409da",
-  "publication_scope": "integration",
+  "publication_id": "fdc80ddd-9ae2-4ba7-b9bf-d119f893f697",
+  "publication_scope": "partial",
   "schema_version": 2,
-  "syncwheel_version": "0.33.2",
+  "syncwheel_version": "0.33.3",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
