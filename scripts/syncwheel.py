@@ -131,6 +131,7 @@ REPOSITORY_MODES = {'delivery', 'journal'}
 DEFAULT_JOURNAL_INTERVAL = '30m'
 CHANNEL_LIFECYCLES = {'shared', 'ephemeral'}
 CHANNEL_PLAN_SCHEMA_VERSION = 1
+STACK_LAND_PLAN_SCHEMA_VERSION = 1
 ZERO_OBJECT_ID = '0' * 40
 JOURNAL_SENSITIVE_PARTS = {
     '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
@@ -2076,6 +2077,86 @@ def normalize_channel_timestamp(value, field):
     return candidate
 
 
+def normalize_landing_requirement(value, path='landing.checks', seen_ids=None):
+    """Normalize the deliberately small all/any requirement grammar for stack land."""
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} must be an object')
+    requirement_id = value.get('id')
+    if not isinstance(requirement_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', requirement_id):
+        raise SyncwheelError(f'{path}.id must be a 1-128 character requirement id')
+    seen_ids = seen_ids if seen_ids is not None else set()
+    if requirement_id in seen_ids:
+        raise SyncwheelError(f'duplicate landing requirement id: {requirement_id}')
+    seen_ids.add(requirement_id)
+    kinds = [kind for kind in ('all', 'any', 'local', 'attestation', 'pr') if kind in value]
+    if len(kinds) != 1:
+        raise SyncwheelError(f'{path} must contain exactly one of all, any, local, attestation, or pr')
+    kind = kinds[0]
+    if kind in {'all', 'any'}:
+        children = value[kind]
+        if not isinstance(children, list) or not children:
+            raise SyncwheelError(f'{path}.{kind} must be a non-empty array')
+        if set(value) != {'id', kind}:
+            raise SyncwheelError(f'{path} {kind} groups may contain only id and {kind}')
+        return {'id': requirement_id, kind: [
+            normalize_landing_requirement(item, f'{path}.{kind}[{index}]', seen_ids)
+            for index, item in enumerate(children)
+        ]}
+    if kind == 'local':
+        local = value['local']
+        if not isinstance(local, dict) or set(local) - {'scope', 'argv', 'timeoutSeconds'}:
+            raise SyncwheelError(f'{path}.local must contain scope, argv, and optional timeoutSeconds')
+        scope = local.get('scope')
+        argv = local.get('argv')
+        timeout = local.get('timeoutSeconds', 1800)
+        if scope not in {'stack', 'integration'}:
+            raise SyncwheelError(f'{path}.local.scope must be stack or integration')
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+            raise SyncwheelError(f'{path}.local.argv must be a non-empty string array')
+        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
+            raise SyncwheelError(f'{path}.local.timeoutSeconds must be a positive integer')
+        return {'id': requirement_id, 'local': {'scope': scope, 'argv': list(argv), 'timeoutSeconds': timeout}}
+    if kind == 'attestation':
+        attestation = value['attestation']
+        if not isinstance(attestation, dict) or set(attestation) != {'scope', 'verifierArgv'}:
+            raise SyncwheelError(f'{path}.attestation must contain exactly scope and verifierArgv')
+        if attestation.get('scope') not in {'stack', 'integration'}:
+            raise SyncwheelError(f'{path}.attestation.scope must be stack or integration')
+        argv = attestation.get('verifierArgv')
+        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+            raise SyncwheelError(f'{path}.attestation.verifierArgv must be a non-empty string array')
+        return {'id': requirement_id, 'attestation': {'scope': attestation['scope'], 'verifierArgv': list(argv)}}
+    pr = value['pr']
+    if not isinstance(pr, dict) or set(pr) != {'checks'}:
+        raise SyncwheelError(f'{path}.pr must contain exactly checks')
+    checks = pr.get('checks')
+    if not isinstance(checks, list) or not checks or not all(isinstance(item, str) and item for item in checks):
+        raise SyncwheelError(f'{path}.pr.checks must be a non-empty string array')
+    return {'id': requirement_id, 'pr': {'checks': list(checks)}}
+
+
+def normalize_landing_policy(value):
+    if value is None:
+        return {'mode': 'disabled', 'strategy': 'merge', 'checks': None}
+    if not isinstance(value, dict):
+        raise SyncwheelError('landing must be an object')
+    unknown = sorted(set(value) - {'mode', 'strategy', 'checks'})
+    if unknown:
+        raise SyncwheelError('landing has unknown keys: ' + ', '.join(unknown))
+    mode = value.get('mode', 'disabled')
+    if mode not in {'disabled', 'direct'}:
+        raise SyncwheelError('landing.mode must be disabled or direct')
+    strategy = value.get('strategy', 'merge')
+    if strategy not in {'merge', 'ff-only'}:
+        raise SyncwheelError('landing.strategy must be merge or ff-only')
+    checks = value.get('checks')
+    return {
+        'mode': mode,
+        'strategy': strategy,
+        'checks': normalize_landing_requirement(checks) if checks is not None else None,
+    }
+
+
 def normalize_channel_entry(raw, channel_id):
     if not isinstance(raw, dict):
         raise SyncwheelError(f'channel {channel_id} composition entries must be objects')
@@ -2480,6 +2561,8 @@ def load_manifest(repo_root, manifest_path=None):
     )
     if defaults.get('replay_mode') is not None:
         normalize_replay_mode(defaults['replay_mode'], 'manifest defaults.replay_mode')
+    if 'landing' in data:
+        data['landing'] = normalize_landing_policy(data['landing'])
 
     integration = data.setdefault('integration', {})
     integration.setdefault('branch', DEFAULT_INTEGRATION_BRANCH)
@@ -3862,6 +3945,8 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
             key: value for key, value in config.items()
             if key in {'mode', 'id', 'state_branch', 'gc'}
         }
+    if 'landing' in manifest:
+        snapshot['landing'] = json.loads(json.dumps(manifest['landing']))
     return snapshot
 
 
@@ -3909,6 +3994,8 @@ def validate_coordination_snapshot_refs(snapshot):
         raise SyncwheelError('coordination state manifest stacks must be an array')
     if not isinstance(channels, list):
         raise SyncwheelError('coordination state manifest channels must be an array')
+    if 'landing' in snapshot:
+        normalize_landing_policy(snapshot['landing'])
     coordination_public_remote_ref_parts(
         defaults['base_ref'], 'coordination state defaults.base_ref'
     )
@@ -4566,6 +4653,7 @@ def snapshot_globals(snapshot):
         'integration': snapshot.get('integration'),
         'channels': snapshot.get('channels', []),
         'coordination': snapshot.get('coordination'),
+        'landing': snapshot.get('landing'),
     }
 
 
@@ -4654,6 +4742,8 @@ def apply_coordination_snapshot(manifest, snapshot):
         updated['coordination'] = coordination
     else:
         updated.pop('coordination', None)
+    if 'landing' in snapshot:
+        updated['landing'] = normalize_landing_policy(snapshot['landing'])
     return updated
 
 
@@ -9928,6 +10018,555 @@ def command_stack_show(args):
     return 0
 
 
+def landing_policy(manifest):
+    return manifest.get('landing') or normalize_landing_policy(None)
+
+
+def landing_override_sets(args):
+    requirement_ids = set(getattr(args, 'override_requirement', None) or [])
+    group_ids = set(getattr(args, 'override_group', None) or [])
+    override_all = bool(getattr(args, 'override_all_checks', False))
+    reason = getattr(args, 'override_reason', None)
+    if (requirement_ids or group_ids or override_all) and (not isinstance(reason, str) or not reason.strip()):
+        raise SyncwheelError('check overrides require a non-empty --override-reason')
+    return requirement_ids, group_ids, override_all, reason.strip() if isinstance(reason, str) else None
+
+
+def landing_requirement_ids(requirement):
+    if requirement is None:
+        return set()
+    ids = {requirement['id']}
+    for kind in ('all', 'any'):
+        for child in requirement.get(kind, []):
+            ids.update(landing_requirement_ids(child))
+    return ids
+
+
+def landing_group_ids(requirement):
+    if requirement is None:
+        return set()
+    groups = {requirement['id']} if any(kind in requirement for kind in ('all', 'any')) else set()
+    for kind in ('all', 'any'):
+        for child in requirement.get(kind, []):
+            groups.update(landing_group_ids(child))
+    return groups
+
+
+def landing_leaf_ids(requirement):
+    if requirement is None:
+        return set()
+    if any(kind in requirement for kind in ('all', 'any')):
+        return set().union(*(landing_leaf_ids(child) for child in requirement.get('all', []) + requirement.get('any', [])))
+    return {requirement['id']}
+
+
+def landing_attestation_paths(args, requirement=None):
+    paths = {}
+    for raw in getattr(args, 'attestation', None) or []:
+        requirement_id, separator, path = raw.partition('=')
+        if not separator or not requirement_id or not path:
+            raise SyncwheelError('--attestation must be requirement-id=receipt-path')
+        if requirement_id in paths:
+            raise SyncwheelError(f'duplicate --attestation for requirement {requirement_id}')
+        paths[requirement_id] = path
+    if requirement is not None:
+        allowed = {
+            requirement_id for requirement_id in landing_leaf_ids(requirement)
+            if _landing_requirement_kind(requirement, requirement_id) == 'attestation'
+        }
+        unknown = sorted(set(paths) - allowed)
+        if unknown:
+            raise SyncwheelError('attestation supplied for non-attestation requirement(s): ' + ', '.join(unknown))
+    return paths
+
+
+def _landing_requirement_kind(requirement, requirement_id):
+    if requirement['id'] == requirement_id:
+        return next(kind for kind in ('all', 'any', 'local', 'attestation', 'pr') if kind in requirement)
+    for kind in ('all', 'any'):
+        for child in requirement.get(kind, []):
+            found = _landing_requirement_kind(child, requirement_id)
+            if found:
+                return found
+    return None
+
+
+def landing_local_check(repo_root, requirement, revisions):
+    config = requirement['local']
+    revision = revisions[config['scope']]
+    with tempfile.TemporaryDirectory(prefix='syncwheel-land-check-') as temporary:
+        worktree = Path(temporary)
+        added = git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(worktree), revision, check=False)
+        if added.returncode != 0:
+            return {'passed': False, 'detail': added.stderr.strip() or 'cannot create isolated check worktree'}
+        try:
+            try:
+                result = subprocess.run(
+                    config['argv'], cwd=worktree, text=True, capture_output=True,
+                    timeout=config['timeoutSeconds'], env=os.environ.copy(),
+                )
+            except subprocess.TimeoutExpired:
+                return {'passed': False, 'detail': f"timed out after {config['timeoutSeconds']} seconds"}
+            return {
+                'passed': result.returncode == 0,
+                'exitCode': result.returncode,
+                'detail': (result.stderr or result.stdout).strip()[:1000] or None,
+            }
+        finally:
+            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+
+
+def landing_attestation_check(repo_root, requirement, revisions, manifest_digest_value, attestation_paths):
+    config = requirement['attestation']
+    receipt_path = attestation_paths.get(requirement['id'])
+    if receipt_path is None:
+        return {'passed': False, 'detail': 'no receipt was supplied'}
+    try:
+        receipt = json.loads(Path(receipt_path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        return {'passed': False, 'detail': f'invalid receipt: {exc}'}
+    expected = {
+        'requirementId': requirement['id'],
+        'scope': config['scope'],
+        'subjectRevision': revisions[config['scope']],
+        'integrationRevision': revisions['integration'],
+        'deliveryRevision': revisions['delivery'],
+        'manifestDigest': manifest_digest_value,
+    }
+    result = run(config['verifierArgv'], cwd=repo_root, input_text=json.dumps({
+        'receipt': receipt, 'expected': expected,
+    }), check=False)
+    if result.returncode != 0:
+        return {'passed': False, 'detail': (result.stderr or result.stdout).strip()[:1000] or 'verifier failed'}
+    try:
+        verified = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        return {'passed': False, 'detail': f'verifier did not emit JSON: {exc}'}
+    passed = (
+        isinstance(verified, dict) and verified.get('valid') is True
+        and verified.get('subjectRevision') == expected['subjectRevision']
+        and isinstance(verified.get('issuer'), str) and bool(verified['issuer'])
+    )
+    return {
+        'passed': passed,
+        'issuer': verified.get('issuer') if isinstance(verified, dict) else None,
+        'detail': None if passed else 'verifier response is not a valid bound attestation',
+    }
+
+
+def evaluate_landing_requirement(repo_root, requirement, revisions, manifest_digest_value, args):
+    requirement_overrides, group_overrides, override_all, reason = landing_override_sets(args)
+    kind = next(kind for kind in ('all', 'any', 'local', 'attestation', 'pr') if kind in requirement)
+    overridden = override_all or requirement['id'] in requirement_overrides or (
+        kind in {'all', 'any'} and requirement['id'] in group_overrides
+    )
+    if overridden:
+        return {
+            'id': requirement['id'], 'kind': kind, 'passed': True, 'status': 'overridden',
+            'overrideReason': reason,
+        }
+    if kind in {'all', 'any'}:
+        children = [
+            evaluate_landing_requirement(repo_root, child, revisions, manifest_digest_value, args)
+            for child in requirement[kind]
+        ]
+        passed = all(child['passed'] for child in children) if kind == 'all' else any(child['passed'] for child in children)
+        return {
+            'id': requirement['id'], 'kind': kind, 'passed': passed,
+            'status': 'passed' if passed else ('requires-pr' if any(child['status'] == 'requires-pr' for child in children) else 'failed'),
+            'children': children,
+        }
+    if kind == 'local':
+        result = landing_local_check(repo_root, requirement, revisions)
+    elif kind == 'attestation':
+        result = landing_attestation_check(
+            repo_root, requirement, revisions, manifest_digest_value,
+            landing_attestation_paths(args),
+        )
+    else:
+        result = {'passed': False, 'detail': 'remote PR checks require the promote-to-PR route'}
+    return {
+        'id': requirement['id'], 'kind': kind, 'passed': result['passed'],
+        'status': 'passed' if result['passed'] else ('requires-pr' if kind == 'pr' else 'failed'),
+        **{key: value for key, value in result.items() if key != 'passed'},
+    }
+
+
+def landing_require_clean_worktrees(repo_root):
+    checked = []
+    for worktree in get_worktrees(repo_root):
+        path = worktree.get('path')
+        if not path:
+            continue
+        ensure_clean_worktree(path)
+        checked.append(path)
+    return checked
+
+
+def landing_stack_projection_is_exact(repo_root, stack):
+    if not branch_exists(repo_root, stack['branch']):
+        raise SyncwheelError(f"stack land STOP: source branch is missing: {stack['branch']}")
+    if not ref_exists(repo_root, stack['base']):
+        raise SyncwheelError(f"stack land STOP: source base is missing: {stack['base']}")
+    declared = [commit_full_sha(repo_root, commit) for commit in stack['commits']]
+    actual = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+    if actual != declared:
+        raise SyncwheelError(
+            'stack land STOP: source branch does not exactly equal its declared stack commits; '
+            'rebuild or update the manifest before landing'
+        )
+    return declared
+
+
+def landing_target_observation(repo_root, manifest, stack):
+    canonical = manifest['defaults']['canonical_remote']
+    if stack['target_remote'] != canonical:
+        raise SyncwheelError('stack land STOP: direct landing is limited to the canonical remote')
+    if not remote_is_configured(repo_root, canonical):
+        raise SyncwheelError(f'stack land STOP: canonical remote is not configured: {canonical}')
+    target_ref = f"refs/heads/{stack['target_branch']}"
+    if target_ref in managed_ref_names(manifest) or (
+        coordination_config(manifest) and target_ref == coordination_state_ref(coordination_config(manifest))
+    ):
+        raise SyncwheelError('stack land STOP: delivery branch overlaps a Syncwheel-managed ref')
+    observed = remote_ref_tips(repo_root, canonical, [target_ref])[target_ref]
+    if not observed:
+        raise SyncwheelError(f'stack land STOP: delivery branch is absent on canonical remote: {target_ref}')
+    fetched = git(repo_root, 'fetch', '--quiet', canonical, target_ref, check=False)
+    if fetched.returncode != 0 or ref_tip(repo_root, 'FETCH_HEAD') != observed:
+        raise SyncwheelError('stack land STOP: delivery branch could not be fetched at its observed revision')
+    return canonical, target_ref, observed
+
+
+def landing_candidate_plan(repo_root, stack, delivery_revision, strategy):
+    source_revision = commit_full_sha(repo_root, stack['branch'])
+    if branch_contains(repo_root, delivery_revision, source_revision):
+        return {'kind': 'already-landed', 'revision': delivery_revision, 'sourceRevision': source_revision}
+    if branch_contains(repo_root, source_revision, delivery_revision):
+        return {'kind': 'fast-forward', 'revision': source_revision, 'sourceRevision': source_revision}
+    if strategy == 'ff-only':
+        return {'kind': 'requires-pr', 'reason': 'delivery branch is not an ancestor of the source branch'}
+    merge_tree = git(repo_root, 'merge-tree', '--write-tree', delivery_revision, source_revision, check=False)
+    if merge_tree.returncode != 0:
+        return {'kind': 'requires-pr', 'reason': 'automatic merge has conflicts'}
+    match = re.search(r'^[0-9a-f]{40}$', merge_tree.stdout, re.MULTILINE)
+    if not match:
+        raise SyncwheelError('stack land STOP: merge-tree did not produce a tree object')
+    authored = max(
+        int(git(repo_root, 'show', '-s', '--format=%ct', delivery_revision).stdout.strip()),
+        int(git(repo_root, 'show', '-s', '--format=%ct', source_revision).stdout.strip()),
+    )
+    return {
+        'kind': 'merge', 'tree': match.group(0), 'parents': [delivery_revision, source_revision],
+        'message': f"Merge stack '{stack['id']}' into {stack['target_branch']} via Syncwheel\n",
+        'timestamp': authored,
+        'sourceRevision': source_revision,
+    }
+
+
+def materialize_landing_candidate(repo_root, candidate):
+    if candidate['kind'] != 'merge':
+        return candidate.get('revision')
+    env = {
+        'GIT_AUTHOR_NAME': 'Syncwheel Landing', 'GIT_AUTHOR_EMAIL': 'landing@syncwheel.invalid',
+        'GIT_COMMITTER_NAME': 'Syncwheel Landing', 'GIT_COMMITTER_EMAIL': 'landing@syncwheel.invalid',
+        'GIT_AUTHOR_DATE': f"{candidate['timestamp']} +0000",
+        'GIT_COMMITTER_DATE': f"{candidate['timestamp']} +0000",
+    }
+    return git(
+        repo_root, 'commit-tree', candidate['tree'], '-p', candidate['parents'][0], '-p', candidate['parents'][1],
+        input_text=candidate['message'], env=env,
+    ).stdout.strip()
+
+
+def landing_active_coordination_gate(repo_root, manifest):
+    if not coordination_is_active(manifest):
+        return None
+    config = coordination_config(manifest)
+    remote = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    state = remote.get('state')
+    if not state or 'landing' not in state.get('manifest', {}):
+        raise SyncwheelError(
+            'stack land STOP: active-active coordination state predates landing policy; '
+            'publish a coordinated manifest update before direct landing'
+        )
+    if state.get('manifest_digest') != coordination_manifest_digest(manifest, repo_root):
+        raise SyncwheelError('stack land STOP: active-active coordination manifest is not aligned')
+    if not coordination_state_matches_remote(repo_root, config, state):
+        raise SyncwheelError('stack land STOP: active-active coordination refs are not aligned')
+    managed = state.get('managed_refs') or {}
+    for branch in [manifest['integration']['branch'], *(stack['branch'] for stack in manifest['stacks'])]:
+        ref = f'refs/heads/{branch}'
+        if managed.get(ref) != ref_tip(repo_root, branch):
+            raise SyncwheelError(
+                'stack land STOP: local active-active source or integration ref is not aligned: ' + branch
+            )
+    return {'remote': config['remote'], 'stateRef': coordination_state_ref(config), 'stateRevision': remote['tip']}
+
+
+def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
+    require_delivery_manifest(manifest)
+    stack = require_stack(manifest, stack_id)
+    policy = landing_policy(manifest)
+    requirement_overrides, group_overrides, _override_all, _reason = landing_override_sets(args)
+    if policy['checks']:
+        unknown_requirements = sorted(requirement_overrides - landing_leaf_ids(policy['checks']))
+        if unknown_requirements:
+            raise SyncwheelError('unknown or non-leaf --override-requirement id(s): ' + ', '.join(unknown_requirements))
+        unknown_groups = sorted(group_overrides - landing_group_ids(policy['checks']))
+        if unknown_groups:
+            raise SyncwheelError('unknown or non-group --override-group id(s): ' + ', '.join(unknown_groups))
+        landing_attestation_paths(args, policy['checks'])
+    elif (
+        requirement_overrides or group_overrides or getattr(args, 'attestation', None)
+        or getattr(args, 'override_all_checks', False)
+    ):
+        raise SyncwheelError('landing policy does not define checks to override or attest')
+    if policy['mode'] != 'direct' and not getattr(args, 'allow_direct', False):
+        raise SyncwheelError(
+            'stack land STOP: direct landing is disabled; use --allow-direct for this explicit request '
+            'or run syncwheel stack promote ' + stack_id
+        )
+    validation = validate_manifest(repo_root, manifest)
+    if validation['errors']:
+        raise SyncwheelError('stack land STOP: manifest validation failed: ' + '; '.join(validation['errors']))
+    worktrees = landing_require_clean_worktrees(repo_root)
+    declared = landing_stack_projection_is_exact(repo_root, stack)
+    integration = manifest['integration']
+    if stack_id not in integration.get('stacks', []):
+        raise SyncwheelError('stack land STOP: stack is not included in main-integration')
+    if not branch_exists(repo_root, integration['branch']):
+        raise SyncwheelError('stack land STOP: main-integration branch is missing')
+    for commit in stack_integration_commits(stack):
+        if not branch_contains(repo_root, integration['branch'], commit):
+            raise SyncwheelError('stack land STOP: stack is not validated on main-integration')
+    expected_integration_tree = materialize_integration_projection(repo_root, manifest)
+    if ref_tree(repo_root, integration['branch']) != expected_integration_tree:
+        raise SyncwheelError('stack land STOP: main-integration does not match the declared combined projection')
+    remote, target_ref, delivery_revision = landing_target_observation(repo_root, manifest, stack)
+    for dependency_id in stack.get('depends_on', []):
+        dependency = require_stack(manifest, dependency_id)
+        if not branch_contains(repo_root, delivery_revision, dependency['branch']):
+            raise SyncwheelError(f'stack land STOP: dependency is not yet delivered: {dependency_id}')
+    coordination = landing_active_coordination_gate(repo_root, manifest)
+    candidate = landing_candidate_plan(repo_root, stack, delivery_revision, policy['strategy'])
+    revisions = {
+        'stack': commit_full_sha(repo_root, stack['branch']),
+        'integration': commit_full_sha(repo_root, integration['branch']),
+        'delivery': delivery_revision,
+    }
+    checks = (
+        evaluate_landing_requirement(repo_root, policy['checks'], revisions, manifest_digest(manifest), args)
+        if policy['checks'] else {'id': 'syncwheel-structural', 'kind': 'structural', 'passed': True, 'status': 'passed'}
+    )
+    ready = candidate['kind'] not in {'requires-pr'} and checks['passed']
+    status = 'ready' if ready else ('requires-pr' if candidate['kind'] == 'requires-pr' or checks['status'] == 'requires-pr' else 'blocked')
+    plan = {
+        'schemaVersion': STACK_LAND_PLAN_SCHEMA_VERSION,
+        'kind': 'stackLandPlan', 'stack': stack_id,
+        'manifestDigest': manifest_digest(manifest), 'policy': policy,
+        'request': {
+            'allowDirect': bool(getattr(args, 'allow_direct', False)),
+            'overrideRequirements': sorted(getattr(args, 'override_requirement', None) or []),
+            'overrideGroups': sorted(getattr(args, 'override_group', None) or []),
+            'overrideAllChecks': bool(getattr(args, 'override_all_checks', False)),
+            'overrideReason': landing_override_sets(args)[3],
+        },
+        'source': {'branch': stack['branch'], 'revision': revisions['stack'], 'commits': declared, 'base': stack['base']},
+        'integration': {'branch': integration['branch'], 'revision': revisions['integration']},
+        'delivery': {'remote': remote, 'ref': target_ref, 'revision': delivery_revision},
+        'coordination': coordination,
+        'worktrees': worktrees, 'checks': checks, 'candidate': candidate,
+        'status': status,
+        'actions': [] if candidate['kind'] == 'already-landed' else [{
+            'type': 'exact-lease-push', 'remote': remote, 'ref': target_ref,
+            'expectedRevision': delivery_revision, 'strategy': candidate['kind'],
+        }],
+        'next': (
+            f'syncwheel stack promote {stack_id}' if status == 'requires-pr'
+            else (f'syncwheel stack close {stack_id}' if ready else 'resolve failed local checks and preview again')
+        ),
+    }
+    plan['planDigest'] = canonical_json_digest(plan)
+    requested = normalize_channel_operation_id(getattr(args, 'operation_id', None))
+    plan['operationId'] = requested or 'land-' + hashlib.sha256(
+        f"stack-land:{plan['planDigest']}".encode('utf-8')
+    ).hexdigest()[:24]
+    return plan
+
+
+def stack_land_events(repo_root, manifest_path, operation_id):
+    return [
+        event for event in load_ledger_events(repo_root, manifest_path)
+        if event.get('type') in {'stack_land_started', 'stack_land_prepared', 'stack_land_receipt'}
+        and (event.get('payload') or {}).get('operationId') == operation_id
+    ]
+
+
+def record_stack_land_event(repo_root, manifest_path, event_type, plan, **extra):
+    payload = {
+        'operationId': plan['operationId'], 'planDigest': plan['planDigest'], 'stack': plan['stack'],
+        'status': extra.pop('status', None), 'delivery': plan['delivery'], 'candidate': plan['candidate'],
+        'request': plan.get('request') or {}, 'next': plan.get('next'),
+        **extra,
+    }
+    append_ledger_event(repo_root, event_type, payload, manifest_path)
+    return payload
+
+
+def return_existing_stack_land_operation(repo_root, manifest_path, plan):
+    events = stack_land_events(repo_root, manifest_path, plan['operationId'])
+    if not events:
+        return None
+    if any((event.get('payload') or {}).get('planDigest') != plan['planDigest'] for event in events):
+        raise SyncwheelError(f'stack land operation id collision: {plan["operationId"]} is bound to another plan')
+    terminal = next((event.get('payload') or {} for event in reversed(events) if event.get('type') == 'stack_land_receipt'), None)
+    if terminal:
+        return terminal
+    candidate_revision = materialize_landing_candidate(repo_root, plan['candidate']) if plan['candidate']['kind'] != 'requires-pr' else None
+    observed = remote_ref_tips(repo_root, plan['delivery']['remote'], [plan['delivery']['ref']])[plan['delivery']['ref']]
+    if candidate_revision and observed == candidate_revision:
+        return record_stack_land_event(
+            repo_root, manifest_path, 'stack_land_receipt', plan, status='succeeded-equivalent',
+            observedRevision=observed, reconciled=True,
+        )
+    if observed == plan['delivery']['revision']:
+        return record_stack_land_event(
+            repo_root, manifest_path, 'stack_land_receipt', plan, status='failed',
+            observedRevision=observed, reconciled=True,
+        )
+    raise SyncwheelError(
+        f'stack land operation {plan["operationId"]} has an unknown outcome; remote delivery ref diverged'
+    )
+
+
+def reconcile_prepared_stack_land_operation(repo_root, manifest_path, operation_id, plan_digest):
+    events = stack_land_events(repo_root, manifest_path, operation_id)
+    if not events:
+        return None
+    if any((event.get('payload') or {}).get('planDigest') != plan_digest for event in events):
+        raise SyncwheelError(f'stack land operation id collision: {operation_id} is bound to another plan')
+    terminal = next(
+        (event.get('payload') or {} for event in reversed(events)
+         if event.get('type') == 'stack_land_receipt'),
+        None,
+    )
+    if terminal:
+        return terminal
+    prepared = next(
+        (event.get('payload') or {} for event in reversed(events)
+         if event.get('type') == 'stack_land_prepared'),
+        None,
+    )
+    if not prepared:
+        raise SyncwheelError(f'stack land operation {operation_id} is incomplete without a prepared intent')
+    delivery = prepared.get('delivery') or {}
+    candidate = prepared.get('candidate') or {}
+    if not all(isinstance(delivery.get(key), str) and delivery[key] for key in ('remote', 'ref', 'revision')):
+        raise SyncwheelError(f'stack land operation {operation_id} has an invalid prepared delivery intent')
+    candidate_revision = materialize_landing_candidate(repo_root, candidate) if candidate.get('kind') != 'requires-pr' else None
+    observed = remote_ref_tips(repo_root, delivery['remote'], [delivery['ref']])[delivery['ref']]
+    replay_plan = {
+        'operationId': operation_id, 'planDigest': plan_digest, 'stack': prepared.get('stack'),
+        'delivery': delivery, 'candidate': candidate, 'request': prepared.get('request') or {},
+        'next': prepared.get('next'),
+    }
+    if candidate_revision and observed == candidate_revision:
+        return record_stack_land_event(
+            repo_root, manifest_path, 'stack_land_receipt', replay_plan,
+            status='succeeded-equivalent', observedRevision=observed, reconciled=True,
+        )
+    if observed == delivery['revision']:
+        return record_stack_land_event(
+            repo_root, manifest_path, 'stack_land_receipt', replay_plan,
+            status='failed', observedRevision=observed, reconciled=True,
+        )
+    raise SyncwheelError(f'stack land operation {operation_id} has an unknown outcome; remote delivery ref diverged')
+
+
+def command_stack_land(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if args.apply and getattr(args, 'operation_id', None) and getattr(args, 'plan_digest', None):
+        existing = reconcile_prepared_stack_land_operation(
+            repo_root, manifest_path, args.operation_id, args.plan_digest
+        )
+        if existing:
+            print(json.dumps(existing, indent=2))
+            return 0
+    plan = build_stack_land_plan(repo_root, manifest, manifest_path, args.stack, args)
+    if not args.apply:
+        print(json.dumps(plan, indent=2))
+        return 0
+    if not isinstance(args.plan_digest, str) or not args.plan_digest:
+        raise SyncwheelError('--plan-digest is required with --apply')
+    if args.plan_digest != plan['planDigest']:
+        raise SyncwheelError('stack land plan is stale; generate a new preview and use its exact planDigest')
+    with manifest_write_transaction(repo_root, manifest_path, f'stack-land-{args.stack}'):
+        manifest = require_locked_manifest_observation(repo_root, manifest_path, {'manifestDigestBefore': plan['manifestDigest']})
+        current = build_stack_land_plan(repo_root, manifest, manifest_path, args.stack, args)
+        if current['planDigest'] != args.plan_digest:
+            raise SyncwheelError('stack land plan is stale after revalidation; generate a new preview')
+        if current['status'] != 'ready':
+            route = current['next']
+            raise SyncwheelError(f'stack land STOP: plan is {current["status"]}; {route}')
+        existing = return_existing_stack_land_operation(repo_root, manifest_path, current)
+        if existing:
+            print(json.dumps(existing, indent=2))
+            return 0
+        lease_token = None
+        config = coordination_config(manifest)
+        if coordination_is_active(manifest):
+            lease_token = acquire_local_coordination_lease(repo_root, config, installation_id(create=True))
+        try:
+            record_stack_land_event(repo_root, manifest_path, 'stack_land_started', current, status='started')
+            record_stack_land_event(repo_root, manifest_path, 'stack_land_prepared', current, status='prepared')
+            if current['candidate']['kind'] == 'already-landed':
+                receipt = record_stack_land_event(
+                    repo_root, manifest_path, 'stack_land_receipt', current, status='already-landed',
+                    observedRevision=current['delivery']['revision'],
+                )
+                print(json.dumps(receipt, indent=2))
+                return 0
+            candidate_revision = materialize_landing_candidate(repo_root, current['candidate'])
+            command = [
+                'git', 'push', f"--force-with-lease={current['delivery']['ref']}:{current['delivery']['revision']}",
+                current['delivery']['remote'], f"{candidate_revision}:{current['delivery']['ref']}",
+            ]
+            result = run_authorized_push(
+                repo_root, command, current['delivery']['remote'], [current['delivery']['ref']], check=False
+            )
+            observed = remote_ref_tips(repo_root, current['delivery']['remote'], [current['delivery']['ref']])[current['delivery']['ref']]
+            if observed == candidate_revision:
+                status = 'succeeded' if result.returncode == 0 else 'succeeded-equivalent'
+                receipt = record_stack_land_event(
+                    repo_root, manifest_path, 'stack_land_receipt', current, status=status,
+                    candidateRevision=candidate_revision, observedRevision=observed,
+                )
+                print(json.dumps(receipt, indent=2))
+                return 0
+            status = 'failed' if observed == current['delivery']['revision'] else 'unknown'
+            receipt = record_stack_land_event(
+                repo_root, manifest_path, 'stack_land_receipt', current, status=status,
+                candidateRevision=candidate_revision, observedRevision=observed,
+                detail=(result.stderr or result.stdout).strip()[:1000] or None,
+            )
+            if status == 'failed':
+                raise SyncwheelError(
+                    'stack land STOP: canonical remote rejected direct landing; '
+                    'use syncwheel stack promote ' + current['stack']
+                )
+            raise SyncwheelError(
+                f'stack land outcome is unknown; repeat with --operation-id {current["operationId"]} '
+                'and the same --plan-digest to reconcile without retrying the push'
+            )
+        finally:
+            if lease_token:
+                release_local_coordination_lease(repo_root, lease_token)
+
+
 def command_stack_close(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -12834,6 +13473,23 @@ def build_parser():
     add_push_args(stack_push_p)
     stack_push_p.set_defaults(func=command_stack_push)
 
+    stack_land_p = stack_sub.add_parser(
+        'land', parents=[common],
+        help='plan or safely direct-land a validated stack without creating a PR',
+    )
+    stack_land_p.add_argument('stack')
+    stack_land_p.add_argument('--allow-direct', action='store_true')
+    stack_land_p.add_argument('--attestation', action='append', default=[], metavar='ID=PATH')
+    stack_land_p.add_argument('--override-requirement', action='append', default=[], metavar='ID')
+    stack_land_p.add_argument('--override-group', action='append', default=[], metavar='ID')
+    stack_land_p.add_argument('--override-all-checks', action='store_true')
+    stack_land_p.add_argument('--override-reason')
+    stack_land_p.add_argument('--operation-id')
+    stack_land_p.add_argument('--plan-digest')
+    stack_land_p.add_argument('-a', '--apply', action='store_true')
+    stack_land_p.add_argument('-j', '--json', action='store_true')
+    stack_land_p.set_defaults(func=command_stack_land)
+
     stack_close_p = stack_sub.add_parser(
         'close',
         aliases=['cl'],
@@ -13193,6 +13849,8 @@ def manifest_mutation_requested(args):
         return bool(getattr(args, 'apply', False))
     if args.func == command_stack_rebuild:
         return bool(getattr(args, 'update_manifest', False))
+    if args.func == command_stack_land:
+        return bool(getattr(args, 'apply', False))
     if args.func in {
         command_channel_create,
         command_channel_add,
@@ -13224,7 +13882,7 @@ def execute_parsed_command(args):
     guarded_publishers = {
         command_stack_push, command_int_push, command_journal_publish,
         command_channel_publish, command_reconcile, command_resume,
-        command_sync, command_publish,
+        command_sync, command_publish, command_stack_land,
     }
     if args.func in guarded_publishers and hasattr(args, 'repo'):
         mutating = (

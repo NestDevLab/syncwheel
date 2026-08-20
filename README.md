@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.33.4`
+Current version: `0.34.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -191,6 +191,33 @@ the stack already records an open pull request.
 
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.
+
+## Direct landing after local validation
+
+`stack land` is the bounded alternative to a PR when a maintainer explicitly
+asks to land an already-validated stack. It does not create a lane type, open a
+PR, close a stack, deploy a channel, rewrite history, or mutate
+`main-integration`. A preview rechecks the exact declared source projection,
+combined integration projection, clean worktrees, dependency ancestry, remote
+delivery tip, and (when enabled) active-active coordination. Its `planDigest`
+binds a second `--apply` invocation; apply re-runs the same checks and pushes
+only through an exact lease.
+
+```bash
+plan="$(syncwheel stack land caching-experiment --allow-direct --operation-id cache-land-01)"
+digest="$(printf '%s' "$plan" | jq -r .planDigest)"
+syncwheel stack land caching-experiment --allow-direct --operation-id cache-land-01 \
+  --plan-digest "$digest" --apply
+```
+
+Repositories can opt in with a root `landing` policy. With no policy,
+`--allow-direct` is required for the specific request. `mode: "direct"` permits
+the normal path; `mode: "disabled"` retains the explicit bypass requirement.
+The optional `checks` field is a small `all`/`any` tree of local commands,
+receipt attestations, and PR-check route markers. A failed PR marker or a
+protected remote ref stops and suggests `stack promote`; Syncwheel never opens
+the PR itself. Every check override needs a reason and is retained in the
+digest-bound plan and ledger receipt.
 
 ## Deployment channels
 
