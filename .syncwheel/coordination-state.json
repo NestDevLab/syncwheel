@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-20T15:53:38+00:00",
+  "created_at": "2026-08-20T16:02:01+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -45,35 +43,17 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "direct-stack-land"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/direct-stack-land",
-        "commits": [
-          "117ff572bbbbdae65a580120f873375d7012874a",
-          "93d7c6f50571be7eef84a3c8982f026985c59efe"
-        ],
-        "id": "direct-stack-land",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "c77a6cc59733065b6c6ac45e98086283de2c7018cfd846fdd2c0dd691f4b8305",
-  "parent_state": "27e1f7047d4f22941da0173c8e7011aac77058c9",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "469e5864406ba34f736697c524f3f410e33fd55d",
   "projection_status": "partial",
-  "publication_id": "6730f5ea-2102-4df3-8f58-ae29044de368",
-  "publication_scope": "promote:direct-stack-land",
+  "publication_id": "9106923e-1191-4755-b839-521acbcaa6c4",
+  "publication_scope": "close:direct-stack-land",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
@@ -154,6 +134,14 @@
       "closed_at": "2026-08-20T15:53:33+00:00",
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/direct-stack-land",
+      "remote_tip": "93d7c6f50571be7eef84a3c8982f026985c59efe",
+      "stack": "direct-stack-land"
+    },
+    {
+      "branch": "pr/direct-stack-land",
+      "closed_at": "2026-08-20T16:01:58+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/direct-stack-land",
       "remote_tip": "93d7c6f50571be7eef84a3c8982f026985c59efe",
       "stack": "direct-stack-land"
     }
