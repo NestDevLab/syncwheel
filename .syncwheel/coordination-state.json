@@ -1,11 +1,13 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "65d12bf34b1b9afb7736e1261ca9d2a7d30a5900"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-20T14:40:57+00:00",
+  "created_at": "2026-08-20T14:41:27+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "ba6a9f836680e93878d59f89ab1e73371360202c",
+    "refs/heads/main-integration": "65d12bf34b1b9afb7736e1261ca9d2a7d30a5900",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
@@ -48,10 +50,10 @@
     "version": 2
   },
   "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "e904bd86dfafbb6197b1ee39f35084095a0b059f",
+  "parent_state": "c9c9bf9024036c69a6337fb13be9e71384e1a93b",
   "projection_status": "partial",
-  "publication_id": "374bea96-79a1-4c97-9734-7fc748b179c7",
-  "publication_scope": "close:reconcile-preflight-atomicity",
+  "publication_id": "86224838-a946-44b1-a662-072dadc898fe",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
