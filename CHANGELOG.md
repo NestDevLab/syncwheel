@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.33.4 - 2026-08-20
+
+- Preflight every local reconciliation rebuild or alignment target before the
+  first mutation. A dirty later target now stops `reconcile --apply` and its
+  `sync` and `publish` wrappers without changing an earlier stack, manifest,
+  or ledger.
+
 ## 0.33.3 - 2026-08-20
 
 - Extend repository hooks with a primary-checkout guard: `post-checkout` reports
