@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.34.0 - 2026-08-20
+
+- Add `stack land`: a plan-first direct-landing path for a declared stack that
+  validates exact source and integration projections, dependencies, clean
+  worktrees, delivery observation, active-active alignment, required local
+  checks or verifier-bound attestations, and a digest-bound exact lease.
+- Keep PR promotion explicit: policy, check, merge-conflict, linear-history,
+  or remote-rejection stops return the `stack promote` route and never create a
+  pull request automatically. Landing supports fast-forward or deterministic
+  two-parent merge candidates, durable operation receipts, and observation-only
+  retry reconciliation.
+
 ## 0.33.4 - 2026-08-20
 
 - Preflight every local reconciliation rebuild or alignment target before the

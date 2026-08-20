@@ -23,6 +23,16 @@ The preferred source of truth is `.syncwheel/manifest.json`.
     "strategy": "merge-stacks",
     "stacks": ["feature-a", "feature-b"]
   },
+  "landing": {
+    "mode": "direct",
+    "strategy": "merge",
+    "checks": {
+      "id": "landing-quality",
+      "all": [
+        {"id": "unit", "local": {"scope": "stack", "argv": ["make", "test"]}}
+      ]
+    }
+  },
   "stacks": [
     {
       "id": "feature-a",
@@ -299,6 +309,16 @@ python3 scripts/syncwheel.py manifest require-integration --apply
   `--replay-mode` on the command overrides both. Omitted means `auto`.
   It is deliberately absent from coordination state: it changes how a ref was
   produced, not what it contains, so it is not shared topology.
+- `landing` is optional. Its mode is `disabled` (the default) or `direct`; an
+  absent or disabled policy needs the per-request `stack land --allow-direct`
+  bypass. `strategy` is `merge` (fast-forward first, deterministic merge if
+  necessary) or `ff-only`.
+- `landing.checks`, when present, is a uniquely identified `all`/`any` tree.
+  Leaves are `local` (`scope` `stack` or `integration`, argv, optional timeout),
+  `attestation` (same scope plus verifier argv), or `pr` (remote-check route
+  marker). There is no negation or ambient-expression language. Attestation
+  verifiers receive JSON on stdin and must emit `{valid:true, subjectRevision,
+  issuer}` on stdout.
 - version 2 or 3 `coordination.mode` is `active-active` or persisted `disabled`
 - version 2 or 3 coordination must use the same named remote as
   `defaults.publication_remote`

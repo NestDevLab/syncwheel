@@ -11,9 +11,28 @@
     "branch": "main-integration",
     "base": "origin/main",
     "strategy": "cherry-pick",
-    "stacks": []
+    "stacks": [
+      "direct-stack-land"
+    ]
   },
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "direct-stack-land",
+      "branch": "syncwheel/draft/direct-stack-land",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Plan-first safe direct landing"
+      }
+    }
+  ],
   "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked",
   "coordination": {
