@@ -1,13 +1,13 @@
 {
   "changed_refs": {
-    "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca"
+    "refs/heads/main-integration": "ba6a9f836680e93878d59f89ab1e73371360202c"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-20T14:32:40+00:00",
+  "created_at": "2026-08-20T14:32:55+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "ba10b46f17681d6738eb4b9c1c2890a57ff6cd8c",
+    "refs/heads/main-integration": "ba6a9f836680e93878d59f89ab1e73371360202c",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
@@ -68,10 +68,10 @@
     "version": 2
   },
   "manifest_digest": "d1aa828972e404695a3f145305ecfbd811c416b988a83057927ae4dc0409913e",
-  "parent_state": "e12d40460af1d4e40d80fe011803fb9b8146b9b0",
+  "parent_state": "e56b2387300255438c43bde344fa46d762448f53",
   "projection_status": "partial",
-  "publication_id": "0a823e04-2104-4ce3-a7ac-226955175c24",
-  "publication_scope": "stack:reconcile-preflight-atomicity",
+  "publication_id": "75028a25-8527-4195-aa24-557348bd5248",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
