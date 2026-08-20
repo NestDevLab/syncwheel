@@ -5211,7 +5211,9 @@ def local_manifest_projection_is_convergent(repo_root, manifest, manifest_path=N
         return False
 
 
-def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
+def apply_pending_coordination_merge(
+    repo_root, manifest, manifest_path, *, persist=True, expected_digest=None
+):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         raise SyncwheelError('--accept-merge requires an active-active coordination manifest')
@@ -5241,19 +5243,25 @@ def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
             + merged.get('reason', 'unknown')
         )
     updated = apply_coordination_snapshot(manifest, merged['merged'])
-    save_manifest_with_ledger(
-        repo_root,
-        manifest_path,
-        updated,
-        'coordination_accept_merge',
-        {
-            'coordination_id': config['id'],
-            'base_state': base_tip,
-            'remote_state': latest['tip'],
-            'local_stacks': merged['local_stacks'],
-            'remote_stacks': merged['remote_stacks'],
-        },
-    )
+    if expected_digest is not None and manifest_digest(updated) != expected_digest:
+        raise SyncwheelError(
+            'the accepted coordination merge changed after reconciliation planning; '
+            'run handoff and retry'
+        )
+    if persist:
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            updated,
+            'coordination_accept_merge',
+            {
+                'coordination_id': config['id'],
+                'base_state': base_tip,
+                'remote_state': latest['tip'],
+                'local_stacks': merged['local_stacks'],
+                'remote_stacks': merged['remote_stacks'],
+            },
+        )
     return updated
 
 
@@ -10845,6 +10853,39 @@ def reconcile_worktree_path(repo_root, branch, worktree_root):
     return default_worktree_path(repo_root, branch)
 
 
+def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root):
+    """Reject dirty local targets before reconciliation changes any managed state."""
+    stack_actions = {'rebuild_stack', 'align_stack_to_remote'}
+    integration_actions = {'rebuild_integration', 'align_integration_to_remote'}
+    checked = set()
+
+    for action in actions:
+        if action['type'] in stack_actions:
+            stack = require_stack(manifest, action['stack'])
+            worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
+            path = Path(worktree).resolve()
+            key = (stack['branch'], path)
+            if key not in checked:
+                ensure_non_in_place_target_clean(repo_root, stack['branch'], path)
+                checked.add(key)
+        elif action['type'] in integration_actions:
+            integration = manifest['integration']
+            branch = integration['branch']
+            if get_current_branch(repo_root) == branch:
+                path = Path(repo_root).resolve()
+                key = (branch, path)
+                if key not in checked:
+                    ensure_clean_worktree(path, allowed_status_prefixes=['?? .syncwheel/'])
+                    checked.add(key)
+            else:
+                worktree = reconcile_worktree_path(repo_root, branch, worktree_root)
+                path = Path(worktree).resolve()
+                key = (branch, path)
+                if key not in checked:
+                    ensure_non_in_place_target_clean(repo_root, branch, path)
+                    checked.add(key)
+
+
 def reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args):
     stack_ids = set(args.stack or [stack['id'] for stack in manifest['stacks']])
     actions = []
@@ -11174,8 +11215,14 @@ def command_reconcile(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    pending_merge_manifest = None
+    pending_merge_preview = None
     if getattr(args, 'accept_merge', False):
-        manifest = apply_pending_coordination_merge(repo_root, manifest, manifest_path)
+        pending_merge_manifest = manifest
+        pending_merge_preview = apply_pending_coordination_merge(
+            repo_root, manifest, manifest_path, persist=False
+        )
+        manifest = pending_merge_preview
     resume_actions = []
     resume_manifest_changed = False
     if args.mode == 'resume':
@@ -11254,6 +11301,7 @@ def command_reconcile(args):
     if manual_actions:
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
 
+    preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root)
     require_manifest_transaction_current(manifest_path)
     if is_external_manifest_path(repo_root, manifest_path):
         ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
@@ -11264,6 +11312,14 @@ def command_reconcile(args):
     coordinated_push = args.push and coordination_is_active(manifest)
     if coordinated_push:
         coordinated_push_remote(args, coordination_config(manifest))
+    if pending_merge_manifest is not None:
+        manifest = apply_pending_coordination_merge(
+            repo_root,
+            pending_merge_manifest,
+            manifest_path,
+            persist=True,
+            expected_digest=manifest_digest(pending_merge_preview),
+        )
     coordinated_refs = {}
     coordinated_events = []
     for action in actions:
