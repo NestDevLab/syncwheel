@@ -832,7 +832,9 @@ def require_managed_push_guard(repo_root, manifest):
 
 def ensure_managed_repository_hooks(repo_root, manifest):
     policy = managed_push_guard_policy(repo_root, manifest)
-    if not policy['required'] or policy['disabled'] or policy['ready']:
+    if not policy['required'] or policy['disabled']:
+        return policy
+    if policy['ready'] and policy['enforced']:
         return policy
     install_managed_push_hook(repo_root, apply=True)
     policy = managed_push_guard_policy(repo_root, manifest)

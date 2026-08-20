@@ -136,6 +136,20 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertTrue(policy['enforced'])
         self.assertTrue(all(item['ready'] for item in policy['hooks'].values()))
 
+    def test_auto_bootstrap_persists_required_mode_for_a_ready_bundle(self):
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        profile_path = self.repo / '.syncwheel' / 'profile.local.json'
+        profile_path.unlink()
+
+        before = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+        self.assertTrue(before['ready'])
+        self.assertTrue(before['migrationPending'])
+
+        after = syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+        self.assertTrue(after['ready'])
+        self.assertTrue(after['enforced'])
+        self.assertFalse(after['migrationPending'])
+
     def test_install_is_plan_first_idempotent_and_restores_existing_hook(self):
         subprocess.run(
             ['git', 'config', 'core.hooksPath', '.custom-hooks'], cwd=self.repo, check=True
