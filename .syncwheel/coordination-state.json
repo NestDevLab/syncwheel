@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "ba6a9f836680e93878d59f89ab1e73371360202c"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-20T14:32:55+00:00",
+  "created_at": "2026-08-20T14:40:57+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -43,35 +41,17 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "reconcile-preflight-atomicity"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/reconcile-preflight-atomicity",
-        "commits": [
-          "23737c55a3a2b99c965ea4d420dc6544b44803b2",
-          "32d406f4f2f5502d985b405ae52995a3493be971"
-        ],
-        "id": "reconcile-preflight-atomicity",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "d1aa828972e404695a3f145305ecfbd811c416b988a83057927ae4dc0409913e",
-  "parent_state": "e56b2387300255438c43bde344fa46d762448f53",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "e904bd86dfafbb6197b1ee39f35084095a0b059f",
   "projection_status": "partial",
-  "publication_id": "75028a25-8527-4195-aa24-557348bd5248",
-  "publication_scope": "integration",
+  "publication_id": "374bea96-79a1-4c97-9734-7fc748b179c7",
+  "publication_scope": "close:reconcile-preflight-atomicity",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
@@ -138,6 +118,14 @@
       "ref": "refs/heads/pr/close-historical-stack-manifest",
       "remote_tip": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
       "stack": "close-historical-stack-manifest"
+    },
+    {
+      "branch": "pr/reconcile-preflight-atomicity",
+      "closed_at": "2026-08-20T14:40:54+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/reconcile-preflight-atomicity",
+      "remote_tip": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
+      "stack": "reconcile-preflight-atomicity"
     }
   ]
 }
