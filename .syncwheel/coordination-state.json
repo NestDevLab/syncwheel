@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-20T15:53:09+00:00",
+  "created_at": "2026-08-20T15:53:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -63,16 +61,17 @@
         ],
         "id": "direct-stack-land",
         "integration_branch": "main-integration",
+        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
-  "manifest_digest": "d65d1a071a20979c00f3c9390ec2c978659d4a1d56a67b48da610933c8e5bac4",
-  "parent_state": "59d11bfed64f00562fddf3f7b4f71e0a42be8bdb",
+  "manifest_digest": "8ad0b4746339a8c52096beffef630f8c8dd736cabaecf3869162b5794a43353a",
+  "parent_state": "c16e6a2c81830d7e1b9c14f70373ed784b7f79ae",
   "projection_status": "partial",
-  "publication_id": "6b6f7c27-298a-43ab-9c99-c8e68a056ef0",
-  "publication_scope": "stack:direct-stack-land",
+  "publication_id": "38db0c98-0e33-4e02-ac16-1fd46d1a8764",
+  "publication_scope": "demote:direct-stack-land",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
