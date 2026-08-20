@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/primary-checkout-hooks": "aa89201f9b8446442f568139e9eb4729f387a1ce"
+    "refs/heads/pr/primary-checkout-hooks": "aec2fb67d0fcf39b25dff9570d1d93a8b6ca35f9"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-20T12:19:58+00:00",
+  "created_at": "2026-08-20T12:27:47+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -12,7 +12,7 @@
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
-    "refs/heads/pr/primary-checkout-hooks": "aa89201f9b8446442f568139e9eb4729f387a1ce",
+    "refs/heads/pr/primary-checkout-hooks": "aec2fb67d0fcf39b25dff9570d1d93a8b6ca35f9",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
   "manifest": {
@@ -55,7 +55,8 @@
         },
         "branch": "pr/primary-checkout-hooks",
         "commits": [
-          "aa89201f9b8446442f568139e9eb4729f387a1ce"
+          "aa89201f9b8446442f568139e9eb4729f387a1ce",
+          "aec2fb67d0fcf39b25dff9570d1d93a8b6ca35f9"
         ],
         "id": "primary-checkout-hooks",
         "integration_branch": "main-integration",
@@ -64,10 +65,10 @@
     ],
     "version": 2
   },
-  "manifest_digest": "ae79e56fb5b44f2b55576037dc19fa945887767d0cec9b554a46ef315f5fbecd",
-  "parent_state": "e450ed014da95e5b73ce4164e2bbc001c62088d0",
+  "manifest_digest": "03c5951aaac9b160daff76b1bdb67e6dc65ebdd9a348e0c48b8aeb05629d0e70",
+  "parent_state": "1b9963b1fb98af1a3a3b344dc620a2a08b74cd3a",
   "projection_status": "partial",
-  "publication_id": "fdc80ddd-9ae2-4ba7-b9bf-d119f893f697",
+  "publication_id": "7a814ea9-e521-4137-8404-800477a21953",
   "publication_scope": "partial",
   "schema_version": 2,
   "syncwheel_version": "0.33.3",
