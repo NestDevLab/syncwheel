@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "08e9258dc6b2c9f42220a658eb1ea375ca74445a"
+    "refs/heads/pr/reconcile-preflight-atomicity": "a3285d02008f581028e17ad0a0d21d0620077262"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-20T14:13:37+00:00",
+  "created_at": "2026-08-20T14:21:53+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -14,6 +14,7 @@
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
+    "refs/heads/pr/reconcile-preflight-atomicity": "a3285d02008f581028e17ad0a0d21d0620077262",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76"
   },
   "manifest": {
@@ -42,19 +43,36 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "reconcile-preflight-atomicity"
+      ],
       "strategy": "cherry-pick"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/reconcile-preflight-atomicity",
+        "commits": [
+          "23737c55a3a2b99c965ea4d420dc6544b44803b2"
+        ],
+        "id": "reconcile-preflight-atomicity",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "9554b3bbe6eabd7563de92d5cc43fda446c7cddd",
+  "manifest_digest": "9b68adeb0813a3f72dd615aedba88f49188f8cd0252c41891078b129b3473be1",
+  "parent_state": "bf333b8997404b2dc4af3238f31ed4cb90f600d8",
   "projection_status": "partial",
-  "publication_id": "74f96b6f-e7ef-4599-8620-97ad3680e4f8",
-  "publication_scope": "integration",
+  "publication_id": "ef2d2a40-02ea-48b1-a63c-c757b8ac0f26",
+  "publication_scope": "stack:reconcile-preflight-atomicity",
   "schema_version": 2,
-  "syncwheel_version": "0.33.3",
+  "syncwheel_version": "0.33.4",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
