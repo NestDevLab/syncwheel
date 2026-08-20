@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -1163,6 +1164,79 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         conflict = module.merge_coordination_snapshots(base, local, integration_change)
         self.assertEqual(conflict['status'], 'conflict')
         self.assertEqual(conflict['reason'], 'shared_integration_or_defaults_changed')
+
+    def test_accept_merge_preflights_targets_before_persisting_the_merge(self):
+        module = self.load_module()
+        manifest = {
+            'version': 2,
+            'syncwheel_tracking': 'git-tracked',
+            'defaults': {'publication_remote': 'origin'},
+            'integration': {'branch': 'integration/shared', 'stacks': []},
+            'coordination': {'mode': 'active-active'},
+            'stacks': [],
+        }
+        manifest_path = self.tmp / 'manifest.json'
+        calls = []
+
+        def accept_merge(_repo_root, current, _manifest_path, *, persist=True, **_kwargs):
+            calls.append(persist)
+            return current
+
+        args = SimpleNamespace(
+            repo=str(self.tmp),
+            repo_path=None,
+            manifest=None,
+            personal=None,
+            accept_merge=True,
+            command='publish',
+            fetch=False,
+            mode='standard',
+            stack=[],
+            remote=None,
+            worktree_root=None,
+            json=False,
+            apply=True,
+            push=True,
+        )
+        dirty_target = module.SyncwheelError('dirty integration target')
+        with contextlib.ExitStack() as patches:
+            patches.enter_context(mock.patch.object(module, 'resolve_repo_root', return_value=self.tmp))
+            patches.enter_context(
+                mock.patch.object(module, 'require_manifest', return_value=(manifest, manifest_path))
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'apply_pending_coordination_merge', side_effect=accept_merge)
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'validate_manifest', return_value={'errors': []})
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'effective_worktree_root', return_value=None)
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'integration_sync_report', return_value={})
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'reconcile_actions', return_value=[{'type': 'rebuild_integration'}])
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'integration_commit_diagnostics', return_value=[])
+            )
+            patches.enter_context(
+                mock.patch.object(module, 'collect_repo_snapshot', return_value={})
+            )
+            patches.enter_context(mock.patch.object(module, 'print_reconcile_report'))
+            patches.enter_context(
+                mock.patch.object(
+                    module,
+                    'preflight_reconcile_mutation_targets',
+                    side_effect=dirty_target,
+                )
+            )
+            with self.assertRaisesRegex(module.SyncwheelError, 'dirty integration target'):
+                module.command_reconcile(args)
+
+        self.assertEqual(calls, [False])
 
     def test_gc_requires_an_old_tombstone_and_respects_local_locks(self):
         origin = self.create_remote()

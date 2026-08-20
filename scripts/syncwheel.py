@@ -5211,7 +5211,9 @@ def local_manifest_projection_is_convergent(repo_root, manifest, manifest_path=N
         return False
 
 
-def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
+def apply_pending_coordination_merge(
+    repo_root, manifest, manifest_path, *, persist=True, expected_digest=None
+):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         raise SyncwheelError('--accept-merge requires an active-active coordination manifest')
@@ -5241,19 +5243,25 @@ def apply_pending_coordination_merge(repo_root, manifest, manifest_path):
             + merged.get('reason', 'unknown')
         )
     updated = apply_coordination_snapshot(manifest, merged['merged'])
-    save_manifest_with_ledger(
-        repo_root,
-        manifest_path,
-        updated,
-        'coordination_accept_merge',
-        {
-            'coordination_id': config['id'],
-            'base_state': base_tip,
-            'remote_state': latest['tip'],
-            'local_stacks': merged['local_stacks'],
-            'remote_stacks': merged['remote_stacks'],
-        },
-    )
+    if expected_digest is not None and manifest_digest(updated) != expected_digest:
+        raise SyncwheelError(
+            'the accepted coordination merge changed after reconciliation planning; '
+            'run handoff and retry'
+        )
+    if persist:
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            updated,
+            'coordination_accept_merge',
+            {
+                'coordination_id': config['id'],
+                'base_state': base_tip,
+                'remote_state': latest['tip'],
+                'local_stacks': merged['local_stacks'],
+                'remote_stacks': merged['remote_stacks'],
+            },
+        )
     return updated
 
 
@@ -11207,8 +11215,14 @@ def command_reconcile(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    pending_merge_manifest = None
+    pending_merge_preview = None
     if getattr(args, 'accept_merge', False):
-        manifest = apply_pending_coordination_merge(repo_root, manifest, manifest_path)
+        pending_merge_manifest = manifest
+        pending_merge_preview = apply_pending_coordination_merge(
+            repo_root, manifest, manifest_path, persist=False
+        )
+        manifest = pending_merge_preview
     resume_actions = []
     resume_manifest_changed = False
     if args.mode == 'resume':
@@ -11298,6 +11312,14 @@ def command_reconcile(args):
     coordinated_push = args.push and coordination_is_active(manifest)
     if coordinated_push:
         coordinated_push_remote(args, coordination_config(manifest))
+    if pending_merge_manifest is not None:
+        manifest = apply_pending_coordination_merge(
+            repo_root,
+            pending_merge_manifest,
+            manifest_path,
+            persist=True,
+            expected_digest=manifest_digest(pending_merge_preview),
+        )
     coordinated_refs = {}
     coordinated_events = []
     for action in actions:
