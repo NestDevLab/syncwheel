@@ -20,6 +20,16 @@ class ManagedRefGuardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.repo = Path(self.temp.name)
+        self.bin_dir = self.repo / '.test-bin'
+        self.bin_dir.mkdir()
+        syncwheel_bin = self.bin_dir / 'syncwheel'
+        syncwheel_bin.write_text(
+            '#!/bin/sh\nexec "' + os.fspath(Path(os.sys.executable)) + '" "'
+            + os.fspath(MODULE_PATH) + '" "$@"\n'
+        )
+        syncwheel_bin.chmod(0o755)
+        self.hook_env = os.environ.copy()
+        self.hook_env['PATH'] = os.fspath(self.bin_dir) + os.pathsep + self.hook_env['PATH']
         subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
         subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=self.repo, check=True)
         subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'], cwd=self.repo, check=True)
@@ -80,6 +90,7 @@ class ManagedRefGuardTests(unittest.TestCase):
 
         switched = subprocess.run(
             ['git', 'switch', '-c', 'feature'], cwd=self.repo,
+            env=self.hook_env,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertNotEqual(switched.returncode, 0)
@@ -93,6 +104,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         subprocess.run(['git', 'add', 'blocked'], cwd=self.repo, check=True)
         committed = subprocess.run(
             ['git', 'commit', '-m', 'must not commit'], cwd=self.repo,
+            env=self.hook_env,
             text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         self.assertNotEqual(committed.returncode, 0)
@@ -106,12 +118,15 @@ class ManagedRefGuardTests(unittest.TestCase):
         feature = self.repo.parent / f'{self.repo.name}-feature-wt'
         subprocess.run(
             ['git', 'worktree', 'add', '-b', 'feature', str(feature), 'HEAD'],
-            cwd=self.repo, check=True,
+            cwd=self.repo, env=self.hook_env, check=True,
         )
         try:
             (feature / 'allowed').write_text('allowed\n')
             subprocess.run(['git', 'add', 'allowed'], cwd=feature, check=True)
-            subprocess.run(['git', 'commit', '-qm', 'allowed'], cwd=feature, check=True)
+            subprocess.run(
+                ['git', 'commit', '-qm', 'allowed'], cwd=feature,
+                env=self.hook_env, check=True,
+            )
         finally:
             subprocess.run(['git', 'worktree', 'remove', str(feature)], cwd=self.repo, check=True)
 
