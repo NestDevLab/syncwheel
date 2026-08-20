@@ -1,4 +1,4 @@
-# Managed-ref push guard
+# Managed repository guards
 
 Syncwheel owns publication of every ref declared by its repository model. A raw
 `git push` can otherwise advance one of those refs without its manifest/state
@@ -7,20 +7,39 @@ coordination state.
 
 ## Local contract
 
-`syncwheel hooks install` is plan-only; `--apply` installs. The command honors
-`core.hooksPath`. When `pre-push` already exists, Syncwheel moves it to a stable
-chain path and runs it before the managed-ref check. An ownership sidecar records
-the generated hook digest and chained-hook digest. Removal is also plan-first,
-refuses modified/unowned hooks, and restores the chained hook.
+`syncwheel hooks install` is plan-only; `--apply` installs the `pre-push`,
+`post-checkout`, and `pre-commit` bundle. The command honors `core.hooksPath`.
+When a hook already exists, Syncwheel moves it to a stable chain path and runs it
+before its own check. Per-hook ownership sidecars record the generated and chained
+digests. Removal is also plan-first, refuses modified/unowned hooks, and restores
+every chained hook.
 
 The policy is required-by-default for `git-tracked` clones with managed refs,
-active-active coordination, or an owned journal branch. New setup flows include
-the hook action in their plan and install it visibly on apply. Existing clones
-enter an explicit migration-pending state: validation warns without rewriting
-hooks, and applying installation activates fail-closed enforcement for later
-Syncwheel mutations. `local-only` contribution clones are optional. A clone can
+active-active coordination, or an owned journal branch. New setup flows install
+the bundle visibly on apply. Existing clones enter a migration-pending state:
+read-only commands warn without rewriting hooks, while the next mutating Syncwheel
+operation installs or upgrades the bundle before changing repository state. A
+foreign hook is chained rather than overwritten. `local-only` contribution clones
+are optional. A clone can
 persist `hooks.mode=disabled` only through `hooks remove --disable --reason ...`;
 the reason remains visible in status and validation.
+
+## Primary checkout
+
+The primary worktree is reserved for the manifest integration branch. The
+`post-checkout` guard compares that worktree with the declared branch and returns a
+visible failure if a checkout moved it elsewhere. Git has already completed the
+switch when this hook runs, so the guard deliberately does not reset, clean, stash,
+or switch anything automatically. The `pre-commit` guard then blocks commits until
+the checkout is restored losslessly. Both guards allow commits in dedicated feature
+worktrees and plumbing-materialized branches.
+
+Git has no pre-checkout hook, so preventing the ref move itself is not portable.
+The combination of immediate post-checkout failure, commit blocking, validation,
+and Syncwheel's integration-first workflow is the strongest reversible local guard
+available without wrapping the `git` executable.
+
+## Managed-ref publication
 
 The guard reads Git's canonical pre-push input, so the destination ref is checked
 after Git resolves shorthand. It therefore covers direct and indirect refspecs,

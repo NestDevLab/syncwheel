@@ -44,6 +44,14 @@ class JournalModeTest(unittest.TestCase):
         self.git('add', '.syncwheel/manifest.json')
         self.git('commit', '-q', '-m', 'configure journal')
         self.git('push', '-q', 'origin', 'journal')
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps({
+            'hooks': {
+                'mode': 'disabled',
+                'reason': 'journal fixture exercises raw remote state transitions',
+            }
+        }, indent=2) + '\n')
+        with (self.repo / '.git' / 'info' / 'exclude').open('a') as handle:
+            handle.write('.syncwheel/profile.local.json\n')
 
     def tearDown(self):
         self.temp.cleanup()

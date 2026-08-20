@@ -112,7 +112,15 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--integration-branch',
             integration,
         )
+        self.disable_fixture_hooks(repo)
         return self.set_integration_membership(repo, integration_membership)
+
+    def disable_fixture_hooks(self, repo):
+        self.run_cli(
+            repo,
+            'hooks', 'remove', '--disable',
+            '--reason', 'coordination fixture uses raw primary branch setup', '--apply',
+        )
 
     def set_integration_membership(self, repo, integration_membership):
         manifest_path = repo / '.syncwheel' / 'manifest.json'
@@ -255,6 +263,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--integration-branch',
             'integration/shared',
         )
+        self.disable_fixture_hooks(second)
         self.run_cli(second, 'int', 'push')
         second_tip, second_state = self.remote_state(origin)
 
@@ -620,6 +629,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--integration-branch',
             'integration/shared',
         )
+        self.disable_fixture_hooks(second)
         self.git(second, 'switch', '-q', 'integration/shared')
         self.git(second, 'commit', '--allow-empty', '-qm', 'chore: equivalent local projection')
         local_tip = self.git(second, 'rev-parse', 'HEAD').stdout.strip()
@@ -918,6 +928,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--coordination-id',
             'second-domain',
         )
+        self.disable_fixture_hooks(second)
         failure = self.run_cli(second, 'int', 'push', expected=2)
         self.assertIn('already owned by another coordination domain', failure.stderr)
 
@@ -939,6 +950,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             '--integration-branch',
             'integration/shared',
         )
+        self.disable_fixture_hooks(current)
         self.set_integration_membership(current, 'legacy')
         remote_sha = self.commit_on_branch(current, 'pr/remote-change', 'remote.txt')
         self.run_cli(current, 'stack', 'create', 'remote-change', remote_sha, '--branch', 'pr/remote-change')
