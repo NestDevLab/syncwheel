@@ -1,7 +1,7 @@
 {
   "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-20T13:11:26+00:00",
+  "created_at": "2026-08-20T13:16:20+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -46,10 +46,10 @@
     "version": 2
   },
   "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "3fb2e40142c9f0113dbeb51b90dfd61b9fc44fe8",
+  "parent_state": "14389aca53b5f25c02f3f674ac915c476ef59bc8",
   "projection_status": "partial",
-  "publication_id": "e69cc5e3-ed15-43b4-bf8e-78dae4ee5595",
-  "publication_scope": "close:primary-checkout-hooks",
+  "publication_id": "fff4e527-2de8-477f-b6fb-2aeebe631bf8",
+  "publication_scope": "close:managed-ref-guard",
   "schema_version": 2,
   "syncwheel_version": "0.33.3",
   "tombstones": [
@@ -94,20 +94,20 @@
       "stack": "coordination-repair"
     },
     {
-      "branch": "pr/managed-ref-guard",
-      "closed_at": "2026-08-16T10:19:20+00:00",
-      "reason": "merged",
-      "ref": "refs/heads/pr/managed-ref-guard",
-      "remote_tip": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
-      "stack": "managed-ref-guard"
-    },
-    {
       "branch": "pr/primary-checkout-hooks",
       "closed_at": "2026-08-20T13:11:23+00:00",
       "reason": "merged",
       "ref": "refs/heads/pr/primary-checkout-hooks",
       "remote_tip": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
       "stack": "primary-checkout-hooks"
+    },
+    {
+      "branch": "pr/managed-ref-guard",
+      "closed_at": "2026-08-20T13:16:18+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/managed-ref-guard",
+      "remote_tip": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
+      "stack": "managed-ref-guard"
     }
   ]
 }
