@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-20T13:28:13+00:00",
+  "created_at": "2026-08-20T13:35:07+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -42,34 +40,17 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "close-historical-stack-manifest"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/close-historical-stack-manifest",
-        "commits": [
-          "44e8600c859b5df7d27f036a9b28ca427cc0a7aa"
-        ],
-        "id": "close-historical-stack-manifest",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "a33531ea23b31cb0b68ac4a35a79e0d4f68bf96abbec89a5935af0f4313ba669",
-  "parent_state": "b7efdbebfa95390f28733c49dbe1d7a87aebce58",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "9b0a543b1aa855627208119ee81e49ccc4710ae0",
   "projection_status": "partial",
-  "publication_id": "238772cd-c9ec-43a9-8395-cdeef8d84adf",
-  "publication_scope": "partial",
+  "publication_id": "7d7e5fdc-dae8-46e4-8734-e29813af89a6",
+  "publication_scope": "close:close-historical-stack-manifest",
   "schema_version": 2,
   "syncwheel_version": "0.33.3",
   "tombstones": [
@@ -128,6 +109,14 @@
       "ref": "refs/heads/pr/managed-ref-guard",
       "remote_tip": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
       "stack": "managed-ref-guard"
+    },
+    {
+      "branch": "pr/close-historical-stack-manifest",
+      "closed_at": "2026-08-20T13:35:04+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/close-historical-stack-manifest",
+      "remote_tip": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
+      "stack": "close-historical-stack-manifest"
     }
   ]
 }
