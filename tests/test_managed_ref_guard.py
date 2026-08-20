@@ -20,6 +20,16 @@ class ManagedRefGuardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.repo = Path(self.temp.name)
+        self.bin_dir = self.repo / '.test-bin'
+        self.bin_dir.mkdir()
+        syncwheel_bin = self.bin_dir / 'syncwheel'
+        syncwheel_bin.write_text(
+            '#!/bin/sh\nexec "' + os.fspath(Path(os.sys.executable)) + '" "'
+            + os.fspath(MODULE_PATH) + '" "$@"\n'
+        )
+        syncwheel_bin.chmod(0o755)
+        self.hook_env = os.environ.copy()
+        self.hook_env['PATH'] = os.fspath(self.bin_dir) + os.pathsep + self.hook_env['PATH']
         subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
         subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=self.repo, check=True)
         subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'], cwd=self.repo, check=True)
@@ -61,8 +71,84 @@ class ManagedRefGuardTests(unittest.TestCase):
     def args(self):
         return types.SimpleNamespace(
             repo=str(self.repo), manifest=None, personal=None,
-            remote_name='origin', remote_url='example.invalid/repo',
+            remote_name='origin', remote_url='example.invalid/repo', event=None,
         )
+
+    def test_bundle_installs_primary_checkout_guards_and_reports_ready(self):
+        result = syncwheel.install_managed_push_hook(self.repo, apply=True)
+        self.assertTrue(result['ready'])
+        self.assertEqual(
+            set(result['hooks']), {'pre-push', 'pre-commit', 'post-checkout'}
+        )
+        for hook in result['hooks'].values():
+            self.assertTrue(hook['ready'])
+            self.assertEqual(hook['status'], 'installed')
+
+    def test_primary_checkout_switch_warns_and_pre_commit_blocks(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+
+        switched = subprocess.run(
+            ['git', 'switch', '-c', 'feature'], cwd=self.repo,
+            env=self.hook_env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(switched.returncode, 0)
+        self.assertIn('branch mismatch detected after checkout', switched.stderr)
+        self.assertEqual(
+            subprocess.check_output(['git', 'branch', '--show-current'], cwd=self.repo, text=True).strip(),
+            'feature',
+        )
+
+        (self.repo / 'blocked').write_text('blocked\n')
+        subprocess.run(['git', 'add', 'blocked'], cwd=self.repo, check=True)
+        committed = subprocess.run(
+            ['git', 'commit', '-m', 'must not commit'], cwd=self.repo,
+            env=self.hook_env,
+            text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(committed.returncode, 0)
+        self.assertIn('commit blocked', committed.stderr)
+
+    def test_feature_worktree_commit_remains_allowed(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        subprocess.run(['git', 'add', '.syncwheel/manifest.json'], cwd=self.repo, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'manifest'], cwd=self.repo, check=True)
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        feature = self.repo.parent / f'{self.repo.name}-feature-wt'
+        subprocess.run(
+            ['git', 'worktree', 'add', '-b', 'feature', str(feature), 'HEAD'],
+            cwd=self.repo, env=self.hook_env, check=True,
+        )
+        try:
+            (feature / 'allowed').write_text('allowed\n')
+            subprocess.run(['git', 'add', 'allowed'], cwd=feature, check=True)
+            subprocess.run(
+                ['git', 'commit', '-qm', 'allowed'], cwd=feature,
+                env=self.hook_env, check=True,
+            )
+        finally:
+            subprocess.run(['git', 'worktree', 'remove', str(feature)], cwd=self.repo, check=True)
+
+    def test_required_hooks_auto_bootstrap_for_mutating_commands(self):
+        policy = syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+        self.assertTrue(policy['ready'])
+        self.assertTrue(policy['enforced'])
+        self.assertTrue(all(item['ready'] for item in policy['hooks'].values()))
+
+    def test_auto_bootstrap_persists_required_mode_for_a_ready_bundle(self):
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        profile_path = self.repo / '.syncwheel' / 'profile.local.json'
+        profile_path.unlink()
+
+        before = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+        self.assertTrue(before['ready'])
+        self.assertTrue(before['migrationPending'])
+
+        after = syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+        self.assertTrue(after['ready'])
+        self.assertTrue(after['enforced'])
+        self.assertFalse(after['migrationPending'])
 
     def test_install_is_plan_first_idempotent_and_restores_existing_hook(self):
         subprocess.run(
@@ -96,6 +182,21 @@ class ManagedRefGuardTests(unittest.TestCase):
         hook.write_text(hook.read_text() + '# modified\n')
         with self.assertRaisesRegex(syncwheel.SyncwheelError, 'not owned'):
             syncwheel.remove_managed_push_hook(self.repo, apply=True)
+        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'stale or tampered'):
+            syncwheel.install_managed_push_hook(self.repo, apply=True)
+
+    def test_bundle_preflight_does_not_partially_install_on_conflict(self):
+        hooks, pre_commit, backup, _, _ = syncwheel.managed_hook_paths(
+            self.repo, 'pre-commit'
+        )
+        hooks.mkdir(parents=True, exist_ok=True)
+        pre_commit.write_text('#!/bin/sh\necho foreign\n')
+        backup.write_text('#!/bin/sh\necho retained\n')
+
+        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'chaining conflict'):
+            syncwheel.install_managed_push_hook(self.repo, apply=True)
+        self.assertFalse((hooks / 'pre-push').exists())
+        self.assertEqual(pre_commit.read_text(), '#!/bin/sh\necho foreign\n')
 
     def test_chained_hook_tamper_is_reported_and_refuses_lifecycle(self):
         _, hook, backup, _ = syncwheel.managed_push_hook_paths(self.repo)
@@ -111,7 +212,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(status['status'], 'conflict')
         with self.assertRaisesRegex(syncwheel.SyncwheelError, 'not owned'):
             syncwheel.remove_managed_push_hook(self.repo, apply=True)
-        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'chaining conflict'):
+        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'stale or tampered'):
             syncwheel.install_managed_push_hook(self.repo, apply=True)
 
     def test_required_policy_migrates_then_fails_closed_on_tamper(self):

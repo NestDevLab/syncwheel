@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.33.3 - 2026-08-20
+
+- Extend repository hooks with a primary-checkout guard: `post-checkout` reports
+  branch drift immediately and `pre-commit` blocks commits outside the declared
+  integration branch while feature worktrees remain allowed.
+- Automatically install or upgrade the reversible hook bundle before mutating
+  Syncwheel operations in required `git-tracked` clones; keep status and
+  validation read-only and explicit about missing, stale, or tampered hooks.
+
 ## 0.33.2 - 2026-08-16
 
 - Add plan-first `hooks status|install|remove` lifecycle for a composable managed-ref pre-push guard.

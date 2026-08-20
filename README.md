@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.33.2`
+Current version: `0.33.3`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -769,9 +769,9 @@ python3 scripts/syncwheel.py manifest compare --other-manifest ../other-manifest
 The comparison reports shared stacks, stacks only present in one composition,
 and shared stacks whose branch/base/commit list diverges.
 
-### 6. Guard managed refs from raw pushes
+### 6. Guard managed refs and the primary checkout
 
-Install the repository-local, composable pre-push guard with an explicit plan/apply gate:
+Inspect or explicitly manage the repository-local, composable hook bundle:
 
 ```bash
 syncwheel hooks status
@@ -782,24 +782,32 @@ syncwheel hooks remove --disable --reason "external contribution clone"
 syncwheel hooks remove --disable --reason "external contribution clone" --apply
 ```
 
-The guard derives owned refs from the manifest and published coordination state,
+The `pre-push` guard derives owned refs from the manifest and published coordination state,
 including integration, stack and draft sources, channels, coordination state, and
 an owned journal branch. It blocks direct, aliased, multi-ref, delete, force, and
 `HEAD:<managed>` pushes, then names the corresponding Syncwheel publisher. Existing
-pre-push hooks are chained and restored on removal; `core.hooksPath` is honored.
-For `git-tracked` repositories the guard is required by default. New initialization,
-active-active setup, and journal scheduler setup include its plan and visibly install
-it on apply. Existing clones migrate compatibly: `validate` and `status` report the
-pending installation; after installation, Syncwheel mutations stop if the hook is
-missing, stale, or tampered. `local-only` contribution clones remain opt-in. The only
-escape hatch is a persisted clone-local disable with a non-empty reason, which stays
-visible in validation.
+hooks are chained and restored on removal; `core.hooksPath` is honored.
+
+The same bundle installs `post-checkout` and `pre-commit` guards for the primary
+checkout. A switch away from the manifest integration branch returns a visible
+failure after Git completes the switch; the following commit is blocked. Dedicated
+feature worktrees remain valid. The checkout hook cannot undo Git's completed branch
+switch, so restore a mismatched checkout losslessly rather than resetting dirty work.
+
+For `git-tracked` repositories the bundle is required by default. New initialization,
+active-active setup, journal scheduler setup, and the first mutating Syncwheel command
+install or upgrade it automatically. Read-only `validate`, `status`, and `hooks status`
+never rewrite local state; they report missing, stale, or tampered hooks. Existing
+non-Syncwheel hooks are chained and restored on removal. `local-only` contribution
+clones remain opt-in. The only escape hatch is a persisted clone-local disable with a
+non-empty reason, which stays visible in validation.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
 remote and allowed destination refset.
 
-This hook is a local safety rail, not a security boundary. `git push --no-verify`
-can bypass it. See [the managed-ref guard design](docs/design/managed-ref-guard.md)
+These hooks are local safety rails, not a security boundary. `--no-verify`, deleting
+the hooks, or operating from a clone that has never run Syncwheel can bypass them.
+See [the managed repository guard design](docs/design/managed-ref-guard.md)
 for server-side hardening options.
 
 ### 7. Install development Git hooks

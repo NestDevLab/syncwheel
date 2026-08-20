@@ -35,6 +35,10 @@ class DeploymentChannelTest(unittest.TestCase):
         self.b = self.make_stack('b', 'b.txt', 'b one\n')
         self.git('switch', '-q', '-c', 'main-integration', 'main')
         self.write_manifest(version=2)
+        self.cli(
+            'hooks', 'remove', '--disable',
+            '--reason', 'channel fixture uses raw primary branch setup', '--apply',
+        )
 
     def tearDown(self):
         self.temp.cleanup()
