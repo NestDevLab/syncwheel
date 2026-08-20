@@ -1,11 +1,14 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-20T13:16:20+00:00",
+  "created_at": "2026-08-20T13:28:13+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
     "refs/heads/main-integration": "b7a6b6ba8bab3e3e955224ce58fa50463dd204a7",
+    "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
@@ -39,17 +42,34 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "close-historical-stack-manifest"
+      ],
       "strategy": "cherry-pick"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/close-historical-stack-manifest",
+        "commits": [
+          "44e8600c859b5df7d27f036a9b28ca427cc0a7aa"
+        ],
+        "id": "close-historical-stack-manifest",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "14389aca53b5f25c02f3f674ac915c476ef59bc8",
+  "manifest_digest": "a33531ea23b31cb0b68ac4a35a79e0d4f68bf96abbec89a5935af0f4313ba669",
+  "parent_state": "b7efdbebfa95390f28733c49dbe1d7a87aebce58",
   "projection_status": "partial",
-  "publication_id": "fff4e527-2de8-477f-b6fb-2aeebe631bf8",
-  "publication_scope": "close:managed-ref-guard",
+  "publication_id": "238772cd-c9ec-43a9-8395-cdeef8d84adf",
+  "publication_scope": "partial",
   "schema_version": 2,
   "syncwheel_version": "0.33.3",
   "tombstones": [
