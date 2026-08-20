@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-20T15:53:22+00:00",
+  "created_at": "2026-08-20T15:53:38+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -9,6 +11,7 @@
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
+    "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
@@ -54,24 +57,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/direct-stack-land",
+        "branch": "pr/direct-stack-land",
         "commits": [
           "117ff572bbbbdae65a580120f873375d7012874a",
           "93d7c6f50571be7eef84a3c8982f026985c59efe"
         ],
         "id": "direct-stack-land",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
-  "manifest_digest": "8ad0b4746339a8c52096beffef630f8c8dd736cabaecf3869162b5794a43353a",
-  "parent_state": "c16e6a2c81830d7e1b9c14f70373ed784b7f79ae",
+  "manifest_digest": "c77a6cc59733065b6c6ac45e98086283de2c7018cfd846fdd2c0dd691f4b8305",
+  "parent_state": "27e1f7047d4f22941da0173c8e7011aac77058c9",
   "projection_status": "partial",
-  "publication_id": "38db0c98-0e33-4e02-ac16-1fd46d1a8764",
-  "publication_scope": "demote:direct-stack-land",
+  "publication_id": "6730f5ea-2102-4df3-8f58-ae29044de368",
+  "publication_scope": "promote:direct-stack-land",
   "schema_version": 2,
   "syncwheel_version": "0.33.4",
   "tombstones": [
@@ -146,6 +148,14 @@
       "ref": "refs/heads/pr/reconcile-preflight-atomicity",
       "remote_tip": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
       "stack": "reconcile-preflight-atomicity"
+    },
+    {
+      "branch": "syncwheel/draft/direct-stack-land",
+      "closed_at": "2026-08-20T15:53:33+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/direct-stack-land",
+      "remote_tip": "93d7c6f50571be7eef84a3c8982f026985c59efe",
+      "stack": "direct-stack-land"
     }
   ]
 }
