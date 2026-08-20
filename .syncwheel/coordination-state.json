@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-20T13:04:24+00:00",
+  "created_at": "2026-08-20T13:11:26+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -41,36 +39,17 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "primary-checkout-hooks"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/primary-checkout-hooks",
-        "commits": [
-          "aa89201f9b8446442f568139e9eb4729f387a1ce",
-          "aec2fb67d0fcf39b25dff9570d1d93a8b6ca35f9",
-          "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6"
-        ],
-        "id": "primary-checkout-hooks",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "be03f95226f049d6ca97079f5348e4d677a1327ddb9f5d52a6be1795cef4d998",
-  "parent_state": "2826326de969f9a2cfa7c1919d5cb28d9c0f20ca",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "3fb2e40142c9f0113dbeb51b90dfd61b9fc44fe8",
   "projection_status": "partial",
-  "publication_id": "971ce3bb-5b5a-48a3-9473-0d75982418b2",
-  "publication_scope": "partial",
+  "publication_id": "e69cc5e3-ed15-43b4-bf8e-78dae4ee5595",
+  "publication_scope": "close:primary-checkout-hooks",
   "schema_version": 2,
   "syncwheel_version": "0.33.3",
   "tombstones": [
@@ -121,6 +100,14 @@
       "ref": "refs/heads/pr/managed-ref-guard",
       "remote_tip": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
       "stack": "managed-ref-guard"
+    },
+    {
+      "branch": "pr/primary-checkout-hooks",
+      "closed_at": "2026-08-20T13:11:23+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/primary-checkout-hooks",
+      "remote_tip": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
+      "stack": "primary-checkout-hooks"
     }
   ]
 }
