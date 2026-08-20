@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Deterministic Git coordination for human and AI teams: rebuild clean PR branches and pinned deployment-channel compositions from one manifest.">
-  <title>syncwheel — One branch. Many PRs.</title>
+  <meta name="description" content="Git coordination for human and AI teams: manage PR lanes, test them together, publish pinned channels, and resume safely from one declared system.">
+  <title>syncwheel — AI-ready Git coordination</title>
   <link rel="icon" type="image/png" href="assets/syncwheel-logo.png">
   <style>
     :root {
@@ -1128,6 +1128,667 @@
         transition: none !important;
       }
     }
+
+    /* ---------- landing refresh: AI-era coordination ---------- */
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    :root {
+      --bg: #070a09;
+      --panel: #0f1412;
+      --panel-2: #111814;
+      --text: #f3f7f4;
+      --muted: #a2aea6;
+      --line: rgba(218, 236, 226, 0.13);
+      --emerald: #57edaa;
+      --teal: #2cc9aa;
+      --mint: #78f0b6;
+      --sky: #4ec4ed;
+      --shadow: 0 30px 90px rgba(0, 0, 0, 0.38);
+    }
+
+    body {
+      background:
+        radial-gradient(circle at 75% 17%, rgba(44, 201, 170, 0.13), transparent 27rem),
+        radial-gradient(circle at 17% 9%, rgba(78, 196, 237, 0.06), transparent 23rem),
+        #070a09;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    a:focus-visible,
+    button:focus-visible {
+      outline: 2px solid var(--sky);
+      outline-offset: 4px;
+    }
+
+    .wrap {
+      width: calc(100% - clamp(52px, 6vw, 192px));
+      max-width: none;
+    }
+
+    main > section,
+    footer {
+      width: min(1160px, 100%);
+      margin-inline: auto;
+    }
+
+    header {
+      position: relative;
+      z-index: 10;
+      min-height: 92px;
+      padding: 23px 0 18px;
+      border-bottom: 1px solid rgba(218, 236, 226, 0.07);
+    }
+
+    .brand {
+      gap: 11px;
+      color: var(--text);
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: -0.045em;
+    }
+
+    .brand-logo {
+      width: 42px;
+      height: 42px;
+      filter: drop-shadow(0 0 18px rgba(44, 201, 170, 0.16));
+    }
+
+    .nav {
+      justify-content: flex-end;
+      gap: clamp(8px, 1.1vw, 15px);
+      color: var(--muted);
+      font-size: clamp(11px, 1.15vw, 14px);
+      font-weight: 580;
+      white-space: nowrap;
+    }
+
+    .nav > a:not(.icon-link):not(.logo-link) {
+      position: relative;
+    }
+
+    .nav > a:not(.icon-link):not(.logo-link)::after {
+      position: absolute;
+      right: 0;
+      bottom: -8px;
+      left: 0;
+      height: 1px;
+      background: var(--emerald);
+      content: "";
+      transform: scaleX(0);
+      transform-origin: left;
+      transition: transform 0.2s ease;
+    }
+
+    .nav > a:not(.icon-link):not(.logo-link):hover {
+      color: var(--text);
+    }
+
+    .nav > a:not(.icon-link):not(.logo-link):hover::after {
+      transform: scaleX(1);
+    }
+
+    .nav > a[href="#get-started"] {
+      min-height: 40px;
+      padding: 0 15px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      display: inline-flex;
+      align-items: center;
+      color: var(--text);
+    }
+
+    .nav > a[href="#get-started"]::after {
+      display: none;
+    }
+
+    .logo-link,
+    .icon-link {
+      width: 30px;
+      height: 30px;
+      border: 0;
+      border-radius: 50%;
+      background: transparent;
+      color: var(--muted);
+    }
+
+    .hero-stage {
+      position: relative;
+      isolation: isolate;
+      min-height: 690px;
+      overflow: hidden;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .hero-stage::before {
+      position: absolute;
+      z-index: -2;
+      top: 0;
+      right: calc(50% - 50vw);
+      bottom: 0;
+      left: calc(50% - 50vw);
+      background-image:
+        linear-gradient(rgba(218, 236, 226, 0.07) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(218, 236, 226, 0.07) 1px, transparent 1px);
+      background-size: 58px 58px;
+      content: "";
+      mask-image: linear-gradient(to bottom, transparent, #000 16%, #000 80%, transparent);
+    }
+
+    .hero-stage::after {
+      position: absolute;
+      z-index: -1;
+      top: 48px;
+      right: -140px;
+      width: 650px;
+      height: 650px;
+      border-radius: 50%;
+      background: radial-gradient(circle, rgba(87, 237, 170, 0.16), transparent 66%);
+      content: "";
+      filter: blur(20px);
+    }
+
+    .hero {
+      display: block;
+      min-height: 690px;
+      padding: clamp(110px, 12vw, 155px) 0 94px;
+      text-align: left;
+    }
+
+    .hero-copy {
+      position: relative;
+      z-index: 3;
+      width: min(56%, 620px);
+    }
+
+    .hero-logo {
+      display: none;
+    }
+
+    .eyebrow {
+      gap: 10px;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      color: var(--emerald);
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 0.045em;
+      text-transform: uppercase;
+    }
+
+    .ai-sigil {
+      position: relative;
+      display: inline-block;
+      width: 17px;
+      height: 12px;
+      border: 1.7px solid currentColor;
+      border-radius: 3px;
+    }
+
+    .ai-sigil::before,
+    .ai-sigil::after {
+      position: absolute;
+      top: 3px;
+      width: 2px;
+      height: 2px;
+      border-radius: 50%;
+      background: currentColor;
+      content: "";
+    }
+
+    .ai-sigil::before { left: 4px; }
+    .ai-sigil::after { right: 4px; }
+
+    .hero-version {
+      margin-left: 3px;
+      color: var(--muted);
+      font-size: 0.78em;
+      letter-spacing: 0.025em;
+    }
+
+    h1 {
+      max-width: 650px;
+      margin: 17px 0 20px;
+      font-size: clamp(54px, 6.2vw, 86px);
+      font-weight: 540;
+      line-height: 0.93;
+      letter-spacing: -0.075em;
+    }
+
+    .title-line {
+      white-space: normal;
+    }
+
+    .accent {
+      padding: 0;
+      margin: 0;
+      color: var(--emerald);
+    }
+
+    .accent-sky { color: inherit; }
+
+    .subhead {
+      max-width: 585px;
+      margin: 0;
+      color: var(--muted);
+      font-size: clamp(17px, 1.75vw, 21px);
+      line-height: 1.38;
+    }
+
+    .actions {
+      justify-content: flex-start;
+      margin-top: 28px;
+    }
+
+    .button {
+      min-height: 47px;
+      border-radius: 999px;
+      font-size: 15px;
+    }
+
+    .button.primary {
+      background: var(--text);
+      color: #07110c;
+      box-shadow: none;
+    }
+
+    .button.secondary {
+      background: rgba(8, 12, 10, 0.48);
+      color: var(--text);
+    }
+
+    .hero .button.icon-only { display: none; }
+
+    .hero-cli {
+      max-width: 530px;
+      margin-top: 30px;
+      overflow: hidden;
+      border: 1px solid rgba(218, 236, 226, 0.17);
+      border-radius: 13px;
+      background: rgba(15, 20, 18, 0.9);
+      box-shadow: 0 28px 64px rgba(0, 0, 0, 0.28);
+    }
+
+    .hero-cli-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px 15px;
+      border-bottom: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .hero-cli-head::before {
+      width: 36px;
+      height: 8px;
+      border-radius: 999px;
+      background: radial-gradient(circle at 4px 4px, #79847f 3px, transparent 3.5px) 0 0 / 12px 8px;
+      content: "";
+      opacity: 0.7;
+    }
+
+    .hero-cli-body {
+      padding: 16px 18px 18px;
+      font: 600 15px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .hero-cli-command { margin: 0; color: var(--text); }
+    .hero-cli-command b,
+    .hero-cli-result { color: var(--emerald); }
+    .hero-cli-result { margin: 9px 0 0; }
+
+    .hero-diagram {
+      position: absolute;
+      z-index: 1;
+      top: 116px;
+      right: 0;
+      width: min(61%, 700px);
+      margin: 0;
+      opacity: 0.98;
+    }
+
+    .hero-diagram .diagram-scroller {
+      overflow: visible;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      box-shadow: none;
+    }
+
+    .hero-diagram svg {
+      min-width: 0;
+      filter: drop-shadow(0 20px 40px rgba(0, 0, 0, 0.18));
+    }
+
+    .hero-diagram .hub-pulse {
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: official-logo-turn 46s linear infinite;
+    }
+
+    @keyframes official-logo-turn {
+      to { transform: rotate(360deg); }
+    }
+
+    .diagram-caption {
+      position: absolute;
+      right: 18%;
+      bottom: 4px;
+      max-width: 230px;
+      margin: 0;
+      color: rgba(162, 174, 166, 0.78);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    section {
+      padding: 74px 0;
+    }
+
+    .section-title {
+      max-width: 780px;
+      margin-bottom: 13px;
+      font-size: clamp(36px, 4.7vw, 62px);
+      font-weight: 540;
+      line-height: 0.98;
+      letter-spacing: -0.06em;
+    }
+
+    .section-lead {
+      max-width: 680px;
+      margin-bottom: 32px;
+      font-size: 17px;
+      line-height: 1.5;
+    }
+
+    #concepts {
+      padding-top: 90px;
+    }
+
+    .capability-overline {
+      display: block;
+      margin-bottom: 12px;
+      color: var(--emerald);
+      font-size: 13px;
+      font-weight: 750;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    #concepts .grid {
+      display: block;
+      border-top: 1px solid var(--line);
+    }
+
+    #concepts .card {
+      display: grid;
+      grid-template-columns: 56px minmax(170px, 0.34fr) minmax(0, 0.66fr) auto;
+      align-items: center;
+      gap: 20px;
+      min-height: 94px;
+      padding: 18px 0;
+      border: 0;
+      border-bottom: 1px solid var(--line);
+      border-radius: 0;
+      background: transparent;
+    }
+
+    #concepts .card:hover {
+      transform: none;
+      border-color: var(--line);
+    }
+
+    #concepts .card svg { display: none; }
+
+    .capability-index {
+      color: var(--emerald);
+      font: 600 14px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    #concepts .card h3 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+    }
+
+    #concepts .card p {
+      font-size: 16px;
+      line-height: 1.45;
+    }
+
+    .capability-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 14px;
+      font-weight: 620;
+      white-space: nowrap;
+    }
+
+    .capability-state::before {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--emerald);
+      box-shadow: 0 0 14px rgba(87, 237, 170, 0.75);
+      content: "";
+    }
+
+    #story,
+    #lifecycle {
+      border-top: 1px solid var(--line);
+    }
+
+    .story-panel,
+    .step-group,
+    .diagram-scroller,
+    .code,
+    .start-method,
+    .agents-strip,
+    .doc-link {
+      background: rgba(15, 20, 18, 0.8);
+    }
+
+    #channels {
+      border-top: 1px solid var(--line);
+    }
+
+    #channels .grid {
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+
+    #channels .card {
+      min-height: 176px;
+      border-radius: 11px;
+      background: linear-gradient(180deg, rgba(17, 24, 20, 0.9), rgba(11, 15, 13, 0.9));
+    }
+
+    #agents {
+      padding: 54px 0 0;
+    }
+
+    .actor-rail {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .actor {
+      min-height: 170px;
+      padding: 26px 24px;
+    }
+
+    .actor + .actor { border-left: 1px solid var(--line); }
+
+    .actor-index {
+      color: var(--emerald);
+      font: 600 13px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .actor strong {
+      display: block;
+      margin: 17px 0 7px;
+      color: var(--text);
+      font-size: 18px;
+    }
+
+    .actor span:last-child {
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .agents-strip {
+      margin-top: 18px;
+      border: 0;
+      border-radius: 0;
+      background: transparent;
+      padding: 8px 0 0;
+    }
+
+    .agents-strip svg { display: none; }
+
+    #get-started {
+      margin-top: 74px;
+      border-top: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+    }
+
+    #get-started .section-title { max-width: 560px; }
+
+    #get-started > .code:last-of-type { margin-bottom: 0; }
+
+    footer {
+      align-items: center;
+      margin-top: 0;
+      padding-top: 30px;
+    }
+
+    @media (min-width: 1800px) {
+      .hero-stage,
+      .hero {
+        min-height: 780px;
+      }
+
+      .hero {
+        padding-top: 150px;
+      }
+
+      .hero-copy {
+        width: min(49%, 760px);
+      }
+
+      .hero-diagram {
+        top: 112px;
+        width: min(62%, 1380px);
+      }
+
+      h1 {
+        max-width: 760px;
+        font-size: clamp(78px, 4.35vw, 106px);
+      }
+
+      .subhead {
+        max-width: 680px;
+      }
+
+      .hero-cli {
+        max-width: 620px;
+      }
+    }
+
+    @media (min-width: 1200px) and (min-aspect-ratio: 3 / 2) {
+      .hero-stage,
+      .hero {
+        min-height: 640px;
+      }
+
+      .hero {
+        padding-top: 60px;
+      }
+
+      .hero-copy {
+        width: min(50%, 650px);
+      }
+
+      .hero-diagram {
+        top: 60px;
+        width: min(55%, 900px);
+      }
+
+      h1 {
+        max-width: 650px;
+        font-size: clamp(64px, 5vw, 82px);
+      }
+
+      .subhead {
+        max-width: 600px;
+      }
+
+      .hero-cli {
+        max-width: 530px;
+      }
+    }
+
+    @media (max-width: 960px) {
+      .wrap { width: min(1160px, calc(100% - 36px)); }
+      .nav { flex-wrap: nowrap; row-gap: 0; gap: 9px; font-size: 11px; }
+      .nav > a[href="#get-started"] { min-height: 36px; padding: 0 11px; }
+      .hero-stage,
+      .hero { min-height: 650px; }
+      .hero-copy { width: 59%; }
+      .hero-diagram { right: 0; width: 64%; }
+      #channels .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+
+    @media (min-width: 701px) and (max-width: 900px) {
+      .story-flow { grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); }
+      .story-arrow { justify-self: auto; padding: 0; transform: none; }
+    }
+
+    @media (max-width: 740px) {
+      .nav > a:not(.icon-link):not(.logo-link):not([href="#get-started"]) { display: none; }
+    }
+
+    @media (max-width: 700px) {
+      header { min-height: 78px; }
+      .nav { font-size: 13px; }
+      .hero-stage,
+      .hero { min-height: auto; }
+      .hero { padding: 82px 0 52px; }
+      .hero-copy { width: 100%; }
+      .hero-diagram { position: relative; top: auto; right: auto; width: 112%; margin: -20px -6% 16px; }
+      .diagram-caption { display: none; }
+      h1 { font-size: clamp(48px, 12vw, 75px); }
+      #concepts .card { grid-template-columns: 34px 1fr; gap: 9px 14px; min-height: 0; padding: 20px 0; }
+      #concepts .card p,
+      .capability-state { grid-column: 2; }
+      .actor-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .actor:nth-child(3) { border-left: 0; border-top: 1px solid var(--line); }
+      .actor:nth-child(4) { border-top: 1px solid var(--line); }
+    }
+
+    @media (max-width: 520px) {
+      .wrap { width: min(100% - 28px, 1160px); }
+      .nav .logo-link,
+      .nav .icon-link { display: none; }
+      .brand { font-size: 17px; }
+      .brand-logo { width: 36px; height: 36px; }
+      #channels .grid { grid-template-columns: 1fr; }
+      .actor { padding: 21px 16px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .hero-diagram .hub-pulse { animation: none; }
+    }
   </style>
 </head>
 <body>
@@ -1162,14 +1823,14 @@
     </header>
 
     <main>
-      <section class="hero">
-        <img class="hero-logo" src="assets/syncwheel-logo.png" alt="" width="124" height="127">
-        <div>
-          <span class="eyebrow"><span class="dot"></span> v<!-- syncwheel-version:start -->0.34.0<!-- syncwheel-version:end --> — deterministic Git coordination for human and AI teams</span>
-          <h1><span class="title-line">One branch.</span><span class="title-line accent"><span class="accent-sky">Many</span> PRs.</span></h1>
-          <p class="subhead">Declare PR stacks once. Rebuild clean review branches and pinned channel compositions from one manifest—then hand the exact tested digest to the deployment platform you already use.</p>
+      <div class="hero-stage" id="top">
+        <section class="hero" aria-labelledby="hero-heading">
+          <div class="hero-copy">
+          <span class="eyebrow"><span class="ai-sigil" aria-hidden="true"></span>AI-ready Git coordination <span class="hero-version">v<!-- syncwheel-version:start -->0.34.0<!-- syncwheel-version:end --></span></span>
+          <h1 id="hero-heading"><span class="title-line">Move at</span><span class="title-line">machine speed.</span><span class="title-line accent">Stay in control.</span></h1>
+          <p class="subhead">Syncwheel coordinates every Git lane used by humans, AI agents, CI and delivery systems—without sacrificing review, safety or recovery.</p>
           <div class="actions">
-            <a class="button primary" href="#get-started">Get started</a>
+            <a class="button primary" href="#get-started">Start building</a>
             <a class="button secondary icon-only" href="https://github.com/NestDevLab/syncwheel" aria-label="syncwheel on GitHub">
               <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
                 <path fill="currentColor" d="M12 .5a12 12 0 0 0-3.8 23.39c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.38-1.34-1.75-1.34-1.75-1.09-.75.08-.73.08-.73 1.2.08 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.12-.3-.54-1.52.12-3.18 0 0 1.01-.32 3.3 1.23A11.5 11.5 0 0 1 12 5.82c1.02 0 2.04.14 3 .41 2.29-1.55 3.3-1.23 3.3-1.23.66 1.66.24 2.88.12 3.18.77.84 1.24 1.91 1.24 3.22 0 4.61-2.81 5.63-5.48 5.92.43.37.81 1.1.81 2.22v3.29c0 .32.22.7.83.58A12 12 0 0 0 12 .5Z"/>
@@ -1180,10 +1841,14 @@
                 <path fill="currentColor" d="M20.3 4.37A19.8 19.8 0 0 0 15.36 2c-.21.38-.46.89-.63 1.3a18.4 18.4 0 0 0-5.47 0c-.18-.41-.42-.92-.64-1.3a19.74 19.74 0 0 0-4.94 2.38C.55 9.08-.3 13.67.12 18.2a19.9 19.9 0 0 0 6.06 3.07c.49-.67.92-1.37 1.29-2.1a12.9 12.9 0 0 1-2.03-.97c.17-.12.33-.25.49-.38a14.15 14.15 0 0 0 12.14 0l.49.38c-.65.38-1.33.7-2.04.97.37.73.8 1.43 1.29 2.1a19.86 19.86 0 0 0 6.06-3.07c.5-5.24-.84-9.79-3.57-13.83ZM8.02 15.42c-1.18 0-2.15-1.08-2.15-2.41s.95-2.42 2.15-2.42c1.21 0 2.18 1.09 2.15 2.42 0 1.33-.95 2.41-2.15 2.41Zm7.96 0c-1.18 0-2.15-1.08-2.15-2.41s.95-2.42 2.15-2.42c1.21 0 2.18 1.09 2.15 2.42 0 1.33-.94 2.41-2.15 2.41Z"/>
               </svg>
             </a>
-            <a class="button secondary" href="#docs">Read the docs</a>
+            <a class="button secondary" href="#lifecycle">See how it works →</a>
           </div>
-        </div>
-      </section>
+          <div class="hero-cli" aria-label="Read-only Syncwheel command example">
+            <div class="hero-cli-head">Preview the next Git state before changing it</div>
+            <div class="hero-cli-body"><p class="hero-cli-command"><b>$</b> syncwheel validate &amp;&amp; syncwheel plan</p><p class="hero-cli-result">✓&nbsp; OK · no actions needed</p></div>
+          </div>
+          </div>
+        </section>
 
       <div class="hero-diagram">
         <div class="diagram-scroller">
@@ -1216,7 +1881,7 @@
             <line x1="252" y1="215" x2="278" y2="215" stroke="#34d399" stroke-width="2" stroke-dasharray="3 5"/>
 
             <!-- manifest hub -->
-            <image class="hub-pulse" href="assets/syncwheel-logo.png" x="280" y="163" width="104" height="104" preserveAspectRatio="xMidYMid meet"/>
+            <image class="hub-pulse" href="assets/syncwheel-logo.png" x="256" y="139" width="152" height="152" preserveAspectRatio="xMidYMid meet"/>
             <text x="318" y="316" font-size="12.5" fill="#6ee7b7" text-anchor="middle">.syncwheel/manifest.json</text>
 
             <!-- spokes hub -> pr lanes -->
@@ -1279,7 +1944,9 @@
             </g>
           </svg>
         </div>
-        <p class="diagram-caption">You work in one place. Syncwheel projects it into clean PRs.</p>
+        <p class="diagram-caption">One declared system. Every active PR has a place.</p>
+      </div>
+
       </div>
 
       <section id="story">
@@ -1648,9 +2315,12 @@
       </section>
 
       <section id="concepts">
-        <h2 class="section-title">Four ideas. No magic.</h2>
+        <span class="capability-overline">What it actually is</span>
+        <h2 class="section-title">One control plane.<br>Every lane.</h2>
+        <p class="section-lead">PR management is only the beginning. Syncwheel separates Git responsibilities into dedicated projections, then coordinates them as one system.</p>
         <div class="grid">
           <article class="card">
+            <span class="capability-index">01</span>
             <svg viewBox="0 0 220 120" aria-hidden="true">
               <g class="c-scatter" fill="#64748b">
                 <circle cx="20" cy="28" r="5"/>
@@ -1673,11 +2343,13 @@
                 <circle cx="196" cy="76" r="5" fill="#14b8a6"/>
               </g>
             </svg>
-            <h3>Manifest is the lens</h3>
-            <p>One JSON file declares which commits belong to which PR.</p>
+            <h3>Pull requests</h3>
+            <p>One branch. Many PRs. Review each change independently.</p>
+            <span class="capability-state">clean branches</span>
           </article>
 
           <article class="card">
+            <span class="capability-index">02</span>
             <svg viewBox="0 0 220 120" aria-hidden="true">
               <line x1="16" y1="26" x2="96" y2="26" stroke="#10b981" stroke-width="2.5"/>
               <circle cx="40" cy="26" r="4.5" fill="#10b981"/>
@@ -1700,11 +2372,13 @@
               </g>
               <image class="c-spin" href="assets/syncwheel-logo.png" x="174" y="24" width="36" height="36" preserveAspectRatio="xMidYMid meet"/>
             </svg>
-            <h3>Integration is disposable</h3>
-            <p>Test everything together. Throw it away. Rebuild it identically.</p>
+            <h3>Integration</h3>
+            <p>All active PRs tested together before merge.</p>
+            <span class="capability-state">system tested</span>
           </article>
 
           <article class="card">
+            <span class="capability-index">03</span>
             <svg viewBox="0 0 220 120" aria-hidden="true">
               <line x1="16" y1="30" x2="204" y2="30" stroke="#10b981" stroke-width="2" opacity="0.8"/>
               <line x1="16" y1="58" x2="204" y2="58" stroke="#14b8a6" stroke-width="2" opacity="0.8"/>
@@ -1717,11 +2391,13 @@
               <rect class="c3-hunk c3-h2" x="102" y="84" width="14" height="14" rx="3" fill="rgba(20,184,166,0.35)" stroke="#14b8a6"/>
               <rect class="c3-hunk c3-h3" x="146" y="84" width="14" height="14" rx="3" fill="rgba(16,185,129,0.35)" stroke="#10b981"/>
             </svg>
-            <h3>Absorb sorts your hacking</h3>
-            <p>Edits on integration get assigned — per file or per hunk — to their stack.</p>
+            <h3>Channels</h3>
+            <p>Pin and promote the exact tested composition for deployment inputs.</p>
+            <span class="capability-state">digest verified</span>
           </article>
 
           <article class="card">
+            <span class="capability-index">04</span>
             <svg viewBox="0 0 220 120" aria-hidden="true">
               <!-- left device -->
               <rect x="20" y="38" width="40" height="28" rx="4" fill="rgba(2,6,23,0.6)" stroke="#94a3b8" stroke-width="1.5"/>
@@ -1741,8 +2417,9 @@
               <path d="M62 52 L90 52" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
               <path d="M158 52 L130 52" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
             </svg>
-            <h3>The ledger remembers</h3>
-            <p>Append-only history. Any machine resumes where the last stopped.</p>
+            <h3>Journal</h3>
+            <p>Safe state snapshots let a human or agent resume exactly where work stopped.</p>
+            <span class="capability-state">state protected</span>
           </article>
         </div>
       </section>
@@ -1792,17 +2469,14 @@
       </section>
 
       <section id="agents">
+        <div class="actor-rail" aria-label="The four components of the Syncwheel model">
+          <article class="actor"><span class="actor-index">01</span><strong>Syncwheel</strong><span>Coordinates declared lanes and protected publication.</span></article>
+          <article class="actor"><span class="actor-index">02</span><strong>Git</strong><span>Preserves history and the exact inputs to every composition.</span></article>
+          <article class="actor"><span class="actor-index">03</span><strong>AI</strong><span>Works at parallel speed inside an explicit contract.</span></article>
+          <article class="actor"><span class="actor-index">04</span><strong>Human</strong><span>Sets intent and approves consequential changes.</span></article>
+        </div>
         <div class="agents-strip">
-          <svg viewBox="0 0 150 72" aria-hidden="true">
-            <rect x="4" y="6" width="52" height="26" rx="7" fill="rgba(2,6,23,0.6)" stroke="rgba(148,163,184,0.4)"/>
-            <text x="30" y="23" font-size="11.5" fill="#cbd5e1" text-anchor="middle">you</text>
-            <rect x="4" y="40" width="52" height="26" rx="7" fill="rgba(2,6,23,0.6)" stroke="rgba(56,189,248,0.45)"/>
-            <text x="30" y="57" font-size="11.5" fill="#7dd3fc" text-anchor="middle">agent</text>
-            <path d="M58 19 C84 19 86 32 102 34" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
-            <path d="M58 53 C84 53 86 40 102 38" fill="none" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
-            <image href="assets/syncwheel-logo.png" x="104" y="18" width="36" height="36" preserveAspectRatio="xMidYMid meet"/>
-          </svg>
-          <p>Built for AI agents: no checkout is authoritative — agents follow the manifest, not memory.</p>
+          <p>Built for human–AI teams: no checkout is authoritative. Agents follow the declared contract, while people retain intent and approval.</p>
           <span class="agents-links">
             <a href="https://github.com/NestDevLab/syncwheel/blob/main/docs/ai-agents.md">Agent contract →</a>
             <a href="https://github.com/NestDevLab/syncwheel/blob/main/docs/agent-procedure.md">Agent procedure →</a>
@@ -1866,8 +2540,9 @@
       </section>
 
       <section id="get-started">
-        <h2 class="section-title">Get started</h2>
-        <p class="section-lead">Python 3.11+, Git, uv. Start from the CLI, hand the bootstrap markdown to an AI agent, or install the companion skill.</p>
+        <span class="capability-overline">Quick start</span>
+        <h2 class="section-title">Your first verified plan in minutes.</h2>
+        <p class="section-lead">Install the CLI, create the default manifest for the current repository, then inspect what Syncwheel would change.</p>
 
         <div class="start-methods" aria-label="Default install methods">
           <article class="start-method primary-method">
@@ -1885,44 +2560,39 @@
           </article>
 
           <article class="start-method">
-            <span class="method-label">AI handoff</span>
-            <strong>Give install.md to an agent</strong>
-            <p>The markdown tells an agent how to install Syncwheel, verify it, inspect a repo, and add the skill.</p>
-            <div class="code" aria-label="AI handoff install markdown">
+            <span class="method-label">Initialize</span>
+            <strong>Create the default manifest</strong>
+            <p><code>syncwheel init</code> creates the manifest with the standard base and integration defaults. Repository tracking remains an explicit policy choice.</p>
+            <div class="code" aria-label="Initialize a repository with Syncwheel defaults">
               <div class="codebar">
                 <span class="light"></span><span class="light"></span><span class="light"></span>
-                <span>fetch prompt</span>
+                <span>current repository</span>
               </div>
-              <pre><code><span class="prompt">$</span> curl -fsSL https://raw.githubusercontent.com/NestDevLab/syncwheel/main/install.md</code></pre>
+              <pre><code><span class="prompt">$</span> syncwheel init</code></pre>
             </div>
           </article>
 
           <article class="start-method">
-            <span class="method-label">Skill</span>
-            <strong>Install the companion skill</strong>
-            <p>Keep Syncwheel's Git safety rules available inside the runtime handling the repo.</p>
-            <div class="code" aria-label="Install the Syncwheel agent skill">
+            <span class="method-label">Inspect</span>
+            <strong>Preview before changing Git</strong>
+            <p>Validation and planning are read-only until you explicitly apply a reviewed plan.</p>
+            <div class="code" aria-label="Validate and plan a Syncwheel repository">
               <div class="codebar">
                 <span class="light"></span><span class="light"></span><span class="light"></span>
-                <span>codex local</span>
+                <span>read-only</span>
               </div>
-              <pre><code><span class="prompt">$</span> agentwheel install github:NestDevLab/syncwheel --adapter codex --local --target-root /path/to/repo --skill syncwheel
-<span class="prompt">$</span> syncwheel self status</code></pre>
+              <pre><code><span class="prompt">$</span> syncwheel validate &amp;&amp; syncwheel plan</code></pre>
             </div>
           </article>
         </div>
 
-        <div class="code" aria-label="Your first wheel">
+        <div class="code" aria-label="Default Syncwheel workflow">
           <div class="codebar">
             <span class="light"></span><span class="light"></span><span class="light"></span>
-            <span>2 · your first wheel</span>
+            <span>the default flow</span>
           </div>
-          <pre><code><span class="prompt">$</span> syncwheel init                               <span class="muted"># writes .syncwheel/manifest.json</span>
-<span class="prompt">$</span> syncwheel stack create feature-a --branch pr/feature-a  <span class="muted"># included in integration by default</span>
-<span class="prompt">$</span> syncwheel stack set feature-a origin/main..HEAD
-<span class="prompt">$</span> syncwheel reconcile                          <span class="muted"># dry-run plan first, always</span>
-<span class="prompt">$</span> syncwheel sync
-<span class="prompt">$</span> syncwheel publish</code></pre>
+          <pre><code><span class="prompt">$</span> syncwheel init                 <span class="muted"># create the manifest</span>
+<span class="prompt">$</span> syncwheel validate &amp;&amp; syncwheel plan <span class="muted"># inspect, no mutation</span></code></pre>
         </div>
 
         <p class="inline-note">Shorthands (<code>rec</code>, <code>s</code>, <code>i</code>, <code>-p</code>, <code>-u</code>), repo aliases, and <code>self update</code> live in the
