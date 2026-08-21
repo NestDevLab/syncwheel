@@ -12,7 +12,8 @@
     "base": "origin/main",
     "strategy": "cherry-pick",
     "stacks": [
-      "resume-tracked-manifest-atomic"
+      "resume-tracked-manifest-atomic",
+      "resume-manifest-replay-digest"
     ]
   },
   "stacks": [
@@ -32,6 +33,24 @@
       },
       "meta": {
         "purpose": "Keep resume manifest persistence atomic across in-place replay"
+      }
+    },
+    {
+      "id": "resume-manifest-replay-digest",
+      "branch": "pr/resume-manifest-replay-digest",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "83759bdaf5764242cd44a44f1270435af6425581"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Accept the raw persisted manifest after an in-place replay"
       }
     }
   ],
