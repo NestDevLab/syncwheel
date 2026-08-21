@@ -12,7 +12,8 @@
     "base": "origin/main",
     "strategy": "cherry-pick",
     "stacks": [
-      "resume-preserve-published-source"
+      "resume-preserve-published-source",
+      "reconcile-replay-mode-args"
     ]
   },
   "stacks": [
@@ -32,6 +33,24 @@
       },
       "meta": {
         "purpose": "Allow exact replay-proven rebases of published stack branches"
+      }
+    },
+    {
+      "id": "reconcile-replay-mode-args",
+      "branch": "pr/reconcile-replay-mode-args",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Fix replay-mode parsing for resume and reconcile"
       }
     }
   ],

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.5 - 2026-08-21
+
+- Allow `resume` and `reconcile` to select their requested replay mode when
+  their parser does not expose legacy `--in-place` or `--worktree` fields.
+
 ## 0.34.4 - 2026-08-21
 
 - Accept a published stack ref rebuilt onto an advanced declared base only when

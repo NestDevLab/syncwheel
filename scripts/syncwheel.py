@@ -6015,9 +6015,9 @@ def requested_replay_mode(args):
         return None
     normalize_replay_mode(mode, '--replay-mode')
     if mode in ('ephemeral', 'plumbing'):
-        if args.in_place:
+        if getattr(args, 'in_place', False):
             raise SyncwheelError(f'use either --replay-mode {mode} or --in-place, not both')
-        if args.worktree:
+        if getattr(args, 'worktree', None):
             raise SyncwheelError(f'use either --replay-mode {mode} or --worktree, not both')
     return mode
 

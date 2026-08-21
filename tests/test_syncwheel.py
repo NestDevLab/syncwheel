@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 from pathlib import Path
+from types import SimpleNamespace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -108,6 +109,14 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertEqual(manifest['stacks'][0]['state'], 'published')
         self.assertEqual(manifest['stacks'][0]['publication'], {'enabled': True})
+
+    def test_requested_replay_mode_allows_reconcile_arguments_without_in_place(self):
+        module = self.load_syncwheel_module()
+
+        self.assertEqual(
+            module.requested_replay_mode(SimpleNamespace(replay_mode='plumbing', worktree=None)),
+            'plumbing',
+        )
 
     def test_validate_manifest_rejects_an_unknown_stack_state(self):
         module = self.load_syncwheel_module()
