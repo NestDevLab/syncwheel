@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/resume-manifest-replay-digest": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-21T17:33:13+00:00",
+  "created_at": "2026-08-21T18:17:15+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -47,36 +45,19 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "resume-manifest-replay-digest"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/resume-manifest-replay-digest",
-        "commits": [
-          "83759bdaf5764242cd44a44f1270435af6425581"
-        ],
-        "id": "resume-manifest-replay-digest",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "885b7b5ed95ac8406d0f503b3dd39ff064a66a1d6a78fa414ff3e4b95a02bfb2",
-  "parent_state": "192011896f25a78df7951b9680b82161d3690d93",
+  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
+  "parent_state": "c5080b5427632c710686bac77bf5148f3b326807",
   "projection_status": "partial",
-  "publication_id": "fd5dba30-3f0b-41ae-aa7d-7c9e7b5b5a63",
-  "publication_scope": "stack:resume-manifest-replay-digest",
+  "publication_id": "145d4a06-8ccb-40ed-a0a3-bdf668f17412",
+  "publication_scope": "close:resume-manifest-replay-digest",
   "schema_version": 2,
-  "syncwheel_version": "0.34.3",
+  "syncwheel_version": "0.34.4",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -173,6 +154,14 @@
       "ref": "refs/heads/pr/resume-tracked-manifest-atomic",
       "remote_tip": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
       "stack": "resume-tracked-manifest-atomic"
+    },
+    {
+      "branch": "pr/resume-manifest-replay-digest",
+      "closed_at": "2026-08-21T18:17:12+00:00",
+      "reason": "merged-by-squash-tree-equivalent",
+      "ref": "refs/heads/pr/resume-manifest-replay-digest",
+      "remote_tip": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
+      "stack": "resume-manifest-replay-digest"
     }
   ]
 }
