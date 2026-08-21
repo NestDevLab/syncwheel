@@ -3174,6 +3174,42 @@ def save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, contex
     append_ledger_event(repo_root, event_type, manifest_event_payload(manifest_path, manifest, reason, context), manifest_path)
 
 
+def acknowledge_in_place_manifest_replay(repo_root, manifest_path, replay_tip):
+    """Accept only the manifest state written by a completed in-place replay."""
+    transaction = active_manifest_write_transaction(manifest_path)
+    if transaction is None or is_external_manifest_path(repo_root, manifest_path):
+        return
+    try:
+        relative_path = Path(manifest_path).resolve(strict=False).relative_to(
+            Path(repo_root).resolve()
+        ).as_posix()
+    except ValueError as exc:
+        raise SyncwheelError(
+            f'in-place replay cannot verify manifest outside repository: {manifest_path}'
+        ) from exc
+    expected_result = git(repo_root, 'show', f'{replay_tip}:{relative_path}', check=False)
+    if expected_result.returncode == 0:
+        try:
+            expected_manifest = json.loads(expected_result.stdout)
+        except json.JSONDecodeError as exc:
+            raise SyncwheelError(
+                f'in-place replay produced an invalid manifest at {replay_tip}:{relative_path}'
+            ) from exc
+        expected_digest = manifest_digest(expected_manifest)
+    else:
+        expected_digest = None
+    observed_manifest, _ = load_manifest(repo_root, manifest_path)
+    observed_digest = manifest_digest(observed_manifest) if observed_manifest is not None else None
+    preserved_untracked_digest = (
+        transaction['expectedDigest'] if expected_digest is None else None
+    )
+    if observed_digest not in {expected_digest, preserved_untracked_digest}:
+        raise SyncwheelError(
+            'manifest changed unexpectedly during in-place replay; refusing stale write or side effect'
+        )
+    transaction['expectedDigest'] = observed_digest
+
+
 def ref_tip(repo_root, ref):
     result = git(repo_root, 'rev-parse', ref, check=False)
     if result.returncode != 0:
@@ -12050,6 +12086,7 @@ def command_reconcile(args):
         )
     coordinated_refs = {}
     coordinated_events = []
+    deferred_manifest_updates = []
     for action in actions:
         if action['type'] == 'rebuild_stack':
             stack = require_stack(manifest, action['stack'])
@@ -12080,14 +12117,10 @@ def command_reconcile(args):
             )
             if args.update_manifest:
                 stack['commits'] = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
-                save_manifest_with_ledger(
-                    repo_root,
-                    manifest_path,
-                    manifest,
-                    'reconcile_update_manifest',
-                    {'stack': stack['id'], 'branch': stack['branch']},
-                )
-                print(f"{stack['id']}: manifest updated from rebuilt branch")
+                deferred_manifest_updates.append({
+                    'stack': stack['id'],
+                    'branch': stack['branch'],
+                })
         elif action['type'] == 'align_stack_to_remote':
             stack = require_stack(manifest, action['stack'])
             before_tip = ref_tip(repo_root, stack['branch'])
@@ -12180,6 +12213,10 @@ def command_reconcile(args):
                 True,
             )
             require_replay_success(result)
+            if in_place:
+                acknowledge_in_place_manifest_replay(
+                    repo_root, manifest_path, result['after_tip']
+                )
             append_ledger_event(
                 repo_root,
                 'integration_rebuilt',
@@ -12209,6 +12246,10 @@ def command_reconcile(args):
                 worktree,
             )
             run_command_list(commands, repo_root, True)
+            if use_primary_checkout:
+                acknowledge_in_place_manifest_replay(
+                    repo_root, manifest_path, action['remote_ref']
+                )
             append_ledger_event(
                 repo_root,
                 'integration_aligned_remote',
@@ -12286,8 +12327,12 @@ def command_reconcile(args):
                 },
                 manifest_path,
             )
-    if args.apply and resume_manifest_changed:
-        save_manifest_with_ledger(repo_root, manifest_path, manifest, 'resume_manifest_update')
+    if args.apply and (resume_manifest_changed or deferred_manifest_updates):
+        reason = 'resume_manifest_update' if resume_manifest_changed else 'reconcile_update_manifest'
+        context = {'stacks': deferred_manifest_updates} if deferred_manifest_updates else None
+        save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, context)
+        for update in deferred_manifest_updates:
+            print(f"{update['stack']}: manifest updated from rebuilt branch")
     if args.apply and getattr(args, 'auto_gc', False) and coordination_is_active(manifest):
         gc_plan = run_coordination_gc(repo_root, manifest, apply=True, fetch=True)
         if gc_plan.get('applied_candidates'):
