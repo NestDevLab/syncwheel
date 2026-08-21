@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d"
+    "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-21T18:17:58+00:00",
+  "created_at": "2026-08-21T18:56:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -20,7 +20,8 @@
     "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d",
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
-    "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe"
+    "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
+    "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
   },
   "manifest": {
     "coordination": {
@@ -49,7 +50,8 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "resume-preserve-published-source"
+        "resume-preserve-published-source",
+        "reconcile-replay-mode-args"
       ],
       "strategy": "cherry-pick"
     },
@@ -67,15 +69,30 @@
         "id": "resume-preserve-published-source",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/reconcile-replay-mode-args",
+        "commits": [
+          "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
+        ],
+        "id": "reconcile-replay-mode-args",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
-  "manifest_digest": "7ab1bb9cbc4ef583175f91fce400936ca4ffe42ed91d12b27cd5faaa25883076",
-  "parent_state": "a9b065163dbcc6dfdf17bd4f51983faba6f08682",
+  "manifest_digest": "f17ab4457f252ef67c28e2b8d8c1a1bc82fc7561e965a0f591d31edbb14391e3",
+  "parent_state": "ab38bad0036d4ee4312a4ecc47ab3ecab3273774",
   "projection_status": "partial",
-  "publication_id": "fd7d0d08-9e83-4bfd-becf-69ed4935f105",
-  "publication_scope": "stack:resume-preserve-published-source",
+  "publication_id": "fb8d018f-9bc0-4b18-bfb5-fb2f5953fd76",
+  "publication_scope": "stack:reconcile-replay-mode-args",
   "schema_version": 2,
   "syncwheel_version": "0.34.4",
   "tombstones": [
