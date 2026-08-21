@@ -833,6 +833,113 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             integration_before,
         )
 
+    def test_publish_allows_an_exact_stack_rebase_after_the_base_advances(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'exact-stack-rebase')
+        self.init_coordinated(repo)
+
+        source = self.commit_on_branch(repo, 'scratch/feature-rebase', 'feature.txt')
+        self.git(repo, 'branch', 'pr/feature-rebase', source)
+        self.run_cli(
+            repo,
+            'stack',
+            'create',
+            'feature-rebase',
+            source,
+            '--branch',
+            'pr/feature-rebase',
+        )
+        self.run_cli(repo, 'stack', 'push', 'feature-rebase')
+
+        advance = self.clone(origin, 'advance-base')
+        (advance / 'base.txt').write_text('advanced base\n')
+        self.git(advance, 'add', 'base.txt')
+        self.git(advance, 'commit', '-q', '-m', 'chore: advance base')
+        self.git(advance, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', 'origin')
+
+        self.run_cli(
+            repo,
+            'reconcile',
+            '--apply',
+            '--push',
+            '--stack',
+            'feature-rebase',
+            '--skip-integration',
+        )
+
+        rebased = self.git(repo, 'rev-parse', 'pr/feature-rebase').stdout.strip()
+        self.assertNotEqual(rebased, source)
+        self.assertEqual(
+            self.git(repo, 'show', 'pr/feature-rebase:feature.txt').stdout,
+            'scratch/feature-rebase\n',
+        )
+        self.assertEqual(
+            self.git(repo, 'show', 'pr/feature-rebase:base.txt').stdout,
+            'advanced base\n',
+        )
+        _, state = self.remote_state(origin)
+        self.assertEqual(
+            state['managed_refs']['refs/heads/pr/feature-rebase'],
+            rebased,
+        )
+        stack = next(item for item in state['manifest']['stacks'] if item['id'] == 'feature-rebase')
+        self.assertEqual(stack['commits'], [rebased])
+
+    def test_exact_stack_rebase_proof_rejects_changed_source_content(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'rebase-content-drift')
+        self.init_coordinated(repo)
+
+        source = self.commit_on_branch(repo, 'scratch/content-drift', 'feature.txt')
+        self.git(repo, 'branch', 'pr/content-drift', source)
+        self.run_cli(
+            repo,
+            'stack',
+            'create',
+            'content-drift',
+            source,
+            '--branch',
+            'pr/content-drift',
+        )
+        self.run_cli(repo, 'stack', 'push', 'content-drift')
+
+        advance = self.clone(origin, 'advance-content-base')
+        (advance / 'base.txt').write_text('advanced base\n')
+        self.git(advance, 'add', 'base.txt')
+        self.git(advance, 'commit', '-q', '-m', 'chore: advance base')
+        self.git(advance, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', 'origin')
+
+        self.git(repo, 'switch', '-q', '-c', 'scratch/changed-source', 'origin/main')
+        (repo / 'feature.txt').write_text('changed source content\n')
+        self.git(repo, 'add', 'feature.txt')
+        self.git(repo, 'commit', '-q', '-m', 'feat: changed source content')
+        changed = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        self.git(repo, 'branch', '-f', 'pr/content-drift', changed)
+
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['stacks'][0]['commits'] = [changed]
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        module = self.load_module()
+        config = module.coordination_config(manifest)
+        state = module.read_remote_coordination_state(
+            repo,
+            config,
+            fetch=True,
+            local_manifest_version=manifest['version'],
+        )['state']
+        self.assertFalse(module.coordination_stack_ref_is_exact_rebase(
+            repo,
+            manifest,
+            state['manifest'],
+            'content-drift',
+            state['managed_refs']['refs/heads/pr/content-drift'],
+        ))
+
     def test_partial_stack_adoption_predicate_fails_closed(self):
         module = self.load_module()
         remote = {

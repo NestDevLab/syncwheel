@@ -12,26 +12,26 @@
     "base": "origin/main",
     "strategy": "cherry-pick",
     "stacks": [
-      "resume-manifest-replay-digest"
+      "resume-preserve-published-source"
     ]
   },
   "stacks": [
     {
-      "id": "resume-manifest-replay-digest",
-      "branch": "pr/resume-manifest-replay-digest",
+      "id": "resume-preserve-published-source",
+      "branch": "pr/resume-preserve-published-source",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
       "integration_branch": "main-integration",
       "commits": [
-        "83759bdaf5764242cd44a44f1270435af6425581"
+        "7bf66c1ab3310c8e4b78cd986d875a6cafc5dcfb"
       ],
       "state": "published",
       "publication": {
         "enabled": true
       },
       "meta": {
-        "purpose": "Accept the raw persisted manifest after an in-place replay"
+        "purpose": "Allow exact replay-proven rebases of published stack branches"
       }
     }
   ],

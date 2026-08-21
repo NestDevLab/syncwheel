@@ -4899,6 +4899,79 @@ def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local
     return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, local_tip, check=False).returncode == 0
 
 
+def deterministic_stack_replay_tip(repo_root, base, commits):
+    """Return the exact tip produced by replaying commits onto base, or None."""
+    head = base
+    for declared_commit in commits:
+        commit = commit_full_sha(repo_root, declared_commit)
+        merge = git(
+            repo_root,
+            'merge-tree',
+            '--write-tree',
+            f'--merge-base={commit}^',
+            head,
+            commit,
+            check=False,
+        )
+        if merge.returncode != 0:
+            return None
+        tree = merge.stdout.strip()
+        if not tree or tree == ref_tree(repo_root, head):
+            return None
+        head = git(
+            repo_root,
+            'commit-tree',
+            tree,
+            '-p',
+            head,
+            '-m',
+            replay_commit_message(repo_root, commit),
+            env=replay_commit_env(repo_root, commit),
+        ).stdout.strip()
+    return head
+
+
+def coordination_stack_ref_is_exact_rebase(
+    repo_root,
+    manifest,
+    remote_snapshot,
+    stack_id,
+    remote_tip,
+):
+    """Accept only a replay-proven rebase of an already published stack ref."""
+    previous_manifest = apply_coordination_snapshot(manifest, remote_snapshot)
+    previous_stack = stack_map(previous_manifest).get(stack_id)
+    local_stack = stack_map(manifest).get(stack_id)
+    if not previous_stack or not local_stack:
+        return False
+    for key in (
+        'branch',
+        'base',
+        'target_remote',
+        'target_branch',
+        'integration_branch',
+        'state',
+        'depends_on',
+    ):
+        if previous_stack.get(key) != local_stack.get(key):
+            return False
+    previous_commits = list(previous_stack.get('commits') or [])
+    local_commits = list(local_stack.get('commits') or [])
+    if not previous_commits or not local_commits:
+        return False
+    if commit_full_sha(repo_root, previous_commits[-1]) != remote_tip:
+        return False
+    local_tip = ref_tip(repo_root, local_stack['branch'])
+    if not local_tip or commit_full_sha(repo_root, local_commits[-1]) != local_tip:
+        return False
+    expected_tip = deterministic_stack_replay_tip(
+        repo_root,
+        local_stack['base'],
+        previous_commits,
+    )
+    return expected_tip == local_tip
+
+
 def integration_partial_stack_adoption_allowed(
     remote_integration, local_integration, added, changed_stack_refs, tombstone=None
 ):
@@ -5123,13 +5196,21 @@ def validate_coordination_publication_base(
             continue
         ref = f"refs/heads/{remote_stack['branch']}"
         remote_tip = state.get('managed_refs', {}).get(ref)
-        if remote_tip and not coordination_ref_is_safe_successor(
+        safe_successor = not remote_tip or coordination_ref_is_safe_successor(
             repo_root,
             config,
             ref,
             remote_tip,
             local_stack['branch'],
-        ):
+        )
+        exact_rebase = remote_tip and coordination_stack_ref_is_exact_rebase(
+            repo_root,
+            manifest,
+            remote_snapshot,
+            stack_id,
+            remote_tip,
+        )
+        if not safe_successor and not exact_rebase:
             raise SyncwheelError(
                 f'{stack_id}: local branch is not a safe successor of the published managed ref; '
                 'run handoff and resolve the overlapping stack change'
