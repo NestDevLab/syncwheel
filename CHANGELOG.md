@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.3 - 2026-08-21
+
+- Compare the raw persisted manifest after an in-place replay, while retaining
+  normalized validation for the manifest transaction. This accepts an unchanged
+  tracked manifest whose omitted defaults are normalized only in memory.
+
 ## 0.34.2 - 2026-08-21
 
 - Defer reconciliation manifest persistence until every requested stack and

@@ -3199,15 +3199,26 @@ def acknowledge_in_place_manifest_replay(repo_root, manifest_path, replay_tip):
     else:
         expected_digest = None
     observed_manifest, _ = load_manifest(repo_root, manifest_path)
-    observed_digest = manifest_digest(observed_manifest) if observed_manifest is not None else None
-    preserved_untracked_digest = (
-        transaction['expectedDigest'] if expected_digest is None else None
+    observed_normalized_digest = (
+        manifest_digest(observed_manifest) if observed_manifest is not None else None
     )
+    if observed_manifest is None:
+        observed_digest = None
+    else:
+        try:
+            observed_digest = manifest_digest(json.loads(Path(manifest_path).read_text()))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SyncwheelError(
+                f'in-place replay left an unreadable manifest: {manifest_path}'
+            ) from exc
+    preserved_untracked_digest = None
+    if expected_digest is None and observed_normalized_digest == transaction['expectedDigest']:
+        preserved_untracked_digest = observed_digest
     if observed_digest not in {expected_digest, preserved_untracked_digest}:
         raise SyncwheelError(
             'manifest changed unexpectedly during in-place replay; refusing stale write or side effect'
         )
-    transaction['expectedDigest'] = observed_digest
+    transaction['expectedDigest'] = observed_normalized_digest
 
 
 def ref_tip(repo_root, ref):
