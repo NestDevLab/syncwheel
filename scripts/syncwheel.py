@@ -1582,6 +1582,14 @@ def commit_patch_id(repo_root, commit):
     return line.split()[0]
 
 
+def patch_ids_reachable_from_ref(repo_root, ref):
+    return {
+        patch_id
+        for commit in rev_list(repo_root, ref)
+        if (patch_id := commit_patch_id(repo_root, commit))
+    }
+
+
 def commit_short_sha(repo_root, commit):
     return git(repo_root, 'rev-parse', '--short', f'{commit}^{{commit}}').stdout.strip()
 
@@ -6555,10 +6563,12 @@ def validate_manifest(repo_root, manifest):
 
     integration_commits = []
     unmapped_commits = []
+    absorbed_patch_commits = []
     control_commits = []
     integration_merge_commits = []
     if integration_exists and ref_exists(repo_root, integration['base']):
         integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
+        base_patch_ids = patch_ids_reachable_from_ref(repo_root, integration['base'])
         for commit in integration_commits:
             full_sha = commit_full_sha(repo_root, commit)
             if commit_parent_count(repo_root, commit) > 1:
@@ -6568,6 +6578,9 @@ def validate_manifest(repo_root, manifest):
                 control_commits.append(full_sha)
                 continue
             patch_id = commit_patch_id(repo_root, commit)
+            if patch_id and patch_id in base_patch_ids:
+                absorbed_patch_commits.append(full_sha)
+                continue
             if full_sha not in declared_commit_shas and (not patch_id or patch_id not in declared_patch_ids):
                 unmapped_commits.append(full_sha)
         if unmapped_commits:
@@ -6585,6 +6598,7 @@ def validate_manifest(repo_root, manifest):
         'commits': integration_commits,
         'declared_commits': declared_commits,
         'unmapped_commits': unmapped_commits,
+        'absorbed_patch_commits': absorbed_patch_commits,
         'control_commits': control_commits,
         'merge_commits': integration_merge_commits,
     }

@@ -2112,6 +2112,55 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(updated['integration']['stacks'], [])
         self.assertEqual(updated['stacks'], [])
 
+    def test_resume_drops_an_integration_commit_already_absorbed_by_base_patch(self):
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        delivered = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', '-c', 'integration/test', f'{delivered}^')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'chore: replay gamma')
+        duplicate = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', 'main')
+        Path(self.repo / 'delta.txt').write_text('delta\n')
+        self.git('add', 'delta.txt')
+        self.git('commit', '-q', '-m', 'feat: add delta')
+        self.git('switch', '-q', 'integration/test')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['integration']['stacks'] = []
+        data['stacks'] = []
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        module = self.load_syncwheel_module()
+        self.assertEqual(
+            module.commit_patch_id(self.repo, delivered),
+            module.commit_patch_id(self.repo, duplicate),
+        )
+        self.assertIn(
+            module.commit_patch_id(self.repo, duplicate),
+            module.patch_ids_reachable_from_ref(self.repo, 'main'),
+        )
+        self.assertEqual(module.rev_list(self.repo, 'main..integration/test'), [duplicate])
+
+        result = self.run_cli('resume', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        integration = report['validation']['details']['integration']
+        self.assertEqual(integration['unmapped_commits'], [])
+        self.assertEqual(integration['absorbed_patch_commits'], [duplicate])
+        self.assertFalse(any(action['type'] == 'resume_manual_review' for action in report['actions']))
+
+        self.run_cli('resume', '--no-fetch', '--apply', expected=0)
+        self.run_cli('reconcile', '--no-fetch', '--apply', expected=0)
+        self.assertEqual(self.git('rev-parse', 'integration/test'), self.git('rev-parse', 'main'))
+        self.assertNotEqual(self.git('rev-parse', 'integration/test'), duplicate)
+
     def test_resume_restores_historical_stack_from_ledger(self):
         self.git('switch', '-q', '-c', 'pr/feature-c', 'main')
         Path(self.repo / 'gamma.txt').write_text('gamma\n')
