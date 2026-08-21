@@ -2265,6 +2265,25 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(updated['stacks'][0]['commits'], [self.git('rev-parse', 'pr/feature-c')])
         self.assertNotEqual(updated['stacks'][0]['commits'], [gamma])
 
+    def test_in_place_replay_accepts_a_tracked_manifest_with_omitted_defaults(self):
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: track manifest')
+        module = self.load_syncwheel_module()
+        raw_manifest = json.loads(manifest.read_text())
+        normalized_manifest, _ = module.load_manifest(self.repo, manifest)
+
+        self.assertNotEqual(
+            module.manifest_digest(raw_manifest),
+            module.manifest_digest(normalized_manifest),
+        )
+        with module.manifest_write_transaction(self.repo, manifest):
+            module.acknowledge_in_place_manifest_replay(
+                self.repo,
+                manifest,
+                self.git('rev-parse', 'HEAD'),
+            )
+
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         data = json.loads(manifest.read_text())
