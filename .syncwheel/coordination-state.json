@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/resume-manifest-replay-digest": "668cb615a22dc335ce9b1ababfaaa916225c85e2"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-21T17:32:37+00:00",
+  "created_at": "2026-08-21T17:32:52+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -48,26 +46,11 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "resume-tracked-manifest-atomic",
         "resume-manifest-replay-digest"
       ],
       "strategy": "cherry-pick"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/resume-tracked-manifest-atomic",
-        "commits": [
-          "ab6ac399468c152f122b54850929bb6f93d08730"
-        ],
-        "id": "resume-tracked-manifest-atomic",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -85,11 +68,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "0bdbaae1544a1c3589fd7c66ffde991e7e90501fcc8fb9a365a7d7766a4482e2",
-  "parent_state": "d51271fa6e5fa8219d20733f628f8186612c48ff",
+  "manifest_digest": "885b7b5ed95ac8406d0f503b3dd39ff064a66a1d6a78fa414ff3e4b95a02bfb2",
+  "parent_state": "195cf8c7d611f7d7df38937ddecdb482233bf9ba",
   "projection_status": "partial",
-  "publication_id": "3aa77f75-eb50-45de-a6bd-75440008b2b8",
-  "publication_scope": "stack:resume-manifest-replay-digest",
+  "publication_id": "8ba75184-9b57-4c87-9a73-a3e0ad7b32f5",
+  "publication_scope": "close:resume-tracked-manifest-atomic",
   "schema_version": 2,
   "syncwheel_version": "0.34.3",
   "tombstones": [
@@ -180,6 +163,14 @@
       "ref": "refs/heads/pr/direct-stack-land",
       "remote_tip": "93d7c6f50571be7eef84a3c8982f026985c59efe",
       "stack": "direct-stack-land"
+    },
+    {
+      "branch": "pr/resume-tracked-manifest-atomic",
+      "closed_at": "2026-08-21T17:32:50+00:00",
+      "reason": "merged-by-squash-tree-equivalent",
+      "ref": "refs/heads/pr/resume-tracked-manifest-atomic",
+      "remote_tip": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
+      "stack": "resume-tracked-manifest-atomic"
     }
   ]
 }
