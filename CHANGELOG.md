@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.34.4 - 2026-08-21
+
+- Accept a published stack ref rebuilt onto an advanced declared base only when
+  Syncwheel can reproduce the exact deterministic replay of the prior declared
+  commits. Divergent source content, ownership changes, and topology changes
+  remain blocked by the managed-ref guard.
+
 ## 0.34.3 - 2026-08-21
 
 - Compare the raw persisted manifest after an in-place replay, while retaining
