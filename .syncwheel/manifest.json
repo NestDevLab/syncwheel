@@ -11,9 +11,30 @@
     "branch": "main-integration",
     "base": "origin/main",
     "strategy": "cherry-pick",
-    "stacks": []
+    "stacks": [
+      "resume-tracked-manifest-atomic"
+    ]
   },
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "resume-tracked-manifest-atomic",
+      "branch": "pr/resume-tracked-manifest-atomic",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "ab6ac399468c152f122b54850929bb6f93d08730"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Keep resume manifest persistence atomic across in-place replay"
+      }
+    }
+  ],
   "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked",
   "coordination": {

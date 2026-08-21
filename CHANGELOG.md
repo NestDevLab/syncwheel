@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.34.2 - 2026-08-21
+
+- Defer reconciliation manifest persistence until every requested stack and
+  integration replay succeeds, so a tracked manifest cannot make its own
+  in-place integration rebuild fail.
+- Verify the exact manifest state materialized by an in-place replay before
+  allowing the final atomic manifest write.
+
 ## 0.34.1 - 2026-08-21
 
 - Recognize a single-parent integration commit whose patch is already reachable

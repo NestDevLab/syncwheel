@@ -2228,6 +2228,9 @@ class SyncwheelFixtureTest(unittest.TestCase):
             '--include-in-integration',
             expected=0,
         )
+        Path(self.repo / 'delta.txt').write_text('delta\n')
+        self.git('add', 'delta.txt')
+        self.git('commit', '-q', '-m', 'feat: add delta')
 
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         data = json.loads(manifest.read_text())
@@ -2237,6 +2240,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data['stacks'] = []
         manifest.write_text(json.dumps(data, indent=2) + '\n')
         self.git('switch', '-q', 'integration/test')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'chore: track recovery manifest')
 
         check = self.run_cli('check', '--no-fetch', '--json', expected=0)
         check_report = json.loads(check.stdout)
@@ -2257,7 +2262,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(updated['integration']['stacks'], ['feature-c'])
         self.assertEqual(updated['stacks'][0]['id'], 'feature-c')
         self.assertEqual(updated['stacks'][0]['branch'], 'pr/feature-c')
-        self.assertEqual(updated['stacks'][0]['commits'], [gamma])
+        self.assertEqual(updated['stacks'][0]['commits'], [self.git('rev-parse', 'pr/feature-c')])
+        self.assertNotEqual(updated['stacks'][0]['commits'], [gamma])
 
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
