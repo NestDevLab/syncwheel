@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "31c7ca33bef9d3f61550ed42b0d156bd7c588846"
+    "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-20T16:02:31+00:00",
+  "created_at": "2026-08-21T14:46:11+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -16,6 +16,7 @@
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
+    "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe"
   },
@@ -45,19 +46,36 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "resume-tracked-manifest-atomic"
+      ],
       "strategy": "cherry-pick"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/resume-tracked-manifest-atomic",
+        "commits": [
+          "ab6ac399468c152f122b54850929bb6f93d08730"
+        ],
+        "id": "resume-tracked-manifest-atomic",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "042355016a304f7154cfb5428305e2ec17aeabde",
-  "projection_status": "convergent",
-  "publication_id": "0424e605-4f5f-41d7-b57e-dd0d3df6428e",
-  "publication_scope": "full",
+  "manifest_digest": "346645fac865992d7b5f04716348eb92c891dc9cd0d0f46ff9b71d5739f54b42",
+  "parent_state": "1ebfc8613dd9c8b396bb91209a4c7a178af7cd58",
+  "projection_status": "partial",
+  "publication_id": "7afebb11-b5b0-48b4-8082-27f6684aee1b",
+  "publication_scope": "stack:resume-tracked-manifest-atomic",
   "schema_version": 2,
-  "syncwheel_version": "0.33.4",
+  "syncwheel_version": "0.34.2",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
