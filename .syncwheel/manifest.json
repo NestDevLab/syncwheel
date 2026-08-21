@@ -37,7 +37,7 @@
     },
     {
       "id": "reconcile-replay-mode-args",
-      "branch": "syncwheel/draft/reconcile-replay-mode-args",
+      "branch": "pr/reconcile-replay-mode-args",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -45,9 +45,9 @@
       "commits": [
         "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Fix replay-mode parsing for resume and reconcile"
