@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
+    "refs/heads/pr/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-21T18:56:22+00:00",
+  "created_at": "2026-08-21T18:56:40+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -16,6 +16,7 @@
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
+    "refs/heads/pr/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
     "refs/heads/pr/resume-manifest-replay-digest": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
     "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d",
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
@@ -76,23 +77,22 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/reconcile-replay-mode-args",
+        "branch": "pr/reconcile-replay-mode-args",
         "commits": [
           "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
         ],
         "id": "reconcile-replay-mode-args",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
-  "manifest_digest": "f17ab4457f252ef67c28e2b8d8c1a1bc82fc7561e965a0f591d31edbb14391e3",
-  "parent_state": "ab38bad0036d4ee4312a4ecc47ab3ecab3273774",
+  "manifest_digest": "c679235a008e4ab30060c4bba1567b1b659cdeb8ac4c6b2fcb62568deb585399",
+  "parent_state": "7ac17f0735bdd5b448337c5ee9dc568978ff529a",
   "projection_status": "partial",
-  "publication_id": "fb8d018f-9bc0-4b18-bfb5-fb2f5953fd76",
-  "publication_scope": "stack:reconcile-replay-mode-args",
+  "publication_id": "91eed2da-7d22-43f9-8f6d-477c22e9698d",
+  "publication_scope": "promote:reconcile-replay-mode-args",
   "schema_version": 2,
   "syncwheel_version": "0.34.4",
   "tombstones": [
@@ -199,6 +199,14 @@
       "ref": "refs/heads/pr/resume-manifest-replay-digest",
       "remote_tip": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
       "stack": "resume-manifest-replay-digest"
+    },
+    {
+      "branch": "syncwheel/draft/reconcile-replay-mode-args",
+      "closed_at": "2026-08-21T18:56:37+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/reconcile-replay-mode-args",
+      "remote_tip": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
+      "stack": "reconcile-replay-mode-args"
     }
   ]
 }
