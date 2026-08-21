@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-21T18:17:15+00:00",
+  "created_at": "2026-08-21T18:17:58+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -15,6 +17,7 @@
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
     "refs/heads/pr/resume-manifest-replay-digest": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
+    "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d",
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe"
@@ -45,17 +48,34 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "resume-preserve-published-source"
+      ],
       "strategy": "cherry-pick"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/resume-preserve-published-source",
+        "commits": [
+          "7bf66c1ab3310c8e4b78cd986d875a6cafc5dcfb"
+        ],
+        "id": "resume-preserve-published-source",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "0569c2c175f330871568b5afcd0445f5fd731d9e4a7f601beeb2c283fe896962",
-  "parent_state": "c5080b5427632c710686bac77bf5148f3b326807",
+  "manifest_digest": "7ab1bb9cbc4ef583175f91fce400936ca4ffe42ed91d12b27cd5faaa25883076",
+  "parent_state": "a9b065163dbcc6dfdf17bd4f51983faba6f08682",
   "projection_status": "partial",
-  "publication_id": "145d4a06-8ccb-40ed-a0a3-bdf668f17412",
-  "publication_scope": "close:resume-manifest-replay-digest",
+  "publication_id": "fd7d0d08-9e83-4bfd-becf-69ed4935f105",
+  "publication_scope": "stack:resume-preserve-published-source",
   "schema_version": 2,
   "syncwheel_version": "0.34.4",
   "tombstones": [
