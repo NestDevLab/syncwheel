@@ -2112,6 +2112,103 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(updated['integration']['stacks'], [])
         self.assertEqual(updated['stacks'], [])
 
+    def test_resume_drops_an_integration_commit_absorbed_by_historical_merged_stack(self):
+        self.git('switch', '-q', '-c', 'pr/feature-gamma', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        historical = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+        self.run_cli(
+            'stack', 'create', 'feature-gamma', historical,
+            '--branch', 'pr/feature-gamma', '--include-in-integration', expected=0,
+        )
+        self.run_cli(
+            'stack', 'close', 'feature-gamma', '--force',
+            '--reason', 'merged-by-squash-tree-equivalent', expected=0,
+        )
+
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        Path(self.repo / 'delta.txt').write_text('delivered alongside gamma\n')
+        self.git('add', 'gamma.txt', 'delta.txt')
+        self.git('commit', '-q', '-m', 'feat: deliver gamma with delta')
+        delivered = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', '-c', 'integration/test', f'{delivered}^')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'chore: replay gamma')
+        duplicate = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', 'integration/test')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['integration']['stacks'] = []
+        data['stacks'] = []
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        module = self.load_syncwheel_module()
+        self.assertEqual(
+            module.commit_patch_id(self.repo, historical),
+            module.commit_patch_id(self.repo, duplicate),
+        )
+        self.assertNotIn(
+            module.commit_patch_id(self.repo, duplicate),
+            module.patch_ids_reachable_from_ref(self.repo, 'main'),
+        )
+        self.assertEqual(module.rev_list(self.repo, 'main..integration/test'), [duplicate])
+
+        result = self.run_cli('resume', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        integration = report['validation']['details']['integration']
+        self.assertEqual(integration['unmapped_commits'], [duplicate])
+        self.assertEqual(integration['absorbed_patch_commits'], [])
+        drop = next(action for action in report['actions'] if action['type'] == 'resume_drop_absorbed_commit')
+        self.assertEqual(drop['commit'], duplicate)
+        self.assertEqual(drop['stack'], 'feature-gamma')
+        self.assertEqual(drop['matched_commit'], historical)
+        self.assertFalse(any(action['type'] == 'resume_manual_review' for action in report['actions']))
+
+        self.run_cli('resume', '--no-fetch', '--apply', expected=0)
+        self.run_cli('reconcile', '--no-fetch', '--apply', expected=0)
+        self.assertEqual(self.git('rev-parse', 'integration/test'), self.git('rev-parse', 'main'))
+        self.assertNotEqual(self.git('rev-parse', 'integration/test'), duplicate)
+
+    def test_resume_keeps_a_patch_equivalent_closed_stack_for_manual_review(self):
+        self.git('switch', '-q', '-c', 'pr/feature-gamma', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        historical = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+        self.run_cli(
+            'stack', 'create', 'feature-gamma', historical,
+            '--branch', 'pr/feature-gamma', '--include-in-integration', expected=0,
+        )
+        self.run_cli('stack', 'close', 'feature-gamma', '--force', '--reason', 'abandoned', expected=0)
+
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'chore: replay gamma')
+
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest.read_text())
+        data['integration']['branch'] = 'integration/test'
+        data['integration']['base'] = 'main'
+        data['integration']['stacks'] = []
+        data['stacks'] = []
+        manifest.write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('resume', '--no-fetch', '--json', expected=0)
+        report = json.loads(result.stdout)
+        self.assertFalse(any(action['type'] == 'resume_drop_absorbed_commit' for action in report['actions']))
+        manual = next(action for action in report['actions'] if action['type'] == 'resume_manual_review')
+        self.assertEqual(manual['reason'], 'owner_not_detected')
+
     def test_resume_restores_historical_stack_from_ledger(self):
         self.git('switch', '-q', '-c', 'pr/feature-c', 'main')
         Path(self.repo / 'gamma.txt').write_text('gamma\n')

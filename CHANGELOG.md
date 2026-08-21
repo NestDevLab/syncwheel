@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.34.1 - 2026-08-21
+
+- Recognize a single-parent integration commit whose patch is already reachable
+  from the declared integration base as absorbed delivery evidence during
+  reconciliation, instead of requiring manual ownership recovery.
 
 ## 0.34.0 - 2026-08-20
 

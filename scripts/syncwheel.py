@@ -1582,6 +1582,14 @@ def commit_patch_id(repo_root, commit):
     return line.split()[0]
 
 
+def patch_ids_reachable_from_ref(repo_root, ref):
+    return {
+        patch_id
+        for commit in rev_list(repo_root, ref)
+        if (patch_id := commit_patch_id(repo_root, commit))
+    }
+
+
 def commit_short_sha(repo_root, commit):
     return git(repo_root, 'rev-parse', '--short', f'{commit}^{{commit}}').stdout.strip()
 
@@ -6555,10 +6563,12 @@ def validate_manifest(repo_root, manifest):
 
     integration_commits = []
     unmapped_commits = []
+    absorbed_patch_commits = []
     control_commits = []
     integration_merge_commits = []
     if integration_exists and ref_exists(repo_root, integration['base']):
         integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
+        base_patch_ids = patch_ids_reachable_from_ref(repo_root, integration['base'])
         for commit in integration_commits:
             full_sha = commit_full_sha(repo_root, commit)
             if commit_parent_count(repo_root, commit) > 1:
@@ -6568,6 +6578,9 @@ def validate_manifest(repo_root, manifest):
                 control_commits.append(full_sha)
                 continue
             patch_id = commit_patch_id(repo_root, commit)
+            if patch_id and patch_id in base_patch_ids:
+                absorbed_patch_commits.append(full_sha)
+                continue
             if full_sha not in declared_commit_shas and (not patch_id or patch_id not in declared_patch_ids):
                 unmapped_commits.append(full_sha)
         if unmapped_commits:
@@ -6585,6 +6598,7 @@ def validate_manifest(repo_root, manifest):
         'commits': integration_commits,
         'declared_commits': declared_commits,
         'unmapped_commits': unmapped_commits,
+        'absorbed_patch_commits': absorbed_patch_commits,
         'control_commits': control_commits,
         'merge_commits': integration_merge_commits,
     }
@@ -6706,11 +6720,19 @@ def related_declared_stack_commits(repo_root, manifest, subject):
     return related
 
 
-def ledger_stack_candidates_for_commit(ledger_state, manifest, local_branches, remote_branches):
+def ledger_stack_candidates_for_commit(
+    repo_root,
+    ledger_state,
+    manifest,
+    commit,
+    local_branches,
+    remote_branches,
+):
     known = []
     current_ids = set(stack_map(manifest))
     seen = set()
     branch_candidates = [*local_branches, *remote_branches]
+    commit_patch = commit_patch_id(repo_root, commit)
     for stack_id, stack in (ledger_state.get('stacks') or {}).items():
         if stack_id in current_ids:
             continue
@@ -6722,21 +6744,59 @@ def ledger_stack_candidates_for_commit(ledger_state, manifest, local_branches, r
             if branch_ref_matches(candidate, branch):
                 reasons.append('historical_branch_contains_commit')
                 break
-        if not reasons:
-            continue
         dedupe_key = (stack_id, branch)
-        if dedupe_key in seen:
+        if reasons:
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            known.append({
+                'id': stack_id,
+                'branch': branch,
+                'base': stack.get('base'),
+                'target_remote': stack.get('target_remote'),
+                'target_branch': stack.get('target_branch'),
+                'integration_branch': stack.get('integration_branch'),
+                'reasons': reasons,
+            })
+
+        # A closed stack that was recorded as merged can explain a distinct SHA
+        # left on an old integration projection.  The main delivery commit may
+        # include additional changes, so its patch-id is not a sufficient
+        # comparison; use the historical source/integration commit recorded by
+        # the ledger instead.  Do not infer this for a merely closed stack.
+        if not commit_patch or not str(stack.get('closed_reason') or '').startswith('merged'):
             continue
-        seen.add(dedupe_key)
-        known.append({
-            'id': stack_id,
-            'branch': branch,
-            'base': stack.get('base'),
-            'target_remote': stack.get('target_remote'),
-            'target_branch': stack.get('target_branch'),
-            'integration_branch': stack.get('integration_branch'),
-            'reasons': reasons,
-        })
+        historical_commits = [
+            *(stack.get('integration_commits') or []),
+            *(stack.get('commits') or []),
+        ]
+        for historical_commit in dict.fromkeys(historical_commits):
+            if not commit_exists(repo_root, historical_commit):
+                continue
+            if commit_patch_id(repo_root, historical_commit) != commit_patch:
+                continue
+            dedupe_key = (stack_id, branch)
+            existing = next(
+                (candidate for candidate in known if (candidate['id'], candidate['branch']) == dedupe_key),
+                None,
+            )
+            if existing is None:
+                existing = {
+                    'id': stack_id,
+                    'branch': branch,
+                    'base': stack.get('base'),
+                    'target_remote': stack.get('target_remote'),
+                    'target_branch': stack.get('target_branch'),
+                    'integration_branch': stack.get('integration_branch'),
+                    'reasons': [],
+                }
+                known.append(existing)
+                seen.add(dedupe_key)
+            existing['reasons'].append('patch_equivalent_historical_merged_stack')
+            existing['absorbed'] = True
+            existing['matched_commit'] = commit_full_sha(repo_root, historical_commit)
+            existing['closed_reason'] = stack.get('closed_reason')
+            break
     return known
 
 
@@ -6767,6 +6827,31 @@ def plan_resume_mutations(repo_root, manifest, diagnostics, selected_stack_ids=N
             for candidate in item.get('historical_stacks') or []
             if not selected or candidate['id'] in selected
         ]
+
+        absorbed_stacks = [candidate for candidate in historical_stacks if candidate.get('absorbed')]
+        if absorbed_stacks:
+            if len(historical_stacks) == 1 and len({candidate['id'] for candidate in absorbed_stacks}) == 1:
+                historical = absorbed_stacks[0]
+                actions.append({
+                    'type': 'resume_drop_absorbed_commit',
+                    'commit': item['commit'],
+                    'short': item['short'],
+                    'subject': item['subject'],
+                    'stack': historical['id'],
+                    'branch': historical['branch'],
+                    'matched_commit': historical['matched_commit'],
+                    'reason': 'patch_equivalent_historical_merged_stack',
+                })
+                continue
+            actions.append({
+                'type': 'resume_manual_review',
+                'commit': item['commit'],
+                'short': item['short'],
+                'subject': item['subject'],
+                'reason': 'ambiguous_historical_patch_equivalence',
+                'stacks': sorted({candidate['id'] for candidate in historical_stacks}),
+            })
+            continue
 
         stack_id = None
         reason = None
@@ -6881,8 +6966,10 @@ def integration_commit_diagnostics(repo_root, manifest, validation, manifest_pat
                     'reasons': reasons,
                 })
         historical_stacks = ledger_stack_candidates_for_commit(
+            repo_root,
             ledger_state,
             manifest,
+            commit,
             local_branches,
             remote_branches,
         )
@@ -11807,6 +11894,8 @@ def format_reconcile_action(action):
         line += ' detail=restore a previously known stack from the ledger before registering commits'
     elif action['type'] == 'resume_manual_review':
         line += ' detail=resume mode could not classify this integration commit safely'
+    elif action['type'] == 'resume_drop_absorbed_commit':
+        line += ' detail=drop a patch-equivalent commit already absorbed by a historical merged stack'
     elif action['type'] == 'rebuild_integration' and action.get('reason') == 'integration_contains_unmapped_commits':
         line += ' detail=integration contains unassigned commits'
     return line
