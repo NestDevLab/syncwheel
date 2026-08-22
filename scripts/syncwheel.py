@@ -67,6 +67,9 @@ COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
 COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
 COORDINATION_LEASE_SECONDS = 5 * 60
 COORDINATION_REPAIR_PLAN_SCHEMA_VERSION = 1
+COORDINATION_COMPOSE_PLAN_SCHEMA_VERSION = 1
+COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
+COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF = 'exact-tree-equality'
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel Coordination',
@@ -4026,6 +4029,20 @@ def managed_ref_names(manifest):
     return list(dict.fromkeys(names))
 
 
+def coordination_snapshot_managed_ref_names(snapshot):
+    refs = []
+    integration = snapshot.get('integration') or {}
+    if isinstance(integration.get('branch'), str) and integration['branch']:
+        refs.append(f"refs/heads/{integration['branch']}")
+    for stack in snapshot.get('stacks') or []:
+        if isinstance(stack, dict) and isinstance(stack.get('branch'), str) and stack['branch']:
+            refs.append(f"refs/heads/{stack['branch']}")
+    for channel in snapshot.get('channels') or []:
+        if isinstance(channel, dict) and isinstance(channel.get('branch'), str) and channel['branch']:
+            refs.append(f"refs/heads/{channel['branch']}")
+    return list(dict.fromkeys(refs))
+
+
 def remote_ref_tips(repo_root, remote, refs):
     refs = list(dict.fromkeys(refs))
     output = {ref: None for ref in refs}
@@ -4379,7 +4396,31 @@ def build_coordination_repair_state(previous_state, previous_tip, repaired_ref, 
     return validate_coordination_state(child, previous_state['coordination_id'])
 
 
+def build_tree_equivalent_coordination_repair_state(previous_state, previous_tip, plan, installation):
+    """Append an evidence-only child for an exact tree-equivalent ref replacement."""
+    child = build_coordination_repair_state(
+        previous_state,
+        previous_tip,
+        plan['repairedRef'],
+        plan['expectedRemoteTip'],
+        installation,
+    )
+    child['changed_refs'] = {}
+    child['publication_scope'] = f"repair-evidence:{plan['repairedRef']}"
+    child['repair_evidence'] = {
+        'schemaVersion': 1,
+        'planDigest': plan['planDigest'],
+        'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF,
+        'ref': plan['repairedRef'],
+        'recordedTip': plan['expectedRecordedTip'],
+        'observedTip': plan['expectedRemoteTip'],
+        'tree': plan['expectedRemoteTree'],
+    }
+    return validate_coordination_state(child, previous_state['coordination_id'])
+
+
 def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='github-lock'):
+    require_sha1_repository(repo_root, 'coordination repair')
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         raise SyncwheelError('coordination repair requires active-active coordination')
@@ -4411,6 +4452,7 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     if not observed:
         raise SyncwheelError(f'coordination repair managed ref is absent: {repaired_ref}')
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
+    status = 'noop' if expected_recorded == observed else 'repair-required'
     payload = {
         'schemaVersion': COORDINATION_REPAIR_PLAN_SCHEMA_VERSION,
         'operation': 'coordination-repair',
@@ -4423,10 +4465,34 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
         'expectedRemoteTip': observed,
         'guardedRefs': dict(sorted(observed_refs.items())),
         'localManifestDigest': coordination_manifest_digest(manifest, repo_root),
-        'status': 'noop' if expected_recorded == observed else 'repair-required',
+        'status': status,
         'precondition': 'externally-verified-write-freeze-or-server-transaction',
         'freezeBackend': freeze_backend,
     }
+    if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and status != 'noop':
+        active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
+        if repaired_ref not in active_refs:
+            raise SyncwheelError(
+                'coordination repair tree-equivalence proof requires an active managed ref'
+            )
+        fetch_coordination_ref_tip(repo_root, config, repaired_ref, observed)
+        if not commit_exists(repo_root, expected_recorded):
+            raise SyncwheelError(
+                'coordination repair tree-equivalence proof requires the recorded commit object'
+            )
+        recorded_tree = ref_tree(repo_root, expected_recorded)
+        observed_tree = ref_tree(repo_root, observed)
+        if recorded_tree != observed_tree:
+            raise SyncwheelError(
+                'coordination repair tree-equivalence proof failed: managed ref trees differ'
+            )
+        payload.update({
+            'repairClass': 'tree-equivalent-state-evidence',
+            'expectedRecordedTree': recorded_tree,
+            'expectedRemoteTree': observed_tree,
+            'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF,
+            'precondition': 'exact-tree-equivalence-and-state-only-cas',
+        })
     payload['planDigest'] = canonical_json_digest(payload)
     return payload, previous
 
@@ -4461,6 +4527,82 @@ class GitHubLockCoordinationRepairBackend(CoordinationRepairBackend):
         )
 
 
+class TreeEquivalentStateCasCoordinationRepairBackend(CoordinationRepairBackend):
+    """CAS only the state ref after exact proof; never claim a lease on code refs."""
+
+    name = COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
+
+    def _verify_observations(
+        self, repo_root, coordination, remote, state_ref, expected_state_tip, guarded_refs
+    ):
+        require_exclusive_coordination_ownership(repo_root, coordination, guarded_refs)
+        observed = remote_ref_tips(repo_root, remote, [state_ref, *guarded_refs])
+        if observed.get(state_ref) != expected_state_tip:
+            raise SyncwheelError('coordination repair STOP: state lease was lost before state CAS')
+        drifted = {
+            ref: (tip, observed.get(ref)) for ref, tip in guarded_refs.items()
+            if observed.get(ref) != tip
+        }
+        if drifted:
+            raise SyncwheelError('coordination repair STOP: guarded refs drifted before state CAS')
+        return observed
+
+    def preflight(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+        )
+        return {'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF}
+
+    def apply(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+        )
+        command = [
+            'git',
+            'push',
+            f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
+            kwargs['remote'],
+            f"{kwargs['new_state_tip']}:{kwargs['state_ref']}",
+        ]
+        result = run_authorized_push(
+            kwargs['repo_root'],
+            command,
+            kwargs['remote'],
+            [kwargs['state_ref']],
+            check=False,
+        )
+        if result.returncode != 0:
+            observed = remote_ref_tips(
+                kwargs['repo_root'], kwargs['remote'], [kwargs['state_ref']]
+            )[kwargs['state_ref']]
+            if observed == kwargs['expected_state_tip']:
+                raise SyncwheelError('coordination repair state CAS was rejected without mutation')
+            if observed != kwargs['new_state_tip']:
+                raise SyncwheelError('coordination repair outcome is unknown after state CAS rejection')
+        return {'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF, 'stateOnly': True}
+
+    def postflight(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+        )
+        return {'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF}
+
+
 def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     if not isinstance(plan, dict):
         raise SyncwheelError('coordination repair plan must be a JSON object')
@@ -4474,11 +4616,12 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     if missing:
         raise SyncwheelError('coordination repair plan is missing: ' + ', '.join(missing))
     if backend is None:
-        backend = (
-            GitHubLockCoordinationRepairBackend()
-            if plan.get('freezeBackend') == 'github-lock'
-            else CoordinationRepairBackend()
-        )
+        if plan.get('freezeBackend') == 'github-lock':
+            backend = GitHubLockCoordinationRepairBackend()
+        elif plan.get('freezeBackend') == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND:
+            backend = TreeEquivalentStateCasCoordinationRepairBackend()
+        else:
+            backend = CoordinationRepairBackend()
     supplied_digest = plan.get('planDigest')
     unsigned = {key: value for key, value in plan.items() if key != 'planDigest'}
     if supplied_digest != canonical_json_digest(unsigned):
@@ -4492,30 +4635,63 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         raise SyncwheelError('coordination repair plan does not match the active coordination domain')
     if plan.get('freezeBackend') != backend.name:
         raise SyncwheelError('coordination repair backend does not match the reviewed plan')
+    tree_equivalent_repair = backend.name == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
+    if tree_equivalent_repair and plan.get('status') != 'noop':
+        required_proof = {
+            'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
+        }
+        missing_proof = sorted(required_proof - set(plan))
+        if missing_proof:
+            raise SyncwheelError(
+                'coordination repair tree-equivalence plan is missing: '
+                + ', '.join(missing_proof)
+            )
+        if (
+            plan.get('repairClass') != 'tree-equivalent-state-evidence'
+            or plan.get('proof') != COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF
+            or plan.get('expectedRecordedTree') != plan.get('expectedRemoteTree')
+            or plan.get('precondition') != 'exact-tree-equivalence-and-state-only-cas'
+        ):
+            raise SyncwheelError('coordination repair tree-equivalence proof is invalid')
     if plan.get('localManifestDigest') != coordination_manifest_digest(manifest, repo_root):
         raise SyncwheelError('coordination repair STOP: local manifest changed after review')
     current_plan, previous = coordination_repair_plan(
         repo_root, manifest, plan['repairedRef'], plan['freezeBackend']
     )
-    for key in ('stateRef', 'expectedStateTip', 'expectedRecordedTip', 'expectedRemoteTip', 'guardedRefs', 'localManifestDigest'):
+    comparison_keys = [
+        'stateRef', 'expectedStateTip', 'expectedRecordedTip', 'expectedRemoteTip',
+        'guardedRefs', 'localManifestDigest', 'precondition',
+    ]
+    if tree_equivalent_repair and plan.get('status') != 'noop':
+        comparison_keys.extend([
+            'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
+        ])
+    for key in comparison_keys:
         if current_plan.get(key) != plan.get(key):
             raise SyncwheelError(f'coordination repair STOP: reviewed plan drifted at {key}')
     if plan.get('status') == 'noop':
         return {'status': 'noop', 'state_tip': previous['tip'], 'plan_digest': supplied_digest}
     backend.preflight(
         repo_root=repo_root,
+        coordination=config,
         remote=config['remote'],
         state_ref=plan['stateRef'],
         expected_state_tip=plan['expectedStateTip'],
         guarded_refs=plan['guardedRefs'],
     )
     installation = installation_id(create=True)
-    child = build_coordination_repair_state(
-        previous['state'], previous['tip'], plan['repairedRef'], plan['expectedRemoteTip'], installation
-    )
+    if tree_equivalent_repair:
+        child = build_tree_equivalent_coordination_repair_state(
+            previous['state'], previous['tip'], plan, installation
+        )
+    else:
+        child = build_coordination_repair_state(
+            previous['state'], previous['tip'], plan['repairedRef'], plan['expectedRemoteTip'], installation
+        )
     child_tip = create_coordination_state_commit(repo_root, child, previous['tip'])
     result = backend.apply(
         repo_root=repo_root,
+        coordination=config,
         remote=config['remote'],
         state_ref=plan['stateRef'],
         expected_state_tip=plan['expectedStateTip'],
@@ -4535,6 +4711,7 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         raise SyncwheelError('coordination repair post-verification failed: guarded refs drifted')
     backend.postflight(
         repo_root=repo_root,
+        coordination=config,
         remote=config['remote'],
         state_ref=plan['stateRef'],
         expected_state_tip=child_tip,
@@ -4548,6 +4725,18 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         or verified['managed_refs'][plan['repairedRef']] != plan['expectedRemoteTip']
     ):
         raise SyncwheelError('coordination repair post-verification failed: invalid child state')
+    if tree_equivalent_repair:
+        evidence = verified.get('repair_evidence')
+        if (
+            verified.get('changed_refs') != {}
+            or not isinstance(evidence, dict)
+            or evidence.get('planDigest') != supplied_digest
+            or evidence.get('proof') != COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF
+            or evidence.get('tree') != plan['expectedRemoteTree']
+        ):
+            raise SyncwheelError(
+                'coordination repair post-verification failed: invalid tree-equivalent evidence'
+            )
     return {
         'status': 'repaired',
         'state_tip': child_tip,
@@ -4555,6 +4744,210 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         'plan_digest': supplied_digest,
         'backend': backend.name,
         'backend_result': result,
+        'proof': plan.get('proof'),
+    }
+
+
+def coordination_compose_stack_plan(
+    repo_root, manifest, stack_id, known_base_state_tip, known_base_snapshot_digest
+):
+    require_sha1_repository(repo_root, 'coordination compose')
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        raise SyncwheelError('coordination compose requires active-active coordination')
+    profile, local_coordination = coordination_profile(repo_root)
+    pending = local_coordination.get('pending_merge')
+    if isinstance(pending, dict) and pending.get('coordination_id') == config['id']:
+        raise SyncwheelError('coordination compose STOP: resolve the pending coordination merge first')
+    if not isinstance(known_base_state_tip, str) or not re.fullmatch(r'[0-9a-f]{40}', known_base_state_tip):
+        raise SyncwheelError('coordination compose requires an exact SHA-1 known base state tip')
+    latest = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    if not latest['tip'] or not latest['state']:
+        raise SyncwheelError('coordination compose requires existing remote coordination state')
+    if not commit_exists(repo_root, known_base_state_tip):
+        raise SyncwheelError('coordination compose known base state object is unavailable')
+    coordination_state_chain_contains(
+        repo_root, config['id'], known_base_state_tip, latest['tip']
+    )
+    base_state = coordination_state_from_commit(
+        repo_root, known_base_state_tip, config['id']
+    )
+    if base_state['manifest_digest'] != known_base_snapshot_digest:
+        raise SyncwheelError('coordination compose known base snapshot digest does not match state')
+    local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
+    composition = compose_additive_coordination_snapshots(
+        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id
+    )
+    merged_snapshot = composition['merged']
+    merged_snapshot_digest = canonical_json_digest(merged_snapshot)
+    stack = require_stack(manifest, stack_id)
+    source_ref = f"refs/heads/{stack['branch']}"
+    source_tip = ref_tip(repo_root, stack['branch'])
+    if not source_tip or not re.fullmatch(r'[0-9a-f]{40}', source_tip):
+        raise SyncwheelError('coordination compose requested stack has no exact local source tip')
+    claimed_refs = list(dict.fromkeys([*latest['state']['managed_refs'], source_ref]))
+    require_exclusive_coordination_ownership(repo_root, config, claimed_refs)
+    observed_refs = remote_ref_tips(repo_root, config['remote'], claimed_refs)
+    drifted = {
+        ref: (tip, observed_refs.get(ref))
+        for ref, tip in latest['state']['managed_refs'].items()
+        if observed_refs.get(ref) != tip
+    }
+    if drifted:
+        raise SyncwheelError('coordination compose STOP: remote state does not match managed refs')
+    remote_has_composed_snapshot = latest['state']['manifest_digest'] == merged_snapshot_digest
+    remote_source_tip = observed_refs.get(source_ref)
+    if remote_has_composed_snapshot:
+        if latest['state']['managed_refs'].get(source_ref) != source_tip or remote_source_tip != source_tip:
+            raise SyncwheelError('coordination compose remote composed state has a different source tip')
+        status = 'adopt-only'
+    else:
+        if remote_source_tip is not None:
+            raise SyncwheelError('coordination compose refuses to adopt an existing unowned source ref')
+        status = 'publish-required'
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+    integration_tip = latest['state']['managed_refs'].get(integration_ref)
+    if not integration_tip or observed_refs.get(integration_ref) != integration_tip:
+        raise SyncwheelError('coordination compose requires an exact unchanged integration tip')
+    if ref_tip(repo_root, manifest['integration']['branch']) != integration_tip:
+        raise SyncwheelError('coordination compose local integration must match the remote state tip exactly')
+    proposed_manifest = apply_coordination_snapshot(manifest, merged_snapshot)
+    validation = validate_manifest(repo_root, proposed_manifest)
+    if validation['errors']:
+        raise SyncwheelError(
+            'coordination compose proposed manifest is invalid: ' + '; '.join(validation['errors'])
+        )
+    unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
+    payload = {
+        'schemaVersion': COORDINATION_COMPOSE_PLAN_SCHEMA_VERSION,
+        'operation': 'coordination-compose-stack',
+        'coordinationId': config['id'],
+        'remote': config['remote'],
+        'stateRef': coordination_state_ref(config),
+        'knownBaseStateTip': known_base_state_tip,
+        'knownBaseSnapshotDigest': known_base_snapshot_digest,
+        'expectedRemoteStateTip': latest['tip'],
+        'remoteSnapshotDigest': latest['state']['manifest_digest'],
+        'localProposalDigest': manifest_digest(manifest),
+        'localSnapshotDigest': canonical_json_digest(local_snapshot),
+        'composedSnapshot': merged_snapshot,
+        'composedSnapshotDigest': merged_snapshot_digest,
+        'proposedManifestDigest': manifest_digest(proposed_manifest),
+        'stack': stack_id,
+        'sourceRef': source_ref,
+        'sourceTip': source_tip,
+        'expectedRemoteSourceTip': remote_source_tip,
+        'guardedRefs': dict(sorted(observed_refs.items())),
+        'integrationRef': integration_ref,
+        'expectedIntegrationTip': integration_tip,
+        'expectedIntegrationTree': ref_tree(repo_root, integration_tip),
+        'unmappedIntegrationCommits': unmapped,
+        'projectionStatus': 'partial',
+        'integrationMutation': False,
+        'localAddedStacks': composition['localAddedStacks'],
+        'remoteAddedStacks': composition['remoteAddedStacks'],
+        'status': status,
+    }
+    payload['planDigest'] = canonical_json_digest(payload)
+    return payload, proposed_manifest, latest
+
+
+def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, plan):
+    if not isinstance(plan, dict):
+        raise SyncwheelError('coordination compose plan must be a JSON object')
+    supplied_digest = plan.get('planDigest')
+    unsigned = {key: value for key, value in plan.items() if key != 'planDigest'}
+    if supplied_digest != canonical_json_digest(unsigned):
+        raise SyncwheelError('coordination compose plan digest does not match its payload')
+    if plan.get('schemaVersion') != COORDINATION_COMPOSE_PLAN_SCHEMA_VERSION:
+        raise SyncwheelError('unsupported coordination compose plan schema')
+    if plan.get('operation') != 'coordination-compose-stack':
+        raise SyncwheelError('coordination compose plan has the wrong operation')
+    current, proposed_manifest, latest = coordination_compose_stack_plan(
+        repo_root,
+        manifest,
+        plan.get('stack'),
+        plan.get('knownBaseStateTip'),
+        plan.get('knownBaseSnapshotDigest'),
+    )
+    if current != plan:
+        raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
+    if plan['status'] == 'publish-required':
+        result = coordinated_publish(
+            repo_root,
+            proposed_manifest,
+            manifest_path,
+            {plan['sourceRef']: plan['sourceTip']},
+            f"compose-stack:{plan['stack']}",
+            plan['projectionStatus'],
+            expected_coordination_state_tip=plan['expectedRemoteStateTip'],
+            expected_observed_refs=plan['guardedRefs'],
+        )
+        if result.get('status') != 'published':
+            raise SyncwheelError('coordination compose publication outcome requires a fresh plan')
+        config = coordination_config(proposed_manifest)
+        accepted = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=proposed_manifest['version']
+        )
+        state = accepted['state']
+        if (
+            state.get('parent_state') != plan['expectedRemoteStateTip']
+            or state.get('manifest_digest') != plan['composedSnapshotDigest']
+            or state.get('manifest') != plan['composedSnapshot']
+            or state.get('changed_refs') != {plan['sourceRef']: plan['sourceTip']}
+            or state.get('managed_refs', {}).get(plan['integrationRef']) != plan['expectedIntegrationTip']
+            or state.get('projection_status') != 'partial'
+            or state.get('tombstones') != latest['state'].get('tombstones')
+        ):
+            raise SyncwheelError('coordination compose post-verification failed: invalid state child')
+        require_exclusive_coordination_ownership(
+            repo_root, config, state['managed_refs']
+        )
+        observed = remote_ref_tips(repo_root, config['remote'], state['managed_refs'])
+        if observed != state['managed_refs']:
+            raise SyncwheelError('coordination compose post-verification failed: managed refs drifted')
+    observed_manifest, _ = load_manifest(repo_root, manifest_path)
+    if not observed_manifest or manifest_digest(observed_manifest) != plan['localProposalDigest']:
+        raise SyncwheelError(
+            'coordination compose local adoption pending: manifest drifted after remote publication'
+        )
+    try:
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            proposed_manifest,
+            'coordination_compose_stack',
+            {
+                'plan_digest': supplied_digest,
+                'known_base_state': plan['knownBaseStateTip'],
+                'remote_state': plan['expectedRemoteStateTip'],
+                'stack': plan['stack'],
+            },
+        )
+    except (OSError, SyncwheelError) as exc:
+        raise SyncwheelError(
+            'coordination compose local adoption pending; do not retry publication, replan: '
+            + str(exc)
+        ) from exc
+    verified_manifest, _ = load_manifest(repo_root, manifest_path)
+    if not verified_manifest or manifest_digest(verified_manifest) != plan['proposedManifestDigest']:
+        raise SyncwheelError('coordination compose local adoption verification failed')
+    return {
+        'status': 'composed' if plan['status'] == 'publish-required' else 'adopted',
+        'plan_digest': supplied_digest,
+        'remote_state_tip': (
+            read_remote_coordination_state(
+                repo_root,
+                coordination_config(proposed_manifest),
+                fetch=False,
+                local_manifest_version=proposed_manifest['version'],
+            )['tip']
+        ),
+        'manifest_digest': plan['proposedManifestDigest'],
+        'integration_mutated': False,
+        'unmapped_integration_commits': plan['unmappedIntegrationCommits'],
     }
 
 
@@ -4757,6 +5150,113 @@ def merge_coordination_snapshots(base, local, remote):
     }
 
 
+def require_sha1_repository(repo_root, operation):
+    object_format = git(repo_root, 'rev-parse', '--show-object-format').stdout.strip()
+    if object_format != 'sha1':
+        raise SyncwheelError(f'{operation} supports only SHA-1 repositories; found {object_format}')
+
+
+def coordination_state_chain_contains(repo_root, coordination_id, base_tip, latest_tip):
+    """Prove both Git ancestry and every declared append-only state link."""
+    if git(repo_root, 'merge-base', '--is-ancestor', base_tip, latest_tip, check=False).returncode != 0:
+        raise SyncwheelError('coordination compose known base state is not an ancestor of remote state')
+    current = latest_tip
+    while current != base_tip:
+        state = coordination_state_from_commit(repo_root, current, coordination_id)
+        declared_parent = state.get('parent_state')
+        git_parent_result = git(repo_root, 'rev-parse', f'{current}^', check=False)
+        git_parent = git_parent_result.stdout.strip() if git_parent_result.returncode == 0 else None
+        if not declared_parent or declared_parent != git_parent:
+            raise SyncwheelError('coordination compose state chain is not append-only')
+        current = declared_parent
+    coordination_state_from_commit(repo_root, base_tip, coordination_id)
+    return True
+
+
+def additive_coordination_snapshot_delta(base, candidate, side):
+    """Accept only stack additions and their ordered integration membership."""
+    base_contract = json.loads(json.dumps(base))
+    candidate_contract = json.loads(json.dumps(candidate))
+    base_contract.pop('stacks', None)
+    candidate_contract.pop('stacks', None)
+    base_contract.get('integration', {}).pop('stacks', None)
+    candidate_contract.get('integration', {}).pop('stacks', None)
+    if base_contract != candidate_contract:
+        raise SyncwheelError(
+            f'coordination compose {side} proposal changes shared defaults or integration contract'
+        )
+    base_stacks = stack_snapshot_map(base)
+    candidate_stacks = stack_snapshot_map(candidate)
+    removed = sorted(set(base_stacks) - set(candidate_stacks))
+    changed = sorted(
+        stack_id for stack_id in set(base_stacks) & set(candidate_stacks)
+        if base_stacks[stack_id] != candidate_stacks[stack_id]
+    )
+    if removed or changed:
+        raise SyncwheelError(
+            f'coordination compose {side} proposal is not additive; '
+            f'removed={removed}, changed={changed}'
+        )
+    base_order = [stack['id'] for stack in base.get('stacks') or []]
+    candidate_order = [stack['id'] for stack in candidate.get('stacks') or []]
+    if candidate_order[:len(base_order)] != base_order:
+        raise SyncwheelError(f'coordination compose {side} proposal reorders existing stacks')
+    added = candidate_order[len(base_order):]
+    if set(added) != set(candidate_stacks) - set(base_stacks):
+        raise SyncwheelError(f'coordination compose {side} proposal has ambiguous stack ordering')
+    base_members = list(base.get('integration', {}).get('stacks') or [])
+    candidate_members = list(candidate.get('integration', {}).get('stacks') or [])
+    if candidate_members != [*base_members, *added]:
+        raise SyncwheelError(
+            f'coordination compose {side} integration membership must append exactly its new stacks'
+        )
+    return {'added': added}
+
+
+def compose_additive_coordination_snapshots(base, local, remote, requested_stack):
+    local_delta = additive_coordination_snapshot_delta(base, local, 'local')
+    remote_delta = additive_coordination_snapshot_delta(base, remote, 'remote')
+    if local_delta['added'] != [requested_stack]:
+        raise SyncwheelError(
+            'coordination compose local proposal must add exactly the requested stack'
+        )
+    local_map = stack_snapshot_map(local)
+    remote_map = stack_snapshot_map(remote)
+    overlap = set(local_delta['added']).intersection(remote_delta['added'])
+    conflicting = sorted(
+        stack_id for stack_id in overlap if local_map[stack_id] != remote_map[stack_id]
+    )
+    if conflicting:
+        raise SyncwheelError(
+            'coordination compose has conflicting additions: ' + ', '.join(conflicting)
+        )
+    merged = json.loads(json.dumps(base))
+    merged_map = stack_snapshot_map(merged)
+    ordered_additions = []
+    for source, added in ((remote_map, remote_delta['added']), (local_map, local_delta['added'])):
+        for stack_id in added:
+            if stack_id not in merged_map:
+                merged_map[stack_id] = json.loads(json.dumps(source[stack_id]))
+                ordered_additions.append(stack_id)
+    merged['stacks'] = [
+        *list(base.get('stacks') or []),
+        *(merged_map[stack_id] for stack_id in ordered_additions),
+    ]
+    merged['integration']['stacks'] = [
+        *list(base.get('integration', {}).get('stacks') or []),
+        *ordered_additions,
+    ]
+    branches = [stack['branch'] for stack in merged['stacks']]
+    if len(branches) != len(set(branches)):
+        raise SyncwheelError('coordination compose stack branch ownership is ambiguous')
+    validate_coordination_snapshot_refs(merged)
+    return {
+        'merged': merged,
+        'localAddedStacks': local_delta['added'],
+        'remoteAddedStacks': remote_delta['added'],
+    }
+
+
 def apply_coordination_snapshot(manifest, snapshot):
     updated = json.loads(json.dumps(manifest))
     local_stacks = {
@@ -4788,8 +5288,9 @@ def apply_coordination_snapshot(manifest, snapshot):
         )
         restored['state'] = stack.get('state', 'published')
         restored['publication'] = {'enabled': restored['state'] != 'draft'}
-        if isinstance(local_stack.get('meta'), dict):
-            restored['meta'] = local_stack['meta']
+        restored['meta'] = (
+            local_stack['meta'] if isinstance(local_stack.get('meta'), dict) else {}
+        )
         updated['stacks'].append(restored)
     updated['channels'] = []
     for channel in snapshot.get('channels', []):
@@ -5263,6 +5764,8 @@ def coordinated_publish(
     tombstone=None,
     rename=None,
     state_transition=None,
+    expected_coordination_state_tip=None,
+    expected_observed_refs=None,
 ):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
@@ -5287,8 +5790,23 @@ def coordinated_publish(
     expected = read_remote_coordination_state(
         repo_root, config, fetch=True, local_manifest_version=manifest['version']
     )
+    if (
+        expected_coordination_state_tip is not None
+        and expected['tip'] != expected_coordination_state_tip
+    ):
+        raise SyncwheelError(
+            'coordinated publish STOP: remote state changed after the reviewed plan'
+        )
     require_exclusive_coordination_ownership(repo_root, config, managed)
     observed_refs = remote_ref_tips(repo_root, config['remote'], managed)
+    if expected_observed_refs is not None:
+        planned_observations = {
+            ref: expected_observed_refs.get(ref) for ref in managed
+        }
+        if observed_refs != planned_observations:
+            raise SyncwheelError(
+                'coordinated publish STOP: managed refs changed after the reviewed plan'
+            )
     validate_coordination_publication_base(
         repo_root,
         manifest,
@@ -7914,6 +8432,50 @@ def command_coordination_repair(args):
     if args.freeze_backend != plan.get('freezeBackend'):
         raise SyncwheelError('--freeze-backend does not match the reviewed repair plan')
     result = apply_coordination_repair_plan(repo_root, manifest, plan)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def command_coordination_compose(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    if not args.apply:
+        if args.plan_file:
+            raise SyncwheelError('--plan-file is only valid with --apply')
+        if not args.stack or not args.known_base_state or not args.known_base_snapshot_digest:
+            raise SyncwheelError(
+                'coordination compose planning requires --stack, --known-base-state, '
+                'and --known-base-snapshot-digest'
+            )
+        plan, _, _ = coordination_compose_stack_plan(
+            repo_root,
+            manifest,
+            args.stack,
+            args.known_base_state,
+            args.known_base_snapshot_digest,
+        )
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    if not args.plan_file:
+        raise SyncwheelError(
+            'coordination compose --apply requires --plan-file with the exact reviewed plan'
+        )
+    try:
+        plan = json.loads(Path(args.plan_file).read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(f'cannot read coordination compose plan: {exc}') from exc
+    for option, key in (
+        (args.stack, 'stack'),
+        (args.known_base_state, 'knownBaseStateTip'),
+        (args.known_base_snapshot_digest, 'knownBaseSnapshotDigest'),
+    ):
+        if option and option != plan.get(key):
+            raise SyncwheelError('coordination compose arguments do not match the reviewed plan')
+    result = apply_coordination_compose_stack_plan(
+        repo_root, manifest, manifest_path, plan
+    )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -13280,7 +13842,7 @@ def build_parser():
     coordination_repair_p = coordination_sub.add_parser(
         'repair',
         parents=[common],
-        help='plan or apply a serialized coordination-state repair under an external write freeze',
+        help='plan or apply a serialized coordination-state repair under an exact proof backend',
     )
     coordination_repair_p.add_argument(
         '--ref',
@@ -13290,15 +13852,36 @@ def build_parser():
     coordination_repair_p.add_argument('-a', '--apply', action='store_true')
     coordination_repair_p.add_argument(
         '--freeze-backend',
-        choices=['github-lock'],
+        choices=['github-lock', COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND],
         default='github-lock',
-        help='reviewed external serialization backend (default: github-lock)',
+        help=(
+            'reviewed repair backend: github-lock remains unsupported; '
+            'tree-equivalent-state-cas changes only append-only state after exact tree proof'
+        ),
     )
     coordination_repair_p.add_argument(
         '--plan-file',
         help='exact reviewed JSON plan; required with --apply',
     )
     coordination_repair_p.set_defaults(func=command_coordination_repair)
+
+    coordination_compose_p = coordination_sub.add_parser(
+        'compose',
+        parents=[common],
+        help='plan or apply an additive remote/local stack composition without rebuilding integration',
+    )
+    coordination_compose_p.add_argument('--stack', help='single locally added stack to publish')
+    coordination_compose_p.add_argument(
+        '--known-base-state',
+        help='exact append-only coordination state from which the local proposal was derived',
+    )
+    coordination_compose_p.add_argument(
+        '--known-base-snapshot-digest',
+        help='exact manifest snapshot digest recorded by --known-base-state',
+    )
+    coordination_compose_p.add_argument('-a', '--apply', action='store_true')
+    coordination_compose_p.add_argument('--plan-file', help='exact reviewed JSON plan')
+    coordination_compose_p.set_defaults(func=command_coordination_compose)
 
     handoff_p = sub.add_parser(
         'handoff',

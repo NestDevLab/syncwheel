@@ -13,7 +13,8 @@
     "strategy": "cherry-pick",
     "stacks": [
       "resume-preserve-published-source",
-      "reconcile-replay-mode-args"
+      "reconcile-replay-mode-args",
+      "tree-equivalent-state-cas"
     ]
   },
   "stacks": [
@@ -51,6 +52,24 @@
       },
       "meta": {
         "purpose": "Fix replay-mode parsing for resume and reconcile"
+      }
+    },
+    {
+      "id": "tree-equivalent-state-cas",
+      "branch": "pr/tree-equivalent-state-cas",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "cf2cb7f07e099cf5a27c190d0c8154a3e31bb11c"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Lossless coordination state repair and additive stack composition"
       }
     }
   ],
