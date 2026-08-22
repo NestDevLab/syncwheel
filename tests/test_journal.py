@@ -223,6 +223,23 @@ class JournalModeTest(unittest.TestCase):
         result = self.cli('journal', 'publish', '--apply', expected=2)
         self.assertIn('remote tip mismatch', result.stderr)
 
+    def test_publish_bootstraps_missing_remote_journal_ref(self):
+        subprocess.run(
+            ['git', '--git-dir', str(self.remote), 'update-ref', '-d', 'refs/heads/journal'],
+            check=True,
+        )
+        self.git('fetch', '-q', '--prune', 'origin')
+        (self.repo / 'notes.txt').write_text('bootstrap\n')
+
+        published = json.loads(self.cli('journal', 'publish', '--apply').stdout)
+
+        self.assertEqual(published['expected_remote_tip'], None)
+        self.assertEqual(published['published_tip'], self.git('rev-parse', 'HEAD'))
+        self.assertEqual(
+            self.git('ls-remote', 'origin', 'refs/heads/journal').split()[0],
+            published['published_tip'],
+        )
+
     def test_publish_lease_loss_stops(self):
         module = self.load_module()
         args = mock.Mock(repo=None, manifest=None, personal=None, apply=True)

@@ -6356,7 +6356,8 @@ def command_journal_publish(args):
     tip = snapshot['commit'] or local_head
     if tip != observed:
         refspec = f'{tip}:refs/heads/{journal["branch"]}'
-        lease = f'--force-with-lease=refs/heads/{journal["branch"]}:{observed}'
+        expected_ref = observed or ''
+        lease = f'--force-with-lease=refs/heads/{journal["branch"]}:{expected_ref}'
         pushed = run_authorized_push(
             repo_root,
             ['git', 'push', '--porcelain', lease, journal['remote'], refspec],
