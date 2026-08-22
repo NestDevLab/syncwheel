@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.34.7`
+Current version: `0.34.8`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -113,7 +113,7 @@ state model, lease handling, explicit merge acceptance, privacy contract, and
 local cleanup safeguards.
 
 When a managed branch is correct but coordination state recorded the wrong tip,
-use the reviewed repair protocol:
+generate a digest-bound repair plan. The default backend remains non-mutating:
 
 ```bash
 syncwheel coordination repair --ref refs/heads/main-integration > repair-plan.json
@@ -124,8 +124,36 @@ Apply rechecks the exact plan, ownership, pending merges, and every guarded ref.
 Ordinary Git drops an unchanged no-op refspec, so there is no Git push fallback.
 GitHub branch locks are not sufficient: administrators can bypass or change
 them concurrently, so `github-lock` stops as unsupported before any state
-update. Apply remains unavailable until a backend can hold a continuous
-server-side transaction across the state ref and every guarded ref.
+update.
+
+For the narrower case where the recorded and observed commits have exactly the
+same tree, use `--freeze-backend tree-equivalent-state-cas` for both plan and
+apply. This backend fetches and proves both commit trees, rechecks the state tip
+and every managed ref, then pushes only an append-only state child under an
+exact state-ref lease. It never updates the managed branch. Any different tree,
+ownership uncertainty, ref drift, lease loss, or post-CAS drift stops
+fail-closed; an accepted state child remains durable evidence even when the
+post-verification reports failure.
+
+When the remote state and a stale local manifest independently added stacks,
+compose the proposals explicitly instead of weakening `stack push`:
+
+```bash
+syncwheel coordination compose \
+  --stack new-stack \
+  --known-base-state <state-sha> \
+  --known-base-snapshot-digest <snapshot-digest> > compose-plan.json
+syncwheel coordination compose --apply --plan-file compose-plan.json
+```
+
+Compose accepts only one local additive stack and additive remote stacks from
+the exact known base. Existing records, shared defaults, integration strategy,
+and membership order must be unchanged. Apply rederives the complete plan,
+then atomically publishes only the new stack ref and an append-only partial
+state child under exact leases. The integration ref is observed but never
+updated; unmapped integration commits remain unmapped diagnostics. If remote
+publication succeeds but local manifest adoption fails, replan produces an
+adopt-only operation and never repeats the push.
 
 ## Common Short Flags
 

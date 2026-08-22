@@ -159,6 +159,126 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.git(repo, 'switch', '-q', previous)
         return sha
 
+    def prepare_tree_equivalent_repair(self, name='tree-equivalent-repair'):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo)
+        branch = 'integration/shared'
+        self.git(repo, 'switch', '-q', branch)
+        (repo / 'projection.txt').write_text('stable projection\n')
+        self.git(repo, 'add', 'projection.txt')
+        self.git(repo, 'commit', '-qm', 'test: recorded integration projection')
+        self.run_cli(repo, 'int', 'push')
+        parent_tip, parent = self.remote_state(origin)
+        ref = f'refs/heads/{branch}'
+        recorded = parent['managed_refs'][ref]
+        tree = self.git(repo, 'rev-parse', f'{recorded}^{{tree}}').stdout.strip()
+        recorded_parent = self.git(repo, 'rev-parse', f'{recorded}^').stdout.strip()
+        observed = self.git(
+            repo,
+            'commit-tree',
+            tree,
+            '-p',
+            recorded_parent,
+            '-m',
+            'test: equivalent remote integration projection',
+        ).stdout.strip()
+        fixture_ref = 'refs/heads/fixture/tree-equivalent-object'
+        self.git(repo, 'push', '-q', 'origin', f'{observed}:{fixture_ref}')
+        subprocess.run(
+            [
+                'git', '--git-dir', str(origin), 'update-ref',
+                ref, observed, recorded,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            [
+                'git', '--git-dir', str(origin), 'update-ref',
+                '-d', fixture_ref, observed,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        plan, _ = module.coordination_repair_plan(
+            repo,
+            manifest,
+            ref,
+            module.COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
+        )
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': manifest,
+            'ref': ref,
+            'parent_tip': parent_tip,
+            'parent': parent,
+            'recorded': recorded,
+            'observed': observed,
+            'tree': tree,
+            'plan': plan,
+        }
+
+    def prepare_additive_compose(self, name='additive-compose'):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo, integration_membership='required')
+        integration_commits = []
+        for index in (1, 2):
+            path = repo / f'unmapped-{index}.txt'
+            path.write_text(f'unmapped {index}\n')
+            self.git(repo, 'add', path.name)
+            self.git(repo, 'commit', '-qm', f'test: unmapped integration {index}')
+            integration_commits.append(self.git(repo, 'rev-parse', 'HEAD').stdout.strip())
+        self.run_cli(repo, 'int', 'push')
+        base_tip, base_state = self.remote_state(origin)
+        base_manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+
+        orphan_tip = self.commit_on_branch(repo, 'pr/orphan', 'orphan.txt')
+        self.run_cli(repo, 'stack', 'create', 'orphan', orphan_tip, '--branch', 'pr/orphan')
+        self.run_cli(repo, 'stack', 'push', 'orphan')
+        remote_tip, remote_state = self.remote_state(origin)
+
+        (repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(base_manifest, indent=2) + '\n'
+        )
+        new_tip = self.commit_on_branch(repo, 'pr/new-stack', 'new-stack.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'new-stack', new_tip, '--branch', 'pr/new-stack'
+        )
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        plan, proposed, _ = module.coordination_compose_stack_plan(
+            repo,
+            manifest,
+            'new-stack',
+            base_tip,
+            base_state['manifest_digest'],
+        )
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': manifest,
+            'manifest_path': manifest_path,
+            'base_tip': base_tip,
+            'base_state': base_state,
+            'remote_tip': remote_tip,
+            'remote_state': remote_state,
+            'orphan_tip': orphan_tip,
+            'new_tip': new_tip,
+            'integration_tip': integration_commits[-1],
+            'integration_commits': integration_commits,
+            'plan': plan,
+            'proposed': proposed,
+        }
+
     def test_new_git_tracked_init_defaults_to_v2_and_local_only_is_disabled(self):
         origin = self.create_remote()
         tracked = self.clone(origin, 'tracked')
@@ -1491,6 +1611,450 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertTrue(
             any(item.get('stack') == 'after-repair' for item in closed_state['tombstones'])
         )
+
+    def test_tree_equivalent_repair_pushes_only_append_only_state(self):
+        fixture = self.prepare_tree_equivalent_repair()
+        module = fixture['module']
+        plan = fixture['plan']
+        self.assertEqual(plan['status'], 'repair-required')
+        self.assertEqual(plan['proof'], module.COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF)
+        self.assertEqual(plan['expectedRecordedTree'], fixture['tree'])
+        self.assertEqual(plan['expectedRemoteTree'], fixture['tree'])
+
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(repo_root, command, remote, refs, check=True):
+            pushes.append({'command': command, 'remote': remote, 'refs': refs})
+            return original_push(repo_root, command, remote, refs, check=check)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_repair_plan(
+                fixture['repo'], fixture['manifest'], plan
+            )
+
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(result['backend'], module.COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND)
+        self.assertEqual(result['proof'], module.COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF)
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(pushes[0]['refs'], [plan['stateRef']])
+        self.assertNotIn('--atomic', pushes[0]['command'])
+        self.assertEqual(
+            pushes[0]['command'][-1],
+            f"{result['state_tip']}:{plan['stateRef']}",
+        )
+        self.assertFalse(any(f":{fixture['ref']}" in item for item in pushes[0]['command']))
+
+        child_tip, child = self.remote_state(fixture['origin'])
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], fixture['parent_tip'])
+        self.assertEqual(child['managed_refs'][fixture['ref']], fixture['observed'])
+        self.assertEqual(child['changed_refs'], {})
+        self.assertEqual(child['repair_evidence']['planDigest'], plan['planDigest'])
+        self.assertEqual(child['repair_evidence']['tree'], fixture['tree'])
+        for key in ('manifest', 'manifest_digest', 'tombstones'):
+            self.assertEqual(child[key], fixture['parent'][key])
+        for managed_ref, tip in fixture['parent']['managed_refs'].items():
+            if managed_ref != fixture['ref']:
+                self.assertEqual(child['managed_refs'][managed_ref], tip)
+        self.assertEqual(
+            module.remote_ref_tips(fixture['repo'], 'origin', [fixture['ref']])[fixture['ref']],
+            fixture['observed'],
+        )
+
+    def test_tree_equivalent_repair_rejects_tree_difference_before_plan(self):
+        origin = self.create_remote('tree-different-repair')
+        repo = self.clone(origin, 'tree-different-repair')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        branch = 'integration/shared'
+        ref = f'refs/heads/{branch}'
+        self.git(repo, 'switch', '-q', branch)
+        (repo / 'different.txt').write_text('different tree\n')
+        self.git(repo, 'add', 'different.txt')
+        self.git(repo, 'commit', '-qm', 'test: different integration tree')
+        self.git(repo, 'push', '--no-verify', 'origin', branch)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        with self.assertRaisesRegex(module.SyncwheelError, 'managed ref trees differ'):
+            module.coordination_repair_plan(
+                repo,
+                manifest,
+                ref,
+                module.COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
+            )
+        github_plan, _ = module.coordination_repair_plan(repo, manifest, ref, 'github-lock')
+        self.assertEqual(github_plan['status'], 'repair-required')
+        with self.assertRaisesRegex(module.SyncwheelError, 'GitHub branch locks can be bypassed'):
+            module.apply_coordination_repair_plan(repo, manifest, github_plan)
+
+    def test_tree_equivalent_repair_stops_on_pre_and_post_cas_drift(self):
+        before = self.prepare_tree_equivalent_repair('tree-equivalent-pre-drift')
+        module = before['module']
+        later = self.git(
+            before['repo'],
+            'commit-tree',
+            before['tree'],
+            '-p',
+            before['observed'],
+            '-m',
+            'test: drift before state CAS',
+        ).stdout.strip()
+        self.git(before['repo'], 'push', '--no-verify', 'origin', f"{later}:{before['ref']}")
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_repair_plan(
+                before['repo'], before['manifest'], before['plan']
+            )
+        self.assertEqual(self.remote_state(before['origin'])[0], before['parent_tip'])
+
+        after = self.prepare_tree_equivalent_repair('tree-equivalent-post-drift')
+        module = after['module']
+        final_tip = self.git(
+            after['repo'],
+            'commit-tree',
+            after['tree'],
+            '-p',
+            after['observed'],
+            '-m',
+            'test: drift after state CAS',
+        ).stdout.strip()
+
+        class DriftAfterCasBackend(module.TreeEquivalentStateCasCoordinationRepairBackend):
+            def apply(self, **kwargs):
+                result = super().apply(**kwargs)
+                module.git(
+                    kwargs['repo_root'],
+                    'push',
+                    '--no-verify',
+                    kwargs['remote'],
+                    f"{final_tip}:{after['ref']}",
+                )
+                return result
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'guarded refs drifted'):
+            module.apply_coordination_repair_plan(
+                after['repo'],
+                after['manifest'],
+                after['plan'],
+                backend=DriftAfterCasBackend(),
+            )
+        accepted_tip, accepted = self.remote_state(after['origin'])
+        self.assertNotEqual(accepted_tip, after['parent_tip'])
+        self.assertEqual(accepted['parent_state'], after['parent_tip'])
+        self.assertEqual(accepted['managed_refs'][after['ref']], after['observed'])
+        self.assertEqual(
+            module.remote_ref_tips(after['repo'], 'origin', [after['ref']])[after['ref']],
+            final_tip,
+        )
+
+    def test_tree_equivalent_repair_stops_on_state_lease_loss(self):
+        fixture = self.prepare_tree_equivalent_repair('tree-equivalent-state-race')
+        module = fixture['module']
+        competing_state = json.loads(json.dumps(fixture['parent']))
+        competing_state['publication_id'] = 'fixture-state-race'
+        competing_state['parent_state'] = fixture['parent_tip']
+        competing_state['created_at'] = module.iso_utc_now()
+        competing_state['changed_refs'] = {}
+        competing_state['publication_scope'] = 'fixture-state-race'
+        competing_tip = module.create_coordination_state_commit(
+            fixture['repo'], competing_state, fixture['parent_tip']
+        )
+
+        class LoseStateLeaseBackend(module.TreeEquivalentStateCasCoordinationRepairBackend):
+            def apply(self, **kwargs):
+                module.git(
+                    kwargs['repo_root'],
+                    'push',
+                    '--no-verify',
+                    f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
+                    kwargs['remote'],
+                    f"{competing_tip}:{kwargs['state_ref']}",
+                )
+                return super().apply(**kwargs)
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'state lease was lost'):
+            module.apply_coordination_repair_plan(
+                fixture['repo'],
+                fixture['manifest'],
+                fixture['plan'],
+                backend=LoseStateLeaseBackend(),
+            )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], competing_tip)
+
+    def test_tree_equivalent_repair_stops_on_post_cas_ownership_race(self):
+        fixture = self.prepare_tree_equivalent_repair('tree-equivalent-owner-race')
+        module = fixture['module']
+        competing_state = json.loads(json.dumps(fixture['parent']))
+        competing_state['coordination_id'] = 'second-domain'
+        competing_state['publication_id'] = 'fixture-owner-race'
+        competing_state['parent_state'] = None
+        competing_state['created_at'] = module.iso_utc_now()
+        competing_state['changed_refs'] = {}
+        competing_state['publication_scope'] = 'fixture-owner-race'
+        competing_tip = module.create_coordination_state_commit(
+            fixture['repo'], competing_state
+        )
+        competing_ref = 'refs/heads/syncwheel/state/second-domain'
+
+        class OwnershipRaceBackend(module.TreeEquivalentStateCasCoordinationRepairBackend):
+            def apply(self, **kwargs):
+                result = super().apply(**kwargs)
+                module.git(
+                    kwargs['repo_root'],
+                    'push',
+                    '--no-verify',
+                    kwargs['remote'],
+                    f'{competing_tip}:{competing_ref}',
+                )
+                return result
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'already owned by another coordination domain'
+        ):
+            module.apply_coordination_repair_plan(
+                fixture['repo'],
+                fixture['manifest'],
+                fixture['plan'],
+                backend=OwnershipRaceBackend(),
+            )
+
+        accepted_tip, accepted = self.remote_state(fixture['origin'])
+        self.assertNotEqual(accepted_tip, fixture['parent_tip'])
+        self.assertEqual(accepted['parent_state'], fixture['parent_tip'])
+        self.assertEqual(accepted['managed_refs'][fixture['ref']], fixture['observed'])
+        self.assertEqual(
+            self.remote_state(fixture['origin'], 'second-domain')[0], competing_tip
+        )
+
+    def test_compose_publishes_new_stack_and_preserves_remote_stack_and_unmapped_integration(self):
+        fixture = self.prepare_additive_compose()
+        module = fixture['module']
+        plan = fixture['plan']
+        self.assertEqual(plan['status'], 'publish-required')
+        self.assertEqual(plan['remoteAddedStacks'], ['orphan'])
+        self.assertEqual(plan['localAddedStacks'], ['new-stack'])
+        self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
+        self.assertEqual(plan['unmappedIntegrationCommits'], fixture['integration_commits'])
+        self.assertFalse(plan['integrationMutation'])
+        self.assertEqual(
+            [stack['id'] for stack in plan['composedSnapshot']['stacks']],
+            ['orphan', 'new-stack'],
+        )
+
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(repo_root, command, remote, refs, check=True):
+            pushes.append({'command': command, 'refs': refs})
+            return original_push(repo_root, command, remote, refs, check=check)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_compose_stack_plan(
+                fixture['repo'],
+                fixture['manifest'],
+                fixture['manifest_path'],
+                plan,
+            )
+
+        self.assertEqual(result['status'], 'composed')
+        self.assertFalse(result['integration_mutated'])
+        self.assertEqual(result['unmapped_integration_commits'], fixture['integration_commits'])
+        self.assertEqual(len(pushes), 1)
+        command = pushes[0]['command']
+        self.assertIn('--atomic', command)
+        self.assertEqual(
+            set(pushes[0]['refs']),
+            {'refs/heads/pr/new-stack', plan['stateRef']},
+        )
+        self.assertTrue(any(item.endswith(':refs/heads/pr/new-stack') for item in command))
+        self.assertFalse(any(item.endswith(':refs/heads/pr/orphan') for item in command))
+        self.assertFalse(any(item.endswith(f":{plan['integrationRef']}") for item in command))
+
+        accepted_tip, accepted = self.remote_state(fixture['origin'])
+        self.assertEqual(accepted_tip, result['remote_state_tip'])
+        self.assertEqual(accepted['parent_state'], fixture['remote_tip'])
+        self.assertEqual(accepted['projection_status'], 'partial')
+        self.assertEqual(
+            accepted['changed_refs'], {'refs/heads/pr/new-stack': fixture['new_tip']}
+        )
+        self.assertEqual(
+            accepted['managed_refs']['refs/heads/pr/orphan'], fixture['orphan_tip']
+        )
+        self.assertEqual(
+            accepted['managed_refs'][plan['integrationRef']], fixture['integration_tip']
+        )
+        self.assertEqual(
+            [stack['id'] for stack in accepted['manifest']['stacks']],
+            ['orphan', 'new-stack'],
+        )
+        persisted, _ = module.load_manifest(fixture['repo'], fixture['manifest_path'])
+        self.assertEqual([stack['id'] for stack in persisted['stacks']], ['orphan', 'new-stack'])
+
+    def test_compose_is_digest_bound_and_rejects_non_additive_or_drifted_inputs(self):
+        fixture = self.prepare_additive_compose('compose-drift')
+        module = fixture['module']
+        with self.assertRaisesRegex(module.SyncwheelError, 'snapshot digest does not match'):
+            module.coordination_compose_stack_plan(
+                fixture['repo'],
+                fixture['manifest'],
+                'new-stack',
+                fixture['base_tip'],
+                '0' * 64,
+            )
+
+        tampered = json.loads(json.dumps(fixture['plan']))
+        tampered['expectedIntegrationTip'] = '0' * 40
+        with self.assertRaisesRegex(module.SyncwheelError, 'plan digest does not match'):
+            module.apply_coordination_compose_stack_plan(
+                fixture['repo'], fixture['manifest'], fixture['manifest_path'], tampered
+            )
+
+        changed_manifest = json.loads(json.dumps(fixture['manifest']))
+        changed_manifest['stacks'][0]['commits'] = [fixture['base_tip']]
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_compose_stack_plan(
+                fixture['repo'], changed_manifest, fixture['manifest_path'], fixture['plan']
+            )
+
+        local_snapshot = module.coordination_manifest_snapshot(
+            fixture['manifest'], fixture['repo']
+        )
+        remote_snapshot = json.loads(json.dumps(fixture['remote_state']['manifest']))
+        remote_snapshot['stacks'][0].update({
+            'id': 'new-stack',
+            'branch': 'pr/new-stack',
+            'commits': [fixture['orphan_tip']],
+        })
+        remote_snapshot['integration']['stacks'] = ['new-stack']
+        with self.assertRaisesRegex(module.SyncwheelError, 'conflicting additions'):
+            module.compose_additive_coordination_snapshots(
+                fixture['base_state']['manifest'],
+                local_snapshot,
+                remote_snapshot,
+                'new-stack',
+            )
+
+    def test_compose_replans_to_local_adoption_after_remote_success(self):
+        fixture = self.prepare_additive_compose('compose-adoption-retry')
+        module = fixture['module']
+        with mock.patch.object(
+            module,
+            'save_manifest_with_ledger',
+            side_effect=module.SyncwheelError('fixture manifest save failed'),
+        ):
+            with self.assertRaisesRegex(module.SyncwheelError, 'local adoption pending'):
+                module.apply_coordination_compose_stack_plan(
+                    fixture['repo'],
+                    fixture['manifest'],
+                    fixture['manifest_path'],
+                    fixture['plan'],
+                )
+
+        accepted_tip, accepted = self.remote_state(fixture['origin'])
+        self.assertEqual(accepted['parent_state'], fixture['remote_tip'])
+        self.assertEqual(
+            accepted['managed_refs']['refs/heads/pr/new-stack'], fixture['new_tip']
+        )
+        unchanged_local, _ = module.load_manifest(fixture['repo'], fixture['manifest_path'])
+        self.assertEqual([stack['id'] for stack in unchanged_local['stacks']], ['new-stack'])
+
+        adoption_plan, _, _ = module.coordination_compose_stack_plan(
+            fixture['repo'],
+            unchanged_local,
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+        self.assertEqual(adoption_plan['status'], 'adopt-only')
+        with mock.patch.object(module, 'run_authorized_push') as push:
+            result = module.apply_coordination_compose_stack_plan(
+                fixture['repo'],
+                unchanged_local,
+                fixture['manifest_path'],
+                adoption_plan,
+            )
+        push.assert_not_called()
+        self.assertEqual(result['status'], 'adopted')
+        self.assertEqual(result['remote_state_tip'], accepted_tip)
+        persisted, _ = module.load_manifest(fixture['repo'], fixture['manifest_path'])
+        self.assertEqual([stack['id'] for stack in persisted['stacks']], ['orphan', 'new-stack'])
+
+    def test_compose_stops_when_remote_state_lease_moves_after_plan(self):
+        fixture = self.prepare_additive_compose('compose-state-race')
+        module = fixture['module']
+        competing = json.loads(json.dumps(fixture['remote_state']))
+        competing['publication_id'] = 'fixture-compose-state-race'
+        competing['parent_state'] = fixture['remote_tip']
+        competing['created_at'] = module.iso_utc_now()
+        competing['changed_refs'] = {}
+        competing['publication_scope'] = 'fixture-compose-state-race'
+        competing_tip = module.create_coordination_state_commit(
+            fixture['repo'], competing, fixture['remote_tip']
+        )
+        state_ref = fixture['plan']['stateRef']
+        self.git(
+            fixture['repo'],
+            'push',
+            '--no-verify',
+            f'--force-with-lease={state_ref}:{fixture["remote_tip"]}',
+            'origin',
+            f'{competing_tip}:{state_ref}',
+        )
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_compose_stack_plan(
+                fixture['repo'],
+                fixture['manifest'],
+                fixture['manifest_path'],
+                fixture['plan'],
+            )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], competing_tip)
+        self.assertEqual(
+            self.git(
+                fixture['repo'], 'ls-remote', 'origin', 'refs/heads/pr/new-stack'
+            ).stdout.strip(),
+            '',
+        )
+
+    def test_compose_publisher_is_bound_to_reviewed_state_tip(self):
+        fixture = self.prepare_additive_compose('compose-publisher-race')
+        module = fixture['module']
+        original_publish = module.coordinated_publish
+
+        def publish_competitor_then_continue(*args, **kwargs):
+            competitor_kwargs = dict(kwargs)
+            competitor_kwargs.pop('expected_coordination_state_tip', None)
+            competitor_kwargs.pop('expected_observed_refs', None)
+            original_publish(*args, **competitor_kwargs)
+            return original_publish(*args, **kwargs)
+
+        with mock.patch.object(
+            module,
+            'coordinated_publish',
+            side_effect=publish_competitor_then_continue,
+        ):
+            with self.assertRaisesRegex(module.SyncwheelError, 'remote state changed'):
+                module.apply_coordination_compose_stack_plan(
+                    fixture['repo'],
+                    fixture['manifest'],
+                    fixture['manifest_path'],
+                    fixture['plan'],
+                )
+
+        accepted_tip, accepted = self.remote_state(fixture['origin'])
+        self.assertEqual(accepted['parent_state'], fixture['remote_tip'])
+        self.assertEqual(
+            accepted['managed_refs']['refs/heads/pr/new-stack'], fixture['new_tip']
+        )
+        adoption_plan, _, _ = module.coordination_compose_stack_plan(
+            fixture['repo'],
+            fixture['manifest'],
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+        self.assertEqual(adoption_plan['status'], 'adopt-only')
+        self.assertEqual(adoption_plan['expectedRemoteStateTip'], accepted_tip)
 
     def test_repair_rejects_plan_drift_wrong_lease_and_unsupported_github(self):
         origin = self.create_remote()

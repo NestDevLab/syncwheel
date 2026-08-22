@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.34.8 - 2026-08-22
+
+- Add a tree-equivalent coordination repair backend that proves identical
+  managed-ref trees, binds every observed ref into the reviewed plan, and
+  appends only coordination evidence under an exact state-ref lease.
+- Stop fail-closed on different content, ownership uncertainty, state lease
+  loss, or managed-ref drift before or immediately after the state CAS; the
+  existing `github-lock` backend remains unsupported and non-mutating.
+- Add digest-bound `coordination compose` for one additive local stack proposal
+  derived from a known append-only base state. It preserves independently added
+  remote stacks and unmapped integration commits while atomically publishing
+  only the new stack ref and an append-only partial state child.
+
 ## 0.34.7 - 2026-08-22
 
 - Treat the declared journal branch as the compliant primary checkout, so the

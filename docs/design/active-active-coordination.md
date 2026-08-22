@@ -224,8 +224,49 @@ apply boundary therefore requires an externally verified write freeze or a
 server-side transaction that continuously guards the state ref and every
 managed ref. GitHub branch locks do not meet that contract: administrators can
 bypass or change them during the operation. The `github-lock` backend therefore
-stops as unsupported before any state update. A future backend must hold its
-serialization primitive through CAS and post-verification. After apply,
-Syncwheel observes the new state tip, every guarded ref, the child Git parent,
-the child's declared state parent, and the repaired value before it reports
-success. An ambiguous observation is an unknown outcome, never a retry.
+stops as unsupported before any state update.
+
+The `tree-equivalent-state-cas` backend covers one mechanically provable subset
+without claiming a lease on an unchanged managed ref. Planning requires the
+recorded ref to remain actively declared and owned, fetches the exact observed
+commit, and binds the plan digest to both commit tips, their identical tree,
+the state tip, the manifest digest, and every managed-ref observation. Apply
+repeats those checks and creates an evidence-only state child whose
+`changed_refs` is empty and whose `repair_evidence` records the plan digest,
+tips, proof type, and shared tree. It then pushes only that child to the state
+ref with an exact lease; it never sends an integration or application refspec.
+
+After CAS, Syncwheel independently observes the new state tip and every guarded
+ref, then validates the child Git parent, declared state parent, repaired value,
+and embedded proof. Any post-CAS drift stops immediately. The accepted child is
+not rolled back or rewritten: it remains append-only evidence that the guarded
+snapshot was true at CAS time, while the reported failure forces a fresh plan
+for later state. Different trees, missing objects, ownership uncertainty,
+pre-CAS drift, lease loss, and ambiguous push outcomes all stop fail-closed.
+Repository object IDs are currently restricted to 40-hex SHA-1; SHA-256 state
+or managed-ref tips are rejected rather than truncated or inferred.
+
+## Composing additive stack proposals
+
+`coordination compose` is separate from repair. It handles a known common state
+whose local and remote descendants independently add stack records. The plan
+binds the exact known base state and snapshot digest, current remote state and
+snapshot, local proposal, composed snapshot, source and integration tips, all
+managed-ref observations, and unmapped integration commits.
+
+Version 1 is deliberately additive-only: the local side must add exactly the
+requested stack, while the remote side may add stacks. Neither side may remove,
+edit, rename, or reorder existing stacks; change defaults, channels,
+coordination, integration base, branch, or strategy; or alter membership except
+by appending exactly its new stack IDs. Same-ID or same-branch additions must be
+byte-identical or composition stops.
+
+Apply rederives the digest-bound plan and uses the ordinary coordinated atomic
+publication for exactly the new source ref plus the next state child. All
+remote-added stacks, prior managed refs, and tombstones carry forward. The
+integration ref is an exact guarded observation and receives no refspec, so its
+bytes, tip, and unmapped commits are preserved; the child remains `partial`.
+After CAS, Syncwheel independently verifies the child, ownership, and every
+managed ref before adopting the composed manifest locally. A failed local save
+is not retried as publication: the next exact plan is adopt-only when remote
+state already proves the intended composition.
