@@ -1683,10 +1683,17 @@ def primary_checkout_state(repo_root, manifest):
     shared_expected = None
     if shared_manifest and shared_manifest.exists():
         try:
-            shared_expected = json.loads(shared_manifest.read_text()).get('integration', {}).get('branch')
+            shared_data = json.loads(shared_manifest.read_text())
+            if shared_data.get('repository_mode') == 'journal':
+                shared_expected = shared_data.get('journal', {}).get('branch')
+            else:
+                shared_expected = shared_data.get('integration', {}).get('branch')
         except (OSError, json.JSONDecodeError):
             pass
-    active_expected = manifest['integration']['branch'] if manifest else None
+    if manifest and manifest.get('repository_mode') == 'journal':
+        active_expected = manifest['journal']['branch']
+    else:
+        active_expected = manifest['integration']['branch'] if manifest else None
     expected = shared_expected or active_expected
     allowed = list(dict.fromkeys(branch for branch in (expected, active_expected) if branch))
     actual = primary.get('branch', 'DETACHED')

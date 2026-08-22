@@ -338,6 +338,16 @@ class JournalModeTest(unittest.TestCase):
         with self.assertRaisesRegex(module.SyncwheelError, 'journal.include'):
             module.load_manifest(self.repo)
 
+    def test_primary_checkout_accepts_the_journal_branch(self):
+        module = self.load_module()
+        manifest, _ = module.load_manifest(self.repo)
+
+        primary = module.primary_checkout_state(self.repo, manifest)
+
+        self.assertEqual(primary['branch'], 'journal')
+        self.assertEqual(primary['expected_branch'], 'journal')
+        self.assertTrue(primary['compliant'])
+
 
 if __name__ == '__main__':
     unittest.main()

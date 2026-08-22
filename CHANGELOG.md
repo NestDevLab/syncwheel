@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.34.7 - 2026-08-22
+
+- Treat the declared journal branch as the compliant primary checkout, so the
+  managed checkout and commit guards do not apply delivery integration rules to
+  a journal repository.
+
 ## 0.34.6 - 2026-08-22
 
 - Bootstrap a missing remote journal branch with an exact absence lease, while
