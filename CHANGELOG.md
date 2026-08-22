@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.34.6 - 2026-08-22
+
+- Bootstrap a missing remote journal branch with an exact absence lease, while
+  retaining the existing fail-closed exact lease for an already-published ref.
+
 ## 0.34.5 - 2026-08-21
 
 - Allow `resume` and `reconcile` to select their requested replay mode when
