@@ -6547,6 +6547,16 @@ def requested_replay_mode(args):
     return mode
 
 
+def require_nonempty_desk_stack_rebuild(stack, mode):
+    """Reject desk rebuilds before an empty stack can materialize a branch."""
+    if mode != 'desk' or stack['commits']:
+        return
+    raise SyncwheelError(
+        f"stack {stack['id']!r} has no declared commits; cannot rebuild it with replay mode desk. "
+        'Author on the integration branch, then capture the integration commit(s) into the stack.'
+    )
+
+
 def require_journal_manifest(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(
@@ -11944,6 +11954,7 @@ def rebuild_stack_from_manifest(
     worktree,
 ):
     """Rebuild one stack through the shared replay executor and ledger path."""
+    require_nonempty_desk_stack_rebuild(stack, mode)
     if not dry_run and mode == 'in-place':
         ensure_in_place_target(repo_root, stack['branch'])
     if not dry_run and mode in ('ephemeral', 'plumbing'):
@@ -12308,6 +12319,19 @@ def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_
                 if key not in checked:
                     ensure_non_in_place_target_clean(repo_root, branch, path)
                     checked.add(key)
+
+
+def preflight_empty_desk_stack_rebuilds(repo_root, manifest, actions, args, worktree_root):
+    """Reject empty desk rebuilds before reconcile touches managed metadata."""
+    for action in actions:
+        if action['type'] != 'rebuild_stack':
+            continue
+        stack = require_stack(manifest, action['stack'])
+        worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
+        mode, _worktree = select_replay_mode(
+            repo_root, manifest, args, stack['branch'], (worktree, False)
+        )
+        require_nonempty_desk_stack_rebuild(stack, mode)
 
 
 def reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args):
@@ -12727,6 +12751,7 @@ def command_reconcile(args):
     if manual_actions:
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
 
+    preflight_empty_desk_stack_rebuilds(repo_root, manifest, actions, args, worktree_root)
     preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root)
     require_manifest_transaction_current(manifest_path)
     if is_external_manifest_path(repo_root, manifest_path):
@@ -12757,6 +12782,7 @@ def command_reconcile(args):
             mode, worktree = select_replay_mode(
                 repo_root, manifest, args, stack['branch'], (worktree, False)
             )
+            require_nonempty_desk_stack_rebuild(stack, mode)
             result = execute_replay(
                 repo_root,
                 replay_plan(repo_root, manifest, replay_target(stack=stack, worktree=worktree), mode),

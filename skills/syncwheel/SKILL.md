@@ -2,6 +2,8 @@
 name: syncwheel
 description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, integration branches, and pinned deployment-channel branches, all from a single checkout. Use whenever you are about to create a PR branch, compose a deployment channel, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
 allowed-tools: [Bash]
+metadata:
+  version: "1.0"
 ---
 
 # Syncwheel
@@ -64,9 +66,10 @@ that is removed before the command returns. A clean, bounded integration operati
 primary checkout temporarily, but must restore and verify the integration branch before completion.
 Treat any other primary-checkout mismatch as a validation error and blocked handoff.
 
-Reach for a dedicated worktree only when you actually want one: to resolve a conflict, or to build,
-run, or test a branch in isolation. That is `--replay-mode desk`, and it is a deliberate choice rather
-than a side effect of rebuilding.
+Desk is an escalation/validation surface, not routine authoring: begin routine implementation,
+dependency installation, builds, and tests on integration. Use `--replay-mode desk` only to resolve a
+conflict or validate a non-empty materialized stack when integration cannot safely run it; it is never
+a side effect of rebuilding.
 
 ## Locate the CLI
 
@@ -197,7 +200,7 @@ Rebuilds pick their execution mode automatically; you only override it deliberat
 | `plumbing` | replays through Git plumbing, no working tree at all | fastest; chosen automatically on Git ≥ 2.38 |
 | `ephemeral` | temporary worktree, removed before the command returns | automatic fallback on older Git |
 | `in-place` | replays in the checkout you are already standing in | automatic when the target is the current branch |
-| `desk` | persistent worktree, left behind on purpose | resolving a conflict, or building/testing a branch in isolation |
+| `desk` | persistent worktree, left behind on purpose | resolving a conflict, or validating a non-empty materialized stack when integration cannot safely run it |
 
 ```bash
 syncwheel stack rebuild <id> --replay-mode desk   # keep the worktree, e.g. to resolve a conflict

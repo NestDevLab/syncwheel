@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.34.9 - 2026-08-28
+
+- Reject persistent desk replay for an empty stack before refs, worktrees,
+  ledger events, or manifest state can mutate; keep automatic and plumbing
+  replay available for empty stacks.
+- Define desks as conflict-resolution or isolated validation surfaces for
+  non-empty materialized stacks, and direct routine authoring and validation to
+  the integration checkout.
+- Initialize the source Syncwheel skill metadata at version 1.0.
+
 ## 0.34.8 - 2026-08-22
 
 - Add a tree-equivalent coordination repair backend that proves identical

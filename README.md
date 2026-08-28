@@ -188,8 +188,9 @@ The safest default is:
 - keep the primary working checkout on the shared integration branch
 - rebuild and publish every PR branch from there, without checking it out
 - optionally keep a separate administrative checkout for manifest-only work
-- create a worktree for a PR branch when you actually want a desk: to resolve a
-  conflict, or to build, run, or test that branch in isolation
+- begin routine implementation, dependency installation, builds, and tests on integration
+- create a desk only to resolve a conflict or validate a non-empty materialized stack
+  when integration cannot safely run it
 
 `stack rebuild` and `int rebuild` leave no worktree behind by default. Their
 `auto` replay mode uses Git plumbing where Git supports it (2.38 or newer) and a

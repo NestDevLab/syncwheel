@@ -92,9 +92,10 @@ Given one of those prompts, the agent should:
 ## Safe execution rules
 
 - Do not run branch-rebuilding commands against a dirty worktree.
-- Let automatic replay choose plumbing or a self-removing temporary worktree.
-  Use `--replay-mode desk` only when a persistent checkout is needed for
-  conflict resolution or isolated build/test work.
+- Start routine implementation, dependency installation, builds, and tests on integration. Let
+  automatic replay choose plumbing or a self-removing temporary worktree. Use `--replay-mode desk`
+  only for conflict resolution or to validate a non-empty materialized stack when integration cannot
+  safely run it.
 - Treat `stack rebuild` and `int rebuild` as branch mutation unless `--dry-run`
   is used.
 - Treat each rebuild dry-run as an executable POSIX shell transcript. Current
