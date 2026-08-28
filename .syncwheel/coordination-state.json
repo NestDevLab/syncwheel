@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/empty-desk-guard": "e8a9649cdf74be6af5ada349a7b2582f194fe5b4"
+    "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-28T23:06:09+00:00",
+  "created_at": "2026-08-28T23:07:56+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -12,7 +12,7 @@
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
-    "refs/heads/pr/empty-desk-guard": "e8a9649cdf74be6af5ada349a7b2582f194fe5b4",
+    "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
@@ -112,7 +112,8 @@
         "branch": "pr/empty-desk-guard",
         "commits": [
           "793d12dd66862aec1b4282941041fd8bdb4ca540",
-          "e8a9649cdf74be6af5ada349a7b2582f194fe5b4"
+          "e8a9649cdf74be6af5ada349a7b2582f194fe5b4",
+          "36526810886da680f9a4bff2213ba047f4b9a209"
         ],
         "id": "empty-desk-guard",
         "integration_branch": "main-integration",
@@ -121,10 +122,10 @@
     ],
     "version": 2
   },
-  "manifest_digest": "fd4e054b1bfb5962e8f47ae8d211c29ebb9b5d97f16693ca1aa173910356977c",
-  "parent_state": "2f796fedbd6076614e43675502b6862d6bc03e35",
+  "manifest_digest": "7b4f937932d198ea0c6527a1e73c237d4ae375de8b4f7c60695860b46e32851a",
+  "parent_state": "c978dbba55909c2e982f771e296521053257f33b",
   "projection_status": "partial",
-  "publication_id": "d715da1a-640f-4285-9c6d-a2930123639c",
+  "publication_id": "ed1e0f95-3fe5-4372-9f19-555c9b5796e7",
   "publication_scope": "stack:empty-desk-guard",
   "schema_version": 2,
   "syncwheel_version": "0.34.8",
