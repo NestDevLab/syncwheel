@@ -71,6 +71,12 @@ class ReplayModesTest(unittest.TestCase):
             if line.startswith('worktree ')
         ]
 
+    def manifest_with_empty_stack(self, manifest):
+        return {
+            **manifest,
+            'stacks': [{**stack, 'commits': []} for stack in manifest['stacks']],
+        }
+
     def assert_replay_is_stable(self, builder):
         source_repo, manifest, stack_id = builder(self.tmp)
         stack = next(item for item in manifest['stacks'] if item['id'] == stack_id)
@@ -263,6 +269,113 @@ class ReplayModesTest(unittest.TestCase):
         self.assertIn('syncwheel stack rebuild replay --replay-mode desk', failure.stderr)
         self.assertEqual(git(clone, 'status', '--porcelain=v1', '--branch').stdout, before_status)
         self.assertEqual(self.worktree_entries(clone), before_worktrees)
+
+    def test_empty_stack_desk_rebuild_refuses_without_mutation(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        empty_manifest = self.manifest_with_empty_stack(manifest)
+        clone = clone_repo(source_repo, self.tmp / 'empty-desk', empty_manifest)
+        desk = self.tmp / 'empty-desk-worktree'
+        before_refs = git(clone, 'show-ref', '--head').stdout
+        before_status = git(clone, 'status', '--porcelain=v1', '--branch').stdout
+        before_worktrees = self.worktree_entries(clone)
+        before_events = load_syncwheel_module().load_ledger_events(clone)
+
+        failure = run_cli(
+            clone,
+            'stack',
+            'rebuild',
+            stack_id,
+            '--replay-mode',
+            'desk',
+            '--worktree',
+            str(desk),
+            expected=2,
+        )
+
+        self.assertIn("stack 'replay' has no declared commits", failure.stderr)
+        self.assertIn(
+            'Author on the integration branch, then capture the integration commit(s) into the stack.',
+            failure.stderr,
+        )
+        self.assertEqual(git(clone, 'show-ref', '--head').stdout, before_refs)
+        self.assertEqual(git(clone, 'status', '--porcelain=v1', '--branch').stdout, before_status)
+        self.assertEqual(self.worktree_entries(clone), before_worktrees)
+        self.assertEqual(load_syncwheel_module().load_ledger_events(clone), before_events)
+        self.assertFalse(desk.exists())
+        self.assertEqual(
+            git(clone, 'show-ref', '--verify', '--quiet', 'refs/heads/pr/replay', expected=1).returncode,
+            1,
+        )
+
+    def test_empty_stack_auto_and_plumbing_rebuilds_remain_allowed(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        empty_manifest = self.manifest_with_empty_stack(manifest)
+        base = empty_manifest['stacks'][0]['base']
+
+        for mode in ('auto', 'plumbing'):
+            with self.subTest(mode=mode):
+                clone = clone_repo(source_repo, self.tmp / f'empty-{mode}', empty_manifest)
+                before_worktrees = self.worktree_entries(clone)
+                command = ['stack', 'rebuild', stack_id]
+                if mode != 'auto':
+                    command.extend(['--replay-mode', mode])
+
+                run_cli(clone, *command)
+
+                self.assertEqual(git(clone, 'rev-parse', 'pr/replay').stdout.strip(), base)
+                self.assertEqual(self.worktree_entries(clone), before_worktrees)
+
+    def test_reconcile_empty_stack_desk_rebuild_refuses_before_mutation(self):
+        source_repo, manifest, _stack_id = build_linear_chain(self.tmp)
+        empty_manifest = self.manifest_with_empty_stack(manifest)
+        clone = clone_repo(source_repo, self.tmp / 'empty-desk-reconcile', empty_manifest)
+        manifest_path = clone / '.syncwheel' / 'manifest.json'
+        before_manifest = manifest_path.read_text()
+        before_refs = git(clone, 'show-ref', '--head').stdout
+        before_status = git(clone, 'status', '--porcelain=v1', '--branch').stdout
+        before_worktrees = self.worktree_entries(clone)
+
+        failure = run_cli(
+            clone,
+            'reconcile',
+            '--no-fetch',
+            '--apply',
+            '--skip-integration',
+            '--replay-mode',
+            'desk',
+            expected=2,
+        )
+
+        self.assertIn("stack 'replay' has no declared commits", failure.stderr)
+        self.assertEqual(manifest_path.read_text(), before_manifest)
+        self.assertEqual(git(clone, 'show-ref', '--head').stdout, before_refs)
+        self.assertEqual(git(clone, 'status', '--porcelain=v1', '--branch').stdout, before_status)
+        self.assertEqual(self.worktree_entries(clone), before_worktrees)
+
+    def test_nonempty_materialized_stack_can_still_use_desk_for_validation(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        clone = clone_repo(source_repo, self.tmp / 'nonempty-desk', manifest)
+        desk = self.tmp / 'nonempty-desk-worktree'
+
+        run_cli(clone, 'stack', 'rebuild', stack_id)
+        run_cli(
+            clone,
+            'stack',
+            'rebuild',
+            stack_id,
+            '--replay-mode',
+            'desk',
+            '--worktree',
+            str(desk),
+        )
+
+        event = [
+            item for item in load_syncwheel_module().load_ledger_events(clone)
+            if item['type'] == 'stack_rebuilt'
+        ][-1]
+        self.assertEqual(event['payload']['replay_mode'], 'desk')
+        self.assertTrue(desk.is_dir())
+        self.assertTrue(commit_log(clone, manifest['stacks'][0]['base'], 'pr/replay'))
 
     def test_plumbing_empty_commit_stops_like_ephemeral_replay(self):
         source_repo, manifest, stack_id, _base, _empty = build_empty_commit(self.tmp)

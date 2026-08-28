@@ -57,8 +57,10 @@ already the current one, and an existing desk when the branch already has one.
 Capability is detected at runtime and an inapplicable mode falls back rather
 than failing.
 
-Ask for a desk when you actually want one — to resolve a conflict, or to build,
-run, or test the branch in isolation:
+Desk is an escalation/validation surface, not routine authoring: begin routine
+implementation, dependency installation, builds, and tests on integration. Ask
+for a desk only to resolve a conflict or validate a non-empty materialized stack
+when integration cannot safely run it:
 
 ```bash
 syncwheel stack rebuild feature-a --replay-mode desk --worktree <path>

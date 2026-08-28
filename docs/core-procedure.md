@@ -198,6 +198,11 @@ A plumbing conflict never selects another mode: Syncwheel reports the paths and
 stops with the literal desk-mode retry command, leaving no checkout to resolve
 by mistake. Plumbing also requires its target branch not to be checked out.
 
+Desk is an escalation/validation surface, not routine authoring: begin routine
+implementation, dependency installation, builds, and tests on integration. A desk rebuild refuses
+an empty stack; resolve a conflict or validate only a non-empty materialized stack when integration
+cannot safely run it.
+
 Apply:
 ```bash
 python3 scripts/syncwheel.py stack rebuild <stack>

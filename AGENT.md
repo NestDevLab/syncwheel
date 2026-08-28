@@ -58,9 +58,10 @@ install/remove is also plan-first and Linux-only.
   refuse draft-stack publication; ephemeral channels may use drafts, and
   active-active channels must use the coordination remote.
 - Never mutate branches from a dirty checkout.
-- Rebuilds do not create a worktree. Ask for one with `--replay-mode desk` only when you need to
-  resolve a conflict or build/test a branch in isolation, and put it under the declared Syncwheel
-  worktree root.
+- Rebuilds do not create a worktree. Start routine implementation, dependency installation, builds,
+  and tests on integration. Use `--replay-mode desk` only to resolve a conflict or validate a
+  non-empty materialized stack when integration cannot safely run it; put it under the declared
+  Syncwheel worktree root.
 - A plumbing conflict stops and prints the `--replay-mode desk` retry command. Take it: `stack absorb`
   and `stack resolve-integration` need a checkout that plumbing never created.
 - For active-active repositories, never bypass `publish`, `stack push`, or

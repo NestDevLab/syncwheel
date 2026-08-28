@@ -118,8 +118,10 @@ working tree is materialized only once it is established that a human is needed.
 ### `desk`
 
 The only mode that leaves something behind, and the only one that should be chosen
-explicitly. Two legitimate reasons: resolving a conflict, and wanting to build,
-run, or test a branch in isolation. Neither is a side effect of a routine rebuild.
+explicitly. It is an escalation/validation surface: resolve a conflict, or validate
+a non-empty materialized stack when integration cannot safely run it. Routine
+implementation, dependency installation, builds, and tests begin on integration.
+Neither is a side effect of a routine rebuild.
 
 ## Selection
 
@@ -141,8 +143,8 @@ Configuration, most specific wins:
 3. manifest default, for a repository whose contributors should share one;
 4. built-in `auto`.
 
-An operator who dislikes worktrees sets `plumbing`. One who wants every rebuild
-inspectable sets `desk`. Neither has to argue with the tool.
+An operator who dislikes worktrees sets `plumbing`. One who needs a persistent
+checkout for a non-empty conflict or isolated validation selects `desk`.
 
 ## Equivalence testing
 

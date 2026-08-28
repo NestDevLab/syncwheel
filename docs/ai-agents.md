@@ -63,9 +63,9 @@ active-active channel must use the coordination remote.
 ## Safety rules
 
 - do not mutate branches from a dirty worktree
-- let automatic replay choose plumbing or a self-removing temporary worktree;
-  request `--replay-mode desk` only for conflict resolution or isolated
-  build/test work
+- begin routine implementation, dependency installation, builds, and tests on integration;
+  request `--replay-mode desk` only for conflict resolution or validation of a
+  non-empty materialized stack when integration cannot safely run it
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback
