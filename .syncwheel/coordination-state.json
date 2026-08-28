@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-28T23:07:56+00:00",
+  "created_at": "2026-08-28T23:48:32+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -55,8 +53,7 @@
       "stacks": [
         "resume-preserve-published-source",
         "reconcile-replay-mode-args",
-        "tree-equivalent-state-cas",
-        "empty-desk-guard"
+        "tree-equivalent-state-cas"
       ],
       "strategy": "cherry-pick"
     },
@@ -102,31 +99,15 @@
         "id": "tree-equivalent-state-cas",
         "integration_branch": "main-integration",
         "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/empty-desk-guard",
-        "commits": [
-          "793d12dd66862aec1b4282941041fd8bdb4ca540",
-          "e8a9649cdf74be6af5ada349a7b2582f194fe5b4",
-          "36526810886da680f9a4bff2213ba047f4b9a209"
-        ],
-        "id": "empty-desk-guard",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
       }
     ],
     "version": 2
   },
-  "manifest_digest": "7b4f937932d198ea0c6527a1e73c237d4ae375de8b4f7c60695860b46e32851a",
-  "parent_state": "c978dbba55909c2e982f771e296521053257f33b",
+  "manifest_digest": "435377bdaa4b233a3ee20798dbe21294cae7261b08744b27d0aebe17eaaa5ef2",
+  "parent_state": "1b6f2a7ce29e6038b2556ecface28070ebab40ed",
   "projection_status": "partial",
-  "publication_id": "ed1e0f95-3fe5-4372-9f19-555c9b5796e7",
-  "publication_scope": "stack:empty-desk-guard",
+  "publication_id": "1fefd706-ef10-4f3e-a2ca-ca0b4434d20b",
+  "publication_scope": "close:empty-desk-guard",
   "schema_version": 2,
   "syncwheel_version": "0.34.8",
   "tombstones": [
@@ -241,6 +222,14 @@
       "ref": "refs/heads/syncwheel/draft/reconcile-replay-mode-args",
       "remote_tip": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
       "stack": "reconcile-replay-mode-args"
+    },
+    {
+      "branch": "pr/empty-desk-guard",
+      "closed_at": "2026-08-28T23:48:30+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/empty-desk-guard",
+      "remote_tip": "36526810886da680f9a4bff2213ba047f4b9a209",
+      "stack": "empty-desk-guard"
     }
   ]
 }
