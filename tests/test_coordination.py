@@ -225,6 +225,47 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'plan': plan,
         }
 
+    def prepare_fast_forward_repair(self, name='fast-forward-repair'):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        parent_tip, parent = self.remote_state(origin)
+        branch = 'integration/shared'
+        ref = f'refs/heads/{branch}'
+        recorded = parent['managed_refs'][ref]
+        self.git(repo, 'switch', '-q', branch)
+        (repo / 'reviewed-advance.txt').write_text('reviewed fast-forward\n')
+        self.git(repo, 'add', 'reviewed-advance.txt')
+        self.git(repo, 'commit', '-qm', 'test: reviewed managed-ref advance')
+        first_advance = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        (repo / 'reviewed-advance-2.txt').write_text('second reviewed fast-forward\n')
+        self.git(repo, 'add', 'reviewed-advance-2.txt')
+        self.git(repo, 'commit', '-qm', 'test: second reviewed managed-ref advance')
+        observed = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'push', '--no-verify', 'origin', branch)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        plan, _ = module.coordination_repair_plan(
+            repo,
+            manifest,
+            ref,
+            module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+        )
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': manifest,
+            'ref': ref,
+            'parent_tip': parent_tip,
+            'parent': parent,
+            'recorded': recorded,
+            'advance_commits': [first_advance, observed],
+            'observed': observed,
+            'plan': plan,
+        }
+
     def prepare_additive_compose(self, name='additive-compose'):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
@@ -1687,6 +1728,118 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(github_plan['status'], 'repair-required')
         with self.assertRaisesRegex(module.SyncwheelError, 'GitHub branch locks can be bypassed'):
             module.apply_coordination_repair_plan(repo, manifest, github_plan)
+
+    def test_fast_forward_repair_records_bounded_ancestry_and_pushes_only_state(self):
+        fixture = self.prepare_fast_forward_repair()
+        module = fixture['module']
+        plan = fixture['plan']
+        self.assertEqual(plan['status'], 'repair-required')
+        self.assertEqual(plan['proof'], module.COORDINATION_REPAIR_FAST_FORWARD_PROOF)
+        self.assertEqual(plan['expectedAdvanceCommits'], fixture['advance_commits'])
+        self.assertEqual(plan['expectedAdvanceCommitCount'], 2)
+        self.assertNotEqual(plan['expectedRecordedTree'], plan['expectedRemoteTree'])
+        with mock.patch.object(module, 'COORDINATION_REPAIR_MAX_ADVANCE_COMMITS', 1):
+            with self.assertRaisesRegex(module.SyncwheelError, 'bounded commit interval'):
+                module.coordination_repair_plan(
+                    fixture['repo'],
+                    fixture['manifest'],
+                    fixture['ref'],
+                    module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+                )
+
+        tampered = json.loads(json.dumps(plan))
+        tampered['expectedAdvanceCommitCount'] = 3
+        unsigned = {key: value for key, value in tampered.items() if key != 'planDigest'}
+        tampered['planDigest'] = module.canonical_json_digest(unsigned)
+        with self.assertRaisesRegex(module.SyncwheelError, 'fast-forward proof is invalid'):
+            module.apply_coordination_repair_plan(
+                fixture['repo'], fixture['manifest'], tampered
+            )
+
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(repo_root, command, remote, refs, check=True):
+            pushes.append({'command': command, 'remote': remote, 'refs': refs})
+            return original_push(repo_root, command, remote, refs, check=check)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_repair_plan(
+                fixture['repo'], fixture['manifest'], plan
+            )
+
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(result['backend'], module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND)
+        self.assertEqual(result['proof'], module.COORDINATION_REPAIR_FAST_FORWARD_PROOF)
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(pushes[0]['refs'], [plan['stateRef']])
+        self.assertFalse(any(f":{fixture['ref']}" in item for item in pushes[0]['command']))
+
+        child_tip, child = self.remote_state(fixture['origin'])
+        evidence = child['repair_evidence']
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], fixture['parent_tip'])
+        self.assertEqual(child['managed_refs'][fixture['ref']], fixture['observed'])
+        self.assertEqual(child['changed_refs'], {})
+        self.assertEqual(evidence['planDigest'], plan['planDigest'])
+        self.assertEqual(evidence['recordedTree'], plan['expectedRecordedTree'])
+        self.assertEqual(evidence['observedTree'], plan['expectedRemoteTree'])
+        self.assertEqual(evidence['advanceCommitCount'], 2)
+        self.assertEqual(evidence['advanceCommitsDigest'], plan['expectedAdvanceCommitsDigest'])
+        for key in ('manifest', 'manifest_digest', 'tombstones'):
+            self.assertEqual(child[key], fixture['parent'][key])
+
+    def test_fast_forward_repair_rejects_non_descendants_and_review_drift(self):
+        fixture = self.prepare_fast_forward_repair('fast-forward-review-drift')
+        module = fixture['module']
+        repo = fixture['repo']
+        (repo / 'later.txt').write_text('later advance\n')
+        self.git(repo, 'add', 'later.txt')
+        self.git(repo, 'commit', '-qm', 'test: later managed-ref advance')
+        self.git(repo, 'push', '--no-verify', 'origin', 'integration/shared')
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_repair_plan(
+                repo, fixture['manifest'], fixture['plan']
+            )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], fixture['parent_tip'])
+
+        origin = self.create_remote('non-fast-forward-repair')
+        unrelated = self.clone(origin, 'non-fast-forward-repair')
+        self.init_coordinated(unrelated)
+        branch = 'integration/shared'
+        ref = f'refs/heads/{branch}'
+        self.git(unrelated, 'switch', '-q', branch)
+        (unrelated / 'recorded.txt').write_text('recorded history\n')
+        self.git(unrelated, 'add', 'recorded.txt')
+        self.git(unrelated, 'commit', '-qm', 'test: recorded managed-ref tip')
+        self.run_cli(unrelated, 'int', 'push')
+        self.git(unrelated, 'switch', '-q', '-c', 'unrelated-tip', 'origin/main')
+        (unrelated / 'unrelated.txt').write_text('unrelated history\n')
+        self.git(unrelated, 'add', 'unrelated.txt')
+        self.git(unrelated, 'commit', '-qm', 'test: unrelated managed-ref tip')
+        replacement = self.git(unrelated, 'rev-parse', 'HEAD').stdout.strip()
+        fixture_ref = 'refs/heads/fixture/non-fast-forward-object'
+        self.git(unrelated, 'push', '-q', 'origin', f'{replacement}:{fixture_ref}')
+        subprocess.run(
+            ['git', '--git-dir', str(origin), 'update-ref', ref, replacement],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ['git', '--git-dir', str(origin), 'update-ref', '-d', fixture_ref, replacement],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        manifest, _ = module.load_manifest(unrelated)
+        with self.assertRaisesRegex(module.SyncwheelError, 'is not a descendant'):
+            module.coordination_repair_plan(
+                unrelated,
+                manifest,
+                ref,
+                module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+            )
 
     def test_tree_equivalent_repair_stops_on_pre_and_post_cas_drift(self):
         before = self.prepare_tree_equivalent_repair('tree-equivalent-pre-drift')

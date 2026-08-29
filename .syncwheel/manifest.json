@@ -14,7 +14,8 @@
     "stacks": [
       "resume-preserve-published-source",
       "reconcile-replay-mode-args",
-      "tree-equivalent-state-cas"
+      "tree-equivalent-state-cas",
+      "fast-forward-state-cas"
     ]
   },
   "stacks": [
@@ -70,6 +71,24 @@
       },
       "meta": {
         "purpose": "Lossless coordination state repair and additive stack composition"
+      }
+    },
+    {
+      "id": "fast-forward-state-cas",
+      "branch": "pr/fast-forward-state-cas",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "c150c2916f904d15862d5f55b811bb83fa0aa1aa"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Repair stale coordination evidence for reviewed fast-forward managed refs"
       }
     }
   ],

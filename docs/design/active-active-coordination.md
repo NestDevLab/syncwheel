@@ -246,6 +246,21 @@ pre-CAS drift, lease loss, and ambiguous push outcomes all stop fail-closed.
 Repository object IDs are currently restricted to 40-hex SHA-1; SHA-256 state
 or managed-ref tips are rejected rather than truncated or inferred.
 
+The `fast-forward-state-cas` backend covers a second mechanically provable
+subset: an actively owned managed ref whose observed tip is an exact descendant
+of the recorded tip. Planning binds the digest to both endpoint tips and trees,
+the complete oldest-to-newest commit interval, its count and digest, and every
+managed-ref observation. The interval is capped at 1024 commits so the reviewed
+proof remains explicit and bounded rather than summarized from an unbounded
+history.
+
+Apply recomputes that exact ancestry proof and all guarded observations, then
+uses the same state-only CAS boundary. The evidence child records the endpoint
+trees and interval digest and count; `changed_refs` remains empty because the
+operation never updates the managed branch. A non-descendant tip, an oversized
+interval, a changed plan, ownership uncertainty, state lease loss, or any
+pre- or post-CAS managed-ref drift stops fail-closed.
+
 ## Composing additive stack proposals
 
 `coordination compose` is separate from repair. It handles a known common state
