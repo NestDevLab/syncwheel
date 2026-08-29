@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.34.8`
+Current version: `0.34.10`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -61,6 +61,8 @@ python3 scripts/syncwheel.py publish
 Default behavior is conservative:
 
 - `reconcile` is the dry-run diagnostic entrypoint
+- `check --strict` is the CI/readiness gate: warnings, undeclared stack-branch
+  commits, or any planned action produce a non-zero exit
 - `resume` is the dry-run recovery entrypoint for cross-device resume when
   integration contains unmapped commits that can be classified deterministically
 - `ledger show` exposes Syncwheel's append-only event ledger and the current
@@ -293,8 +295,8 @@ syncwheel has six pieces:
 - **manifest** (`.syncwheel/manifest.json`) as source of truth
 - **integration branch** (`main-integration` by default) for combined testing
 - optional **deployment channels** for pinned, selected compositions
-- **ledger** (`.syncwheel/ledger/` by default, or a sibling `<manifest-name>-ledger/`
-  directory when the manifest lives outside the repo) as append-only
+- **ledger** (`.syncwheel/ledger/` for the shared manifest, or a sibling
+  `<manifest-name>-ledger/` directory for personal and external manifests) as append-only
   operational history plus a replay checkpoint for cross-machine recovery
 
 ```mermaid
@@ -596,7 +598,8 @@ python3 scripts/syncwheel.py init --personal alice
 ```
 
 This writes `.syncwheel/manifests/alice.local.json` and defaults its integration
-branch to `integration/alice/main`. Use `-p alice` on later commands
+branch to `integration/alice/main`. Its operational history is isolated in
+`.syncwheel/manifests/alice.local-ledger/`. Use `-p alice` on later commands
 when you want to target that personal manifest:
 
 ```bash
@@ -743,10 +746,12 @@ In `resume` mode Syncwheel can:
   still exists locally or remotely and ownership is unambiguous
 - leave the commit in manual review when ownership is ambiguous
 
-The ledger lives under `.syncwheel/ledger/` when the manifest is repo-local.
-When `--manifest` points outside the repository, Syncwheel stores the ledger in
-a sibling directory next to that manifest, derived from its filename. For
-example, `docs/syncwheel/glow-portals-manifest.json` uses
+The shared manifest's ledger lives under `.syncwheel/ledger/`. Every other
+manifest gets a sibling ledger derived from its filename, so parallel personal
+or external manifests cannot overwrite one another's checkpoint. For example,
+`.syncwheel/manifests/alice.local.json` uses
+`.syncwheel/manifests/alice.local-ledger/`, while
+`docs/syncwheel/glow-portals-manifest.json` uses
 `docs/syncwheel/glow-portals-ledger/`.
 
 Each ledger root contains:

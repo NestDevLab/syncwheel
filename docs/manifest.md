@@ -227,13 +227,22 @@ python3 scripts/syncwheel.py init --personal alice
 ```
 
 This writes `.syncwheel/manifests/alice.local.json` and sets the integration
-branch to `integration/alice/main`.
+branch to `integration/alice/main`. Syncwheel keeps that manifest's ledger in
+`.syncwheel/manifests/alice.local-ledger/`, isolated from the shared manifest
+and from other personal manifests.
 
 Use the personal manifest with the short `--personal` flag:
 
 ```bash
 python3 scripts/syncwheel.py check -p alice
 ```
+
+For automation, use `check --strict`: it exits non-zero when validation emits
+errors or warnings, when a stack branch has commits outside its declared source
+projection locally or on the publication remote, when a published local/remote
+stack pair is not aligned, or when the deterministic plan is non-empty. Plain
+`check` remains an observational command and exits non-zero only for validation
+errors.
 
 Or set the personal manifest as the default for the current clone:
 

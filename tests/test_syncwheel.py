@@ -285,6 +285,55 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['validation']['errors'], [])
         self.assertEqual(data['plan'], [])
 
+    def test_check_strict_fails_when_branch_contains_undeclared_commits(self):
+        self.git('switch', '-q', 'pr/feature-a')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add undeclared gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+
+        result = self.run_cli('check', '--strict', '--no-fetch', '--json', expected=1)
+        data = json.loads(result.stdout)
+        stack = next(item for item in data['validation']['details']['stacks'] if item['id'] == 'feature-a')
+
+        self.assertEqual(stack['undeclared_branch_commits'], [gamma])
+        self.assertFalse(data['readiness']['ready'])
+        self.assertIn('validation_warnings', data['readiness']['blockers'])
+
+        result = self.run_cli('check', '--no-fetch', '--json', expected=0)
+        self.assertFalse(json.loads(result.stdout)['readiness']['ready'])
+
+    def test_check_strict_passes_only_when_validation_and_plan_are_clean(self):
+        result = self.run_cli('check', '--strict', '--no-fetch', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertTrue(data['readiness']['ready'])
+        self.assertEqual(data['readiness']['blockers'], [])
+
+    def test_check_strict_detects_undeclared_remote_only_stack_commits(self):
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'init', '--bare', '-q', str(origin)], check=True)
+        self.git('remote', 'add', 'fork', str(origin))
+        self.git('push', '-q', 'fork', 'main', 'pr/feature-a', 'pr/feature-b')
+
+        self.git('switch', '-q', 'pr/feature-a')
+        Path(self.repo / 'gamma.txt').write_text('remote gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add remote-only gamma')
+        gamma = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'fork', 'pr/feature-a')
+        self.git('switch', '-q', 'main')
+        self.git('branch', '-f', 'pr/feature-a', 'main~1')
+
+        result = self.run_cli('check', '--strict', '--json', expected=1)
+        data = json.loads(result.stdout)
+        stack = next(item for item in data['validation']['details']['stacks'] if item['id'] == 'feature-a')
+
+        self.assertEqual(stack['remote_relation'], 'local_behind')
+        self.assertEqual(stack['undeclared_remote_commits'], [gamma])
+        self.assertIn('validation_warnings', data['readiness']['blockers'])
+
     def test_primary_checkout_mismatch_blocks_read_only_handoff_commands(self):
         self.git('switch', '-c', 'feature/wrong-primary')
 
@@ -336,6 +385,28 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = json.loads(personal_manifest.read_text())
         self.assertEqual(data['integration']['branch'], 'integration/alice/main')
         self.assertEqual(data['stacks'], [])
+
+    def test_personal_manifests_have_isolated_ledgers(self):
+        module = self.load_syncwheel_module()
+        alice = self.repo / '.syncwheel' / 'manifests' / 'alice.local.json'
+        bob = self.repo / '.syncwheel' / 'manifests' / 'bob.local.json'
+
+        self.assertEqual(
+            module.ledger_root(self.repo, alice),
+            self.repo / '.syncwheel' / 'manifests' / 'alice.local-ledger',
+        )
+        self.assertEqual(
+            module.ledger_root(self.repo, bob),
+            self.repo / '.syncwheel' / 'manifests' / 'bob.local-ledger',
+        )
+        self.assertNotEqual(
+            module.ledger_root(self.repo, alice),
+            module.ledger_root(self.repo, bob),
+        )
+        self.assertEqual(
+            module.ledger_root(self.repo, self.repo / '.syncwheel' / 'manifest.json'),
+            self.repo / '.syncwheel' / 'ledger',
+        )
 
     def test_init_defaults_to_main_integration(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
