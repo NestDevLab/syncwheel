@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.35.1 - 2026-08-29
+
+- Add `check --strict` as a deterministic readiness gate for validation
+  warnings and non-empty reconciliation plans while preserving the observational
+  exit behavior of plain `check`.
+- Detect undeclared commits on local and publication-remote stack branches, and
+  report published local/remote branch misalignment.
+- Isolate each personal manifest's append-only ledger and replay checkpoint from
+  the shared manifest and other personal operators.
+
 ## 0.35.0 - 2026-08-29
 
 - Add a fast-forward coordination repair backend that binds the complete

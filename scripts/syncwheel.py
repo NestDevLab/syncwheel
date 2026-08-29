@@ -2744,10 +2744,6 @@ def stack_integration_commits(stack):
     return list(stack.get('integration_commits', stack['commits']))
 
 
-def ledger_root(repo_root):
-    return repo_root / '.syncwheel' / 'ledger'
-
-
 def external_ledger_root(manifest_path):
     path = Path(manifest_path).expanduser()
     stem = path.stem
@@ -2769,8 +2765,29 @@ def is_external_manifest_path(repo_root, manifest_path):
         return True
 
 
+def is_personal_manifest_path(repo_root, manifest_path):
+    if manifest_path is None:
+        return False
+    repo_root_path = Path(repo_root).expanduser().resolve(strict=False)
+    manifest_root = Path(manifest_path).expanduser().resolve(strict=False)
+    try:
+        relative = manifest_root.relative_to(repo_root_path)
+    except ValueError:
+        return False
+    return (
+        relative.parent == Path('.syncwheel/manifests')
+        and relative.name.endswith('.local.json')
+    )
+
+
 def ledger_root(repo_root, manifest_path=None):
-    if is_external_manifest_path(repo_root, manifest_path):
+    if manifest_path is None:
+        return repo_root / '.syncwheel' / 'ledger'
+    repo_root_path = Path(repo_root).expanduser().resolve(strict=False)
+    manifest_root = Path(manifest_path).expanduser().resolve(strict=False)
+    if is_external_manifest_path(repo_root_path, manifest_root) or is_personal_manifest_path(
+        repo_root_path, manifest_root
+    ):
         return external_ledger_root(manifest_path)
     return repo_root / '.syncwheel' / 'ledger'
 
@@ -7262,6 +7279,8 @@ def validate_manifest(repo_root, manifest):
 
     for stack in manifest['stacks']:
         state = stack.get('state', 'published')
+        publication_remote = stack.get('publication_remote') or manifest['defaults']['publication_remote']
+        remote_ref = f"{publication_remote}/{stack['branch']}"
         item = {
             'id': stack['id'],
             'branch': stack['branch'],
@@ -7270,11 +7289,20 @@ def validate_manifest(repo_root, manifest):
             'branch_exists': branch_exists(repo_root, stack['branch']),
             'base_exists': ref_exists(repo_root, stack['base']),
             'target': f"{stack['target_remote']}/{stack['target_branch']}",
+            'remote_ref': remote_ref,
+            'remote_exists': ref_exists(repo_root, remote_ref),
+            'remote_relation': None,
             'missing_from_branch': [],
+            'branch_commits': [],
+            'undeclared_branch_commits': [],
+            'remote_commits': [],
+            'undeclared_remote_commits': [],
             'missing_from_integration': [],
             'missing_commits': [],
             'integration_commits': stack_integration_commits(stack),
         }
+        stack_declared_shas = set()
+        stack_declared_patch_ids = set()
         if state not in STACK_STATES:
             errors.append(
                 f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
@@ -7288,8 +7316,69 @@ def validate_manifest(repo_root, manifest):
                 item['missing_commits'].append(commit)
                 errors.append(f"stack {stack['id']} references missing commit: {commit}")
                 continue
+            stack_declared_shas.add(commit_full_sha(repo_root, commit))
+            patch_id = commit_patch_id(repo_root, commit)
+            if patch_id:
+                stack_declared_patch_ids.add(patch_id)
             if item['branch_exists'] and not branch_contains(repo_root, stack['branch'], commit):
                 item['missing_from_branch'].append(commit)
+        if item['branch_exists'] and item['base_exists']:
+            item['branch_commits'] = [
+                commit_full_sha(repo_root, commit)
+                for commit in rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+            ]
+            for commit in item['branch_commits']:
+                patch_id = commit_patch_id(repo_root, commit)
+                if commit not in stack_declared_shas and (
+                    not patch_id or patch_id not in stack_declared_patch_ids
+                ):
+                    item['undeclared_branch_commits'].append(commit)
+            if item['undeclared_branch_commits']:
+                warnings.append(
+                    f"stack {stack['id']} branch contains "
+                    f"{len(item['undeclared_branch_commits'])} undeclared commit(s)"
+                )
+        if item['remote_exists'] and item['base_exists']:
+            item['remote_commits'] = [
+                commit_full_sha(repo_root, commit)
+                for commit in rev_list(repo_root, f"{stack['base']}..{remote_ref}")
+            ]
+            for commit in item['remote_commits']:
+                patch_id = commit_patch_id(repo_root, commit)
+                if commit not in stack_declared_shas and (
+                    not patch_id or patch_id not in stack_declared_patch_ids
+                ):
+                    item['undeclared_remote_commits'].append(commit)
+            if item['undeclared_remote_commits']:
+                warnings.append(
+                    f"stack {stack['id']} remote branch contains "
+                    f"{len(item['undeclared_remote_commits'])} undeclared commit(s)"
+                )
+        if item['branch_exists'] and item['remote_exists']:
+            ahead, behind = rev_left_right_count(repo_root, stack['branch'], remote_ref)
+            if ahead == 0 and behind == 0:
+                item['remote_relation'] = 'aligned'
+            elif ahead == 0:
+                item['remote_relation'] = 'local_behind'
+            elif behind == 0:
+                item['remote_relation'] = 'local_ahead'
+            else:
+                item['remote_relation'] = 'diverged'
+        elif item['branch_exists']:
+            item['remote_relation'] = 'local_only'
+        elif item['remote_exists']:
+            item['remote_relation'] = 'remote_only'
+        else:
+            item['remote_relation'] = 'missing'
+        if (
+            state == 'published'
+            and remote_is_configured(repo_root, publication_remote)
+            and item['remote_relation'] != 'aligned'
+        ):
+            warnings.append(
+                f"published stack {stack['id']} branch is not aligned with {remote_ref}: "
+                f"{item['remote_relation']}"
+            )
         for commit in item['integration_commits']:
             if not commit_exists(repo_root, commit):
                 item['missing_commits'].append(commit)
@@ -8862,18 +8951,30 @@ def command_check(args):
     validation = validate_manifest(repo_root, manifest)
     plan = build_plan(repo_root, manifest, validation)
     diagnostics = integration_commit_diagnostics(repo_root, manifest, validation)
+    readiness_blockers = []
+    if validation['errors']:
+        readiness_blockers.append('validation_errors')
+    if validation['warnings']:
+        readiness_blockers.append('validation_warnings')
+    if plan:
+        readiness_blockers.append('planned_actions')
+    readiness = {
+        'ready': not readiness_blockers,
+        'blockers': readiness_blockers,
+    }
     output = {
         'snapshot': snapshot,
         'manifest_path': str(manifest_path),
         'validation': validation,
         'plan': plan,
+        'readiness': readiness,
         'diagnostics': {
             'unmapped_integration_commits': diagnostics,
         },
     }
     if args.json:
         print(json.dumps(output, indent=2))
-        return 1 if validation['errors'] else 0
+        return 1 if validation['errors'] or (args.strict and not readiness['ready']) else 0
     print(f"repo: {snapshot['repo_root']}")
     print(f"branch: {snapshot['current_branch']}")
     print(f"manifest: {manifest_path}")
@@ -8899,7 +9000,9 @@ def command_check(args):
         if 'branch' in action:
             line += f" branch={action['branch']}"
         print(f'  - {line}')
-    return 1 if validation['errors'] else 0
+    if args.strict:
+        print(f"\nreadiness: {'READY' if readiness['ready'] else 'BLOCKED'}")
+    return 1 if validation['errors'] or (args.strict and not readiness['ready']) else 0
 
 
 def channel_manifest_change_output(operation, manifest_path, channel, migration=False):
@@ -14109,6 +14212,7 @@ def build_parser():
 
     check_p = sub.add_parser('check', aliases=['ck'], help='fetch, validate, and print the current action plan', parents=[common])
     check_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
+    check_p.add_argument('--strict', action='store_true', help='exit nonzero on warnings or planned actions')
     check_p.add_argument('-j', '--json', action='store_true')
     check_p.set_defaults(func=command_check, fetch=True)
 
