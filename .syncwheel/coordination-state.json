@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-28T23:48:32+00:00",
+  "created_at": "2026-08-29T21:26:57+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -11,6 +13,7 @@
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
+    "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
@@ -53,7 +56,8 @@
       "stacks": [
         "resume-preserve-published-source",
         "reconcile-replay-mode-args",
-        "tree-equivalent-state-cas"
+        "tree-equivalent-state-cas",
+        "fleet-coordination-invariants"
       ],
       "strategy": "cherry-pick"
     },
@@ -99,17 +103,31 @@
         "id": "tree-equivalent-state-cas",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/fleet-coordination-invariants",
+        "commits": [
+          "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2"
+        ],
+        "id": "fleet-coordination-invariants",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
-  "manifest_digest": "435377bdaa4b233a3ee20798dbe21294cae7261b08744b27d0aebe17eaaa5ef2",
-  "parent_state": "1b6f2a7ce29e6038b2556ecface28070ebab40ed",
+  "manifest_digest": "c883679ca1b2075c1c8043f23665c41c56117e4cc1c4095201ba071ed0b1091a",
+  "parent_state": "f4a6f5161120e559e8adab59f005badfba7c572a",
   "projection_status": "partial",
-  "publication_id": "1fefd706-ef10-4f3e-a2ca-ca0b4434d20b",
-  "publication_scope": "close:empty-desk-guard",
+  "publication_id": "210701ff-c187-4413-9415-8d8a99ef1bd2",
+  "publication_scope": "compose-stack:fleet-coordination-invariants",
   "schema_version": 2,
-  "syncwheel_version": "0.34.8",
+  "syncwheel_version": "0.34.10",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
