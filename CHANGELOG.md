@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.35.0 - 2026-08-29
+
+- Add a fast-forward coordination repair backend that binds the complete
+  recorded-to-observed commit interval, both endpoint trees, and all guarded
+  refs into a reviewed plan before appending state-only evidence.
+- Refuse non-descendant histories, intervals above 1024 commits, ownership or
+  plan uncertainty, state lease loss, and managed-ref drift without updating
+  the managed branch.
+
 ## 0.34.9 - 2026-08-28
 
 - Reject persistent desk replay for an empty stack before refs, worktrees,

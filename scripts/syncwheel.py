@@ -70,6 +70,9 @@ COORDINATION_REPAIR_PLAN_SCHEMA_VERSION = 1
 COORDINATION_COMPOSE_PLAN_SCHEMA_VERSION = 1
 COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
 COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF = 'exact-tree-equality'
+COORDINATION_REPAIR_FAST_FORWARD_BACKEND = 'fast-forward-state-cas'
+COORDINATION_REPAIR_FAST_FORWARD_PROOF = 'exact-fast-forward-ancestry'
+COORDINATION_REPAIR_MAX_ADVANCE_COMMITS = 1024
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel Coordination',
@@ -4419,6 +4422,32 @@ def build_tree_equivalent_coordination_repair_state(previous_state, previous_tip
     return validate_coordination_state(child, previous_state['coordination_id'])
 
 
+def build_fast_forward_coordination_repair_state(previous_state, previous_tip, plan, installation):
+    """Append reviewed evidence for one exact fast-forward managed-ref advance."""
+    child = build_coordination_repair_state(
+        previous_state,
+        previous_tip,
+        plan['repairedRef'],
+        plan['expectedRemoteTip'],
+        installation,
+    )
+    child['changed_refs'] = {}
+    child['publication_scope'] = f"repair-evidence:{plan['repairedRef']}"
+    child['repair_evidence'] = {
+        'schemaVersion': 1,
+        'planDigest': plan['planDigest'],
+        'proof': COORDINATION_REPAIR_FAST_FORWARD_PROOF,
+        'ref': plan['repairedRef'],
+        'recordedTip': plan['expectedRecordedTip'],
+        'observedTip': plan['expectedRemoteTip'],
+        'recordedTree': plan['expectedRecordedTree'],
+        'observedTree': plan['expectedRemoteTree'],
+        'advanceCommitCount': plan['expectedAdvanceCommitCount'],
+        'advanceCommitsDigest': plan['expectedAdvanceCommitsDigest'],
+    }
+    return validate_coordination_state(child, previous_state['coordination_id'])
+
+
 def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='github-lock'):
     require_sha1_repository(repo_root, 'coordination repair')
     config = coordination_config(manifest)
@@ -4493,6 +4522,54 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
             'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF,
             'precondition': 'exact-tree-equivalence-and-state-only-cas',
         })
+    if freeze_backend == COORDINATION_REPAIR_FAST_FORWARD_BACKEND and status != 'noop':
+        active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
+        if repaired_ref not in active_refs:
+            raise SyncwheelError(
+                'coordination repair fast-forward proof requires an active managed ref'
+            )
+        fetch_coordination_ref_tip(repo_root, config, repaired_ref, observed)
+        if not commit_exists(repo_root, expected_recorded):
+            raise SyncwheelError(
+                'coordination repair fast-forward proof requires the recorded commit object'
+            )
+        ancestry = git(
+            repo_root,
+            'merge-base',
+            '--is-ancestor',
+            expected_recorded,
+            observed,
+            check=False,
+        )
+        if ancestry.returncode != 0:
+            raise SyncwheelError(
+                'coordination repair fast-forward proof failed: observed tip is not a descendant'
+            )
+        commits = [
+            item for item in git(
+                repo_root,
+                'rev-list',
+                '--reverse',
+                f'{expected_recorded}..{observed}',
+            ).stdout.splitlines()
+            if item
+        ]
+        if not commits or len(commits) > COORDINATION_REPAIR_MAX_ADVANCE_COMMITS:
+            raise SyncwheelError(
+                'coordination repair fast-forward proof exceeds the bounded commit interval'
+            )
+        recorded_tree = ref_tree(repo_root, expected_recorded)
+        observed_tree = ref_tree(repo_root, observed)
+        payload.update({
+            'repairClass': 'fast-forward-state-evidence',
+            'expectedRecordedTree': recorded_tree,
+            'expectedRemoteTree': observed_tree,
+            'expectedAdvanceCommits': commits,
+            'expectedAdvanceCommitCount': len(commits),
+            'expectedAdvanceCommitsDigest': canonical_json_digest(commits),
+            'proof': COORDINATION_REPAIR_FAST_FORWARD_PROOF,
+            'precondition': 'exact-fast-forward-ancestry-and-state-only-cas',
+        })
     payload['planDigest'] = canonical_json_digest(payload)
     return payload, previous
 
@@ -4531,6 +4608,7 @@ class TreeEquivalentStateCasCoordinationRepairBackend(CoordinationRepairBackend)
     """CAS only the state ref after exact proof; never claim a lease on code refs."""
 
     name = COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
+    proof = COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF
 
     def _verify_observations(
         self, repo_root, coordination, remote, state_ref, expected_state_tip, guarded_refs
@@ -4556,7 +4634,7 @@ class TreeEquivalentStateCasCoordinationRepairBackend(CoordinationRepairBackend)
             kwargs['expected_state_tip'],
             kwargs['guarded_refs'],
         )
-        return {'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF}
+        return {'proof': self.proof}
 
     def apply(self, **kwargs):
         self._verify_observations(
@@ -4589,7 +4667,7 @@ class TreeEquivalentStateCasCoordinationRepairBackend(CoordinationRepairBackend)
                 raise SyncwheelError('coordination repair state CAS was rejected without mutation')
             if observed != kwargs['new_state_tip']:
                 raise SyncwheelError('coordination repair outcome is unknown after state CAS rejection')
-        return {'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF, 'stateOnly': True}
+        return {'proof': self.proof, 'stateOnly': True}
 
     def postflight(self, **kwargs):
         self._verify_observations(
@@ -4600,7 +4678,16 @@ class TreeEquivalentStateCasCoordinationRepairBackend(CoordinationRepairBackend)
             kwargs['expected_state_tip'],
             kwargs['guarded_refs'],
         )
-        return {'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF}
+        return {'proof': self.proof}
+
+
+class FastForwardStateCasCoordinationRepairBackend(
+    TreeEquivalentStateCasCoordinationRepairBackend
+):
+    """Adopt one exact reviewed fast-forward by CASing only append-only state."""
+
+    name = COORDINATION_REPAIR_FAST_FORWARD_BACKEND
+    proof = COORDINATION_REPAIR_FAST_FORWARD_PROOF
 
 
 def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
@@ -4620,6 +4707,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             backend = GitHubLockCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND:
             backend = TreeEquivalentStateCasCoordinationRepairBackend()
+        elif plan.get('freezeBackend') == COORDINATION_REPAIR_FAST_FORWARD_BACKEND:
+            backend = FastForwardStateCasCoordinationRepairBackend()
         else:
             backend = CoordinationRepairBackend()
     supplied_digest = plan.get('planDigest')
@@ -4636,6 +4725,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     if plan.get('freezeBackend') != backend.name:
         raise SyncwheelError('coordination repair backend does not match the reviewed plan')
     tree_equivalent_repair = backend.name == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
+    fast_forward_repair = backend.name == COORDINATION_REPAIR_FAST_FORWARD_BACKEND
+    state_only_repair = tree_equivalent_repair or fast_forward_repair
     if tree_equivalent_repair and plan.get('status') != 'noop':
         required_proof = {
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
@@ -4653,6 +4744,42 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             or plan.get('precondition') != 'exact-tree-equivalence-and-state-only-cas'
         ):
             raise SyncwheelError('coordination repair tree-equivalence proof is invalid')
+    if fast_forward_repair and plan.get('status') != 'noop':
+        required_proof = {
+            'repairClass', 'expectedRecordedTree', 'expectedRemoteTree',
+            'expectedAdvanceCommits', 'expectedAdvanceCommitCount',
+            'expectedAdvanceCommitsDigest', 'proof',
+        }
+        missing_proof = sorted(required_proof - set(plan))
+        if missing_proof:
+            raise SyncwheelError(
+                'coordination repair fast-forward plan is missing: '
+                + ', '.join(missing_proof)
+            )
+        commits = plan.get('expectedAdvanceCommits')
+        valid_commits = (
+            isinstance(commits, list)
+            and 1 <= len(commits) <= COORDINATION_REPAIR_MAX_ADVANCE_COMMITS
+            and len(set(commits)) == len(commits)
+            and all(
+                isinstance(item, str) and re.fullmatch(r'[0-9a-f]{40}', item)
+                for item in commits
+            )
+            and commits[-1] == plan.get('expectedRemoteTip')
+        )
+        if (
+            plan.get('repairClass') != 'fast-forward-state-evidence'
+            or plan.get('proof') != COORDINATION_REPAIR_FAST_FORWARD_PROOF
+            or plan.get('precondition') != 'exact-fast-forward-ancestry-and-state-only-cas'
+            or not isinstance(plan.get('expectedRecordedTree'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', plan['expectedRecordedTree'])
+            or not isinstance(plan.get('expectedRemoteTree'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', plan['expectedRemoteTree'])
+            or not valid_commits
+            or plan.get('expectedAdvanceCommitCount') != len(commits)
+            or plan.get('expectedAdvanceCommitsDigest') != canonical_json_digest(commits)
+        ):
+            raise SyncwheelError('coordination repair fast-forward proof is invalid')
     if plan.get('localManifestDigest') != coordination_manifest_digest(manifest, repo_root):
         raise SyncwheelError('coordination repair STOP: local manifest changed after review')
     current_plan, previous = coordination_repair_plan(
@@ -4665,6 +4792,12 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     if tree_equivalent_repair and plan.get('status') != 'noop':
         comparison_keys.extend([
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
+        ])
+    if fast_forward_repair and plan.get('status') != 'noop':
+        comparison_keys.extend([
+            'repairClass', 'expectedRecordedTree', 'expectedRemoteTree',
+            'expectedAdvanceCommits', 'expectedAdvanceCommitCount',
+            'expectedAdvanceCommitsDigest', 'proof',
         ])
     for key in comparison_keys:
         if current_plan.get(key) != plan.get(key):
@@ -4682,6 +4815,10 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     installation = installation_id(create=True)
     if tree_equivalent_repair:
         child = build_tree_equivalent_coordination_repair_state(
+            previous['state'], previous['tip'], plan, installation
+        )
+    elif fast_forward_repair:
+        child = build_fast_forward_coordination_repair_state(
             previous['state'], previous['tip'], plan, installation
         )
     else:
@@ -4725,17 +4862,29 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         or verified['managed_refs'][plan['repairedRef']] != plan['expectedRemoteTip']
     ):
         raise SyncwheelError('coordination repair post-verification failed: invalid child state')
-    if tree_equivalent_repair:
+    if state_only_repair:
         evidence = verified.get('repair_evidence')
         if (
             verified.get('changed_refs') != {}
             or not isinstance(evidence, dict)
             or evidence.get('planDigest') != supplied_digest
-            or evidence.get('proof') != COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF
-            or evidence.get('tree') != plan['expectedRemoteTree']
+            or evidence.get('proof') != plan.get('proof')
         ):
             raise SyncwheelError(
+                'coordination repair post-verification failed: invalid state-only evidence'
+            )
+        if tree_equivalent_repair and evidence.get('tree') != plan['expectedRemoteTree']:
+            raise SyncwheelError(
                 'coordination repair post-verification failed: invalid tree-equivalent evidence'
+            )
+        if fast_forward_repair and (
+            evidence.get('recordedTree') != plan['expectedRecordedTree']
+            or evidence.get('observedTree') != plan['expectedRemoteTree']
+            or evidence.get('advanceCommitCount') != plan['expectedAdvanceCommitCount']
+            or evidence.get('advanceCommitsDigest') != plan['expectedAdvanceCommitsDigest']
+        ):
+            raise SyncwheelError(
+                'coordination repair post-verification failed: invalid fast-forward evidence'
             )
     return {
         'status': 'repaired',
@@ -13878,11 +14027,17 @@ def build_parser():
     coordination_repair_p.add_argument('-a', '--apply', action='store_true')
     coordination_repair_p.add_argument(
         '--freeze-backend',
-        choices=['github-lock', COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND],
+        choices=[
+            'github-lock',
+            COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
+            COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+        ],
         default='github-lock',
         help=(
             'reviewed repair backend: github-lock remains unsupported; '
-            'tree-equivalent-state-cas changes only append-only state after exact tree proof'
+            'tree-equivalent-state-cas requires exact tree equality; '
+            'fast-forward-state-cas requires exact bounded ancestry; '
+            'both change only append-only coordination state'
         ),
     )
     coordination_repair_p.add_argument(

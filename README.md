@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.34.8`
+Current version: `0.35.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -134,6 +134,14 @@ exact state-ref lease. It never updates the managed branch. Any different tree,
 ownership uncertainty, ref drift, lease loss, or post-CAS drift stops
 fail-closed; an accepted state child remains durable evidence even when the
 post-verification reports failure.
+
+When an actively managed ref has instead advanced through an exact, reviewed
+fast-forward, use `--freeze-backend fast-forward-state-cas`. The plan binds the
+recorded and observed tips and trees plus the complete bounded commit interval.
+Apply repeats the ancestry and drift checks, then appends only state evidence
+under the same exact state-ref lease. It never updates the managed branch and
+refuses non-descendants, intervals above 1024 commits, plan drift, ownership
+uncertainty, or concurrent ref changes.
 
 When the remote state and a stale local manifest independently added stacks,
 compose the proposals explicitly instead of weakening `stack push`:
