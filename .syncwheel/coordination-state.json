@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-29T23:01:19+00:00",
+  "created_at": "2026-08-29T23:08:10+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -59,7 +57,6 @@
         "resume-preserve-published-source",
         "reconcile-replay-mode-args",
         "tree-equivalent-state-cas",
-        "fleet-coordination-invariants",
         "fast-forward-state-cas",
         "fleet-coordination-invariants-v2"
       ],
@@ -114,20 +111,6 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "pr/fleet-coordination-invariants",
-        "commits": [
-          "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2"
-        ],
-        "id": "fleet-coordination-invariants",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
         "branch": "pr/fast-forward-state-cas",
         "commits": [
           "c150c2916f904d15862d5f55b811bb83fa0aa1aa"
@@ -153,11 +136,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "e8b5601e22751f403f55a07be5fe7ddfa99df76b899ede43c5cbaede7ee89239",
-  "parent_state": "cfc506342977a66ca5da650f56b593a8d2e9d75e",
+  "manifest_digest": "50a86189986f4bff1b162a5261e17e003f95707403e4e97526fd4447250a389d",
+  "parent_state": "cb9028ff1198a2d5f7924ff979e48217c5bd7838",
   "projection_status": "partial",
-  "publication_id": "4a5e4d10-80cc-4d06-86f5-cebf89653b19",
-  "publication_scope": "compose-stack:fleet-coordination-invariants-v2",
+  "publication_id": "ca58bff4-3e6b-4404-b1eb-fe0ec25f8986",
+  "publication_scope": "close:fleet-coordination-invariants",
   "schema_version": 2,
   "syncwheel_version": "0.35.0",
   "tombstones": [
@@ -280,6 +263,14 @@
       "ref": "refs/heads/pr/empty-desk-guard",
       "remote_tip": "36526810886da680f9a4bff2213ba047f4b9a209",
       "stack": "empty-desk-guard"
+    },
+    {
+      "branch": "pr/fleet-coordination-invariants",
+      "closed_at": "2026-08-29T23:08:07+00:00",
+      "reason": "superseded-by-pr-45",
+      "ref": "refs/heads/pr/fleet-coordination-invariants",
+      "remote_tip": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
+      "stack": "fleet-coordination-invariants"
     }
   ]
 }
