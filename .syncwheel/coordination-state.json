@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T21:22:21+00:00",
+  "created_at": "2026-08-30T21:42:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -59,9 +57,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "agentwheel-revision-provider"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -69,33 +65,16 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/agentwheel-revision-provider",
-        "commits": [
-          "e86a3730d8bac786020b1ec07872ff0e67b075cc",
-          "cb06631a7d071a64f6631e53125f87690ede817e",
-          "04bdaae17296d5715ab8cf3fd9213da69075842b"
-        ],
-        "id": "agentwheel-revision-provider",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "80fefcb32b8ec1d6e6be4f68b66e746b55665644f29e2a6d0efd50b05f8bed26",
-  "parent_state": "e29df5a6ff82312bc56f3be0b74b37151bf278ba",
+  "manifest_digest": "c14ffa363f4ca6c2f6a59c0d600a1456db8f6425a3aaffe17ce62d596925f227",
+  "parent_state": "286aaddf9ad3cae9f41a1de3fa1a596ee1216618",
   "projection_status": "partial",
-  "publication_id": "44ca39bb-f742-4cef-9761-840234ebcae9",
-  "publication_scope": "stack:agentwheel-revision-provider",
+  "publication_id": "c46ec52f-1853-4e29-b543-bb3de6c40328",
+  "publication_scope": "close:agentwheel-revision-provider",
   "schema_version": 2,
-  "syncwheel_version": "0.35.2",
+  "syncwheel_version": "0.36.0",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -287,6 +266,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/agentwheel-revision-provider",
       "remote_tip": "e86a3730d8bac786020b1ec07872ff0e67b075cc",
+      "stack": "agentwheel-revision-provider"
+    },
+    {
+      "branch": "pr/agentwheel-revision-provider",
+      "closed_at": "2026-08-30T21:42:02+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/agentwheel-revision-provider",
+      "remote_tip": "04bdaae17296d5715ab8cf3fd9213da69075842b",
       "stack": "agentwheel-revision-provider"
     }
   ]
