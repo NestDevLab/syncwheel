@@ -1,7 +1,7 @@
 {
   "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:08:28+00:00",
+  "created_at": "2026-08-30T19:08:52+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -55,7 +55,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "reconcile-replay-mode-args",
         "tree-equivalent-state-cas",
         "fast-forward-state-cas",
         "auto-hook-bootstrap"
@@ -63,20 +62,6 @@
       "strategy": "cherry-pick"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/reconcile-replay-mode-args",
-        "commits": [
-          "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
-        ],
-        "id": "reconcile-replay-mode-args",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -123,11 +108,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "115d7cb71e8a41668b8ec0ad8b38da2e81943a3694d023cd1edc0afec727538f",
-  "parent_state": "09b2032f08372a3e3e2cacab1ce8ae3c9da43612",
+  "manifest_digest": "4170bba6b8a45036a4d033b73404b50e540dc620c83cd245caed96188836f767",
+  "parent_state": "22e124ac127986f56bae51e6057342cbe7c563df",
   "projection_status": "partial",
-  "publication_id": "fb27583a-8a65-45d9-b7ca-a0f123b806d3",
-  "publication_scope": "close:resume-preserve-published-source",
+  "publication_id": "6c57d058-f378-4867-960c-48a41f6a768d",
+  "publication_scope": "close:reconcile-replay-mode-args",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
@@ -274,6 +259,14 @@
       "ref": "refs/heads/pr/resume-preserve-published-source",
       "remote_tip": "16e485f31c268b656c29d11a51b9f05d064ac29d",
       "stack": "resume-preserve-published-source"
+    },
+    {
+      "branch": "pr/reconcile-replay-mode-args",
+      "closed_at": "2026-08-30T19:08:44+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/reconcile-replay-mode-args",
+      "remote_tip": "6f51bb1b92e689043a0055d806b4f9fc2ff5ce36",
+      "stack": "reconcile-replay-mode-args"
     }
   ]
 }
