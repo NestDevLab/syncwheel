@@ -672,7 +672,16 @@ def managed_hook_paths(repo_root, hook_name):
     return hooks_dir, hook, backup, metadata, configured
 
 
+def managed_hook_syncwheel_command():
+    if not sys.executable or not __file__:
+        raise SyncwheelError('cannot resolve the current Syncwheel invocation for repository hooks')
+    executable = os.path.abspath(sys.executable)
+    source = os.path.abspath(__file__)
+    return f'{shlex.quote(executable)} {shlex.quote(source)}'
+
+
 def managed_push_hook_content(backup_exists):
+    syncwheel_command = managed_hook_syncwheel_command()
     chain = (
         'if [ -x "$hook_dir/pre-push.syncwheel-chain" ]; then\n'
         '  "$hook_dir/pre-push.syncwheel-chain" "$@" <"$input"\n'
@@ -688,7 +697,8 @@ def managed_push_hook_content(backup_exists):
         'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
         'cat >"$input"\n'
         + chain +
-        'syncwheel hooks guard --remote-name "${1:-}" --remote-url "${2:-}" <"$input"\n'
+        f'{syncwheel_command} hooks guard '
+        '--remote-name "${1:-}" --remote-url "${2:-}" <"$input"\n'
     )
 
 
@@ -706,13 +716,14 @@ def managed_worktree_hook_content(hook_name, backup_exists):
         'fi\n'
         if backup_exists else ''
     )
+    syncwheel_command = managed_hook_syncwheel_command()
     return (
         '#!/bin/sh\n'
         f'{marker}\n'
         'set -eu\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         + chain
-        + f'syncwheel hooks worktree-guard --event {hook_name}\n'
+        + f'{syncwheel_command} hooks worktree-guard --event {hook_name}\n'
     )
 
 

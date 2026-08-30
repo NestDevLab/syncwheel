@@ -500,7 +500,23 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
     def test_repo_tracking_migrates_git_tracked_to_local_only(self):
         self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
-        self.git('commit', '-q', '-m', 'test: track syncwheel manifest')
+        hook_path = self.tmp / 'hook-path-without-syncwheel'
+        hook_path.mkdir()
+        for executable in ('git', 'dirname'):
+            target = shutil.which(executable)
+            self.assertIsNotNone(target)
+            (hook_path / executable).symlink_to(target)
+        environment = os.environ.copy()
+        environment['PATH'] = str(hook_path)
+        self.assertIsNone(shutil.which('syncwheel', path=environment['PATH']))
+        committed = subprocess.run(
+            ['git', 'commit', '-q', '-m', 'test: track syncwheel manifest'],
+            cwd=self.repo,
+            env=environment,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(committed.returncode, 0, committed.stderr)
 
         result = self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', '--json', expected=0)
         data = json.loads(result.stdout)
