@@ -1,7 +1,7 @@
 {
   "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:13:40+00:00",
+  "created_at": "2026-08-30T19:15:02+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -54,9 +54,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "auto-hook-bootstrap"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -64,30 +62,14 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "syncwheel/draft/auto-hook-bootstrap",
-        "commits": [
-          "242ce4a13cbbf91418b677da038ada0e673177ac"
-        ],
-        "id": "auto-hook-bootstrap",
-        "integration_branch": "main-integration",
-        "state": "draft",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "fd79bba73f68135f1af5776ab47b98af5331624655725847bf8f8b24807c54ca",
-  "parent_state": "c19fa7d31be0572df69643387b8e4a9c107eaa9e",
-  "projection_status": "convergent",
-  "publication_id": "0d574179-2cee-4812-9e9e-f12b3f7ddac8",
-  "publication_scope": "full",
+  "manifest_digest": "c14ffa363f4ca6c2f6a59c0d600a1456db8f6425a3aaffe17ce62d596925f227",
+  "parent_state": "eaa1a5d6e9d712aa0de57864c46208cbf9a97da9",
+  "projection_status": "partial",
+  "publication_id": "da1f5625-9ab3-45e2-a029-280978bc495e",
+  "publication_scope": "close:auto-hook-bootstrap",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
@@ -258,6 +240,14 @@
       "ref": "refs/heads/pr/fast-forward-state-cas",
       "remote_tip": "c273a4be0562007b90343c93c48cdbfad0c0a185",
       "stack": "fast-forward-state-cas"
+    },
+    {
+      "branch": "syncwheel/draft/auto-hook-bootstrap",
+      "closed_at": "2026-08-30T19:14:53+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/syncwheel/draft/auto-hook-bootstrap",
+      "remote_tip": "242ce4a13cbbf91418b677da038ada0e673177ac",
+      "stack": "auto-hook-bootstrap"
     }
   ]
 }
