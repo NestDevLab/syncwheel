@@ -1,7 +1,7 @@
 {
   "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:08:52+00:00",
+  "created_at": "2026-08-30T19:09:17+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -55,27 +55,12 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "tree-equivalent-state-cas",
         "fast-forward-state-cas",
         "auto-hook-bootstrap"
       ],
       "strategy": "cherry-pick"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/tree-equivalent-state-cas",
-        "commits": [
-          "cf2cb7f07e099cf5a27c190d0c8154a3e31bb11c"
-        ],
-        "id": "tree-equivalent-state-cas",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -108,11 +93,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "4170bba6b8a45036a4d033b73404b50e540dc620c83cd245caed96188836f767",
-  "parent_state": "22e124ac127986f56bae51e6057342cbe7c563df",
+  "manifest_digest": "fef074b7a0e392a61a40adddf86e565374ea3956175cff2253cceef2b53ca0d2",
+  "parent_state": "d864cfbe7134b838073e83148275fa627de7b4eb",
   "projection_status": "partial",
-  "publication_id": "6c57d058-f378-4867-960c-48a41f6a768d",
-  "publication_scope": "close:reconcile-replay-mode-args",
+  "publication_id": "52e537da-cab1-4435-a34a-3b085bc2ad48",
+  "publication_scope": "close:tree-equivalent-state-cas",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
@@ -267,6 +252,14 @@
       "ref": "refs/heads/pr/reconcile-replay-mode-args",
       "remote_tip": "6f51bb1b92e689043a0055d806b4f9fc2ff5ce36",
       "stack": "reconcile-replay-mode-args"
+    },
+    {
+      "branch": "pr/tree-equivalent-state-cas",
+      "closed_at": "2026-08-30T19:09:09+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/tree-equivalent-state-cas",
+      "remote_tip": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
+      "stack": "tree-equivalent-state-cas"
     }
   ]
 }
