@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "365c401fdf26f8627edaef3609a50103fda22398"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:21:00+00:00",
+  "created_at": "2026-08-30T19:22:16+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -57,9 +55,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "manifest-state-sync"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -67,30 +63,14 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "syncwheel/draft/manifest-state-sync",
-        "commits": [
-          "365c401fdf26f8627edaef3609a50103fda22398"
-        ],
-        "id": "manifest-state-sync",
-        "integration_branch": "main-integration",
-        "state": "draft",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
-  "manifest_digest": "0fee975977491300a4cd03cfa95bff2e7348f82dcd8f9d422a2ce8fa294c73b5",
-  "parent_state": "53ec070cfd9471988f1e373254f29863be24f76d",
+  "manifest_digest": "c14ffa363f4ca6c2f6a59c0d600a1456db8f6425a3aaffe17ce62d596925f227",
+  "parent_state": "fdfaa3e1f83bbe632035ba69b76ec393de164f04",
   "projection_status": "partial",
-  "publication_id": "b0531760-c684-44b6-a64d-f1199eba7359",
-  "publication_scope": "integration",
+  "publication_id": "370324b1-f8ce-456e-8ce8-12346ea31409",
+  "publication_scope": "close:manifest-state-sync",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
@@ -269,6 +249,14 @@
       "ref": "refs/heads/syncwheel/draft/auto-hook-bootstrap",
       "remote_tip": "242ce4a13cbbf91418b677da038ada0e673177ac",
       "stack": "auto-hook-bootstrap"
+    },
+    {
+      "branch": "syncwheel/draft/manifest-state-sync",
+      "closed_at": "2026-08-30T19:22:08+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/syncwheel/draft/manifest-state-sync",
+      "remote_tip": "365c401fdf26f8627edaef3609a50103fda22398",
+      "stack": "manifest-state-sync"
     }
   ]
 }
