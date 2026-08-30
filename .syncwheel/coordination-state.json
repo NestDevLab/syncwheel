@@ -1,7 +1,7 @@
 {
   "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:09:17+00:00",
+  "created_at": "2026-08-30T19:09:42+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -55,26 +55,11 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "fast-forward-state-cas",
         "auto-hook-bootstrap"
       ],
       "strategy": "cherry-pick"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/fast-forward-state-cas",
-        "commits": [
-          "c150c2916f904d15862d5f55b811bb83fa0aa1aa"
-        ],
-        "id": "fast-forward-state-cas",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -93,11 +78,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "fef074b7a0e392a61a40adddf86e565374ea3956175cff2253cceef2b53ca0d2",
-  "parent_state": "d864cfbe7134b838073e83148275fa627de7b4eb",
+  "manifest_digest": "8c2faf1c1009225eb55da06a13cdf3b52f8bb78f1d6ec9d31cfd3b62b0656e0a",
+  "parent_state": "273e26ffc153af3f3b665b8de4a175d0fef49016",
   "projection_status": "partial",
-  "publication_id": "52e537da-cab1-4435-a34a-3b085bc2ad48",
-  "publication_scope": "close:tree-equivalent-state-cas",
+  "publication_id": "f6ae99e8-ca1b-4f60-9c2c-417b1b91d58c",
+  "publication_scope": "close:fast-forward-state-cas",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
@@ -260,6 +245,14 @@
       "ref": "refs/heads/pr/tree-equivalent-state-cas",
       "remote_tip": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
       "stack": "tree-equivalent-state-cas"
+    },
+    {
+      "branch": "pr/fast-forward-state-cas",
+      "closed_at": "2026-08-30T19:09:34+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/fast-forward-state-cas",
+      "remote_tip": "c273a4be0562007b90343c93c48cdbfad0c0a185",
+      "stack": "fast-forward-state-cas"
     }
   ]
 }
