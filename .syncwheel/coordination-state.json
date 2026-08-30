@@ -1,14 +1,14 @@
 {
   "changed_refs": {
-    "refs/heads/pr/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc"
+    "refs/heads/pr/agentwheel-revision-provider": "cb06631a7d071a64f6631e53125f87690ede817e"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-30T20:47:44+00:00",
+  "created_at": "2026-08-30T21:07:41+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
     "refs/heads/main-integration": "365c401fdf26f8627edaef3609a50103fda22398",
-    "refs/heads/pr/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc",
+    "refs/heads/pr/agentwheel-revision-provider": "cb06631a7d071a64f6631e53125f87690ede817e",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
@@ -78,7 +78,8 @@
         },
         "branch": "pr/agentwheel-revision-provider",
         "commits": [
-          "e86a3730d8bac786020b1ec07872ff0e67b075cc"
+          "e86a3730d8bac786020b1ec07872ff0e67b075cc",
+          "cb06631a7d071a64f6631e53125f87690ede817e"
         ],
         "id": "agentwheel-revision-provider",
         "integration_branch": "main-integration",
@@ -87,11 +88,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "12c0103cb24a4475ecbf697ca1abe2271a8971b4118a2b56a18d335c73b24bb5",
-  "parent_state": "3a0aa0be0604aa674176235e05bf4b3cfc8682bb",
+  "manifest_digest": "d46326039c9456110a26dffd42f89e091510474a02f37c654949015eeff0cbf0",
+  "parent_state": "ef0450d218dc5c268f33d4315c35c960dfe9f298",
   "projection_status": "partial",
-  "publication_id": "31ec7541-cb4b-4c64-a06a-2ccfbdb981c2",
-  "publication_scope": "promote:agentwheel-revision-provider",
+  "publication_id": "02e0ea5f-cca2-48bb-99d9-556db07bfce5",
+  "publication_scope": "stack:agentwheel-revision-provider",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
