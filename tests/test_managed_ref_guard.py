@@ -2,6 +2,8 @@ import importlib.util
 import io
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import tempfile
 import types
@@ -113,6 +115,118 @@ class ManagedRefGuardTests(unittest.TestCase):
         for hook in result['hooks'].values():
             self.assertTrue(hook['ready'])
             self.assertEqual(hook['status'], 'installed')
+
+    def test_managed_hook_callbacks_skip_startup_update_policy(self):
+        callbacks = {
+            'pre-commit': [
+                'hooks', 'worktree-guard', '--event', 'pre-commit',
+                '--repo', str(self.repo),
+            ],
+            'post-checkout': [
+                'hooks', 'worktree-guard', '--event', 'post-checkout',
+                '--repo', str(self.repo),
+            ],
+            'pre-push': [
+                'hooks', 'guard', '--remote-name', 'origin',
+                '--remote-url', 'example.invalid/repo', '--repo', str(self.repo),
+            ],
+        }
+        for callback, argv in callbacks.items():
+            with (
+                self.subTest(callback=callback),
+                mock.patch.object(os.sys, 'argv', [str(MODULE_PATH), *argv]),
+                mock.patch.object(syncwheel, 'maybe_handle_startup_update_policy') as updater,
+                mock.patch.object(syncwheel, 'execute_parsed_command', return_value=0) as execute,
+            ):
+                self.assertEqual(syncwheel.main(), 0)
+                updater.assert_not_called()
+                execute.assert_called_once()
+
+    def test_managed_hook_callbacks_are_hermetic_without_update_state_or_network(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        bundle_before = self.hook_bundle_bytes()
+
+        restricted_bin = self.repo / '.restricted-bin'
+        restricted_bin.mkdir()
+        network_log = self.repo / '.network-attempts'
+        real_git = shutil.which('git')
+        self.assertIsNotNone(real_git)
+        fake_git = restricted_bin / 'git'
+        fake_git.write_text(
+            '#!/bin/sh\n'
+            'case "${1:-}" in\n'
+            '  fetch|ls-remote|push)\n'
+            '    printf "%s\\n" "$*" >>"$SYNCWHEEL_TEST_NETWORK_LOG"\n'
+            '    exit 97\n'
+            '    ;;\n'
+            'esac\n'
+            f'exec {shlex.quote(real_git)} "$@"\n'
+        )
+        fake_git.chmod(0o755)
+        for executable in ('cat', 'dirname', 'mktemp', 'rm'):
+            target = shutil.which(executable)
+            self.assertIsNotNone(target)
+            (restricted_bin / executable).symlink_to(target)
+        self.assertIsNone(shutil.which('syncwheel', path=str(restricted_bin)))
+
+        restricted_home = self.repo / '.restricted-home'
+        restricted_home.mkdir()
+        poison_path = self.repo / '.network-poison'
+        poison_path.mkdir()
+        (poison_path / 'sitecustomize.py').write_text(
+            'import os\n'
+            'from pathlib import Path\n'
+            'import socket\n'
+            'import urllib.request\n'
+            'def blocked(*args, **kwargs):\n'
+            '    Path(os.environ["SYNCWHEEL_TEST_NETWORK_LOG"]).write_text("python-network\\n")\n'
+            '    raise RuntimeError("network access is forbidden in managed hooks")\n'
+            'socket.create_connection = blocked\n'
+            'urllib.request.urlopen = blocked\n'
+        )
+        state_path = restricted_home / 'update-state.json'
+        settings_path = restricted_home / 'settings.json'
+        environment = os.environ.copy()
+        environment.update({
+            'HOME': str(restricted_home),
+            'PATH': str(restricted_bin),
+            'PYTHONDONTWRITEBYTECODE': '1',
+            'PYTHONPATH': str(poison_path),
+            'SYNCWHEEL_TEST_NETWORK_LOG': str(network_log),
+            syncwheel.ENV_UPDATE_INTERVAL_SECONDS: '0',
+            syncwheel.ENV_UPDATE_MODE: 'auto',
+            syncwheel.ENV_UPDATE_SETTINGS_PATH: str(settings_path),
+            syncwheel.ENV_UPDATE_STATE_PATH: str(state_path),
+        })
+
+        head = subprocess.check_output(
+            [real_git, 'rev-parse', 'HEAD'], cwd=self.repo, text=True
+        ).strip()
+        callbacks = {
+            'pre-commit': ([], ''),
+            'post-checkout': ([head, head, '1'], ''),
+            'pre-push': (
+                ['origin', 'example.invalid/repo'],
+                f'HEAD {head} refs/heads/scratch {"0" * 40}\n',
+            ),
+        }
+        for hook_name, (argv, payload) in callbacks.items():
+            hook = syncwheel.managed_hook_paths(self.repo, hook_name)[1]
+            result = subprocess.run(
+                [str(hook), *argv],
+                cwd=self.repo,
+                env=environment,
+                input=payload,
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(result.returncode, 0, f'{hook_name}: {result.stderr}')
+
+        self.assertFalse(network_log.exists())
+        self.assertFalse(settings_path.exists())
+        self.assertFalse(state_path.exists())
+        self.assertEqual(self.hook_bundle_bytes(), bundle_before)
 
     def test_primary_checkout_switch_warns_and_pre_commit_blocks(self):
         subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)

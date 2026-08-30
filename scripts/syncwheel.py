@@ -17363,8 +17363,12 @@ def main():
     args = parser.parse_args(raw_args)
     args.git_args = passthrough
     try:
-        if args.command != 'revision-provider':
+        if (
+            args.command != 'revision-provider'
+            and args.func not in {command_hooks_guard, command_hooks_worktree_guard}
+        ):
             maybe_handle_startup_update_policy(args)
+        if args.command != 'revision-provider':
             converge_default_repository_hooks(args)
         if manifest_mutation_requested(args) and hasattr(args, 'repo'):
             repo_root = resolve_repo_root(args.repo)
