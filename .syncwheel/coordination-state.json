@@ -1,13 +1,13 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398"
+    "refs/heads/main-integration": "365c401fdf26f8627edaef3609a50103fda22398"
   },
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:19:43+00:00",
+  "created_at": "2026-08-30T19:21:00+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "242ce4a13cbbf91418b677da038ada0e673177ac",
+    "refs/heads/main-integration": "365c401fdf26f8627edaef3609a50103fda22398",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
@@ -87,10 +87,10 @@
     "version": 2
   },
   "manifest_digest": "0fee975977491300a4cd03cfa95bff2e7348f82dcd8f9d422a2ce8fa294c73b5",
-  "parent_state": "1dcdbad51fe78df7507720810f3e566adf88e86b",
+  "parent_state": "53ec070cfd9471988f1e373254f29863be24f76d",
   "projection_status": "partial",
-  "publication_id": "8385fa7b-a74f-4d3d-9f8b-c874332410f3",
-  "publication_scope": "compose-stack:manifest-state-sync",
+  "publication_id": "b0531760-c684-44b6-a64d-f1199eba7359",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
