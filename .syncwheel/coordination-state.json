@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:15:02+00:00",
+  "created_at": "2026-08-30T19:19:43+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -26,6 +28,7 @@
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/auto-hook-bootstrap": "242ce4a13cbbf91418b677da038ada0e673177ac",
     "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
+    "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
   },
   "manifest": {
@@ -54,7 +57,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "manifest-state-sync"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -62,14 +67,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/manifest-state-sync",
+        "commits": [
+          "365c401fdf26f8627edaef3609a50103fda22398"
+        ],
+        "id": "manifest-state-sync",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "c14ffa363f4ca6c2f6a59c0d600a1456db8f6425a3aaffe17ce62d596925f227",
-  "parent_state": "eaa1a5d6e9d712aa0de57864c46208cbf9a97da9",
+  "manifest_digest": "0fee975977491300a4cd03cfa95bff2e7348f82dcd8f9d422a2ce8fa294c73b5",
+  "parent_state": "1dcdbad51fe78df7507720810f3e566adf88e86b",
   "projection_status": "partial",
-  "publication_id": "da1f5625-9ab3-45e2-a029-280978bc495e",
-  "publication_scope": "close:auto-hook-bootstrap",
+  "publication_id": "8385fa7b-a74f-4d3d-9f8b-c874332410f3",
+  "publication_scope": "compose-stack:manifest-state-sync",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
