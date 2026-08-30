@@ -8,90 +8,12 @@
     "integration_membership": "required"
   },
   "integration": {
-    "branch": "main-integration",
     "base": "origin/main",
+    "branch": "main-integration",
     "strategy": "cherry-pick",
-    "stacks": [
-      "resume-preserve-published-source",
-      "reconcile-replay-mode-args",
-      "tree-equivalent-state-cas",
-      "fast-forward-state-cas"
-    ]
+    "stacks": []
   },
-  "stacks": [
-    {
-      "id": "resume-preserve-published-source",
-      "branch": "pr/resume-preserve-published-source",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "7bf66c1ab3310c8e4b78cd986d875a6cafc5dcfb"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Allow exact replay-proven rebases of published stack branches"
-      }
-    },
-    {
-      "id": "reconcile-replay-mode-args",
-      "branch": "pr/reconcile-replay-mode-args",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "4ba52d1901d4bc7057221409c82d3238ed0eb6b1"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Fix replay-mode parsing for resume and reconcile"
-      }
-    },
-    {
-      "id": "tree-equivalent-state-cas",
-      "branch": "pr/tree-equivalent-state-cas",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "cf2cb7f07e099cf5a27c190d0c8154a3e31bb11c"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Lossless coordination state repair and additive stack composition"
-      }
-    },
-    {
-      "id": "fast-forward-state-cas",
-      "branch": "pr/fast-forward-state-cas",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "c150c2916f904d15862d5f55b811bb83fa0aa1aa"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Repair stale coordination evidence for reviewed fast-forward managed refs"
-      }
-    }
-  ],
+  "stacks": [],
   "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked",
   "coordination": {
@@ -104,6 +26,11 @@
       "backup_retention_days": 30,
       "backup_keep": 2
     }
+  },
+  "landing": {
+    "mode": "disabled",
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "channels": []
