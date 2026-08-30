@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-30T19:22:16+00:00",
+  "created_at": "2026-08-30T20:47:25+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -24,6 +26,7 @@
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
+    "refs/heads/syncwheel/draft/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc",
     "refs/heads/syncwheel/draft/auto-hook-bootstrap": "242ce4a13cbbf91418b677da038ada0e673177ac",
     "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398",
@@ -55,7 +58,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "agentwheel-revision-provider"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -63,14 +68,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/agentwheel-revision-provider",
+        "commits": [
+          "e86a3730d8bac786020b1ec07872ff0e67b075cc"
+        ],
+        "id": "agentwheel-revision-provider",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "c14ffa363f4ca6c2f6a59c0d600a1456db8f6425a3aaffe17ce62d596925f227",
-  "parent_state": "fdfaa3e1f83bbe632035ba69b76ec393de164f04",
+  "manifest_digest": "aca01a174637e4de1d816f83e31106b05a93b38bb505e88e123956a579be1b0c",
+  "parent_state": "1b0e59a9e1855adc44d1d87e6f06ec477c77431e",
   "projection_status": "partial",
-  "publication_id": "370324b1-f8ce-456e-8ce8-12346ea31409",
-  "publication_scope": "close:manifest-state-sync",
+  "publication_id": "096743dc-bbf2-480f-9032-38c5e0af0d60",
+  "publication_scope": "stack:agentwheel-revision-provider",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
