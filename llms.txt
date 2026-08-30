@@ -27,6 +27,7 @@ an exact lease. Channel publication is not an environment deployment.
 - Core procedure: https://github.com/NestDevLab/syncwheel/blob/main/docs/core-procedure.md
 - Manifest tracking: https://github.com/NestDevLab/syncwheel/blob/main/docs/manifest-tracking.md
 - Active-active coordination: https://github.com/NestDevLab/syncwheel/blob/main/docs/design/active-active-coordination.md
+- Agentwheel revision provider: https://github.com/NestDevLab/syncwheel/blob/main/docs/revision-provider.md
 - Deployment channels: https://github.com/NestDevLab/syncwheel/blob/main/docs/deployment-channels.md
 - Workflow: https://github.com/NestDevLab/syncwheel/blob/main/docs/workflow.md
 - Branch model: https://github.com/NestDevLab/syncwheel/blob/main/docs/branch-model.md

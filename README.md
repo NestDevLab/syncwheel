@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.35.2`
+Current version: `0.36.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -911,6 +911,7 @@ raw Git equivalent of the Syncwheel lifecycle.
 ## Files
 
 - `scripts/syncwheel.py`: main CLI
+- `scripts/syncwheel_revision_provider.py`: strict Agentwheel revision-provider protocol
 - `scripts/syncwheel-status.sh`: small compatibility wrapper
 - `docs/`: human-readable workflow docs and guides
 - `docs/sync_version.py`: renders the checked-in website version from `VERSION`
@@ -927,6 +928,7 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/workflow.md`: concise workflow model
 - `docs/core-procedure.md`: deterministic recovery procedure
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
+- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
@@ -944,6 +946,7 @@ python3 scripts/syncwheel.py --version
 python3 scripts/syncwheel.py init --help
 python3 scripts/syncwheel.py coordination --help
 python3 scripts/syncwheel.py handoff --help
+python3 scripts/syncwheel.py revision-provider --help
 python3 scripts/syncwheel.py gc --help
 python3 scripts/syncwheel.py worktree --help
 python3 scripts/syncwheel.py check --help

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.36.0 - 2026-08-30
+
+- Add a strict Agentwheel revision-provider protocol with exact path and hash
+  leases, clean-checkout gating, and deterministic operation ownership.
+- Validate product and manifest-only control commits through repository hooks
+  before compare-and-swap ref updates, without publishing remote state.
+- Add crash-safe, idempotent recovery for product commits, draft ownership, and
+  control state, including audited no-commit and no-delta outcomes.
+- Lease the physical Git index and pinned base ref across every provider phase,
+  snapshot typed direct and symbolic ref identity across hook and final checks,
+  and make ledger records and checkpoints fsync-backed with deterministic
+  incomplete-tail recovery.
+- Reject managed-branch base aliases, normalize bounded error responses, and
+  recover only provably operation-owned `index.lock` files after fatal process
+  interruption.
+- Preserve typed symbolic-ref leases without dereference collisions and require
+  bounded manual cleanup for unprovable Git 2.43 ref locks after process-group
+  termination, before every recovery shortcut or terminal response.
+- Restrict revision-provider bases to direct leased refs or exact commit SHAs,
+  reject revision syntax, abbreviated hashes, and symbolic refs, and persist the
+  owned stack on the immutable peeled base commit.
+- Report the projected `draftTipSha` separately from the integration control
+  commit, with all-or-none terminal draft ownership fields.
+
 ## 0.35.2 - 2026-08-30
 
 - Converge the required repository hook bundle before every normal repo-aware

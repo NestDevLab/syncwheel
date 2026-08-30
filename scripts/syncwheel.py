@@ -3,6 +3,7 @@ import argparse
 import copy
 import contextlib
 import datetime
+import errno
 import fnmatch
 import hashlib
 import importlib.metadata
@@ -2907,6 +2908,116 @@ def ledger_checkpoint_path(repo_root, manifest_path=None):
     return ledger_checkpoints_dir(repo_root, manifest_path) / 'latest.json'
 
 
+def ledger_io_checkpoint(stage):
+    """Fault-injection seam around physically durable ledger writes."""
+    return None
+
+
+def fsync_directory_path(directory):
+    descriptor = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+_LEDGER_FSYNC = os.fsync
+
+
+def ledger_fsync_directory_path(directory):
+    descriptor = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
+    try:
+        _LEDGER_FSYNC(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def ensure_directory_durable(directory):
+    directory = Path(directory)
+    missing = []
+    cursor = directory
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        ledger_fsync_directory_path(created.parent)
+        ledger_fsync_directory_path(created)
+
+
+@contextlib.contextmanager
+def ledger_write_lock(repo_root, manifest_path=None):
+    if fcntl is None:
+        raise SyncwheelError('ledger writes require POSIX file locking support')
+    root = ledger_root(repo_root, manifest_path)
+    ensure_directory_durable(root)
+    lock_path = root / 'ledger.lock'
+    existed = lock_path.exists()
+    with lock_path.open('a+b') as handle:
+        if not existed:
+            handle.flush()
+            _LEDGER_FSYNC(handle.fileno())
+            ledger_fsync_directory_path(root)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _repair_incomplete_ledger_tail(path):
+    """Repair only the final unterminated JSONL frame.
+
+    A complete JSON value without its delimiter is finished by appending the
+    delimiter. An invalid unterminated suffix is the only data we truncate;
+    newline-terminated corruption is never rewritten or hidden.
+    """
+    path = Path(path)
+    if not path.exists():
+        return 'unchanged'
+    payload = path.read_bytes()
+    if not payload or payload.endswith(b'\n'):
+        return 'unchanged'
+    boundary = payload.rfind(b'\n') + 1
+    tail = payload[boundary:]
+    try:
+        parsed = json.loads(tail.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        with path.open('r+b') as handle:
+            handle.truncate(boundary)
+            handle.flush()
+            _LEDGER_FSYNC(handle.fileno())
+        ledger_fsync_directory_path(path.parent)
+        return 'truncated-incomplete-tail'
+    if not isinstance(parsed, dict):
+        raise SyncwheelError(
+            f'invalid unterminated ledger event in {path}: expected a JSON object'
+        )
+    with path.open('ab') as handle:
+        handle.write(b'\n')
+        handle.flush()
+        _LEDGER_FSYNC(handle.fileno())
+    ledger_fsync_directory_path(path.parent)
+    return 'completed-delimiter'
+
+
+def _recover_ledger_tail_unlocked(repo_root, manifest_path=None):
+    directory = ledger_events_dir(repo_root, manifest_path)
+    if not directory.exists():
+        return 'unchanged'
+    segments = sorted(directory.glob('*.jsonl'))
+    if not segments:
+        return 'unchanged'
+    return _repair_incomplete_ledger_tail(segments[-1])
+
+
+def recover_ledger_tail(repo_root, manifest_path=None):
+    with ledger_write_lock(repo_root, manifest_path):
+        return _recover_ledger_tail_unlocked(repo_root, manifest_path)
+
+
 def manifest_stack_history_summary(stack):
     summary = {
         'id': stack['id'],
@@ -2997,13 +3108,24 @@ def load_ledger_events(repo_root, manifest_path=None):
         return []
     events = []
     for path in sorted(directory.glob('*.jsonl')):
-        for line in path.read_text().splitlines():
-            line = line.strip()
-            if not line:
+        payload = path.read_bytes()
+        if payload and not payload.endswith(b'\n'):
+            raise SyncwheelError(
+                f'incomplete ledger tail in {path}; recover it before reading'
+            )
+        for line_number, raw_line in enumerate(payload.split(b'\n')[:-1], start=1):
+            if not raw_line.strip():
                 continue
-            data = json.loads(line)
+            try:
+                data = json.loads(raw_line.decode('utf-8'))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise SyncwheelError(
+                    f'invalid ledger event in {path}:{line_number}: {exc}'
+                ) from exc
             if not isinstance(data, dict):
-                raise SyncwheelError(f'invalid ledger event in {path}')
+                raise SyncwheelError(
+                    f'invalid ledger event in {path}:{line_number}: expected object'
+                )
             events.append(data)
     return events
 
@@ -3150,23 +3272,68 @@ def reduce_ledger_state(events):
 
 
 def load_ledger_state(repo_root, manifest_path=None):
+    reduced = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
     path = ledger_checkpoint_path(repo_root, manifest_path)
     if path.exists():
-        data = json.loads(path.read_text())
-        if isinstance(data, dict):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            data = None
+        if isinstance(data, dict) and data == reduced:
             return data
-    return reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
+    return reduced
+
+
+def _write_all(descriptor, payload):
+    offset = 0
+    while offset < len(payload):
+        written = os.write(descriptor, payload[offset:])
+        if written <= 0:
+            raise OSError('short ledger write')
+        offset += written
+
+
+def _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path=None):
+    path = ledger_checkpoint_path(repo_root, manifest_path)
+    ensure_directory_durable(path.parent)
+    encoded = (json.dumps(state, indent=2, sort_keys=True) + '\n').encode('utf-8')
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix='.latest.', suffix='.tmp', dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        midpoint = max(1, len(encoded) // 2)
+        _write_all(descriptor, encoded[:midpoint])
+        ledger_io_checkpoint('checkpoint_payload_half_written')
+        _write_all(descriptor, encoded[midpoint:])
+        ledger_io_checkpoint('checkpoint_payload_written')
+        _LEDGER_FSYNC(descriptor)
+        ledger_io_checkpoint('checkpoint_temp_fsynced')
+        os.close(descriptor)
+        descriptor = None
+        os.replace(temporary, path)
+        ledger_fsync_directory_path(path.parent)
+        ledger_io_checkpoint('checkpoint_replaced')
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
 def write_ledger_checkpoint(repo_root, state, manifest_path=None):
-    path = ledger_checkpoint_path(repo_root, manifest_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + '\n')
+    with ledger_write_lock(repo_root, manifest_path):
+        _recover_ledger_tail_unlocked(repo_root, manifest_path)
+        authoritative = reduce_ledger_state(
+            load_ledger_events(repo_root, manifest_path)
+        )
+        # The append-only event log is authoritative if the caller raced and
+        # supplied an older derived checkpoint state.
+        _write_ledger_checkpoint_unlocked(repo_root, authoritative, manifest_path)
 
 
 def next_ledger_segment_path(repo_root, manifest_path=None):
     directory = ledger_events_dir(repo_root, manifest_path)
-    directory.mkdir(parents=True, exist_ok=True)
+    ensure_directory_durable(directory)
     segments = sorted(directory.glob('*.jsonl'))
     if not segments:
         return directory / '000001.jsonl'
@@ -3183,20 +3350,37 @@ def append_ledger_event(repo_root, event_type, payload, manifest_path=None):
     if not is_external_manifest_path(repo_root, manifest_path):
         tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
         ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
-    current = load_ledger_state(repo_root, manifest_path)
-    event = {
-        'schema_version': LEDGER_SCHEMA_VERSION,
-        'seq': current['last_seq'] + 1,
-        'ts': iso_utc_now(),
-        'type': event_type,
-        'payload': payload,
-    }
-    path = next_ledger_segment_path(repo_root, manifest_path)
-    with path.open('a', encoding='utf-8') as handle:
-        handle.write(json.dumps(event, sort_keys=True) + '\n')
-    state = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
-    write_ledger_checkpoint(repo_root, state, manifest_path)
-    return event
+    with ledger_write_lock(repo_root, manifest_path):
+        _recover_ledger_tail_unlocked(repo_root, manifest_path)
+        current = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
+        event = {
+            'schema_version': LEDGER_SCHEMA_VERSION,
+            'seq': current['last_seq'] + 1,
+            'ts': iso_utc_now(),
+            'type': event_type,
+            'payload': payload,
+        }
+        path = next_ledger_segment_path(repo_root, manifest_path)
+        existed = path.exists()
+        encoded = json.dumps(event, sort_keys=True).encode('utf-8')
+        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            midpoint = max(1, len(encoded) // 2)
+            _write_all(descriptor, encoded[:midpoint])
+            ledger_io_checkpoint('event_payload_half_written')
+            _write_all(descriptor, encoded[midpoint:])
+            ledger_io_checkpoint('event_payload_written')
+            _write_all(descriptor, b'\n')
+            ledger_io_checkpoint('event_record_written')
+            _LEDGER_FSYNC(descriptor)
+            if not existed:
+                ledger_fsync_directory_path(path.parent)
+            ledger_io_checkpoint('event_fsynced')
+        finally:
+            os.close(descriptor)
+        state = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
+        _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path)
+        return event
 
 
 def save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, context=None, event_type='manifest_saved'):
@@ -5575,6 +5759,16 @@ def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local
 
 def deterministic_stack_replay_tip(repo_root, base, commits):
     """Return the exact tip produced by replaying commits onto base, or None."""
+    projection = deterministic_stack_projection(repo_root, base, commits)
+    return projection.get('tip') if projection['status'] == 'projected' else None
+
+
+def deterministic_stack_projection(repo_root, base, commits):
+    """Construct a stack projection entirely in the object database.
+
+    The detailed status lets callers distinguish an empty projection from a
+    conflicting one without falling back to a temporary worktree.
+    """
     head = base
     for declared_commit in commits:
         commit = commit_full_sha(repo_root, declared_commit)
@@ -5588,10 +5782,14 @@ def deterministic_stack_replay_tip(repo_root, base, commits):
             check=False,
         )
         if merge.returncode != 0:
-            return None
+            return {
+                'status': 'conflict',
+                'commit': commit,
+                'detail': (merge.stderr.strip() or merge.stdout.strip())[:2000],
+            }
         tree = merge.stdout.strip()
         if not tree or tree == ref_tree(repo_root, head):
-            return None
+            return {'status': 'empty', 'commit': commit, 'base': head}
         head = git(
             repo_root,
             'commit-tree',
@@ -5602,7 +5800,7 @@ def deterministic_stack_replay_tip(repo_root, base, commits):
             replay_commit_message(repo_root, commit),
             env=replay_commit_env(repo_root, commit),
         ).stdout.strip()
-    return head
+    return {'status': 'projected', 'tip': head, 'tree': ref_tree(repo_root, head)}
 
 
 def coordination_stack_ref_is_exact_rebase(
@@ -13861,6 +14059,2107 @@ def command_repo_tracking_set(args):
     return 0
 
 
+class SyncwheelRevisionBackend:
+    """In-process facade for the Agentwheel revision-provider protocol."""
+
+    MANIFEST_PRODUCT_PATH = '.syncwheel/manifest.json'
+
+    def __init__(self, provider_module):
+        self.provider = provider_module
+
+    def _fail(self, message):
+        raise self.provider.RevisionProviderError(message)
+
+    def _repo_root(self, request):
+        supplied = Path(request.repository_root)
+        resolved = supplied.resolve(strict=False)
+        if str(resolved) != request.repository_root:
+            self._fail('repositoryRoot must be a canonical absolute path')
+        result = git(resolved, 'rev-parse', '--show-toplevel', check=False)
+        if result.returncode != 0:
+            self._fail(f'repositoryRoot is not a Git worktree: {resolved}')
+        top = Path(result.stdout.strip()).resolve()
+        if top != resolved:
+            self._fail(f'repositoryRoot must name the worktree root: {top}')
+        return resolved
+
+    def _manifest(self, repo_root):
+        try:
+            return require_manifest(repo_root, str(repo_root), None, None)
+        except SyncwheelError as exc:
+            self._fail(str(exc))
+
+    def _read_product_path(self, repo_root, relative):
+        """Read a regular file through descriptor-bound, no-follow traversal."""
+        directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+        nofollow = getattr(os, 'O_NOFOLLOW', 0)
+        descriptors = []
+        try:
+            current = os.open(str(repo_root), directory_flags | nofollow)
+            descriptors.append(current)
+            parts = relative.split('/')
+            for part in parts[:-1]:
+                try:
+                    current = os.open(
+                        part, directory_flags | nofollow, dir_fd=current
+                    )
+                except FileNotFoundError:
+                    return None
+                except OSError as exc:
+                    if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                        self._fail(
+                            f'product path parent must not be a symbolic link: {relative}'
+                        )
+                    raise
+                descriptors.append(current)
+            try:
+                descriptor = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=current)
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                if exc.errno == errno.ELOOP:
+                    self._fail(f'product path must not be a symbolic link: {relative}')
+                raise
+            descriptors.append(descriptor)
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                self._fail(f'product path must be a regular file or absent: {relative}')
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            after = os.fstat(descriptor)
+            fingerprint_before = (
+                before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                before.st_ctime_ns, stat.S_IMODE(before.st_mode),
+            )
+            fingerprint_after = (
+                after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns,
+                after.st_ctime_ns, stat.S_IMODE(after.st_mode),
+            )
+            if fingerprint_before != fingerprint_after:
+                self._fail(f'product path changed while it was being read: {relative}')
+            payload = b''.join(chunks)
+            return {
+                'sha256': hashlib.sha256(payload).hexdigest(),
+                'bytes': payload,
+                'mode': '100755' if after.st_mode & 0o111 else '100644',
+                'fingerprint': list(fingerprint_after),
+            }
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+
+    def _file_sha256(self, repo_root, relative):
+        observed = self._read_product_path(repo_root, relative)
+        return observed['sha256'] if observed is not None else None
+
+    def _hash_blob_bytes(self, repo_root, payload):
+        result = subprocess.run(
+            ['git', 'hash-object', '-w', '--stdin'],
+            cwd=repo_root,
+            input=payload,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            self._fail(
+                'could not persist provider blob object: '
+                + result.stderr.decode('utf-8', errors='replace').strip()
+            )
+        return result.stdout.decode().strip()
+
+    def _capture_path_objects(self, repo_root, request, paths=None):
+        expected = {
+            item.path: item.after_sha256 for item in request.paths
+        }
+        selected = paths or [item.path for item in request.paths]
+        objects = {}
+        for relative in selected:
+            observed = self._read_product_path(repo_root, relative)
+            declared = expected.get(relative)
+            actual = observed['sha256'] if observed is not None else None
+            if relative in expected and actual != declared:
+                self._fail(
+                    f'after SHA-256 mismatch for {relative}: '
+                    f'expected {declared!r}, found {actual!r}'
+                )
+            if observed is None:
+                objects[relative] = {
+                    'sha256': None, 'blob': None, 'mode': None,
+                }
+            else:
+                objects[relative] = {
+                    'sha256': observed['sha256'],
+                    'blob': self._hash_blob_bytes(repo_root, observed['bytes']),
+                    'mode': observed['mode'],
+                }
+        return objects
+
+    def _validate_hashes(self, repo_root, request, stage):
+        attribute = 'before_sha256' if stage == 'before' else 'after_sha256'
+        for item in request.paths:
+            expected = getattr(item, attribute)
+            actual = self._file_sha256(repo_root, item.path)
+            if actual != expected:
+                self._fail(
+                    f'{stage} SHA-256 mismatch for {item.path}: '
+                    f'expected {expected!r}, found {actual!r}'
+                )
+
+    def _head_file_sha256(self, repo_root, head, relative):
+        listing = git(repo_root, 'ls-tree', '-z', head, '--', relative, check=False)
+        if listing.returncode != 0:
+            self._fail(f'could not inspect {relative} at expectedHead {head}')
+        if not listing.stdout:
+            return None
+        entry = listing.stdout.rstrip('\0')
+        metadata, separator, listed_path = entry.partition('\t')
+        if not separator or listed_path != relative:
+            self._fail(f'ambiguous tree entry for product path: {relative}')
+        mode, object_type, object_id = metadata.split(' ', 2)
+        if object_type != 'blob' or mode not in {'100644', '100755'}:
+            self._fail(f'product path is not a regular file at expectedHead: {relative}')
+        result = subprocess.run(
+            ['git', 'cat-file', 'blob', object_id],
+            cwd=repo_root,
+            capture_output=True,
+        )
+        if result.returncode != 0:
+            self._fail(f'could not read {relative} at expectedHead {head}')
+        return hashlib.sha256(result.stdout).hexdigest()
+
+    def _validate_before_hashes_at_head(self, repo_root, request):
+        for item in request.paths:
+            actual = self._head_file_sha256(repo_root, request.expected_head, item.path)
+            if actual != item.before_sha256:
+                self._fail(
+                    f'before SHA-256 mismatch for {item.path} at expectedHead: '
+                    f'expected {item.before_sha256!r}, found {actual!r}'
+                )
+
+    def _index_conflicts(self, repo_root):
+        return bool(git(repo_root, 'ls-files', '-u').stdout.strip())
+
+    def _index_is_clean(self, repo_root):
+        return git(repo_root, 'diff', '--cached', '--quiet', check=False).returncode == 0
+
+    def _dirty_paths(self, repo_root):
+        paths = set()
+        for arguments in (
+            ('diff', '--name-only', '-z'),
+            ('ls-files', '--others', '--exclude-standard', '-z'),
+        ):
+            output = git(repo_root, *arguments).stdout
+            paths.update(item for item in output.split('\0') if item)
+        return paths
+
+    def _ensure_clean(self, repo_root):
+        if self._index_conflicts(repo_root):
+            self._fail('revision provider requires a conflict-free index')
+        status = git(
+            repo_root,
+            'status',
+            '--porcelain',
+            '--untracked-files=all',
+            env={'GIT_OPTIONAL_LOCKS': '0'},
+        ).stdout
+        if status.strip():
+            self._fail('revision provider preflight requires a completely clean worktree and index')
+
+    def _ensure_after_scope(self, repo_root, request):
+        if self._index_conflicts(repo_root):
+            self._fail('revision provider refuses an index with conflicts')
+        if not self._index_is_clean(repo_root):
+            self._fail('revision provider refuses pre-staged changes')
+        self._validate_hashes(repo_root, request, 'after')
+        allowed = {item.path for item in request.paths}
+        outside = sorted(self._dirty_paths(repo_root) - allowed)
+        if outside:
+            self._fail('mutation changed paths outside the declared allowlist: ' + ', '.join(outside))
+        for item in request.paths:
+            tracked = git(
+                repo_root, 'ls-files', '--error-unmatch', '--', item.path, check=False
+            ).returncode == 0
+            ignored = git(repo_root, 'check-ignore', '-q', '--', item.path, check=False).returncode == 0
+            if not tracked and ignored and item.after_sha256 is not None:
+                self._fail(f'revision provider refuses an ignored product path: {item.path}')
+
+    def _worktrees(self, repo_root):
+        return sorted(str(Path(item['path']).resolve()) for item in get_worktrees(repo_root))
+
+    def _worktree_porcelain(self, repo_root):
+        return git(repo_root, 'worktree', 'list', '--porcelain').stdout
+
+    def _direct_ref_observation(self, name, object_oid):
+        return {
+            'name': name,
+            'kind': 'direct',
+            'objectOid': object_oid,
+            'symbolicTarget': None,
+        }
+
+    def _symbolic_ref_result(self, repo_root, name):
+        return git(
+            repo_root,
+            'symbolic-ref',
+            '--quiet',
+            '--no-recurse',
+            name,
+            check=False,
+        )
+
+    def _observe_ref(self, repo_root, name, *, allow_missing=True):
+        if run(['git', 'check-ref-format', name], check=False).returncode != 0:
+            self._fail(f'cannot inspect invalid full ref name: {name!r}')
+        symbolic = self._symbolic_ref_result(repo_root, name)
+        if symbolic.returncode == 0:
+            kind = 'symbolic'
+            symbolic_target = symbolic.stdout.strip()
+            if (
+                not symbolic_target
+                or run(
+                    ['git', 'check-ref-format', symbolic_target], check=False
+                ).returncode != 0
+            ):
+                self._fail(
+                    f'symbolic ref {name!r} has an invalid immediate target: '
+                    f'{symbolic_target!r}'
+                )
+        elif symbolic.returncode == 1:
+            kind = 'direct'
+            symbolic_target = None
+        else:
+            detail = symbolic.stderr.strip() or symbolic.stdout.strip()
+            suffix = f': {detail}' if detail else ''
+            self._fail(
+                f'could not inspect ref kind for {name!r} '
+                f'(symbolic-ref exit {symbolic.returncode}){suffix}'
+            )
+
+        resolved = git(
+            repo_root,
+            'show-ref',
+            '--verify',
+            '--hash',
+            '--',
+            name,
+            check=False,
+        )
+        object_oid = resolved.stdout.strip() if resolved.returncode == 0 else ''
+        if not re.fullmatch(r'[0-9a-f]{40}', object_oid):
+            if kind == 'direct' and allow_missing:
+                return None
+            detail = resolved.stderr.strip() or resolved.stdout.strip()
+            suffix = f': {detail}' if detail else ''
+            self._fail(
+                f'could not resolve {kind} ref {name!r} to a full object OID'
+                f'{suffix}'
+            )
+        return {
+            'name': name,
+            'kind': kind,
+            'objectOid': object_oid,
+            'symbolicTarget': symbolic_target,
+        }
+
+    def _refs_snapshot(self, repo_root, *prefixes):
+        result = git(
+            repo_root,
+            'for-each-ref',
+            '--format=%(refname)',
+            *prefixes,
+        )
+        names = sorted(line for line in result.stdout.splitlines() if line)
+        if len(names) != len(set(names)):
+            self._fail('Git returned duplicate ref names while taking a snapshot')
+        return {
+            name: self._observe_ref(repo_root, name, allow_missing=False)
+            for name in names
+        }
+
+    def _remote_refs(self, repo_root):
+        return self._refs_snapshot(repo_root, 'refs/remotes/')
+
+    def _managed_local_refs(self, repo_root, manifest):
+        return {
+            ref: self._observe_ref(repo_root, ref)
+            for ref in sorted(managed_ref_names(manifest))
+        }
+
+    def _all_refs(self, repo_root):
+        return self._refs_snapshot(repo_root, 'refs/')
+
+    def _index_path(self, repo_root):
+        raw = git(repo_root, 'rev-parse', '--git-path', 'index').stdout.strip()
+        path = Path(raw)
+        if not path.is_absolute():
+            path = repo_root / path
+        return Path(os.path.abspath(path))
+
+    def _read_regular_file(self, path, label):
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0)
+        try:
+            descriptor = os.open(path, flags)
+        except FileNotFoundError:
+            self._fail(f'{label} does not exist: {path}')
+        except OSError as exc:
+            self._fail(f'could not open {label} without following links: {path}: {exc}')
+        try:
+            metadata = os.fstat(descriptor)
+            if not stat.S_ISREG(metadata.st_mode):
+                self._fail(f'{label} is not a regular file: {path}')
+            chunks = []
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b''.join(chunks), metadata
+        finally:
+            os.close(descriptor)
+
+    def _index_sha256(self, repo_root):
+        path = self._index_path(repo_root)
+        payload, _ = self._read_regular_file(path, 'Git index')
+        return hashlib.sha256(payload).hexdigest()
+
+    def _resolve_base_ref(self, repo_root, manifest):
+        base_ref = manifest['defaults']['base_ref']
+        if re.fullmatch(r'[0-9a-f]{40}', base_ref):
+            try:
+                base_sha = commit_full_sha(repo_root, base_ref)
+            except SyncwheelError as exc:
+                self._fail(
+                    f'defaults.base_ref full SHA does not name a commit: '
+                    f'{base_ref!r}: {exc}'
+                )
+            if base_sha != base_ref:
+                self._fail(
+                    'defaults.base_ref full SHA must identify a commit directly, '
+                    'not an annotated tag or another peeled object'
+                )
+            return base_ref, None, base_sha, None, None
+
+        if re.fullmatch(r'[0-9A-Fa-f]{4,40}', base_ref):
+            self._fail(
+                'defaults.base_ref must not be an abbreviated commit SHA or a '
+                'non-lowercase full SHA; '
+                'use the exact lowercase 40-hex commit SHA'
+            )
+
+        if base_ref.startswith('refs/'):
+            candidates = [base_ref]
+        elif base_ref.startswith(('heads/', 'remotes/', 'tags/')):
+            candidates = [f'refs/{base_ref}']
+        else:
+            candidates = [
+                f'refs/heads/{base_ref}',
+                f'refs/remotes/{base_ref}',
+                f'refs/tags/{base_ref}',
+            ]
+
+        resolved = []
+        for candidate in candidates:
+            if run(['git', 'check-ref-format', candidate], check=False).returncode != 0:
+                continue
+            observation = self._observe_ref(repo_root, candidate)
+            if observation is None:
+                continue
+            if observation['kind'] == 'symbolic':
+                self._fail(
+                    f'defaults.base_ref {base_ref!r} resolves to symbolic ref '
+                    f'{candidate!r} -> {observation["symbolicTarget"]!r}; '
+                    'revision-provider v1 requires a direct object ref'
+                )
+            resolved.append((candidate, observation))
+
+        if not resolved:
+            self._fail(
+                f'defaults.base_ref {base_ref!r} must be a direct resolvable Git ref '
+                'or an exact lowercase 40-hex commit SHA; revision expressions are '
+                'not accepted'
+            )
+        if len(resolved) != 1:
+            self._fail(
+                f'defaults.base_ref {base_ref!r} is ambiguous between direct refs: '
+                + ', '.join(candidate for candidate, _ in resolved)
+                + '; use one full refs/... name'
+            )
+        full_name, base_ref_observation = resolved[0]
+        base_ref_object_sha = base_ref_observation['objectOid']
+        try:
+            base_sha = commit_full_sha(repo_root, full_name)
+        except SyncwheelError as exc:
+            self._fail(f'could not resolve defaults.base_ref {base_ref!r}: {exc}')
+        return (
+            base_ref,
+            full_name,
+            base_sha,
+            base_ref_object_sha,
+            base_ref_observation,
+        )
+
+    def _assert_base_ref_is_not_managed(self, manifest, base_ref, full_name):
+        if full_name is None:
+            return
+        managed = set(managed_ref_names(manifest))
+        if full_name in managed:
+            self._fail(
+                f'defaults.base_ref {base_ref!r} resolves to managed ref '
+                f'{full_name!r}; a revision-provider base must not alias an '
+                'integration, stack, or channel branch'
+            )
+
+    def _fresh_coordination_handoff(self, repo_root, manifest):
+        if not coordination_is_active(manifest):
+            return {'mode': 'disabled', 'stateTip': None, 'manifestDigest': None}
+        config = coordination_config(manifest)
+        try:
+            _, local_coordination = coordination_profile(repo_root)
+            pending = local_coordination.get('pending_merge')
+            if isinstance(pending, dict) and pending.get('coordination_id') == config['id']:
+                self._fail(
+                    'active-active handoff has a pending coordination merge; resolve it first'
+                )
+            if local_coordination.get('locks'):
+                self._fail('active-active handoff has local stack/worktree locks')
+            if local_lease_is_active(local_coordination):
+                self._fail('active-active handoff has an active local publication lease')
+            remote = read_remote_coordination_state(
+                repo_root,
+                config,
+                fetch=True,
+                local_manifest_version=manifest['version'],
+            )
+            state = remote.get('state')
+            if not remote.get('tip') or not state:
+                self._fail(
+                    'active-active handoff requires an initialized published coordination state'
+                )
+            current_refs = managed_ref_names(manifest)
+            require_exclusive_coordination_ownership(repo_root, config, current_refs)
+            local_digest = coordination_manifest_digest(manifest, repo_root)
+            if state.get('manifest_digest') != local_digest:
+                self._fail(
+                    'active-active handoff manifest is not aligned with fresh coordination state'
+                )
+            if not coordination_state_matches_remote(repo_root, config, state):
+                self._fail(
+                    'active-active handoff coordination state does not match fresh remote refs'
+                )
+            drifted_local = []
+            for ref in current_refs:
+                expected_tip = state.get('managed_refs', {}).get(ref)
+                local_tip = ref_tip(repo_root, ref)
+                if not expected_tip or local_tip != expected_tip:
+                    drifted_local.append(
+                        f'{ref} (local {local_tip or "missing"}, state {expected_tip or "missing"})'
+                    )
+            if drifted_local:
+                self._fail(
+                    'active-active handoff local managed refs are not aligned: '
+                    + '; '.join(drifted_local)
+                )
+            return {
+                'mode': 'active-active',
+                'stateTip': remote['tip'],
+                'manifestDigest': state['manifest_digest'],
+            }
+        except SyncwheelError as exc:
+            self._fail(f'active-active handoff gate failed: {exc}')
+
+    def _validate_repository(self, repo_root, request, *, require_clean):
+        manifest, manifest_path = self._manifest(repo_root)
+        if manifest.get('repository_mode') != 'delivery':
+            self._fail('revision provider requires repository_mode="delivery"')
+        if manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED:
+            self._fail('revision provider requires syncwheel_tracking="git-tracked"')
+        tracked_manifest = git(
+            repo_root, 'ls-files', '--error-unmatch', '--', self.MANIFEST_PRODUCT_PATH,
+            check=False,
+        )
+        if tracked_manifest.returncode != 0:
+            self._fail('revision provider requires a tracked .syncwheel/manifest.json')
+        branch = get_current_branch(repo_root)
+        integration_branch = manifest['integration']['branch']
+        if branch != integration_branch:
+            self._fail(
+                f'revision provider requires the integration checkout: '
+                f'expected {integration_branch!r}, found {branch!r}'
+            )
+        head = ref_tip(repo_root, 'HEAD')
+        if head != request.expected_head:
+            self._fail(
+                f'integration HEAD changed: expected {request.expected_head}, found {head}'
+            )
+        digest = manifest_digest(manifest)
+        if (
+            request.expected_manifest_digest is not None
+            and digest != request.expected_manifest_digest
+        ):
+            self._fail(
+                'manifest digest changed: '
+                f'expected {request.expected_manifest_digest}, found {digest}'
+            )
+        hooks = managed_push_guard_policy(repo_root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail(
+                'managed repository guards are not ready; install or explicitly disable them '
+                'before revision-provider preflight'
+            )
+        (
+            base_ref,
+            base_ref_full_name,
+            base_ref_sha,
+            base_ref_object_sha,
+            base_ref_observation,
+        ) = self._resolve_base_ref(repo_root, manifest)
+        self._assert_base_ref_is_not_managed(
+            manifest, base_ref, base_ref_full_name
+        )
+        validation = validate_manifest(repo_root, manifest)
+        if validation['errors']:
+            self._fail('Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
+        if unmapped:
+            self._fail(
+                'integration already contains unmapped commits: ' + ', '.join(unmapped)
+            )
+        if require_clean:
+            self._ensure_clean(repo_root)
+            self._validate_hashes(repo_root, request, 'before')
+        coordination = self._fresh_coordination_handoff(repo_root, manifest)
+        remote_refs = self._remote_refs(repo_root)
+        managed_local_refs = self._managed_local_refs(repo_root, manifest)
+        ref_transaction_refs = dict(managed_local_refs)
+        ref_transaction_refs.update(remote_refs)
+        if base_ref_full_name:
+            ref_transaction_refs[base_ref_full_name] = base_ref_observation
+        integration_ref = f'refs/heads/{integration_branch}'
+        ref_transaction_refs[integration_ref] = self._direct_ref_observation(
+            integration_ref, head
+        )
+        ref_transaction_refs[f'refs/heads/{request.draft_branch}'] = None
+        ref_transaction_refs = self._expand_symbolic_target_leases(
+            repo_root, ref_transaction_refs
+        )
+        return {
+            'repoRoot': repo_root,
+            'manifest': manifest,
+            'manifestPath': manifest_path,
+            'manifestDigest': digest,
+            'head': head,
+            'integrationBranch': integration_branch,
+            'worktrees': self._worktrees(repo_root),
+            'remoteRefs': remote_refs,
+            'managedLocalRefs': managed_local_refs,
+            'refTransactionRefs': ref_transaction_refs,
+            'baseRef': base_ref,
+            'baseRefFullName': base_ref_full_name,
+            'baseRefSha': base_ref_sha,
+            'baseRefObjectSha': base_ref_object_sha,
+            'baseRefObservation': base_ref_observation,
+            'indexSha256': self._index_sha256(repo_root),
+            'unmappedIntegrationCommits': unmapped,
+            'coordination': coordination,
+        }
+
+    def _journal_directory(self, request):
+        repo_root = self._repo_root(request)
+        return git_common_dir(repo_root) / 'syncwheel' / 'revision-provider'
+
+    def _journal_path(self, request):
+        return self._journal_directory(request) / f'{request.operation_id}.json'
+
+    @contextlib.contextmanager
+    def operation_lock(self, request):
+        if fcntl is None:
+            self._fail(f'revision-provider locking is unsupported on {sys.platform}')
+        directory = self._journal_directory(request)
+        directory.mkdir(parents=True, exist_ok=True)
+        lock_path = directory / 'provider.lock'
+        with lock_path.open('a+') as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                self._fail(f'another revision-provider operation holds {lock_path}')
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def load_journal(self, request):
+        path = self._journal_path(request)
+        if not path.exists():
+            return None
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            self._fail(f'invalid revision-provider journal {path}: {exc}')
+        if not isinstance(payload, dict):
+            self._fail(f'invalid revision-provider journal root: {path}')
+        return payload
+
+    def _fsync_directory(self, directory):
+        descriptor = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def save_journal(self, request, journal):
+        path = self._journal_path(request)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        encoded = json.dumps(journal, indent=2, sort_keys=True) + '\n'
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f'.{request.operation_id}.', suffix='.tmp', dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(descriptor, 0o600)
+            with os.fdopen(descriptor, 'w') as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            self._fsync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def delete_journal(self, request):
+        path = self._journal_path(request)
+        path.unlink(missing_ok=True)
+        if path.parent.exists():
+            self._fsync_directory(path.parent)
+
+    def check(self, request):
+        observation = self._validate_repository(
+            self._repo_root(request), request, require_clean=True
+        )
+        stacks = stack_map(observation['manifest'])
+        if request.draft_stack_id in stacks:
+            self._fail(f'draft stack id already exists: {request.draft_stack_id}')
+        if any(
+            stack['branch'] == request.draft_branch
+            for stack in observation['manifest']['stacks']
+        ) or branch_exists(observation['repoRoot'], request.draft_branch):
+            self._fail(f'draft branch already exists: {request.draft_branch}')
+        return observation
+
+    def preflight(self, request):
+        observation = self._validate_repository(
+            self._repo_root(request), request, require_clean=False
+        )
+        self._validate_before_hashes_at_head(observation['repoRoot'], request)
+        self._ensure_after_scope(observation['repoRoot'], request)
+        stacks = stack_map(observation['manifest'])
+        if request.draft_stack_id in stacks:
+            self._fail(f'draft stack id already exists: {request.draft_stack_id}')
+        if any(
+            stack['branch'] == request.draft_branch
+            for stack in observation['manifest']['stacks']
+        ) or branch_exists(observation['repoRoot'], request.draft_branch):
+            self._fail(f'draft branch already exists: {request.draft_branch}')
+        return observation
+
+    def verify_after_paths(self, request):
+        repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        if get_current_branch(repo_root) != manifest['integration']['branch']:
+            self._fail('integration branch changed after preflight')
+        if ref_tip(repo_root, 'HEAD') != request.expected_head:
+            self._fail('integration HEAD changed after preflight')
+        current_digest = manifest_digest(manifest)
+        journal = self.load_journal(request)
+        expected_digest = (
+            journal.get('observedManifestDigest') if journal else request.expected_manifest_digest
+        )
+        if expected_digest and current_digest != expected_digest:
+            self._fail('manifest changed after preflight')
+        if journal:
+            expected_refs = dict(journal['managedLocalRefs'])
+            expected_refs.update(journal['baselineRemoteRefs'])
+            if journal.get('baseRefFullName'):
+                expected_refs[journal['baseRefFullName']] = journal[
+                    'baseRefObservation'
+                ]
+            expected_refs[f'refs/heads/{request.draft_branch}'] = None
+            self._assert_ref_leases(repo_root, expected_refs)
+            self._assert_index_lease(
+                repo_root, journal['baselineIndexSha256'], 'preflight'
+            )
+        self._ensure_after_scope(repo_root, request)
+
+    def _prepare_exact_commit(self, repo_root, parent, path_objects, message):
+        descriptor, index_name = tempfile.mkstemp(prefix='syncwheel-revision-index-')
+        os.close(descriptor)
+        index_path = Path(index_name)
+        index_path.unlink(missing_ok=True)
+        environment = {'GIT_INDEX_FILE': str(index_path)}
+        try:
+            git(repo_root, 'read-tree', parent, env=environment)
+            for relative, entry in sorted(path_objects.items()):
+                if entry['blob'] is None:
+                    git(
+                        repo_root, 'update-index', '--force-remove', '--', relative,
+                        env=environment, check=False,
+                    )
+                    continue
+                git(
+                    repo_root,
+                    'update-index',
+                    '--add',
+                    '--cacheinfo',
+                    f"{entry['mode']},{entry['blob']},{relative}",
+                    env=environment,
+                )
+            tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
+            parent_tree = ref_tree(repo_root, parent)
+            if tree == parent_tree:
+                return None
+            command = with_git_identity(
+                repo_root,
+                ['git', 'commit-tree', tree, '-p', parent, '-F', '-'],
+            )
+            commit = run(command, cwd=repo_root, input_text=message).stdout.strip()
+            changed = set(
+                item
+                for item in git(
+                    repo_root,
+                    'diff-tree',
+                    '--no-commit-id',
+                    '--name-only',
+                    '-r',
+                    '-z',
+                    parent,
+                    commit,
+                ).stdout.split('\0')
+                if item
+            )
+            if not changed or changed != set(path_objects):
+                self._fail('prepared commit escaped the exact path allowlist')
+            return {'commit': commit, 'tree': tree, 'pathObjects': path_objects}
+        finally:
+            index_path.unlink(missing_ok=True)
+
+    def prepare_product_commit(self, request, message):
+        repo_root = self._repo_root(request)
+        self._ensure_after_scope(repo_root, request)
+        path_objects = self._capture_path_objects(repo_root, request)
+        prepared = self._prepare_exact_commit(
+            repo_root,
+            request.expected_head,
+            path_objects,
+            message,
+        )
+        if prepared is None:
+            return None
+        return {
+            'candidateProductCommitSha': prepared['commit'],
+            'candidateProductTreeSha': prepared['tree'],
+            'productPathObjects': prepared['pathObjects'],
+        }
+
+    def prepare_draft_projection(self, request, journal):
+        repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        if manifest_digest(manifest) != journal['observedManifestDigest']:
+            self._fail('manifest changed before draft object preparation')
+        projection = deterministic_stack_projection(
+            repo_root,
+            journal['baseRefSha'],
+            [journal['candidateProductCommitSha']],
+        )
+        if projection['status'] == 'conflict':
+            self._fail(
+                'product commit has a conflicting draft projection; no managed ref was moved'
+            )
+        if projection['status'] == 'empty':
+            self._fail(
+                'product commit has an empty draft projection; no managed ref was moved'
+            )
+        return {
+            'candidateDraftCommitSha': projection['tip'],
+            'candidateDraftTreeSha': projection['tree'],
+        }
+
+    def current_head(self, request):
+        return ref_tip(self._repo_root(request), 'HEAD')
+
+    def _tree_entry(self, repo_root, commit, relative):
+        listing = git(repo_root, 'ls-tree', '-z', commit, '--', relative, check=False)
+        if listing.returncode != 0:
+            self._fail(f'could not inspect candidate tree path: {relative}')
+        if not listing.stdout:
+            return None
+        entry = listing.stdout.rstrip('\0')
+        metadata, separator, listed_path = entry.partition('\t')
+        if not separator or listed_path != relative:
+            self._fail(f'ambiguous candidate tree entry: {relative}')
+        mode, object_type, object_id = metadata.split(' ', 2)
+        if object_type != 'blob' or mode not in {'100644', '100755'}:
+            self._fail(f'candidate tree path is not a regular blob: {relative}')
+        return {'mode': mode, 'blob': object_id}
+
+    def _verify_candidate_object(
+        self, repo_root, commit, tree, parent, path_objects
+    ):
+        if ref_tip(repo_root, f'{commit}^') != parent:
+            self._fail('journaled candidate parent changed or is unavailable')
+        if ref_tree(repo_root, commit) != tree:
+            self._fail('journaled candidate tree does not match its object id')
+        changed = {
+            item for item in git(
+                repo_root, 'diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
+                parent, commit,
+            ).stdout.split('\0') if item
+        }
+        if changed != set(path_objects):
+            self._fail('journaled candidate tree escaped the exact path allowlist')
+        for relative, expected in path_objects.items():
+            actual = self._tree_entry(repo_root, commit, relative)
+            if expected['blob'] is None:
+                if actual is not None:
+                    self._fail(f'candidate did not delete declared path: {relative}')
+                continue
+            if actual != {'mode': expected['mode'], 'blob': expected['blob']}:
+                self._fail(f'candidate blob or mode lease failed for {relative}')
+            result = subprocess.run(
+                ['git', 'cat-file', 'blob', expected['blob']],
+                cwd=repo_root,
+                capture_output=True,
+            )
+            if result.returncode != 0:
+                self._fail(f'candidate blob is unavailable for {relative}')
+            if hashlib.sha256(result.stdout).hexdigest() != expected['sha256']:
+                self._fail(f'candidate blob bytes do not match declared hash for {relative}')
+
+    def _verify_worktree_objects(self, repo_root, path_objects):
+        for relative, expected in path_objects.items():
+            observed = self._read_product_path(repo_root, relative)
+            if expected['blob'] is None:
+                if observed is not None:
+                    self._fail(f'declared deletion was replaced before ref update: {relative}')
+                continue
+            if observed is None:
+                self._fail(f'declared file disappeared before ref update: {relative}')
+            if (
+                observed['sha256'] != expected['sha256']
+                or observed['mode'] != expected['mode']
+            ):
+                self._fail(f'worktree bytes or mode changed before ref update: {relative}')
+
+    def _expected_managed_refs(self, request, journal, integration_tip, *, draft_owned):
+        expected = dict(journal['managedLocalRefs'])
+        expected.update(journal['baselineRemoteRefs'])
+        if journal.get('baseRefFullName'):
+            expected[journal['baseRefFullName']] = journal['baseRefObservation']
+        manifest, _ = self._manifest(self._repo_root(request))
+        integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+        expected[integration_ref] = self._direct_ref_observation(
+            integration_ref, integration_tip
+        )
+        draft_ref = f'refs/heads/{request.draft_branch}'
+        expected[draft_ref] = (
+            self._direct_ref_observation(
+                draft_ref, journal['candidateDraftCommitSha']
+            )
+            if draft_owned
+            else None
+        )
+        return expected
+
+    def _assert_operation_worktree(self, repo_root, request, journal, kind):
+        manifest, _ = self._manifest(repo_root)
+        if kind == 'product':
+            if manifest_digest(manifest) != journal['observedManifestDigest']:
+                self._fail('manifest changed before product ref ownership')
+            self._ensure_after_scope(repo_root, request)
+            return
+        if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+            self._fail('control ref update requires a clean, conflict-free index')
+        dirty = self._dirty_paths(repo_root)
+        if dirty != {self.MANIFEST_PRODUCT_PATH}:
+            self._fail(
+                'control ref update requires only .syncwheel/manifest.json; found: '
+                + ', '.join(sorted(dirty))
+            )
+        if manifest_digest(manifest) != journal['manifestDigest']:
+            self._fail('manifest changed before control ref update')
+
+    def _assert_ref_leases(self, repo_root, expected):
+        drift = []
+        for ref, observation in sorted(expected.items()):
+            actual = self._observe_ref(repo_root, ref)
+            if actual != observation:
+                drift.append(
+                    f'{ref} (expected {observation or "missing"}, '
+                    f'found {actual or "missing"})'
+                )
+        if drift:
+            self._fail('managed local ref lease was lost: ' + '; '.join(drift))
+
+    def _assert_index_lease(self, repo_root, expected, stage):
+        actual = self._index_sha256(repo_root)
+        if actual != expected:
+            self._fail(
+                f'real Git index lease was lost before {stage}: '
+                f'expected {expected}, found {actual}'
+            )
+
+    def _expand_symbolic_target_leases(self, repo_root, expected):
+        expanded = dict(expected)
+        pending = [
+            observation
+            for observation in expanded.values()
+            if observation is not None and observation['kind'] == 'symbolic'
+        ]
+        visited = set()
+        while pending:
+            symbolic = pending.pop()
+            name = symbolic['name']
+            if name in visited:
+                continue
+            visited.add(name)
+            target = symbolic['symbolicTarget']
+            target_observation = expanded.get(target)
+            if target not in expanded:
+                target_observation = self._observe_ref(
+                    repo_root, target, allow_missing=False
+                )
+                expanded[target] = target_observation
+            if target_observation is None:
+                self._fail(
+                    f'symbolic ref lease target disappeared: {name!r} -> {target!r}'
+                )
+            if target_observation['objectOid'] != symbolic['objectOid']:
+                self._fail(
+                    f'symbolic ref lease object differs from its immediate target: '
+                    f'{name!r} -> {target!r}'
+                )
+            if target_observation['kind'] == 'symbolic':
+                pending.append(target_observation)
+        return expanded
+
+    def _journal_ref_transaction_refs(self, request, journal):
+        raw = journal.get('refTransactionRefs')
+        if not isinstance(raw, dict) or not raw:
+            self._fail(
+                'operation journal has no complete ref-transaction observation set'
+            )
+        integration_branch = journal.get('integrationBranch')
+        if (
+            not isinstance(integration_branch, str)
+            or run(
+                ['git', 'check-ref-format', '--branch', integration_branch],
+                check=False,
+            ).returncode != 0
+        ):
+            self._fail('operation journal has an invalid integration branch')
+
+        required = {
+            f'refs/heads/{integration_branch}',
+            f'refs/heads/{request.draft_branch}',
+        }
+        base_ref = journal.get('baseRefFullName')
+        if base_ref is not None:
+            if not isinstance(base_ref, str):
+                self._fail('operation journal has an invalid base ref name')
+            required.add(base_ref)
+        for field in ('managedLocalRefs', 'baselineRemoteRefs'):
+            source = journal.get(field)
+            if not isinstance(source, dict):
+                self._fail(f'operation journal has an invalid {field} snapshot')
+            required.update(source)
+            for name, observation in source.items():
+                if name not in raw or raw[name] != observation:
+                    self._fail(
+                        f'operation journal ref-transaction snapshot omitted or '
+                        f'changed {name!r} from {field}'
+                    )
+        if base_ref is not None and raw.get(base_ref) != journal.get(
+            'baseRefObservation'
+        ):
+            self._fail(
+                'operation journal ref-transaction snapshot changed its base ref'
+            )
+        missing = sorted(required.difference(raw))
+        if missing:
+            self._fail(
+                'operation journal ref-transaction snapshot omitted required refs: '
+                + ', '.join(missing)
+            )
+
+        observations = {}
+        fields = {'name', 'kind', 'objectOid', 'symbolicTarget'}
+        for name, observation in raw.items():
+            if (
+                not isinstance(name, str)
+                or run(['git', 'check-ref-format', name], check=False).returncode != 0
+            ):
+                self._fail(
+                    f'operation journal contains an invalid ref-transaction name: '
+                    f'{name!r}'
+                )
+            if observation is None:
+                observations[name] = None
+                continue
+            if not isinstance(observation, dict) or set(observation) != fields:
+                self._fail(
+                    f'operation journal contains an invalid typed ref observation '
+                    f'for {name!r}'
+                )
+            kind = observation.get('kind')
+            target = observation.get('symbolicTarget')
+            if (
+                observation.get('name') != name
+                or kind not in {'direct', 'symbolic'}
+                or not re.fullmatch(r'[0-9a-f]{40}', observation.get('objectOid') or '')
+            ):
+                self._fail(
+                    f'operation journal contains an invalid typed ref observation '
+                    f'for {name!r}'
+                )
+            if kind == 'direct' and target is not None:
+                self._fail(
+                    f'operation journal direct ref {name!r} has a symbolic target'
+                )
+            if kind == 'symbolic' and (
+                not isinstance(target, str)
+                or run(['git', 'check-ref-format', target], check=False).returncode != 0
+            ):
+                self._fail(
+                    f'operation journal symbolic ref {name!r} has an invalid target'
+                )
+            observations[name] = observation
+
+        for name, observation in observations.items():
+            if observation is None or observation['kind'] != 'symbolic':
+                continue
+            target = observation['symbolicTarget']
+            target_observation = observations.get(target)
+            if target not in observations or target_observation is None:
+                self._fail(
+                    f'operation journal symbolic ref {name!r} omitted its typed '
+                    f'referent {target!r}'
+                )
+            if target_observation['objectOid'] != observation['objectOid']:
+                self._fail(
+                    f'operation journal symbolic ref {name!r} differs from its '
+                    f'referent {target!r}'
+                )
+        return observations
+
+    def verify_recovery_gate(self, request, journal):
+        repo_root = self._repo_root(request)
+        expected = self._journal_ref_transaction_refs(request, journal)
+        self._assert_no_ref_transaction_locks(repo_root, expected)
+
+    def _ref_transaction_lock_paths(self, repo_root, expected):
+        paths = []
+        for ref in sorted(expected):
+            raw = git(
+                repo_root, 'rev-parse', '--git-path', f'{ref}.lock'
+            ).stdout.strip()
+            path = Path(raw)
+            if not path.is_absolute():
+                path = repo_root / path
+            paths.append(Path(os.path.abspath(path)))
+        packed_raw = git(
+            repo_root, 'rev-parse', '--git-path', 'packed-refs.lock'
+        ).stdout.strip()
+        packed = Path(packed_raw)
+        if not packed.is_absolute():
+            packed = repo_root / packed
+        paths.append(Path(os.path.abspath(packed)))
+        head_raw = git(
+            repo_root, 'rev-parse', '--git-path', 'HEAD.lock'
+        ).stdout.strip()
+        head = Path(head_raw)
+        if not head.is_absolute():
+            head = repo_root / head
+        paths.append(Path(os.path.abspath(head)))
+        return sorted(set(paths), key=str)
+
+    def _assert_no_ref_transaction_locks(self, repo_root, expected):
+        existing = [
+            path
+            for path in self._ref_transaction_lock_paths(repo_root, expected)
+            if path.exists() or path.is_symlink()
+        ]
+        if existing:
+            self._fail(
+                'Git ref transaction lock ownership cannot be proven after an '
+                'interrupted writer; automatic cleanup is forbidden. Verify no '
+                'Git writer is active, inspect and remove only these exact lock '
+                'paths manually, then retry recover: '
+                + ', '.join(str(path) for path in existing)
+            )
+
+    def _cas_ref_with_leases(self, repo_root, target_ref, new_tip, expected):
+        expected = self._expand_symbolic_target_leases(repo_root, expected)
+        target_observation = expected[target_ref]
+        if target_observation is not None and target_observation['kind'] != 'direct':
+            self._fail(f'compare-and-swap target must be a direct ref: {target_ref}')
+        self._assert_ref_leases(repo_root, expected)
+        self._assert_no_ref_transaction_locks(repo_root, expected)
+        commands = []
+        for ref, observation in sorted(expected.items()):
+            old = (
+                observation['objectOid']
+                if observation is not None
+                else ('0' * 40)
+            )
+            commands.append('option no-deref')
+            if ref == target_ref:
+                commands.append(f'update {ref} {new_tip} {old}')
+            else:
+                commands.append(f'verify {ref} {old}')
+
+        process = subprocess.Popen(
+            ['git', 'update-ref', '--stdin'],
+            cwd=repo_root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        prepared = False
+        try:
+            process.stdin.write('start\n')
+            process.stdin.flush()
+            start_response = process.stdout.readline().strip()
+            if start_response != 'start: ok':
+                stdout, stderr = self._abort_ref_transaction(process)
+                detail = stderr.strip() or stdout.strip() or start_response
+                self._fail(f'managed ref transaction could not start: {detail}')
+
+            process.stdin.write('\n'.join([*commands, 'prepare', '']))
+            process.stdin.flush()
+            prepare_response = process.stdout.readline().strip()
+            if prepare_response != 'prepare: ok':
+                stdout, stderr = self._abort_ref_transaction(process)
+                detail = stderr.strip() or stdout.strip() or prepare_response
+                self._fail(f'managed ref transaction could not prepare: {detail}')
+            prepared = True
+
+            self.checkpoint('ref_transaction_prepared')
+            self._assert_ref_leases(repo_root, expected)
+
+            process.stdin.write('commit\n')
+            process.stdin.flush()
+            process.stdin.close()
+            stdout = process.stdout.read()
+            stderr = process.stderr.read()
+            process.stdout.close()
+            process.stderr.close()
+            returncode = process.wait()
+            prepared = False
+            if returncode != 0 or stdout.strip() != 'commit: ok':
+                detail = stderr.strip() or stdout.strip()
+                self._fail(
+                    'managed ref compare-and-swap failed during commit: ' + detail
+                )
+        except BaseException:
+            if prepared or process.poll() is None:
+                self._abort_ref_transaction(process)
+            raise
+
+    def _abort_ref_transaction(self, process):
+        if process.poll() is None and process.stdin and not process.stdin.closed:
+            try:
+                process.stdin.write('abort\n')
+                process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                pass
+        if process.stdin and not process.stdin.closed:
+            process.stdin.close()
+        stdout = process.stdout.read() if process.stdout else ''
+        stderr = process.stderr.read() if process.stderr else ''
+        if process.stdout:
+            process.stdout.close()
+        if process.stderr:
+            process.stderr.close()
+        process.wait()
+        return stdout, stderr
+
+    def _verify_draft_candidate(self, repo_root, request, journal):
+        projection = deterministic_stack_projection(
+            repo_root,
+            journal['baseRefSha'],
+            [journal['candidateProductCommitSha']],
+        )
+        if projection.get('status') != 'projected':
+            self._fail('draft projection is no longer a non-empty conflict-free object')
+        if (
+            projection['tip'] != journal['candidateDraftCommitSha']
+            or projection['tree'] != journal['candidateDraftTreeSha']
+        ):
+            self._fail('journaled draft projection object changed')
+
+    def ensure_draft_ref_owned(self, request, journal):
+        repo_root = self._repo_root(request)
+        self.verify_recovery_gate(request, journal)
+        if ref_tip(repo_root, 'HEAD') != request.expected_head:
+            self._fail('integration advanced before draft ownership')
+        self._assert_operation_worktree(repo_root, request, journal, 'product')
+        self._verify_candidate_object(
+            repo_root,
+            journal['candidateProductCommitSha'],
+            journal['candidateProductTreeSha'],
+            request.expected_head,
+            journal['productPathObjects'],
+        )
+        self._verify_worktree_objects(repo_root, journal['productPathObjects'])
+        self._verify_draft_candidate(repo_root, request, journal)
+        self._assert_index_lease(
+            repo_root, journal['baselineIndexSha256'], 'draft ownership'
+        )
+        expected = self._expected_managed_refs(
+            request, journal, request.expected_head, draft_owned=False
+        )
+        draft_ref = f'refs/heads/{request.draft_branch}'
+        actual = self._observe_ref(repo_root, draft_ref)
+        actual_oid = actual['objectOid'] if actual is not None else None
+        if actual_oid == journal['candidateDraftCommitSha']:
+            expected[draft_ref] = self._direct_ref_observation(
+                draft_ref, journal['candidateDraftCommitSha']
+            )
+            self._assert_ref_leases(repo_root, expected)
+            self.verify_recovery_gate(request, journal)
+            return
+        if actual_oid is not None:
+            self._fail(f'draft branch collision: expected absent, found {actual_oid}')
+        self._cas_ref_with_leases(
+            repo_root, draft_ref, journal['candidateDraftCommitSha'], expected
+        )
+        self.verify_recovery_gate(request, journal)
+        self.checkpoint('draft_ref_cas')
+
+    def _run_commit_validation_hooks(self, repo_root, commit):
+        hooks_dir, _ = active_hooks_dir(repo_root)
+        prepare_commit_message = hooks_dir / 'prepare-commit-msg'
+        if prepare_commit_message.is_file() and os.access(prepare_commit_message, os.X_OK):
+            self._fail(
+                'executable prepare-commit-msg hooks are unsupported by the deterministic '
+                'revision provider; disable the hook or commit outside this provider'
+            )
+        descriptor, index_name = tempfile.mkstemp(prefix='syncwheel-hook-index-')
+        os.close(descriptor)
+        index_path = Path(index_name)
+        index_path.unlink(missing_ok=True)
+        message_descriptor, message_name = tempfile.mkstemp(
+            prefix='syncwheel-commit-message-', suffix='.txt'
+        )
+        message_path = Path(message_name)
+        message = git(repo_root, 'show', '-s', '--format=%B', commit).stdout
+        try:
+            with os.fdopen(message_descriptor, 'w') as handle:
+                handle.write(message)
+                handle.flush()
+                os.fsync(handle.fileno())
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    'GIT_INDEX_FILE': str(index_path),
+                    'SYNCWHEEL_REVISION_PROVIDER_COMMIT': commit,
+                }
+            )
+            git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(index_path)})
+            for hook_name, arguments in (
+                ('pre-commit', []),
+                ('commit-msg', [str(message_path)]),
+            ):
+                hook = hooks_dir / hook_name
+                if not hook.is_file() or not os.access(hook, os.X_OK):
+                    continue
+                result = subprocess.run(
+                    [str(hook), *arguments],
+                    cwd=repo_root,
+                    text=True,
+                    capture_output=True,
+                    env=environment,
+                )
+                if result.returncode != 0:
+                    detail = (result.stderr.strip() or result.stdout.strip())[:2000]
+                    suffix = f': {detail}' if detail else ''
+                    self._fail(
+                        f'{hook_name} hook rejected prepared commit '
+                        f'(exit {result.returncode}){suffix}'
+                    )
+            hook_tree = git(
+                repo_root,
+                'write-tree',
+                env={'GIT_INDEX_FILE': str(index_path)},
+            ).stdout.strip()
+            if hook_tree != ref_tree(repo_root, commit):
+                self._fail('commit hook modified the deterministic provider index')
+            if message_path.read_text() != message:
+                self._fail('commit-msg hook modified the deterministic provider message')
+        finally:
+            index_path.unlink(missing_ok=True)
+            message_path.unlink(missing_ok=True)
+
+    def _hook_repository_snapshot(self, repo_root, path_objects):
+        observed_paths = {}
+        for relative in path_objects:
+            observed = self._read_product_path(repo_root, relative)
+            observed_paths[relative] = None if observed is None else {
+                'sha256': observed['sha256'], 'mode': observed['mode'],
+            }
+        return {
+            'allRefs': self._all_refs(repo_root),
+            'headSymbolic': git(
+                repo_root, 'symbolic-ref', '--quiet', 'HEAD', check=False
+            ).stdout.strip() or None,
+            'headObject': ref_tip(repo_root, 'HEAD'),
+            'worktreePorcelain': self._worktree_porcelain(repo_root),
+            'indexSha256': self._index_sha256(repo_root),
+            'indexTree': git(repo_root, 'write-tree').stdout.strip(),
+            'status': git(
+                repo_root,
+                'status',
+                '--porcelain=v1',
+                '-z',
+                '--untracked-files=all',
+                env={'GIT_OPTIONAL_LOCKS': '0'},
+            ).stdout,
+            'paths': observed_paths,
+        }
+
+    def validate_prepared_commit(self, request, journal, kind):
+        repo_root = self._repo_root(request)
+        if kind == 'product':
+            commit = journal['candidateProductCommitSha']
+            tree = journal['candidateProductTreeSha']
+            parent = request.expected_head
+            path_objects = journal['productPathObjects']
+            integration_tip = request.expected_head
+            draft_owned = False
+        elif kind == 'control':
+            commit = journal['candidateControlCommitSha']
+            tree = journal['candidateControlTreeSha']
+            parent = journal['productCommitSha']
+            path_objects = journal['controlPathObjects']
+            integration_tip = journal['productCommitSha']
+            draft_owned = True
+        else:
+            self._fail(f'unknown prepared commit kind: {kind}')
+        self._assert_operation_worktree(repo_root, request, journal, kind)
+        self._verify_candidate_object(
+            repo_root, commit, tree, parent, path_objects
+        )
+        self._verify_worktree_objects(repo_root, path_objects)
+        if kind == 'product':
+            self._verify_draft_candidate(repo_root, request, journal)
+        expected_refs = self._expected_managed_refs(
+            request, journal, integration_tip, draft_owned=draft_owned
+        )
+        self._assert_ref_leases(repo_root, expected_refs)
+        expected_index = (
+            journal['baselineIndexSha256']
+            if kind == 'product'
+            else journal.get('productIndexSha256')
+        )
+        if not expected_index:
+            self._fail(f'{kind} index lease is missing from the operation journal')
+        self._assert_index_lease(repo_root, expected_index, f'{kind} hook validation')
+        before = self._hook_repository_snapshot(repo_root, path_objects)
+        rejection = None
+        try:
+            self._run_commit_validation_hooks(repo_root, commit)
+        except self.provider.RevisionProviderError as exc:
+            rejection = exc
+        after = self._hook_repository_snapshot(repo_root, path_objects)
+        if after != before:
+            self._fail(
+                'commit hook changed repository state; no subsequent managed ref was moved'
+            )
+        if rejection is not None:
+            raise rejection
+        self._verify_candidate_object(
+            repo_root, commit, tree, parent, path_objects
+        )
+        self._verify_worktree_objects(repo_root, path_objects)
+        self._assert_ref_leases(repo_root, expected_refs)
+
+    def publish_prepared_commit(self, request, commit, expected_parent):
+        repo_root = self._repo_root(request)
+        journal = self.load_journal(request)
+        if journal is None:
+            self._fail('prepared commit publication requires a journal')
+        self.verify_recovery_gate(request, journal)
+        parent = ref_tip(repo_root, f'{commit}^')
+        if parent != expected_parent:
+            self._fail(
+                f'prepared commit parent mismatch: expected {expected_parent}, found {parent}'
+            )
+        current_head = ref_tip(repo_root, 'HEAD')
+        if current_head not in {expected_parent, commit}:
+            self._fail('integration HEAD changed before compare-and-swap publication')
+        index_tree = git(repo_root, 'write-tree').stdout.strip()
+        if index_tree not in {ref_tree(repo_root, expected_parent), ref_tree(repo_root, commit)}:
+            self._fail('real index changed before compare-and-swap publication')
+        manifest, _ = self._manifest(repo_root)
+        branch = manifest['integration']['branch']
+        if get_current_branch(repo_root) != branch:
+            self._fail('primary checkout left the integration branch')
+        if expected_parent == request.expected_head:
+            expected_index = journal['baselineIndexSha256']
+            if not journal.get('productHooksValidated'):
+                self._fail('product hooks were not durably validated before draft ownership')
+            if ref_tip(repo_root, request.draft_branch) != journal.get(
+                'candidateDraftCommitSha'
+            ):
+                self._fail('draft ownership is missing before integration publication')
+            if current_head == expected_parent:
+                self._assert_operation_worktree(
+                    repo_root, request, journal, 'product'
+                )
+            self._verify_candidate_object(
+                repo_root, commit, journal['candidateProductTreeSha'], expected_parent,
+                journal['productPathObjects'],
+            )
+            self._verify_worktree_objects(repo_root, journal['productPathObjects'])
+            self._verify_draft_candidate(repo_root, request, journal)
+            expected_refs = self._expected_managed_refs(
+                request, journal, expected_parent, draft_owned=True
+            )
+        else:
+            expected_index = journal.get('productIndexSha256')
+            if not expected_index:
+                self._fail('product index lease is missing before control publication')
+            if not journal.get('controlHooksValidated'):
+                self._fail('control hooks were not durably validated before publication')
+            if current_head == expected_parent:
+                self._assert_operation_worktree(
+                    repo_root, request, journal, 'control'
+                )
+            self._verify_candidate_object(
+                repo_root, commit, journal['candidateControlTreeSha'], expected_parent,
+                journal['controlPathObjects'],
+            )
+            self._verify_worktree_objects(repo_root, journal['controlPathObjects'])
+            expected_refs = self._expected_managed_refs(
+                request, journal, expected_parent, draft_owned=True
+            )
+        integration_ref = f'refs/heads/{branch}'
+        if current_head == commit:
+            expected_refs[integration_ref] = self._direct_ref_observation(
+                integration_ref, commit
+            )
+            self._assert_ref_leases(repo_root, expected_refs)
+            self.verify_recovery_gate(request, journal)
+            return commit
+        self._assert_index_lease(repo_root, expected_index, 'integration publication')
+        self._assert_ref_leases(repo_root, expected_refs)
+        self._cas_ref_with_leases(repo_root, integration_ref, commit, expected_refs)
+        self.verify_recovery_gate(request, journal)
+        self.checkpoint(
+            'integration_product_cas'
+            if expected_parent == request.expected_head
+            else 'integration_control_cas'
+        )
+        return commit
+
+    def _deterministic_index(self, repo_root, commit):
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix='syncwheel-revision-aligned-index-'
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        temporary.unlink(missing_ok=True)
+        environment = {'GIT_INDEX_FILE': str(temporary)}
+        try:
+            git(repo_root, 'read-tree', commit, env=environment)
+            refreshed = git(
+                repo_root,
+                'update-index',
+                '--refresh',
+                check=False,
+                env=environment,
+            )
+            if refreshed.returncode != 0:
+                self._fail(
+                    'working tree does not match the commit during index preparation: '
+                    + (refreshed.stderr.strip() or refreshed.stdout.strip())
+                )
+            tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
+            expected_tree = ref_tree(repo_root, commit)
+            if tree != expected_tree:
+                self._fail('deterministic replacement index does not match the commit tree')
+            payload = temporary.read_bytes()
+            return payload, hashlib.sha256(payload).hexdigest()
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _index_alignment_directory(self, request):
+        return self._journal_directory(request) / 'index-alignment'
+
+    def _ensure_index_alignment_directory(self, request):
+        directory = self._index_alignment_directory(request)
+        if not directory.exists():
+            directory.mkdir(parents=True, exist_ok=True)
+            self._fsync_directory(directory.parent)
+        self._fsync_directory(directory)
+        return directory
+
+    def _index_alignment_record(
+        self, request, journal, kind, commit, expected_sha, desired_sha
+    ):
+        filename = (
+            f'{request.operation_id}-{kind}-{desired_sha}.index'
+        )
+        record = {
+            'schemaVersion': 1,
+            'kind': kind,
+            'commitSha': commit,
+            'expectedSha256': expected_sha,
+            'desiredSha256': desired_sha,
+            'backingFile': filename,
+        }
+        alignments = journal.get('indexAlignments')
+        if alignments is None:
+            alignments = {}
+        if not isinstance(alignments, dict):
+            self._fail('operation journal has invalid index-alignment ownership state')
+        existing = alignments.get(kind)
+        if existing is not None and existing != record:
+            self._fail(f'{kind} index-alignment ownership record changed')
+        if existing is None:
+            updated = copy.deepcopy(journal)
+            updated_alignments = dict(alignments)
+            updated_alignments[kind] = record
+            updated['indexAlignments'] = updated_alignments
+            self.save_journal(request, updated)
+            self.checkpoint(f'{kind}_index_alignment_prepared')
+        return record
+
+    def _prepare_index_backing(self, request, record, desired_payload, mode):
+        directory = self._ensure_index_alignment_directory(request)
+        backing = directory / record['backingFile']
+        if backing.parent != directory:
+            self._fail('index-alignment backing path escaped its ownership directory')
+        try:
+            existing_payload, metadata = self._read_regular_file(
+                backing, 'journaled index-alignment backing file'
+            )
+        except self.provider.RevisionProviderError as exc:
+            if backing.exists() or backing.is_symlink():
+                raise
+            descriptor = None
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, 'O_NOFOLLOW', 0)
+            )
+            try:
+                descriptor = os.open(backing, flags, mode)
+                os.fchmod(descriptor, mode)
+                _write_all(descriptor, desired_payload)
+                os.fsync(descriptor)
+            except FileExistsError:
+                self._fail(
+                    f'index-alignment backing file appeared concurrently: {backing}'
+                )
+            finally:
+                if descriptor is not None:
+                    os.close(descriptor)
+            self._fsync_directory(directory)
+            existing_payload, metadata = self._read_regular_file(
+                backing, 'journaled index-alignment backing file'
+            )
+        if hashlib.sha256(existing_payload).hexdigest() != record['desiredSha256']:
+            self._fail('journaled index-alignment backing bytes changed')
+        if existing_payload != desired_payload:
+            self._fail('journaled index-alignment backing payload is not deterministic')
+        if stat.S_IMODE(metadata.st_mode) != mode:
+            self._fail('journaled index-alignment backing mode changed')
+        self.checkpoint(f"{record['kind']}_index_backing_fsynced")
+        return backing
+
+    def _same_regular_inode(self, first, second):
+        try:
+            first_stat = os.lstat(first)
+            second_stat = os.lstat(second)
+        except FileNotFoundError:
+            return False
+        return (
+            stat.S_ISREG(first_stat.st_mode)
+            and stat.S_ISREG(second_stat.st_mode)
+            and first_stat.st_dev == second_stat.st_dev
+            and first_stat.st_ino == second_stat.st_ino
+        )
+
+    def _remove_owned_index_lock(self, lock_path, backing):
+        if not self._same_regular_inode(lock_path, backing):
+            return False
+        os.unlink(lock_path)
+        self._fsync_directory(lock_path.parent)
+        return True
+
+    def _remove_index_backing(self, backing):
+        try:
+            metadata = os.lstat(backing)
+        except FileNotFoundError:
+            return
+        if not stat.S_ISREG(metadata.st_mode):
+            self._fail(f'index-alignment backing is no longer regular: {backing}')
+        os.unlink(backing)
+        self._fsync_directory(backing.parent)
+
+    def recover_owned_index_lock(self, request, journal):
+        index_path = self._index_path(self._repo_root(request))
+        lock_path = Path(f'{index_path}.lock')
+        if not (lock_path.exists() or lock_path.is_symlink()):
+            return
+        alignments = journal.get('indexAlignments')
+        if not isinstance(alignments, dict):
+            self._fail(f'Git index is locked by another writer: {lock_path}')
+        owned = []
+        for kind, record in alignments.items():
+            if kind not in {'product', 'control'} or not isinstance(record, dict):
+                self._fail('operation journal has invalid index-alignment ownership state')
+            commit = record.get('commitSha')
+            expected_sha = record.get('expectedSha256')
+            desired_sha = record.get('desiredSha256')
+            expected_filename = f'{request.operation_id}-{kind}-{desired_sha}.index'
+            if (
+                not isinstance(commit, str)
+                or not self.provider.HEX_40.fullmatch(commit)
+                or not isinstance(expected_sha, str)
+                or not self.provider.HEX_64.fullmatch(expected_sha)
+                or not isinstance(desired_sha, str)
+                or not self.provider.HEX_64.fullmatch(desired_sha)
+                or record.get('backingFile') != expected_filename
+            ):
+                self._fail('operation journal has invalid index-alignment ownership state')
+            backing = self._index_alignment_directory(request) / expected_filename
+            if self._same_regular_inode(lock_path, backing):
+                owned.append((kind, record, backing))
+        if len(owned) != 1:
+            self._fail(f'Git index is locked by another writer: {lock_path}')
+        kind, record, backing = owned[0]
+        repo_root = self._repo_root(request)
+        if ref_tip(repo_root, 'HEAD') != record['commitSha']:
+            self._fail(
+                f'journaled {kind} index.lock is not aligned with current HEAD; '
+                'automatic recovery is unsafe'
+            )
+        current_sha = self._index_sha256(repo_root)
+        if current_sha not in {
+            record['expectedSha256'], record['desiredSha256']
+        }:
+            self._fail(
+                f'real Git index lease was lost while recovering {kind} index.lock'
+            )
+        if not self._remove_owned_index_lock(lock_path, backing):
+            self._fail('journaled index.lock ownership changed during recovery')
+        self.checkpoint(f'{kind}_index_lock_recovered')
+
+    def align_index(self, request, commit):
+        repo_root = self._repo_root(request)
+        if ref_tip(repo_root, 'HEAD') != commit:
+            self._fail('cannot align index to a non-current revision')
+        journal = self.load_journal(request)
+        if journal is None:
+            self._fail('index alignment requires an operation journal')
+        if commit == journal.get('candidateProductCommitSha'):
+            kind = 'product'
+            expected_sha = journal['baselineIndexSha256']
+        elif commit == journal.get('candidateControlCommitSha'):
+            kind = 'control'
+            expected_sha = journal.get('productIndexSha256')
+        else:
+            self._fail('index alignment commit is not owned by this operation')
+        if not expected_sha:
+            self._fail(f'{kind} index alignment has no predecessor lease')
+
+        desired_payload, desired_sha = self._deterministic_index(repo_root, commit)
+        current_sha = self._index_sha256(repo_root)
+        if current_sha not in {expected_sha, desired_sha}:
+            self._fail(
+                f'real Git index lease was lost before {kind} alignment: '
+                f'expected {expected_sha}, found {current_sha}'
+            )
+
+        self.checkpoint(f'before_{kind}_index_lock')
+        index_path = self._index_path(repo_root)
+        lock_path = Path(f'{index_path}.lock')
+        try:
+            _, index_metadata = self._read_regular_file(index_path, 'Git index')
+            mode = stat.S_IMODE(index_metadata.st_mode)
+        except FileNotFoundError:
+            self._fail(f'revision provider requires an existing Git index: {index_path}')
+
+        current_sha = self._index_sha256(repo_root)
+        if current_sha not in {expected_sha, desired_sha}:
+            self._fail(
+                f'real Git index lease was lost before {kind} alignment: '
+                f'expected {expected_sha}, found {current_sha}'
+            )
+        record = self._index_alignment_record(
+            request, journal, kind, commit, expected_sha, desired_sha
+        )
+        backing = self._prepare_index_backing(
+            request, record, desired_payload, mode
+        )
+
+        if current_sha == desired_sha:
+            if lock_path.exists() or lock_path.is_symlink():
+                if not self._remove_owned_index_lock(lock_path, backing):
+                    self._fail(f'Git index is locked by another writer: {lock_path}')
+            self._fsync_directory(index_path.parent)
+            self._remove_index_backing(backing)
+            if git(repo_root, 'write-tree').stdout.strip() != ref_tree(repo_root, commit):
+                self._fail('aligned index hash does not produce the current commit tree')
+            return desired_sha
+
+        lock_owned = False
+        try:
+            try:
+                os.link(backing, lock_path, follow_symlinks=False)
+                lock_owned = True
+                self._fsync_directory(lock_path.parent)
+            except FileExistsError:
+                if not self._same_regular_inode(lock_path, backing):
+                    self._fail(f'Git index is locked by another writer: {lock_path}')
+                lock_owned = True
+            if not self._same_regular_inode(lock_path, backing):
+                self._fail('journaled index.lock ownership could not be proven')
+            self.checkpoint(f'{kind}_index_lock_owned')
+            locked_sha = self._index_sha256(repo_root)
+            if locked_sha != expected_sha:
+                self._fail(
+                    f'real Git index lease was lost before {kind} alignment: '
+                    f'expected {expected_sha}, found {locked_sha}'
+                )
+            final_sha = self._index_sha256(repo_root)
+            if final_sha != expected_sha:
+                self._fail(
+                    f'real Git index changed while {kind} alignment held index.lock'
+                )
+            os.replace(lock_path, index_path)
+            lock_owned = False
+            fsync_directory_path(index_path.parent)
+            self.checkpoint(f'{kind}_index_cas')
+        except BaseException:
+            if lock_owned:
+                self._remove_owned_index_lock(lock_path, backing)
+            raise
+        finally:
+            if lock_owned:
+                self._remove_owned_index_lock(lock_path, backing)
+        self._remove_index_backing(backing)
+        if self._index_sha256(repo_root) != desired_sha:
+            self._fail(f'real Git index did not retain the {kind} replacement bytes')
+        if git(repo_root, 'write-tree').stdout.strip() != ref_tree(repo_root, commit):
+            self._fail(f'real Git index did not align to the {kind} commit tree')
+        return desired_sha
+
+    def _desired_stack(self, request, journal, manifest):
+        return {
+            'id': request.draft_stack_id,
+            'branch': request.draft_branch,
+            'base': journal['baseRefSha'],
+            'target_remote': manifest['defaults']['canonical_remote'],
+            'target_branch': manifest['defaults']['base_branch'],
+            'integration_branch': manifest['integration']['branch'],
+            'commits': [journal['productCommitSha']],
+            'state': 'draft',
+            'publication': {'enabled': False},
+            'meta': {
+                'purpose': f'Own Agentwheel operation {request.operation_id}',
+                'agentwheel_operation_id': request.operation_id,
+                'agentwheel_plan_digest': request.plan_digest,
+            },
+        }
+
+    def _manifest_without_operation_stack(self, manifest, request):
+        stripped = copy.deepcopy(manifest)
+        stripped['stacks'] = [
+            stack for stack in stripped['stacks']
+            if stack['id'] != request.draft_stack_id
+        ]
+        stripped['integration']['stacks'] = [
+            stack_id for stack_id in stripped['integration'].get('stacks', [])
+            if stack_id != request.draft_stack_id
+        ]
+        return stripped
+
+    def _assert_draft_branch(self, repo_root, desired, journal):
+        journal_tip = ref_tip(repo_root, desired['branch'])
+        expected_tip = deterministic_stack_replay_tip(
+            repo_root, journal['baseRefSha'], desired['commits']
+        )
+        if not expected_tip:
+            self._fail('owned draft projection is no longer reproducible')
+        if journal_tip != expected_tip:
+            self._fail(
+                f'draft branch collision: expected {expected_tip}, found {journal_tip}'
+            )
+
+    def ensure_stack_owned(self, request, journal):
+        repo_root = self._repo_root(request)
+        if ref_tip(repo_root, 'HEAD') != journal['productCommitSha']:
+            self._fail('product commit is not the current integration HEAD')
+        self._assert_ref_leases(
+            repo_root,
+            self._expected_managed_refs(
+                request, journal, journal['productCommitSha'], draft_owned=True
+            ),
+        )
+        manifest, manifest_path = self._manifest(repo_root)
+        with manifest_write_transaction(repo_root, manifest_path, 'revision-provider'):
+            manifest, _ = self._manifest(repo_root)
+            desired = self._desired_stack(request, journal, manifest)
+            existing = stack_map(manifest).get(request.draft_stack_id)
+            if existing is not None:
+                if existing != desired:
+                    self._fail(f'draft stack collision: {request.draft_stack_id}')
+                stripped = self._manifest_without_operation_stack(manifest, request)
+                if manifest_digest(stripped) != journal['observedManifestDigest']:
+                    self._fail('manifest contains changes beyond this operation draft stack')
+                if not branch_exists(repo_root, request.draft_branch):
+                    self._fail('owned draft stack branch is missing')
+                if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+                    self._fail('manifest recovery requires a clean, conflict-free index')
+                if self._dirty_paths(repo_root) != {self.MANIFEST_PRODUCT_PATH}:
+                    self._fail(
+                        'manifest recovery found changes beyond the journaled manifest'
+                    )
+                self._assert_draft_branch(repo_root, desired, journal)
+                context = {
+                    'operation_id': request.operation_id,
+                    'plan_digest': request.plan_digest,
+                    'stack': request.draft_stack_id,
+                    'branch': request.draft_branch,
+                    'product_commit': journal['productCommitSha'],
+                }
+                if not journal.get('manifestReplaced'):
+                    journal['manifestDigest'] = manifest_digest(manifest)
+                    journal['manifestReplaced'] = True
+                    self.save_journal(request, journal)
+                    self.checkpoint('manifest_replaced')
+                self._ensure_ownership_ledger_event(
+                    repo_root, manifest_path, manifest, context, request, journal
+                )
+                return {'manifestDigest': manifest_digest(manifest)}
+
+            if manifest_digest(manifest) != journal['observedManifestDigest']:
+                self._fail('manifest changed before draft ownership')
+            self._ensure_clean(repo_root)
+            if any(stack['branch'] == request.draft_branch for stack in manifest['stacks']):
+                self._fail(f'draft branch is owned by another stack: {request.draft_branch}')
+            if ref_tip(repo_root, request.draft_branch) != journal.get(
+                'candidateDraftCommitSha'
+            ):
+                self._fail('draft ref ownership must be proven before manifest ownership')
+            self._assert_draft_branch(repo_root, desired, journal)
+            manifest['stacks'].append(desired)
+            if request.draft_stack_id not in manifest['integration']['stacks']:
+                manifest['integration']['stacks'].append(request.draft_stack_id)
+            validate_stack_dependency_graph(
+                manifest['stacks'],
+                require_declared_dependencies=manifest['version'] == MANIFEST_VERSION_CHANNELS,
+            )
+            desired_digest = manifest_digest(manifest)
+            context = {
+                'operation_id': request.operation_id,
+                'plan_digest': request.plan_digest,
+                'stack': request.draft_stack_id,
+                'branch': request.draft_branch,
+                'product_commit': journal['productCommitSha'],
+            }
+            require_manifest_transaction_current(manifest_path)
+            save_manifest(manifest_path, manifest)
+            self.checkpoint('manifest_replace_written')
+            journal['manifestDigest'] = desired_digest
+            journal['manifestReplaced'] = True
+            self.save_journal(request, journal)
+            self.checkpoint('manifest_replaced')
+            self._ensure_ownership_ledger_event(
+                repo_root, manifest_path, manifest, context, request, journal
+            )
+            persisted, _ = self._manifest(repo_root)
+            return {'manifestDigest': manifest_digest(persisted)}
+
+    def _ensure_ownership_ledger_event(
+        self, repo_root, manifest_path, manifest, context, request, journal
+    ):
+        recover_ledger_tail(repo_root, manifest_path)
+        desired_payload = manifest_event_payload(
+            manifest_path, manifest, 'revision_provider_stack_ownership', context
+        )
+        matching = []
+        for event in load_ledger_events(repo_root, manifest_path):
+            if event.get('type') != 'manifest_saved':
+                continue
+            payload = event.get('payload') or {}
+            event_context = payload.get('context') or {}
+            if event_context.get('operation_id') == request.operation_id:
+                matching.append(event)
+        if matching:
+            if len(matching) != 1 or matching[0].get('payload') != desired_payload:
+                self._fail(
+                    f'ledger collision for revision-provider operation {request.operation_id}'
+                )
+        else:
+            append_ledger_event(
+                repo_root, 'manifest_saved', desired_payload, manifest_path
+            )
+            self.checkpoint('ledger_event_written')
+        events = load_ledger_events(repo_root, manifest_path)
+        write_ledger_checkpoint(repo_root, reduce_ledger_state(events), manifest_path)
+        if not journal.get('ledgerAppended'):
+            journal['ledgerAppended'] = True
+            self.save_journal(request, journal)
+            self.checkpoint('ledger_appended')
+
+    def prepare_control_commit(self, request, message):
+        repo_root = self._repo_root(request)
+        journal = self.load_journal(request)
+        if not journal or ref_tip(repo_root, 'HEAD') != journal.get('productCommitSha'):
+            self._fail('control commit requires the product commit at integration HEAD')
+        if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+            self._fail('control commit requires a clean, conflict-free index')
+        dirty = self._dirty_paths(repo_root)
+        if dirty != {self.MANIFEST_PRODUCT_PATH}:
+            self._fail(
+                'control commit must contain only .syncwheel/manifest.json; found: '
+                + ', '.join(sorted(dirty))
+            )
+        path_objects = self._capture_path_objects(
+            repo_root, request, paths=[self.MANIFEST_PRODUCT_PATH]
+        )
+        prepared = self._prepare_exact_commit(
+            repo_root,
+            journal['productCommitSha'],
+            path_objects,
+            message,
+        )
+        if prepared is None:
+            return None
+        return {
+            'candidateControlCommitSha': prepared['commit'],
+            'candidateControlTreeSha': prepared['tree'],
+            'controlPathObjects': prepared['pathObjects'],
+        }
+
+    def _verify_invariants(self, repo_root, request, journal, expected_head):
+        self.verify_recovery_gate(request, journal)
+        if ref_tip(repo_root, 'HEAD') != expected_head:
+            self._fail('integration HEAD does not match the operation receipt')
+        status = git(
+            repo_root,
+            'status',
+            '--porcelain',
+            '--untracked-files=all',
+            env={'GIT_OPTIONAL_LOCKS': '0'},
+        ).stdout
+        if status.strip():
+            self._fail('revision-provider operation left repository changes behind')
+        manifest, _ = self._manifest(repo_root)
+        digest = manifest_digest(manifest)
+        if digest != journal['manifestDigest']:
+            self._fail('manifest digest does not match the operation receipt')
+        validation = validate_manifest(repo_root, manifest)
+        if validation['errors']:
+            self._fail('post-operation Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
+        if unmapped:
+            self._fail('operation left unmapped integration commits: ' + ', '.join(unmapped))
+        if self._worktrees(repo_root) != journal['baselineWorktrees']:
+            self._fail('operation leaked or removed a Git worktree')
+        if self._remote_refs(repo_root) != journal['baselineRemoteRefs']:
+            self._fail('operation changed a remote-tracking ref; publication is forbidden')
+        if journal.get('productCommitSha'):
+            expected_refs = self._expected_managed_refs(
+                request, journal, expected_head, draft_owned=True
+            )
+        else:
+            expected_refs = self._expected_managed_refs(
+                request, journal, expected_head, draft_owned=False
+            )
+        self._assert_ref_leases(repo_root, expected_refs)
+        expected_index = (
+            journal.get('controlIndexSha256')
+            if journal.get('productCommitSha')
+            else journal['baselineIndexSha256']
+        )
+        if not expected_index:
+            self._fail('terminal index lease is missing from the operation journal')
+        self._assert_index_lease(repo_root, expected_index, 'terminal verification')
+        self.verify_recovery_gate(request, journal)
+        return {
+            'resultingHead': expected_head,
+            'manifestDigest': digest,
+            'unmappedIntegrationCommits': unmapped,
+        }
+
+    def verify_final(self, request, journal):
+        repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        desired = self._desired_stack(request, journal, manifest)
+        if stack_map(manifest).get(request.draft_stack_id) != desired:
+            self._fail('operation draft stack ownership is missing or changed')
+        if not branch_exists(repo_root, request.draft_branch):
+            self._fail('operation draft branch is missing')
+        self._assert_draft_branch(repo_root, desired, journal)
+        if ref_tip(repo_root, request.draft_branch) != journal.get(
+            'candidateDraftCommitSha'
+        ):
+            self._fail('operation draft branch differs from its journaled object')
+        return self._verify_invariants(
+            repo_root, request, journal, journal['controlCommitSha']
+        )
+
+    def verify_no_repository_delta(self, request, journal):
+        repo_root = self._repo_root(request)
+        if self._dirty_paths(repo_root):
+            self._fail('no-delta operation still has working tree changes')
+        journal['manifestDigest'] = journal['observedManifestDigest']
+        return self._verify_invariants(repo_root, request, journal, request.expected_head)
+
+    def verify_release(self, request, journal):
+        repo_root = self._repo_root(request)
+        observation = self._validate_repository(repo_root, request, require_clean=False)
+        if observation['manifestDigest'] != journal['observedManifestDigest']:
+            self._fail('cannot release after manifest mutation')
+        self._ensure_after_scope(repo_root, request)
+        manifest = observation['manifest']
+        if request.draft_stack_id in stack_map(manifest) or branch_exists(
+            repo_root, request.draft_branch
+        ):
+            self._fail('cannot release after draft ownership or ref mutation')
+        expected_refs = self._expected_managed_refs(
+            request, journal, request.expected_head, draft_owned=False
+        )
+        self._assert_ref_leases(repo_root, expected_refs)
+        self._assert_index_lease(
+            repo_root, journal['baselineIndexSha256'], 'operation release'
+        )
+
+    def checkpoint(self, phase):
+        """Fault-injection seam; production intentionally performs no action."""
+        return None
+
+
+def command_revision_provider(args):
+    try:
+        import syncwheel_revision_provider as provider_module
+    except ImportError as exc:
+        raise SyncwheelError(f'revision-provider module is not installed: {exc}') from exc
+    backend = SyncwheelRevisionBackend(provider_module)
+    return provider_module.run_provider_stream(
+        backend, sys.stdin, sys.stdout, sys.stderr
+    )
+
+
 def add_rebuild_args(parser):
     parser.add_argument('-w', '--worktree')
     parser.add_argument('-i', '--in-place', action='store_true')
@@ -13983,6 +16282,12 @@ def build_parser():
     common.add_argument('-M', '--manifest', help='path to a syncwheel manifest JSON file')
     common.add_argument('-p', '--personal', help='use .syncwheel/manifests/<name>.local.json')
     sub = parser.add_subparsers(dest='command', required=True)
+
+    revision_provider_p = sub.add_parser(
+        'revision-provider',
+        help='serve one strict Agentwheel revision-provider JSON request on stdin',
+    )
+    revision_provider_p.set_defaults(func=command_revision_provider)
 
     repo_p = sub.add_parser('repo', aliases=['r'], help='manage repo aliases')
     repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
@@ -15047,8 +17352,9 @@ def main():
     args = parser.parse_args(raw_args)
     args.git_args = passthrough
     try:
-        maybe_handle_startup_update_policy(args)
-        converge_default_repository_hooks(args)
+        if args.command != 'revision-provider':
+            maybe_handle_startup_update_policy(args)
+            converge_default_repository_hooks(args)
         if manifest_mutation_requested(args) and hasattr(args, 'repo'):
             repo_root = resolve_repo_root(args.repo)
             manifest_path = resolve_manifest_path(
