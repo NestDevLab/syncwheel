@@ -33,6 +33,13 @@ Run `journal status`, then plan with `journal snapshot` or `journal publish`;
 add `--apply` only for an authorized commit or exact-lease push. Scheduler
 install/remove is also plan-first and Linux-only.
 
+When Agentwheel delegates Git revisioning to `syncwheel revision-provider`, it
+must persist its start receipt, call `check` on a clean integration checkout,
+perform the file mutation, then call `preflight` with exact before/after hashes
+before `finalize`. In active-active mode both gates require fresh, published,
+fully aligned handoff state; offline or stale coordination fails closed before a
+provider journal is prepared. The provider never publishes the resulting draft.
+
 - `reconcile` is read-only by default.
 - `sync`, `publish`, `reconcile --apply`, stack rebuilds, integration rebuilds, branch deletion, and
   pushes are mutations.
@@ -102,5 +109,6 @@ End with:
 - Agent procedure: `docs/agent-procedure.md`
 - Manifest tracking: `docs/manifest-tracking.md`
 - Active-active protocol: `docs/design/active-active-coordination.md`
+- Agentwheel revision provider: `docs/revision-provider.md`
 - Deployment channels: `docs/deployment-channels.md`
 - Core procedure: `docs/core-procedure.md`

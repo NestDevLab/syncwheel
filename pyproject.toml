@@ -18,7 +18,7 @@ dependencies = []
 syncwheel = "syncwheel:main"
 
 [tool.setuptools]
-py-modules = ["syncwheel"]
+py-modules = ["syncwheel", "syncwheel_revision_provider"]
 package-dir = {"" = "scripts"}
 
 [tool.setuptools.dynamic]
