@@ -1,11 +1,13 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "bfbf78f1c4198e6cbb3b5d208a1b1ea923099320"
+  },
   "coordination_id": "default",
-  "created_at": "2026-08-30T21:42:05+00:00",
+  "created_at": "2026-08-30T21:43:31+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "365c401fdf26f8627edaef3609a50103fda22398",
+    "refs/heads/main-integration": "bfbf78f1c4198e6cbb3b5d208a1b1ea923099320",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -69,10 +71,10 @@
     "version": 2
   },
   "manifest_digest": "c14ffa363f4ca6c2f6a59c0d600a1456db8f6425a3aaffe17ce62d596925f227",
-  "parent_state": "286aaddf9ad3cae9f41a1de3fa1a596ee1216618",
+  "parent_state": "6a5e0262a10cb15895097dcbb6f268d505d4eb58",
   "projection_status": "partial",
-  "publication_id": "c46ec52f-1853-4e29-b543-bb3de6c40328",
-  "publication_scope": "close:agentwheel-revision-provider",
+  "publication_id": "eba289cb-8781-4b8b-bd13-7f145f1aa338",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.36.0",
   "tombstones": [
