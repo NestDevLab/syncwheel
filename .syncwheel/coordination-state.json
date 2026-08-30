@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/syncwheel/draft/auto-hook-bootstrap": "242ce4a13cbbf91418b677da038ada0e673177ac"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-30T17:06:42+00:00",
+  "created_at": "2026-08-30T19:08:28+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -57,7 +55,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "resume-preserve-published-source",
         "reconcile-replay-mode-args",
         "tree-equivalent-state-cas",
         "fast-forward-state-cas",
@@ -66,20 +63,6 @@
       "strategy": "cherry-pick"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/resume-preserve-published-source",
-        "commits": [
-          "7bf66c1ab3310c8e4b78cd986d875a6cafc5dcfb"
-        ],
-        "id": "resume-preserve-published-source",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -140,11 +123,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "f5f52689e0fb1df0b99c1275ae5365d3c94632f9cf3f57ec8529deadd7afa5ae",
-  "parent_state": "7b6944f4e9f2bcd81842fc6e629a56a6a4084aee",
+  "manifest_digest": "115d7cb71e8a41668b8ec0ad8b38da2e81943a3694d023cd1edc0afec727538f",
+  "parent_state": "09b2032f08372a3e3e2cacab1ce8ae3c9da43612",
   "projection_status": "partial",
-  "publication_id": "8b4a297c-336c-49a6-83fb-c23633095fc9",
-  "publication_scope": "compose-stack:auto-hook-bootstrap",
+  "publication_id": "fb27583a-8a65-45d9-b7ca-a0f123b806d3",
+  "publication_scope": "close:resume-preserve-published-source",
   "schema_version": 2,
   "syncwheel_version": "0.35.2",
   "tombstones": [
@@ -283,6 +266,14 @@
       "ref": "refs/heads/pr/fleet-coordination-invariants-v2",
       "remote_tip": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
       "stack": "fleet-coordination-invariants-v2"
+    },
+    {
+      "branch": "pr/resume-preserve-published-source",
+      "closed_at": "2026-08-30T19:08:19+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/resume-preserve-published-source",
+      "remote_tip": "16e485f31c268b656c29d11a51b9f05d064ac29d",
+      "stack": "resume-preserve-published-source"
     }
   ]
 }
