@@ -13829,6 +13829,7 @@ def command_repo_tracking_set(args):
             'repo_tracking_set',
             {'syncwheel_tracking': tracking, 'syncwheel_worktree_root': worktree_root},
         )
+        ensure_managed_repository_hooks(repo_root, manifest)
         git_add_paths(
             repo_root,
             [manifest_path, repo_root / '.gitignore', readme_path],
@@ -14970,6 +14971,38 @@ def manifest_mutation_requested(args):
     return False
 
 
+def default_hook_convergence_requested(args):
+    if not hasattr(args, 'repo'):
+        return False
+    if args.func in {
+        command_init,
+        command_hooks_status,
+        command_hooks_install,
+        command_hooks_remove,
+        command_hooks_guard,
+        command_hooks_worktree_guard,
+    }:
+        return False
+    if args.func == command_repo_tracking_set and bool(getattr(args, 'apply', False)):
+        return False
+    return True
+
+
+def converge_default_repository_hooks(args):
+    if not default_hook_convergence_requested(args):
+        return None
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
+    if not manifest_path.exists():
+        return None
+    manifest, _ = load_manifest(repo_root, manifest_path)
+    if manifest is None:
+        return None
+    return ensure_managed_repository_hooks(repo_root, manifest)
+
+
 def execute_parsed_command(args):
     if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
         repo_root = resolve_repo_root(args.repo)
@@ -15015,6 +15048,7 @@ def main():
     args.git_args = passthrough
     try:
         maybe_handle_startup_update_policy(args)
+        converge_default_repository_hooks(args)
         if manifest_mutation_requested(args) and hasattr(args, 'repo'):
             repo_root = resolve_repo_root(args.repo)
             manifest_path = resolve_manifest_path(

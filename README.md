@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.35.1`
+Current version: `0.35.2`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -863,19 +863,23 @@ failure after Git completes the switch; the following commit is blocked. Dedicat
 feature worktrees remain valid. The checkout hook cannot undo Git's completed branch
 switch, so restore a mismatched checkout losslessly rather than resetting dirty work.
 
-For `git-tracked` repositories the bundle is required by default. New initialization,
-active-active setup, journal scheduler setup, and the first mutating Syncwheel command
-install or upgrade it automatically. Read-only `validate`, `status`, and `hooks status`
-never rewrite local state; they report missing, stale, or tampered hooks. Existing
-non-Syncwheel hooks are chained and restored on removal. `local-only` contribution
-clones remain opt-in. The only escape hatch is a persisted clone-local disable with a
-non-empty reason, which stays visible in validation.
+For `git-tracked` repositories the bundle is required by default. Every normal
+repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
+`status`, checks and converges the bundle before continuing. Initialization and a
+transition to `git-tracked` converge it in the same command. Explicit `hooks
+status|install|remove` lifecycle commands remain observational or plan-first so they
+can inspect and administer an absent bundle; the generated hook callbacks are also
+excluded to prevent recursion. Existing non-Syncwheel hooks are chained and restored
+on removal. `local-only` contribution clones remain opt-in. The only escape hatch is
+a persisted clone-local disable with a non-empty reason, which stays visible in
+validation.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
 remote and allowed destination refset.
 
 These hooks are local safety rails, not a security boundary. `--no-verify`, deleting
-the hooks, or operating from a clone that has never run Syncwheel can bypass them.
+the hooks, or operating from a clone before its first normal Syncwheel command can
+bypass them.
 See [the managed repository guard design](docs/design/managed-ref-guard.md)
 for server-side hardening options.
 

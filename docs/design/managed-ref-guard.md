@@ -15,12 +15,13 @@ digests. Removal is also plan-first, refuses modified/unowned hooks, and restore
 every chained hook.
 
 The policy is required-by-default for `git-tracked` clones with managed refs,
-active-active coordination, or an owned journal branch. New setup flows install
-the bundle visibly on apply. Existing clones enter a migration-pending state:
-read-only commands warn without rewriting hooks, while the next mutating Syncwheel
-operation installs or upgrades the bundle before changing repository state. A
-foreign hook is chained rather than overwritten. `local-only` contribution clones
-are optional. A clone can
+active-active coordination, or an owned journal branch. Every normal repo-aware
+Syncwheel command checks and converges the bundle before continuing, including
+status and validation commands. Initialization and a transition to `git-tracked`
+converge it in the same command. Explicit `hooks status|install|remove` lifecycle
+commands retain their observational or plan-first semantics, and generated hook
+callbacks are excluded to prevent recursion. A foreign hook is chained rather than
+overwritten. `local-only` contribution clones are optional. A clone can
 persist `hooks.mode=disabled` only through `hooks remove --disable --reason ...`;
 the reason remains visible in status and validation.
 
@@ -61,7 +62,7 @@ host user who controls the repository.
 ## Server-side hardening
 
 The hook is not a security boundary: `git push --no-verify`, deleting the hook,
-or running on a different clone bypasses it. A
+or pushing from a clone before its first normal Syncwheel command bypasses it. A
 [GitHub ruleset](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 can restrict updates to stable ref-name patterns and grant bypass to a GitHub App,
 but ruleset patterns

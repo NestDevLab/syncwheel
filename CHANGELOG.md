@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.35.2 - 2026-08-30
+
+- Converge the required repository hook bundle before every normal repo-aware
+  Syncwheel command, including status and validation, while preserving explicit
+  hook lifecycle commands, `local-only` clones, and reasoned clone-local disables.
+
 ## 0.35.1 - 2026-08-29
 
 - Add `check --strict` as a deterministic readiness gate for validation

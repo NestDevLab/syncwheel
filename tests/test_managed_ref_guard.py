@@ -74,6 +74,36 @@ class ManagedRefGuardTests(unittest.TestCase):
             remote_name='origin', remote_url='example.invalid/repo', event=None,
         )
 
+    def run_syncwheel(self, *args):
+        environment = self.hook_env.copy()
+        environment[syncwheel.ENV_UPDATE_MODE] = 'off'
+        environment[syncwheel.ENV_UPDATE_SETTINGS_PATH] = str(
+            self.repo / '.test-update-settings.json'
+        )
+        environment[syncwheel.ENV_UPDATE_STATE_PATH] = str(
+            self.repo / '.test-update-state.json'
+        )
+        return subprocess.run(
+            [os.fspath(Path(os.sys.executable)), os.fspath(MODULE_PATH), *args],
+            cwd=self.repo,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+
+    def hook_bundle_bytes(self):
+        paths = []
+        for name in syncwheel.MANAGED_REPOSITORY_HOOKS:
+            _, hook, backup, metadata, _ = syncwheel.managed_hook_paths(self.repo, name)
+            paths.extend((hook, backup, metadata))
+        paths.append(self.repo / '.syncwheel' / 'profile.local.json')
+        return {
+            str(path.relative_to(self.repo)): path.read_bytes()
+            for path in paths
+            if path.exists()
+        }
+
     def test_bundle_installs_primary_checkout_guards_and_reports_ready(self):
         result = syncwheel.install_managed_push_hook(self.repo, apply=True)
         self.assertTrue(result['ready'])
@@ -135,6 +165,77 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertTrue(policy['ready'])
         self.assertTrue(policy['enforced'])
         self.assertTrue(all(item['ready'] for item in policy['hooks'].values()))
+
+    def test_tracking_status_bootstraps_missing_required_hooks_and_is_idempotent(self):
+        first = self.run_syncwheel(
+            'repo', 'tracking', 'status', '--repo', str(self.repo), '--json'
+        )
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(json.loads(first.stdout)['syncwheel_tracking'], 'git-tracked')
+        first_bundle = self.hook_bundle_bytes()
+        self.assertEqual(
+            set(syncwheel.MANAGED_REPOSITORY_HOOKS),
+            {
+                path.name
+                for path in (self.repo / '.git' / 'hooks').iterdir()
+                if path.name in syncwheel.MANAGED_REPOSITORY_HOOKS
+            },
+        )
+        self.assertEqual(
+            json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())['hooks'],
+            {'mode': 'required'},
+        )
+
+        second = self.run_syncwheel(
+            'repo', 'tracking', 'status', '--repo', str(self.repo), '--json'
+        )
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(self.hook_bundle_bytes(), first_bundle)
+
+    def test_hook_lifecycle_status_can_observe_an_uninstalled_bundle(self):
+        result = self.run_syncwheel('hooks', 'status', '--repo', str(self.repo))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)['ready'])
+        self.assertEqual(self.hook_bundle_bytes(), {})
+
+    def test_tracking_set_git_tracked_converges_hooks_in_the_same_command(self):
+        self.manifest['syncwheel_tracking'] = 'local-only'
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(self.manifest, indent=2) + '\n'
+        )
+
+        result = self.run_syncwheel(
+            'repo', 'tracking', 'set', 'git-tracked',
+            '--repo', str(self.repo), '--apply', '--json',
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(syncwheel.managed_hook_bundle_status(self.repo)['ready'])
+        self.assertEqual(
+            json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())['hooks'],
+            {'mode': 'required'},
+        )
+
+    def test_normal_command_respects_local_only_and_reasoned_disable(self):
+        self.manifest['syncwheel_tracking'] = 'local-only'
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        local_only = self.run_syncwheel(
+            'repo', 'tracking', 'status', '--repo', str(self.repo), '--json'
+        )
+        self.assertEqual(local_only.returncode, 0, local_only.stderr)
+        self.assertEqual(self.hook_bundle_bytes(), {})
+
+        self.manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        syncwheel.remove_managed_push_hook(
+            self.repo, apply=True, disable=True, reason='explicit test opt-out'
+        )
+        disabled_before = self.hook_bundle_bytes()
+        disabled = self.run_syncwheel(
+            'repo', 'tracking', 'status', '--repo', str(self.repo), '--json'
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        self.assertEqual(self.hook_bundle_bytes(), disabled_before)
 
     def test_auto_bootstrap_persists_required_mode_for_a_ready_bundle(self):
         syncwheel.install_managed_push_hook(self.repo, apply=True)
