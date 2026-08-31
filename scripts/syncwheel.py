@@ -12645,6 +12645,19 @@ def rev_left_right_count(repo_root, left, right):
     return int(left_count), int(right_count)
 
 
+def trees_differ_only_by_manifest(repo_root, left_tree, right_tree):
+    changed = git(
+        repo_root,
+        'diff-tree',
+        '--no-commit-id',
+        '--name-only',
+        '-r',
+        left_tree,
+        right_tree,
+    ).stdout.splitlines()
+    return bool(changed) and set(changed) == {'.syncwheel/manifest.json'}
+
+
 def integration_sync_report(repo_root, manifest, remote=None, stack_ref_overrides=None):
     integration = manifest['integration']
     branch = integration['branch']
@@ -12690,9 +12703,15 @@ def integration_sync_report(repo_root, manifest, remote=None, stack_ref_override
         projected_tree = materialize_integration_projection(repo_root, manifest, stack_ref_overrides)
         report['projected_tree'] = projected_tree
         if report['remote_tree']:
-            report['remote_matches_projection'] = report['remote_tree'] == projected_tree
+            report['remote_matches_projection'] = (
+                report['remote_tree'] == projected_tree
+                or trees_differ_only_by_manifest(repo_root, report['remote_tree'], projected_tree)
+            )
         if report['local_tree']:
-            report['local_matches_projection'] = report['local_tree'] == projected_tree
+            report['local_matches_projection'] = (
+                report['local_tree'] == projected_tree
+                or trees_differ_only_by_manifest(repo_root, report['local_tree'], projected_tree)
+            )
     except SyncwheelError as exc:
         report['projection_error'] = str(exc)
     return report

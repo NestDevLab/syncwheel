@@ -1390,6 +1390,46 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertTrue(report['local_matches_projection'])
         self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, 'main'))
 
+    def test_integration_projection_accepts_manifest_only_control_tree(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/control')
+        manifest['integration'] = {
+            'branch': 'integration/control',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps({**manifest, 'control': 'recorded'}, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record control state')
+
+        report = module.integration_sync_report(self.repo, manifest)
+
+        self.assertTrue(report['local_matches_projection'])
+
+    def test_integration_projection_rejects_product_tree_difference(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/product')
+        manifest['integration'] = {
+            'branch': 'integration/product',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / 'product.txt').write_text('drift\n')
+        self.git('add', 'product.txt')
+        self.git('commit', '-q', '-m', 'feat: unprojected product change')
+
+        report = module.integration_sync_report(self.repo, manifest)
+
+        self.assertFalse(report['local_matches_projection'])
+
     def test_reconcile_reports_dirty_working_tree_status(self):
         Path(self.repo / 'dirty.txt').write_text('dirty\n')
 
