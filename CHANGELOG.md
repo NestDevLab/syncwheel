@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.36.2 - 2026-08-31
+
+- Allow a governed revision-provider handoff when `main-integration` is ahead
+  of coordinated state only through manifest-only control commits.
+- Treat declared stack commits already contained by the canonical base as
+  absorbed instead of replaying them into artificial lock-file conflicts.
+- Accept integration projections that differ only by the tracked Syncwheel
+  manifest while continuing to reject unprojected product changes.
+- Use the same absorbed-stack and manifest-control semantics for reconcile
+  reports and the final coordinated publication gate.
+
 ## 0.36.1 - 2026-08-31
 
 - Treat patch-equivalent replayed commits as satisfying stack and integration
