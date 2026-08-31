@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.36.1 - 2026-08-31
+
+- Treat patch-equivalent replayed commits as satisfying stack and integration
+  projections, while still rebuilding branches whose base or projected tree is
+  genuinely stale.
+
 ## 0.36.0 - 2026-08-30
 
 - Add a strict Agentwheel revision-provider protocol with exact path and hash

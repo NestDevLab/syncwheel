@@ -270,6 +270,55 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data = json.loads(result.stdout)
         self.assertEqual(data, [])
 
+    def test_replayed_patch_equivalent_commits_satisfy_stack_and_integration_projection(self):
+        self.git('switch', '-q', '-c', 'source/original', 'main')
+        Path(self.repo / 'gamma.txt').write_text('gamma\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'feat: add gamma')
+        original = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', 'main')
+        Path(self.repo / 'delta.txt').write_text('delta\n')
+        self.git('add', 'delta.txt')
+        self.git('commit', '-q', '-m', 'feat: advance base')
+        self.git('switch', '-q', '-c', 'pr/replayed')
+        self.git('cherry-pick', original)
+        replayed = self.git('rev-parse', 'HEAD')
+
+        self.git('switch', '-q', '-c', 'integration/replayed', 'main')
+        self.git('merge', '--no-ff', 'pr/replayed', '-m', "Merge stack 'replayed' into integration/replayed")
+
+        data = self.read_manifest()
+        data['integration'] = {
+            'branch': 'integration/replayed',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': ['replayed'],
+        }
+        data['stacks'] = [{
+            'id': 'replayed',
+            'branch': 'pr/replayed',
+            'base': 'main',
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'integration/replayed',
+            'commits': [original],
+        }]
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+
+        module = self.load_syncwheel_module()
+        manifest, _ = module.load_manifest(self.repo)
+        self.assertEqual(module.commit_patch_id(self.repo, original), module.commit_patch_id(self.repo, replayed))
+        validation = module.validate_manifest(self.repo, manifest)
+        stack = validation['details']['stacks'][0]
+
+        self.assertEqual(validation['errors'], [])
+        self.assertEqual(stack['missing_from_branch'], [])
+        self.assertEqual(stack['missing_from_integration'], [])
+        self.assertEqual(stack['undeclared_branch_commits'], [])
+        self.assertEqual(validation['details']['integration']['unmapped_commits'], [])
+        self.assertEqual(module.build_plan(self.repo, manifest, validation), [])
+
     def test_status_json_reports_manifest_present(self):
         result = self.run_cli('status', '--json', expected=0)
         data = json.loads(result.stdout)

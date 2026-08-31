@@ -7468,10 +7468,17 @@ def validate_manifest(repo_root, manifest):
             + f': {integration_strategy}'
         )
     integration_exists = branch_exists(repo_root, integration_branch)
+    integration_projection_patch_ids = set()
     if not ref_exists(repo_root, integration['base']):
         errors.append(f"integration base ref does not exist: {integration['base']}")
     if not integration_exists:
         warnings.append(f'integration branch is missing locally: {integration_branch}')
+    elif ref_exists(repo_root, integration['base']):
+        integration_projection_patch_ids = {
+            patch_id
+            for commit in rev_list(repo_root, f"{integration['base']}..{integration_branch}")
+            if (patch_id := commit_patch_id(repo_root, commit))
+        }
     unknown_stack_refs = [stack_id for stack_id in integration.get('stacks', []) if stack_id not in stacks_by_id]
     if unknown_stack_refs:
         errors.append('integration references unknown stacks: ' + ', '.join(unknown_stack_refs))
@@ -7512,6 +7519,7 @@ def validate_manifest(repo_root, manifest):
         }
         stack_declared_shas = set()
         stack_declared_patch_ids = set()
+        branch_patch_ids = set()
         if state not in STACK_STATES:
             errors.append(
                 f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
@@ -7529,8 +7537,6 @@ def validate_manifest(repo_root, manifest):
             patch_id = commit_patch_id(repo_root, commit)
             if patch_id:
                 stack_declared_patch_ids.add(patch_id)
-            if item['branch_exists'] and not branch_contains(repo_root, stack['branch'], commit):
-                item['missing_from_branch'].append(commit)
         if item['branch_exists'] and item['base_exists']:
             item['branch_commits'] = [
                 commit_full_sha(repo_root, commit)
@@ -7538,6 +7544,8 @@ def validate_manifest(repo_root, manifest):
             ]
             for commit in item['branch_commits']:
                 patch_id = commit_patch_id(repo_root, commit)
+                if patch_id:
+                    branch_patch_ids.add(patch_id)
                 if commit not in stack_declared_shas and (
                     not patch_id or patch_id not in stack_declared_patch_ids
                 ):
@@ -7547,6 +7555,15 @@ def validate_manifest(repo_root, manifest):
                     f"stack {stack['id']} branch contains "
                     f"{len(item['undeclared_branch_commits'])} undeclared commit(s)"
                 )
+        if item['branch_exists']:
+            for commit in stack['commits']:
+                if not commit_exists(repo_root, commit):
+                    continue
+                if branch_contains(repo_root, stack['branch'], commit):
+                    continue
+                patch_id = commit_patch_id(repo_root, commit)
+                if not patch_id or patch_id not in branch_patch_ids:
+                    item['missing_from_branch'].append(commit)
         if item['remote_exists'] and item['base_exists']:
             item['remote_commits'] = [
                 commit_full_sha(repo_root, commit)
@@ -7599,7 +7616,9 @@ def validate_manifest(repo_root, manifest):
             if patch_id:
                 declared_patch_ids.add(patch_id)
             if integration_exists and not branch_contains(repo_root, integration_branch, commit):
-                item['missing_from_integration'].append(commit)
+                patch_id = commit_patch_id(repo_root, commit)
+                if not patch_id or patch_id not in integration_projection_patch_ids:
+                    item['missing_from_integration'].append(commit)
         details['stacks'].append(item)
 
     for channel in manifest.get('channels', []):
