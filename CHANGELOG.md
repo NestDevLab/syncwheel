@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.36.3 - 2026-08-31
+
+- Publish a local-ahead manifest-only integration control commit instead of
+  normalizing it back to an older remote projection with the same product tree.
+
 ## 0.36.2 - 2026-08-31
 
 - Allow a governed revision-provider handoff when `main-integration` is ahead

@@ -12677,6 +12677,7 @@ def integration_sync_report(repo_root, manifest, remote=None, stack_ref_override
         'projected_tree': None,
         'remote_matches_projection': None,
         'local_matches_projection': None,
+        'local_control_only_ahead': False,
     }
     if local_exists:
         report['local_tree'] = ref_tree(repo_root, branch)
@@ -12698,6 +12699,12 @@ def integration_sync_report(repo_root, manifest, remote=None, stack_ref_override
         report['relation'] = 'local_only'
     elif remote_exists:
         report['relation'] = 'remote_only'
+
+    if report['relation'] == 'local_ahead':
+        ahead_commits = rev_list(repo_root, f'{remote_ref}..{branch}')
+        report['local_control_only_ahead'] = bool(ahead_commits) and all(
+            is_manifest_only_commit(repo_root, commit) for commit in ahead_commits
+        )
 
     try:
         projected_tree = materialize_integration_projection(repo_root, manifest, stack_ref_overrides)
@@ -12996,6 +13003,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         and integration_report.get('local_matches_projection') is True
         and integration_report.get('remote_matches_projection') is True
         and integration_report['relation'] != 'aligned'
+        and not integration_report.get('local_control_only_ahead')
     )
     if integration_normalize_history_from_remote:
         actions.append({
@@ -13015,6 +13023,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         integration_rebuild_needed
         or not integration_report['remote_exists']
         or integration_report.get('remote_matches_projection') is False
+        or integration_report.get('local_control_only_ahead') is True
     ):
         actions.append({
             'type': 'push_integration',

@@ -1925,6 +1925,41 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'integration/reconcile'), remote_integration)
         self.assertEqual(manifest_path.read_text(), before_manifest)
 
+    def test_reconcile_pushes_manifest_only_control_commit_instead_of_aligning_back(self):
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'control-ahead-manifest.json'
+        data = self.read_manifest()
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/control-ahead',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        data['stacks'] = []
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('branch', 'integration/control-ahead', base)
+
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin', '--prune')
+        self.git('switch', '-q', 'integration/control-ahead')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked = json.loads(tracked_manifest.read_text())
+        tracked['control'] = 'new ownership'
+        tracked_manifest.write_text(json.dumps(tracked, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist control ownership')
+
+        result = self.run_cli(
+            'reconcile', '--manifest', str(manifest_path), '--no-fetch', '--push', '--json', expected=0
+        )
+        report = json.loads(result.stdout)
+
+        self.assertTrue(report['integration']['local_control_only_ahead'])
+        self.assertEqual([action['type'] for action in report['actions']], ['push_integration'])
+
     def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
         base = self.git('rev-parse', 'HEAD')
         script = self.repo / 'scripts' / 'demo.py'
