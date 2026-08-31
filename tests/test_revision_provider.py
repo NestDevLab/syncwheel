@@ -1689,6 +1689,49 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_active_active_handoff_accepts_owned_control_commit_only_ahead(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            manifest = fixture.repo / '.syncwheel' / 'manifest.json'
+            original = manifest.read_text()
+            manifest.write_text(original + '\n')
+            fixture.git('add', '.syncwheel/manifest.json')
+            fixture.git('commit', '-q', '-m', 'syncwheel: intermediate control state')
+            manifest.write_text(original)
+            fixture.git('add', '.syncwheel/manifest.json')
+            fixture.git('commit', '-q', '-m', 'syncwheel: restore published control state')
+
+            next_request = fixture.request('preflight', operation_id='after-control-ahead')
+            ready, _ = fixture.protocol_request(fixture.check_request(next_request))
+
+            self.assertEqual(ready['status'], 'ready')
+        finally:
+            fixture.close()
+
+    def test_active_active_handoff_rejects_non_control_commit_ahead(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            manifest = fixture.repo / '.syncwheel' / 'manifest.json'
+            original = manifest.read_text()
+            manifest.write_text(original + '\n')
+            fixture.git('add', '.syncwheel/manifest.json')
+            fixture.git('commit', '-q', '-m', 'syncwheel: intermediate control state')
+            manifest.write_text(original)
+            fixture.git('add', '.syncwheel/manifest.json')
+            fixture.git('commit', '-q', '-m', 'syncwheel: restore published control state')
+
+            (fixture.repo / 'unowned.txt').write_text('unowned\n')
+            fixture.git('add', 'unowned.txt')
+            fixture.git('commit', '-q', '-m', 'test: unowned product commit')
+            next_request = fixture.request('preflight', operation_id='after-product-ahead')
+            rejected, _ = fixture.protocol_request(
+                fixture.check_request(next_request), expected=2
+            )
+
+            self.assertIn('integration already contains unmapped commits', rejected['error'])
+        finally:
+            fixture.close()
+
 
 class RevisionProviderRecoveryTest(unittest.TestCase):
     def test_unowned_index_lock_is_never_removed_during_recovery(self):

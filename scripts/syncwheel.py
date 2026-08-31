@@ -14580,10 +14580,26 @@ class SyncwheelRevisionBackend:
                     'active-active handoff coordination state does not match fresh remote refs'
                 )
             drifted_local = []
+            integration_ref = f"refs/heads/{manifest['integration']['branch']}"
             for ref in current_refs:
                 expected_tip = state.get('managed_refs', {}).get(ref)
                 local_tip = ref_tip(repo_root, ref)
-                if not expected_tip or local_tip != expected_tip:
+                control_only_ahead = False
+                if ref == integration_ref and expected_tip and local_tip:
+                    ancestor = git(
+                        repo_root,
+                        'merge-base',
+                        '--is-ancestor',
+                        expected_tip,
+                        local_tip,
+                        check=False,
+                    )
+                    if ancestor.returncode == 0:
+                        ahead = rev_list(repo_root, f'{expected_tip}..{local_tip}')
+                        control_only_ahead = bool(ahead) and all(
+                            is_manifest_only_commit(repo_root, commit) for commit in ahead
+                        )
+                if not expected_tip or (local_tip != expected_tip and not control_only_ahead):
                     drifted_local.append(
                         f'{ref} (local {local_tip or "missing"}, state {expected_tip or "missing"})'
                     )
