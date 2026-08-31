@@ -6313,12 +6313,12 @@ def local_manifest_projection_is_convergent(repo_root, manifest, manifest_path=N
         for stack in manifest['stacks']:
             if not branch_exists(repo_root, stack['branch']):
                 return False
-            if ref_tree(repo_root, stack['branch']) != materialize_stack_projection(repo_root, stack):
+            if stack_reconcile_report(repo_root, manifest, stack).get('local_matches_projection') is not True:
                 return False
         integration = manifest['integration']
         if not branch_exists(repo_root, integration['branch']):
             return False
-        if ref_tree(repo_root, integration['branch']) != materialize_integration_projection(repo_root, manifest):
+        if integration_sync_report(repo_root, manifest).get('local_matches_projection') is not True:
             return False
         for channel in manifest.get('channels', []):
             tip = ref_tip(repo_root, channel['branch'])

@@ -1390,6 +1390,23 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertTrue(report['local_matches_projection'])
         self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, 'main'))
 
+    def test_convergence_accepts_stack_already_absorbed_by_base(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        absorbed = self.git('rev-parse', 'main~1')
+        stack = next(item for item in manifest['stacks'] if item['id'] == 'feature-a')
+        stack['base'] = 'main'
+        stack['commits'] = [absorbed]
+        manifest['stacks'] = [stack]
+        manifest['integration'] = {
+            'branch': 'main',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-a'],
+        }
+
+        self.assertTrue(module.local_manifest_projection_is_convergent(self.repo, manifest))
+
     def test_integration_projection_accepts_manifest_only_control_tree(self):
         module = self.load_syncwheel_module()
         manifest = self.read_manifest()
