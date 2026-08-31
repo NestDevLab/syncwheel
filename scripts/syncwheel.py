@@ -12722,6 +12722,7 @@ def stack_reconcile_report(repo_root, manifest, stack, remote=None):
         'projected_tree': None,
         'local_matches_projection': None,
         'remote_matches_projection': None,
+        'absorbed': False,
     }
     if local_exists:
         report['local_tree'] = ref_tree(repo_root, branch)
@@ -12747,10 +12748,27 @@ def stack_reconcile_report(repo_root, manifest, stack, remote=None):
     try:
         projected_tree = materialize_stack_projection(repo_root, stack)
         report['projected_tree'] = projected_tree
+        absorbed = bool(stack['commits']) and all(
+            branch_contains(repo_root, stack['base'], commit)
+            for commit in stack['commits']
+        )
+        report['absorbed'] = absorbed
         if report['local_tree']:
-            report['local_matches_projection'] = report['local_tree'] == projected_tree
+            report['local_matches_projection'] = (
+                report['local_tree'] == projected_tree
+                or (
+                    absorbed
+                    and all(branch_contains(repo_root, branch, commit) for commit in stack['commits'])
+                )
+            )
         if report['remote_tree']:
-            report['remote_matches_projection'] = report['remote_tree'] == projected_tree
+            report['remote_matches_projection'] = (
+                report['remote_tree'] == projected_tree
+                or (
+                    absorbed
+                    and all(branch_contains(repo_root, remote_ref, commit) for commit in stack['commits'])
+                )
+            )
     except SyncwheelError as exc:
         report['projection_error'] = str(exc)
     return report

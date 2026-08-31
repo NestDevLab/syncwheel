@@ -1376,6 +1376,20 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(report['actions'][0]['reason'], 'local_branch_differs_from_manifest_projection')
         self.assertIn('working_tree_status', report['snapshot'])
 
+    def test_reconcile_accepts_stack_already_absorbed_by_base(self):
+        module = self.load_syncwheel_module()
+        absorbed = self.git('rev-parse', 'main~1')
+        manifest = self.read_manifest()
+        stack = next(item for item in manifest['stacks'] if item['id'] == 'feature-a')
+        stack['base'] = 'main'
+        stack['commits'] = [absorbed]
+
+        report = module.stack_reconcile_report(self.repo, manifest, stack)
+
+        self.assertTrue(report['absorbed'])
+        self.assertTrue(report['local_matches_projection'])
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, 'main'))
+
     def test_reconcile_reports_dirty_working_tree_status(self):
         Path(self.repo / 'dirty.txt').write_text('dirty\n')
 
