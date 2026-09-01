@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.38.0 - 2026-09-01
+
+- Add explicit, clone-local governed worktree lanes through `syncwheel worktree
+  open`, with a four-lane capacity, owner and lease records, configured-root
+  containment, optional `--full` mode, and no automatic fallback from the
+  primary checkout.
+- Retain unfinished lane state visibly, recover committed clean lanes to a local
+  recovery ref before reaping them, and expose machine-readable diagnostics plus
+  terminal warnings for dirty, expired, pending, or unknown governed lanes.
+
 ## 0.37.1 - 2026-09-01
 
 - Resolve the worktree path through `syncwheel_worktree_root` in `stack rebuild`,

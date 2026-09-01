@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.37.1`
+Current version: `0.38.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -208,6 +208,37 @@ self-removing temporary worktree below that, the current checkout when it is
 already on the target branch, and an existing worktree when the branch has one.
 Pin a mode with `--replay-mode`, with `syncwheel replay-mode <mode>` for a
 repo-local default, or with `defaults.replay_mode` in the manifest.
+
+When another agent has explicitly locked or owns the primary checkout, continue
+authoring only by asking for a governed lane. This is an explicit fallback, not
+an automatic reaction to a lock:
+
+```bash
+syncwheel worktree open concise-change
+syncwheel worktree open dependency-repair --full
+```
+
+`open` creates one clone-local, registered worktree below the configured
+`syncwheel_worktree_root` and prints its path. A light lane is for authoring and
+committing only; Syncwheel does not provision dependencies there. `--full` is
+the explicit, bounded choice when dependency installation, builds, tests, or
+debugging are necessary. It is a lifecycle declaration, not a sandbox: a raw
+shell can still bypass it, so agents must keep that boundary in their procedure.
+
+Each clone permits four active lanes. The local registry records the owner,
+lease, base, branch, target stack, mode, and any recovery ref in Git's common
+directory, never in the shared manifest. Use `--into <existing-stack>` when the
+destination is already known. Otherwise, after committing, use the existing
+`stack create`, `stack add`, or `stack capture-integration` workflow from a
+different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
+the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
+worktree and local lane branch. A dirty, unavailable, outside-root, or current
+directory lane is retained and reported; it is never removed automatically.
+
+`status`, `check`, `handoff`, and `gc` include structured governed-worktree
+diagnostics in JSON. Repo-aware terminal commands show actionable yellow
+warnings for unfinished lanes when stderr is a TTY; `NO_COLOR` removes ANSI
+color and JSON output remains free of ANSI sequences.
 
 ## Owning a commit before you know its PR
 
