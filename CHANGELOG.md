@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.37.0 - 2026-09-01
 
 - Add a `reference-transaction` guard that refuses to rewind a manifest-managed
   branch onto a commit that does not contain its current tip, closing the gap
