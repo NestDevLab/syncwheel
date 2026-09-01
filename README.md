@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.38.1`
+Current version: `0.39.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -262,6 +262,22 @@ the stack already records an open pull request.
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.
 
+When the owning stack already exists and its source branch must remain
+unchanged, classify the commit declaratively instead. Preview is the default;
+apply requires the exact digest printed by the preview:
+
+```bash
+plan=$(syncwheel stack classify-integration caching-experiment HEAD)
+digest=$(printf '%s' "$plan" | jq -r .planDigest)
+syncwheel stack classify-integration caching-experiment HEAD --apply --plan-digest "$digest"
+```
+
+This writes only the manifest and ledger. The commit is recorded in
+`integration_only_commits` and remains part of future integration rebuilds,
+including `merge-stacks`, without being projected onto the stack branch. These
+commits replay after the combined stack projection so they retain the context in
+which integration-first work was created.
+
 ## Direct landing after local validation
 
 `stack land` is the bounded alternative to a PR when a maintainer explicitly
@@ -376,6 +392,8 @@ Practical meaning:
 - A **PR stack** is one logical change stream mapped to one `pr/*` branch with an explicit commit list.
 - `stack sync`, `stack set`, and `stack add` update commit ownership without
   hand-editing SHA lists.
+- `stack classify-integration` records integration-only ownership through a
+  digest-bound manifest plan without rebuilding a stack or integration ref.
 - `stack absorb` moves dirty or staged integration-branch changes into a stack
   branch, updates the manifest, and removes the absorbed patch from the
   integration checkout.

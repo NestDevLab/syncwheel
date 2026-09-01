@@ -359,6 +359,10 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `integration_commits`, when present, is the resolved projection used only for
   integration. Record it after a conflict creates new integration commits; it
   prevents Syncwheel from treating those commits as source-branch commits.
+- `integration_only_commits`, when present, contains commits owned by the stack
+  only in integration. They are excluded from source-branch rebuilds and are
+  replayed after the combined stack projection during integration rebuilds,
+  including after all stack merges under `merge-stacks`.
 - `integration.strategy` is optional and defaults to `cherry-pick`
 - supported integration strategies are:
   - `cherry-pick`: replay all declared commits into integration as a linear history
@@ -391,6 +395,21 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 Unmapped integration commits are reported as warnings plus a
 `classify_integration_commits` plan action. The tool can identify the commits,
 but a human or AI agent still needs to decide which stack owns each change.
+
+After choosing an existing owner, preview and apply the manifest-only
+classification with an exact plan digest:
+
+```bash
+syncwheel stack classify-integration feature-a <integration-commit>
+syncwheel stack classify-integration feature-a <integration-commit> \
+  --apply --plan-digest <digest-from-preview>
+```
+
+The operation requires the commit to be present on the configured integration
+branch and the owner to participate in that integration, refuses ownership
+already assigned to another stack, and updates no Git refs or worktrees. Use
+`stack capture-integration` instead when the commit must also be materialized on
+the stack source branch.
 
 ### Resolved integration projections
 
