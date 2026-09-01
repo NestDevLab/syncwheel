@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.39.0 - 2026-09-01
 
 - Add plan-first `stack classify-integration` for manifest-only ownership of an
   integration commit. The operation requires an exact plan digest, updates no
