@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.37.1 - 2026-09-01
+
+- Resolve the worktree path through `syncwheel_worktree_root` in `stack rebuild`,
+  `int rebuild`, and `--auto-worktree`. They went straight to the hardcoded
+  sibling layout, so a repository declaring a root still got worktrees dropped
+  next to it while only `reconcile` honoured the setting.
+
 ## 0.37.0 - 2026-09-01
 
 - Add a `reference-transaction` guard that refuses to rewind a manifest-managed
