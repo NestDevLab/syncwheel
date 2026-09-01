@@ -882,10 +882,11 @@ syncwheel hooks remove --disable --reason "external contribution clone"
 syncwheel hooks remove --disable --reason "external contribution clone" --apply
 ```
 
-The `pre-push` guard derives owned refs from the manifest and published coordination state,
-including integration, stack and draft sources, channels, coordination state, and
-an owned journal branch. It blocks direct, aliased, multi-ref, delete, force, and
-`HEAD:<managed>` pushes, then names the corresponding Syncwheel publisher. Existing
+The `pre-push` guard derives guarded refs from the manifest and published coordination state,
+including integration, stack and draft sources, channels, coordination state, an
+owned journal branch, and the delivery branches that only `stack land` may publish.
+It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes,
+then names the corresponding Syncwheel publisher. Existing
 hooks are chained and restored on removal; `core.hooksPath` is honored.
 
 The same bundle installs `post-checkout` and `pre-commit` guards for the primary

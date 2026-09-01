@@ -566,6 +566,29 @@ class ManagedRefGuardTests(unittest.TestCase):
                 with self.assertRaisesRegex(syncwheel.SyncwheelError, 'raw git push blocked'):
                     syncwheel.command_hooks_guard(self.args())
 
+    def test_guard_blocks_raw_push_to_the_delivery_branch(self):
+        zero = '0' * 40
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True).strip()
+        with mock.patch('sys.stdin', io.StringIO(f'HEAD {head} refs/heads/main {zero}\n')):
+            with self.assertRaisesRegex(syncwheel.SyncwheelError, 'raw git push blocked.*stack land'):
+                syncwheel.command_hooks_guard(self.args())
+
+    def test_stack_land_authorization_permits_the_delivery_push(self):
+        zero = '0' * 40
+        head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True).strip()
+        path, secret = syncwheel.authorize_syncwheel_push(self.repo, 'origin', ['refs/heads/main'])
+        environment = {
+            syncwheel.MANAGED_PUSH_AUTH_ENV: str(path),
+            syncwheel.MANAGED_PUSH_SECRET_ENV: secret,
+        }
+        payload = f'HEAD {head} refs/heads/main {zero}\n'
+        with mock.patch.dict(os.environ, environment), mock.patch('sys.stdin', io.StringIO(payload)):
+            self.assertEqual(syncwheel.command_hooks_guard(self.args()), 0)
+
+    def test_delivery_branch_is_guarded_but_not_managed(self):
+        self.assertIn('refs/heads/main', syncwheel.delivery_ref_names(self.manifest))
+        self.assertNotIn('refs/heads/main', syncwheel.managed_ref_names(self.manifest))
+
     def test_guard_allows_unmanaged_and_exact_single_use_authorization(self):
         zero = '0' * 40
         head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True).strip()
