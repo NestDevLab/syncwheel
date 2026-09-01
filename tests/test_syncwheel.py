@@ -433,14 +433,28 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('worktree', 'open', 'lane-4', '--json', expected=2)
 
         self.assertIn('capacity reached (4)', result.stderr)
+        base = self.git('rev-parse', 'main')
+        self.assertIn(
+            f'syncwheel stack add feature-a {base}..syncwheel/lane/lane-0', result.stderr
+        )
         self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'syncwheel-lane-lane-4').exists())
 
     def test_expired_clean_lane_is_reaped_with_a_recovery_ref_before_next_open(self):
-        opened = json.loads(self.run_cli('worktree', 'open', 'expired', '--json').stdout)
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'expired', '--into', 'feature-a', '--json'
+        ).stdout)
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        expired_status = status['governed_worktrees']['lanes'][0]
+        self.assertEqual(expired_status['code'], 'expired')
+        self.assertIn(
+            f"syncwheel stack add feature-a {opened['lane']['base']}..syncwheel/lane/expired",
+            expired_status['remedy'],
+        )
 
         self.run_cli('worktree', 'open', 'next', '--json')
 
@@ -1301,6 +1315,15 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_in_place_apply_requires_current_target_branch(self):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', expected=2)
         self.assertIn('requires current branch', result.stderr)
+        self.assertIn('syncwheel worktree open <lane> --into feature-a', result.stderr)
+
+    def test_int_rebuild_in_place_names_manifest_capture_remedy(self):
+        self.git('switch', '-qc', 'feature/wrong-primary')
+
+        result = self.run_cli('int', 'rebuild', '--in-place', expected=2)
+
+        self.assertIn('requires current branch', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
 
     def test_stack_sync_updates_manifest_from_branch(self):
         self.git('switch', '-q', 'pr/feature-a')
@@ -1847,6 +1870,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('reconcile', '--no-fetch', '--apply', expected=2)
 
         self.assertIn(f'{self.repo} is not clean', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
         self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
         self.assertEqual(manifest.read_text(), before_manifest)
         self.assertFalse(ledger.exists())

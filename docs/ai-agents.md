@@ -69,6 +69,11 @@ active-active channel must use the coordination remote.
 - when the primary checkout is explicitly owned, use `worktree open <lane>` as
   the only authoring fallback; choose `--full` only when that lane genuinely
   needs dependencies, builds, tests, or debugging
+- when a primary-checkout stop names a manifest-derived remedy, use the named
+  `stack capture-integration <stack> HEAD` command for your committed primary
+  work, or `worktree open <lane> --into <stack>` without changing work owned by
+  another agent; capacity and expiry messages name the applicable `stack add`
+  queue command
 - treat a light lane as an operational boundary, not a sandbox: do not install
   dependencies there, and return to a clean checkout before stack ownership
   operations
