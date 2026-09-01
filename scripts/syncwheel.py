@@ -120,10 +120,13 @@ SYNCWHEEL_HOOKS_PATH = 'githooks'
 MANAGED_PUSH_HOOK_MARKER = '# syncwheel-managed-ref-guard v1'
 MANAGED_PRIMARY_PRE_COMMIT_MARKER = '# syncwheel-primary-checkout-guard pre-commit v1'
 MANAGED_PRIMARY_POST_CHECKOUT_MARKER = '# syncwheel-primary-checkout-guard post-checkout v1'
-MANAGED_REPOSITORY_HOOKS = ('pre-push', 'pre-commit', 'post-checkout')
+MANAGED_REF_MOVE_MARKER = '# syncwheel-ref-move-guard v1'
+MANAGED_REPOSITORY_HOOKS = ('pre-push', 'pre-commit', 'post-checkout', 'reference-transaction')
 MANAGED_PUSH_AUTH_ENV = 'SYNCWHEEL_PUSH_AUTH_FILE'
 MANAGED_PUSH_SECRET_ENV = 'SYNCWHEEL_PUSH_AUTH_SECRET'
 MANAGED_PUSH_AUTH_TTL_SECONDS = 60
+MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'
+SYNCWHEEL_OWNS_REF_MOVES = False
 FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel',
@@ -199,6 +202,8 @@ VERSION = resolve_runtime_version()
 
 def run(cmd, cwd=None, check=True, input_text=None, env=None):
     process_env = os.environ.copy()
+    if SYNCWHEEL_OWNS_REF_MOVES:
+        process_env[MANAGED_REF_MOVE_AUTH_ENV] = '1'
     if env:
         process_env.update(env)
     result = subprocess.run(
@@ -727,9 +732,40 @@ def managed_worktree_hook_content(hook_name, backup_exists):
     )
 
 
+def managed_ref_move_hook_content(backup_exists):
+    chain = (
+        'if [ -x "$hook_dir/reference-transaction.syncwheel-chain" ]; then\n'
+        '  printf \'%s\\n\' "$input" | '
+        '"$hook_dir/reference-transaction.syncwheel-chain" "$@" || exit 0\n'
+        'fi\n'
+        if backup_exists else ''
+    )
+    syncwheel_command = managed_hook_syncwheel_command()
+    # Git runs this for every ref transaction, so it stays cheap and it fails
+    # open: only an explicit refusal (exit 2) aborts the update. A missing
+    # interpreter or PATH must never be able to block an ordinary commit, and
+    # the payload is a few ref lines, so no temporary file is needed.
+    return (
+        '#!/bin/sh\n'
+        f'{MANAGED_REF_MOVE_MARKER}\n'
+        '[ "${1:-}" = "prepared" ] || exit 0\n'
+        'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 0\n'
+        'input=$(cat) || exit 0\n'
+        '[ -n "$input" ] || exit 0\n'
+        + chain +
+        f'printf \'%s\\n\' "$input" | {syncwheel_command} '
+        'hooks ref-guard --phase "$1"\n'
+        'status=$?\n'
+        '[ "$status" -eq 2 ] && exit 1\n'
+        'exit 0\n'
+    )
+
+
 def managed_hook_content(hook_name, backup_exists):
     if hook_name == 'pre-push':
         return managed_push_hook_content(backup_exists)
+    if hook_name == 'reference-transaction':
+        return managed_ref_move_hook_content(backup_exists)
     return managed_worktree_hook_content(hook_name, backup_exists)
 
 
@@ -738,6 +774,7 @@ def managed_hook_marker(hook_name):
         'pre-push': MANAGED_PUSH_HOOK_MARKER,
         'pre-commit': MANAGED_PRIMARY_PRE_COMMIT_MARKER,
         'post-checkout': MANAGED_PRIMARY_POST_CHECKOUT_MARKER,
+        'reference-transaction': MANAGED_REF_MOVE_MARKER,
     }[hook_name]
 
 
@@ -16467,6 +16504,11 @@ def build_parser():
         '--event', required=True, choices=('pre-commit', 'post-checkout')
     )
     hooks_worktree_guard_p.set_defaults(func=command_hooks_worktree_guard)
+    hooks_ref_guard_p = hooks_sub.add_parser(
+        'ref-guard', parents=[common], help=argparse.SUPPRESS
+    )
+    hooks_ref_guard_p.add_argument('--phase', default='')
+    hooks_ref_guard_p.set_defaults(func=command_hooks_ref_guard)
 
     use_p = sub.add_parser('use', help='show or set the repo-local default syncwheel profile', parents=[common])
     use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
@@ -17311,6 +17353,68 @@ def command_hooks_worktree_guard(args):
     )
 
 
+def command_hooks_ref_guard(args):
+    # Git runs this for every ref transaction. Only the "prepared" phase can
+    # veto, and only a rewind of a managed branch is worth vetoing: everything
+    # else must stay out of the way of ordinary Git use.
+    if args.phase != 'prepared':
+        return 0
+    updates = []
+    for line in sys.stdin.read().splitlines():
+        parts = line.split()
+        if len(parts) == 3:
+            updates.append(parts)
+    if not updates:
+        return 0
+    repo_root = resolve_repo_root(args.repo)
+    worktrees = get_worktrees(repo_root)
+    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+    manifest_path = resolve_manifest_path(
+        primary_root, str(primary_root), args.manifest, args.personal
+    )
+    manifest, _ = load_manifest(primary_root, manifest_path)
+    if manifest is None:
+        return 0
+    managed = set(managed_ref_names(manifest))
+    if not managed:
+        return 0
+    rewinds = []
+    for old, new, ref in updates:
+        if ref not in managed:
+            continue
+        if set(new) == {'0'}:
+            # Deletion is a lifecycle decision the branch commands already own.
+            continue
+        if set(old) == {'0'}:
+            # "git branch -f" reports a zero old value, so a rewind looks exactly
+            # like a creation. The prepared phase runs before the ref moves, so
+            # read what the ref still points at and trust that instead.
+            current = git(
+                repo_root, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}',
+                check=False,
+            )
+            old = current.stdout.strip()
+            if current.returncode != 0 or not old:
+                continue
+        ancestor = git(repo_root, 'merge-base', '--is-ancestor', old, new, check=False)
+        if ancestor.returncode != 0:
+            rewinds.append((ref, old, new))
+    if not rewinds:
+        return 0
+    if os.environ.get(MANAGED_REF_MOVE_AUTH_ENV) == '1':
+        return 0
+    detail = ', '.join(f'{ref} {old[:7]} -> {new[:7]}' for ref, old, new in rewinds)
+    raise SyncwheelError(
+        f'refusing to rewind managed ref(s): {detail}. '
+        'The new tip does not contain the current one, so committed work would '
+        'stop being reachable from this branch. Use the Syncwheel command that '
+        'owns this branch (for example "reconcile --apply" or "stack rebuild"), '
+        'or move to the intended ref instead. '
+        'This local hook is a safety guard, not a security boundary; '
+        'core.hooksPath and --no-verify can bypass it.'
+    )
+
+
 def command_self_mode(args):
     if not args.mode:
         settings = load_update_settings()
@@ -17378,6 +17482,7 @@ def default_hook_convergence_requested(args):
         command_hooks_remove,
         command_hooks_guard,
         command_hooks_worktree_guard,
+        command_hooks_ref_guard,
     }:
         return False
     if args.func == command_repo_tracking_set and bool(getattr(args, 'apply', False)):
@@ -17443,10 +17548,23 @@ def main():
         raw_args = raw_args[:marker]
     args = parser.parse_args(raw_args)
     args.git_args = passthrough
+    # Syncwheel owns the managed branches, so its own child Git processes are
+    # allowed to rewind them. The guard exists to stop every other caller.
+    if args.func not in {
+        command_hooks_guard,
+        command_hooks_worktree_guard,
+        command_hooks_ref_guard,
+    }:
+        global SYNCWHEEL_OWNS_REF_MOVES
+        SYNCWHEEL_OWNS_REF_MOVES = True
     try:
         if (
             args.command != 'revision-provider'
-            and args.func not in {command_hooks_guard, command_hooks_worktree_guard}
+            and args.func not in {
+                command_hooks_guard,
+                command_hooks_worktree_guard,
+                command_hooks_ref_guard,
+            }
         ):
             maybe_handle_startup_update_policy(args)
         if args.command != 'revision-provider':

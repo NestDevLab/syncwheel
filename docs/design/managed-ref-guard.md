@@ -8,7 +8,7 @@ coordination state.
 ## Local contract
 
 `syncwheel hooks install` is plan-only; `--apply` installs the `pre-push`,
-`post-checkout`, and `pre-commit` bundle. The command honors `core.hooksPath`.
+`post-checkout`, `pre-commit`, and `reference-transaction` bundle. The command honors `core.hooksPath`.
 When a hook already exists, Syncwheel moves it to a stable chain path and runs it
 before its own check. Per-hook ownership sidecars record the generated and chained
 digests. Removal is also plan-first, refuses modified/unowned hooks, and restores
@@ -39,6 +39,34 @@ Git has no pre-checkout hook, so preventing the ref move itself is not portable.
 The combination of immediate post-checkout failure, commit blocking, validation,
 and Syncwheel's integration-first workflow is the strongest reversible local guard
 available without wrapping the `git` executable.
+
+## Managed-ref rewinds
+
+`pre-commit` decides which branch may be committed to and `pre-push` decides what
+may leave the clone, but neither observes a branch being moved backwards. A plain
+`git reset --hard` onto a non-descendant commit therefore drops committed work
+from a managed branch without any guard reporting it, and the loss only surfaces
+later as an unexplained divergence from the published tip.
+
+The `reference-transaction` hook closes that gap. In the `prepared` phase it
+refuses an update to a manifest-managed branch when the incoming tip does not
+contain the current one. Creation and deletion are untouched, unmanaged branches
+are untouched, and fast-forward updates are untouched, so ordinary Git use is
+unaffected.
+
+`git branch -f` reports a zero old value, which makes a rewind indistinguishable
+from a creation. The guard resolves the ref itself in that case, because the
+prepared phase still runs before the ref moves.
+
+Syncwheel rebuilds managed branches legitimately, so every Git process it spawns
+carries an authorization variable. That authorization is injected per child
+process and never into Syncwheel's own environment, so it cannot leak to an
+unrelated caller sharing the process.
+
+The hook fails open. It aborts a transaction only on an explicit refusal; a
+missing interpreter, an unusable `PATH`, or an unreachable `syncwheel` leaves Git
+working normally. A local hook is a safety guard, not a security boundary:
+`core.hooksPath`, `--no-verify`, and a fresh clone all bypass it.
 
 ## Managed-ref publication
 

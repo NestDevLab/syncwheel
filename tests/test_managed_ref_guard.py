@@ -110,11 +110,108 @@ class ManagedRefGuardTests(unittest.TestCase):
         result = syncwheel.install_managed_push_hook(self.repo, apply=True)
         self.assertTrue(result['ready'])
         self.assertEqual(
-            set(result['hooks']), {'pre-push', 'pre-commit', 'post-checkout'}
+            set(result['hooks']),
+            {'pre-push', 'pre-commit', 'post-checkout', 'reference-transaction'},
         )
         for hook in result['hooks'].values():
             self.assertTrue(hook['ready'])
             self.assertEqual(hook['status'], 'installed')
+
+    def _install_and_branch(self, branch):
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        subprocess.run(['git', 'checkout', '-qb', branch], cwd=self.repo, check=True)
+        tips = []
+        for name in ('one', 'two'):
+            (self.repo / name).write_text(name + '\n')
+            subprocess.run(['git', 'add', name], cwd=self.repo, check=True)
+            subprocess.run(['git', 'commit', '-qm', name], cwd=self.repo, check=True)
+            tips.append(subprocess.run(
+                ['git', 'rev-parse', 'HEAD'], cwd=self.repo, check=True,
+                capture_output=True, text=True,
+            ).stdout.strip())
+        return tips
+
+    def _clean_env(self):
+        env = dict(self.hook_env)
+        env.pop(syncwheel.MANAGED_REF_MOVE_AUTH_ENV, None)
+        return env
+
+    def _reset_hard(self, target, env=None):
+        return subprocess.run(
+            ['git', 'reset', '--hard', target], cwd=self.repo,
+            env=env if env is not None else self._clean_env(),
+            capture_output=True, text=True,
+        )
+
+    def test_rewinding_a_managed_branch_is_refused(self):
+        self._install_and_branch('main-integration')
+        result = self._reset_hard('HEAD~1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refusing to rewind managed ref', result.stderr)
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'log', '-1', '--format=%s'], cwd=self.repo,
+                check=True, capture_output=True, text=True,
+            ).stdout.strip(),
+            'two',
+        )
+
+    def test_advancing_a_managed_branch_is_allowed(self):
+        self._install_and_branch('main-integration')
+        (self.repo / 'three').write_text('three\n')
+        subprocess.run(['git', 'add', 'three'], cwd=self.repo, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-qm', 'three'], cwd=self.repo,
+            env=self.hook_env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_syncwheel_authorization_permits_a_rewind(self):
+        self._install_and_branch('main-integration')
+        env = dict(self.hook_env)
+        env.pop(syncwheel.MANAGED_REF_MOVE_AUTH_ENV, None)
+        env[syncwheel.MANAGED_REF_MOVE_AUTH_ENV] = '1'
+        result = self._reset_hard('HEAD~1', env=env)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_guard_fails_open_when_it_cannot_run(self):
+        # A local safety guard that cannot execute must not be able to brick the
+        # repository, so an unusable PATH has to leave ordinary Git working.
+        self._install_and_branch('main-integration')
+        env = self._clean_env()
+        # Git stays reachable; the syncwheel shim in .test-bin does not.
+        env['PATH'] = '/usr/bin:/bin'
+        result = subprocess.run(
+            ['git', 'commit', '-q', '--allow-empty', '-m', 'still works'],
+            cwd=self.repo, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_owned_ref_moves_stay_out_of_the_ambient_environment(self):
+        # Authorization must reach spawned Git only; leaking it into os.environ
+        # would silently disarm the guard for everything else in the process.
+        self.assertNotIn(syncwheel.MANAGED_REF_MOVE_AUTH_ENV, os.environ)
+
+    def test_unmanaged_branch_rewind_is_untouched(self):
+        # Moved with "git branch -f" so the primary-checkout guard, which owns
+        # which branch may be checked out, stays out of this assertion.
+        self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+        result = subprocess.run(
+            ['git', 'branch', '-f', 'scratch', 'HEAD~1'], cwd=self.repo,
+            env=self._clean_env(), capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_rewinding_a_managed_stack_branch_is_refused(self):
+        self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'pr/feature'], cwd=self.repo, check=True)
+        result = subprocess.run(
+            ['git', 'branch', '-f', 'pr/feature', 'HEAD~1'], cwd=self.repo,
+            env=self._clean_env(), capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refusing to rewind managed ref', result.stderr)
 
     def test_managed_hook_callbacks_skip_startup_update_policy(self):
         callbacks = {

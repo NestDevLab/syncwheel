@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.0 - 2026-09-01
+
+- Add a `reference-transaction` guard that refuses to rewind a manifest-managed
+  branch onto a commit that does not contain its current tip, closing the gap
+  where a plain `git reset --hard` silently dropped committed work that
+  `pre-commit` and `pre-push` never observe.
+- Resolve the ref directly when Git reports a zero old value, so a rewind
+  performed with `git branch -f` is not mistaken for a branch creation.
+- Authorize Syncwheel's own rebuilds per spawned Git process rather than through
+  its ambient environment, and fail the hook open so a missing interpreter or an
+  unreachable `syncwheel` can never block an ordinary commit.
+
 ## 0.36.3 - 2026-08-31
 
 - Publish a local-ahead manifest-only integration control commit instead of
