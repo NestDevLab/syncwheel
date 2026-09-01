@@ -71,6 +71,25 @@ dependency installation, builds, and tests on integration. Use `--replay-mode de
 conflict or validate a non-empty materialized stack when integration cannot safely run it; it is never
 a side effect of rebuilding.
 
+When the primary checkout is explicitly owned by another agent and authoring
+must continue, use the explicit governed fallback instead of manual worktree
+surgery:
+
+```bash
+syncwheel worktree open <lane> [--into <existing-stack>] [--full]
+```
+
+The default light lane is for editing and committing only. It receives no
+dependency provisioning; use `--full` only for an explicitly necessary
+dependency, build, test, or debugging surface. This is not a security sandbox,
+so do not defeat the light-lane boundary with raw install/test commands. The
+lane is clone-local and bounded to four active entries. After its commits are
+owned through the existing `stack create`, `stack add`, or
+`stack capture-integration` flow, Syncwheel stores a local recovery ref and
+reaps only a clean lane. Dirty, unknown, outside-root, or current-directory
+lanes stay visible and require explicit recovery. Check governed-worktree
+warnings before a mutating lifecycle command.
+
 ## Locate the CLI
 
 Syncwheel is available as the PATH `syncwheel` command. Install it with:

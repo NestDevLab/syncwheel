@@ -8,6 +8,22 @@
   `merge-stacks` integration projections without materializing it on the stack
   source branch.
 
+## 0.38.1 - 2026-09-01
+
+- Guard the base branch and every stack landing target in the `pre-push` hook.
+  A raw `git push origin HEAD:main` used to go through while the same push to
+  the integration branch was refused; only `stack land` may publish there now.
+
+## 0.38.0 - 2026-09-01
+
+- Add explicit, clone-local governed worktree lanes through `syncwheel worktree
+  open`, with a four-lane capacity, owner and lease records, configured-root
+  containment, optional `--full` mode, and no automatic fallback from the
+  primary checkout.
+- Retain unfinished lane state visibly, recover committed clean lanes to a local
+  recovery ref before reaping them, and expose machine-readable diagnostics plus
+  terminal warnings for dirty, expired, pending, or unknown governed lanes.
+
 ## 0.37.1 - 2026-09-01
 
 - Resolve the worktree path through `syncwheel_worktree_root` in `stack rebuild`,

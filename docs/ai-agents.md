@@ -66,6 +66,15 @@ active-active channel must use the coordination remote.
 - begin routine implementation, dependency installation, builds, and tests on integration;
   request `--replay-mode desk` only for conflict resolution or validation of a
   non-empty materialized stack when integration cannot safely run it
+- when the primary checkout is explicitly owned, use `worktree open <lane>` as
+  the only authoring fallback; choose `--full` only when that lane genuinely
+  needs dependencies, builds, tests, or debugging
+- treat a light lane as an operational boundary, not a sandbox: do not install
+  dependencies there, and return to a clean checkout before stack ownership
+  operations
+- review governed-worktree warnings on normal commands; clean expired lanes are
+  recovered to a local recovery ref before reaping, while dirty or unknown lanes
+  must remain visible until explicitly handled
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback

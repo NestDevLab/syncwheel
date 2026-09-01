@@ -77,6 +77,8 @@ multiple updates, deletion, force, same-ref aliases, and `HEAD:<managed>`.
 Protected refs are derived at push time from:
 
 - manifest integration, stack/draft source, and channel branches;
+- the base branch and every stack's landing target, which only `stack land`
+  may publish;
 - the coordination-state branch and all refs still owned by its latest state;
 - the journal branch when repository mode is `journal`.
 
