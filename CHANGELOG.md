@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.39.1 - 2026-09-01
 
 - Name manifest-derived capture or queue commands whenever an occupied primary
   checkout, a governed-worktree capacity limit, or an expired lane stops the
