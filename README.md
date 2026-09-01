@@ -240,6 +240,14 @@ diagnostics in JSON. Repo-aware terminal commands show actionable yellow
 warnings for unfinished lanes when stderr is a TTY; `NO_COLOR` removes ANSI
 color and JSON output remains free of ANSI sequences.
 
+When an occupied primary checkout stops a mutating command, Syncwheel names
+manifest-derived capture and queue commands in the error. Capture committed
+primary work with `syncwheel stack capture-integration <stack> HEAD`, or leave
+another agent's primary checkout unchanged and use
+`syncwheel worktree open <lane> --into <stack>`. Capacity and expired-lane
+diagnostics name the corresponding `syncwheel stack add <stack> <base>..<lane>`
+queue command.
+
 ## Owning a commit before you know its PR
 
 A commit made on the integration branch has to belong to a stack to reach the base branch. Until it

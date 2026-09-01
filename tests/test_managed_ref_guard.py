@@ -350,6 +350,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
         self.assertNotEqual(committed.returncode, 0)
         self.assertIn('commit blocked', committed.stderr)
+        self.assertIn('syncwheel stack capture-integration feature HEAD', committed.stderr)
 
     def test_feature_worktree_commit_remains_allowed(self):
         subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)

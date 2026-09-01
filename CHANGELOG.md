@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Name manifest-derived capture or queue commands whenever an occupied primary
+  checkout, a governed-worktree capacity limit, or an expired lane stops the
+  workflow, rather than leaving agents to reconcile work manually.
+
 ## 0.39.0 - 2026-09-01
 
 - Add plan-first `stack classify-integration` for manifest-only ownership of an

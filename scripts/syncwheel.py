@@ -1768,7 +1768,12 @@ def primary_checkout_state(repo_root, manifest):
     }
 
 
-def ensure_clean_worktree(path, allowed_status_prefixes=None):
+def format_remedy_suffix(commands):
+    commands = list(dict.fromkeys(command for command in commands if command))
+    return f'. Use: {"; ".join(commands)}' if commands else ''
+
+
+def ensure_clean_worktree(path, allowed_status_prefixes=None, remedy_commands=None):
     result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
     if result.returncode != 0:
         raise SyncwheelError(f'{path} is not a git worktree')
@@ -1782,7 +1787,7 @@ def ensure_clean_worktree(path, allowed_status_prefixes=None):
             continue
         remaining.append(entry)
     if remaining:
-        raise SyncwheelError(f'{path} is not clean')
+        raise SyncwheelError(f'{path} is not clean' + format_remedy_suffix(remedy_commands or []))
 
 
 def normalize_syncwheel_tracking(value, path='manifest'):
@@ -2133,14 +2138,15 @@ def backup_branch_command(repo_root, branch, timestamp):
     return ['git', 'branch', backup_branch_name(branch, timestamp), branch]
 
 
-def ensure_in_place_target(repo_root, target_branch):
+def ensure_in_place_target(repo_root, target_branch, manifest, stack_id=None):
+    remedies = primary_checkout_remedy_commands(manifest, stack_id=stack_id)
     current_branch = get_current_branch(repo_root)
     if current_branch != target_branch:
         raise SyncwheelError(
             f'in-place materialization requires current branch {target_branch!r}; '
-            f'current branch is {current_branch!r}'
+            f'current branch is {current_branch!r}' + format_remedy_suffix(remedies)
         )
-    ensure_clean_worktree(repo_root)
+    ensure_clean_worktree(repo_root, remedy_commands=remedies)
 
 
 def normalize_channel_timestamp(value, field):
@@ -4049,6 +4055,61 @@ def safe_ref_segment(value):
     return cleaned
 
 
+def manifest_remedy_stack_ids(manifest, stack_id=None):
+    """Return deterministic, manifest-declared stack destinations for recovery guidance."""
+    stacks = {
+        stack['id']: stack for stack in manifest.get('stacks', [])
+        if isinstance(stack, dict) and isinstance(stack.get('id'), str)
+    }
+    if stack_id:
+        return [stack_id] if stack_id in stacks else []
+    ordered = [stack_id for stack_id in manifest.get('integration', {}).get('stacks', []) if stack_id in stacks]
+    return list(dict.fromkeys([*ordered, *sorted(stacks)]))
+
+
+def primary_checkout_remedy_commands(manifest, stack_id=None):
+    """Name capture and queue commands without guessing ownership of primary changes."""
+    stack_ids = manifest_remedy_stack_ids(manifest, stack_id)
+    if not stack_ids:
+        return [
+            'syncwheel stack create --draft <stack-id> --purpose "Capture primary checkout work"',
+            'syncwheel stack capture-integration <stack-id> HEAD',
+        ]
+    commands = []
+    for identifier in stack_ids:
+        quoted_stack = shlex.quote(identifier)
+        commands.extend([
+            f'syncwheel stack capture-integration {quoted_stack} HEAD',
+            f'syncwheel worktree open <lane> --into {quoted_stack}',
+        ])
+    return commands
+
+
+def governed_lane_queue_commands(manifest, lanes):
+    """Return manifest-backed queue commands for retained governed lane commits."""
+    commands = []
+    for lane in lanes:
+        branch = lane.get('branch')
+        base = lane.get('base')
+        if not isinstance(branch, str) or not branch or not isinstance(base, str) or not base:
+            continue
+        targets = manifest_remedy_stack_ids(manifest, lane.get('target'))
+        for target in targets:
+            commands.append(
+                f'syncwheel stack add {shlex.quote(target)} '
+                f'{shlex.quote(base)}..{shlex.quote(branch)}'
+            )
+    return list(dict.fromkeys(commands))
+
+
+def governed_lane_remedy(manifest, lane, *, commit_first=False):
+    commands = governed_lane_queue_commands(manifest, [lane])
+    if not commands:
+        commands = primary_checkout_remedy_commands(manifest)
+    prefix = 'commit the lane changes, then ' if commit_first else ''
+    return prefix + 'Use: ' + '; '.join(commands)
+
+
 def personal_manifest_path(repo_root, name):
     segment = safe_ref_segment(name)
     return repo_root / '.syncwheel' / 'manifests' / f'{segment}.local.json'
@@ -4196,7 +4257,7 @@ def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
     if lane['state'] == 'captured_pending_cleanup':
         status.update(
             code=lane.get('pending_reason') or 'captured_pending_cleanup',
-            remedy='leave the lane directory, then run a mutating Syncwheel command again',
+            remedy=governed_lane_remedy(manifest, lane),
         )
         return status
     if not path_is_relative_to(path, root):
@@ -4211,13 +4272,13 @@ def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
         status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
         return status
     if dirty:
-        status.update(code='dirty', remedy='commit, preserve, or discard the lane changes explicitly')
+        status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
         return status
     expires = parse_coordination_timestamp(lane['lease_expires_at'])
     if expires is None:
         status.update(code='invalid_lease', remedy='repair the local registry before any cleanup')
     elif expires <= now:
-        status.update(code='expired', remedy='run a Syncwheel mutation from another directory to recover and reap this clean lane')
+        status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
     return status
 
 
@@ -9357,7 +9418,8 @@ def command_worktree_open(args):
         if len(active) >= GOVERNED_WORKTREE_DEFAULT_CAPACITY:
             raise SyncwheelError(
                 f'governed worktree capacity reached ({GOVERNED_WORKTREE_DEFAULT_CAPACITY}); '
-                'finish or recover an existing lane before opening another'
+                'capture or queue an existing lane before opening another'
+                + format_remedy_suffix(governed_lane_queue_commands(manifest, active))
             )
         if any(item['id'] == lane_id for item in registry['lanes']):
             raise SyncwheelError(
@@ -13018,7 +13080,7 @@ def rebuild_stack_from_manifest(
     """Rebuild one stack through the shared replay executor and ledger path."""
     require_nonempty_desk_stack_rebuild(stack, mode)
     if not dry_run and mode == 'in-place':
-        ensure_in_place_target(repo_root, stack['branch'])
+        ensure_in_place_target(repo_root, stack['branch'], manifest, stack['id'])
     if not dry_run and mode in ('ephemeral', 'plumbing'):
         ensure_non_in_place_target_clean(
             repo_root,
@@ -13416,7 +13478,11 @@ def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_
                 path = Path(repo_root).resolve()
                 key = (branch, path)
                 if key not in checked:
-                    ensure_clean_worktree(path, allowed_status_prefixes=['?? .syncwheel/'])
+                    ensure_clean_worktree(
+                        path,
+                        allowed_status_prefixes=['?? .syncwheel/'],
+                        remedy_commands=primary_checkout_remedy_commands(manifest),
+                    )
                     checked.add(key)
             else:
                 worktree = reconcile_worktree_path(repo_root, branch, worktree_root)
@@ -13982,8 +14048,13 @@ def command_reconcile(args):
                     raise SyncwheelError(
                         f"in-place materialization requires current branch {integration['branch']!r}; "
                         f"current branch is {get_current_branch(repo_root)!r}"
+                        + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
                     )
-                ensure_clean_worktree(repo_root, allowed_status_prefixes=['?? .syncwheel/'])
+                ensure_clean_worktree(
+                    repo_root,
+                    allowed_status_prefixes=['?? .syncwheel/'],
+                    remedy_commands=primary_checkout_remedy_commands(manifest),
+                )
                 worktree = None
                 in_place = True
             else:
@@ -14030,7 +14101,11 @@ def command_reconcile(args):
             before_tip = ref_tip(repo_root, integration['branch'])
             use_primary_checkout = get_current_branch(repo_root) == integration['branch']
             if use_primary_checkout:
-                ensure_clean_worktree(repo_root, allowed_status_prefixes=['?? .syncwheel/'])
+                ensure_clean_worktree(
+                    repo_root,
+                    allowed_status_prefixes=['?? .syncwheel/'],
+                    remedy_commands=primary_checkout_remedy_commands(manifest),
+                )
                 worktree = None
             else:
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
@@ -14190,7 +14265,7 @@ def command_int_align_remote(args):
     integration = manifest['integration']
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
-    ensure_in_place_target(repo_root, integration['branch'])
+    ensure_in_place_target(repo_root, integration['branch'], manifest)
     report = integration_sync_report(repo_root, manifest, args.remote)
     if not report['remote_exists']:
         raise SyncwheelError(f"remote integration ref does not exist: {report['remote_ref']}")
@@ -14240,7 +14315,7 @@ def command_int_rebuild(args):
         plumbing_supported=integration_supports_plumbing(manifest),
     )
     if not args.dry_run and mode == 'in-place':
-        ensure_in_place_target(repo_root, manifest['integration']['branch'])
+        ensure_in_place_target(repo_root, manifest['integration']['branch'], manifest)
     if not args.dry_run and mode in ('ephemeral', 'plumbing'):
         ensure_non_in_place_target_clean(
             repo_root,
@@ -17913,7 +17988,9 @@ def command_hooks_worktree_guard(args):
     raise SyncwheelError(
         f'primary checkout {action}: expected {primary["expected_branch"]!r}, '
         f'found {primary["branch"]!r} at {primary["path"]}. '
-        'Keep feature branches in dedicated worktrees or materialize them with Syncwheel plumbing; '
+        'Keep the primary unchanged'
+        + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
+        + '. '
         'restore the primary checkout losslessly before continuing. '
         'This local hook is a safety guard, not a security boundary; --no-verify can bypass it.'
     )
