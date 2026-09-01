@@ -6743,6 +6743,13 @@ def effective_worktree_root(manifest, override=None):
     return override or syncwheel_worktree_root(manifest)
 
 
+def configured_worktree_path(repo_root, branch, worktree_root):
+    if worktree_root:
+        safe = branch.replace('/', '-').replace('\\', '-')
+        return resolve_worktree_root_path(repo_root, worktree_root) / safe
+    return default_worktree_path(repo_root, branch)
+
+
 def find_worktree_for_branch(repo_root, branch):
     for worktree in get_worktrees(repo_root):
         if worktree.get('branch') == branch:
@@ -6750,7 +6757,7 @@ def find_worktree_for_branch(repo_root, branch):
     return None
 
 
-def resolve_git_worktree(repo_root, branch, worktree=None, auto_worktree=False):
+def resolve_git_worktree(repo_root, branch, manifest, worktree=None, auto_worktree=False):
     found = find_worktree_for_branch(repo_root, branch)
     if found:
         return found
@@ -6759,7 +6766,7 @@ def resolve_git_worktree(repo_root, branch, worktree=None, auto_worktree=False):
         run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
         return path
     if auto_worktree:
-        path = default_worktree_path(repo_root, branch)
+        path = configured_worktree_path(repo_root, branch, effective_worktree_root(manifest))
         run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
         return path
     raise SyncwheelError(
@@ -6779,7 +6786,7 @@ def push_args_with_options(args):
     return push_args
 
 
-def resolve_stack_rebuild_location(repo_root, stack, args):
+def resolve_stack_rebuild_location(repo_root, manifest, stack, args):
     if args.in_place and args.worktree:
         raise SyncwheelError('use either --in-place or --worktree, not both')
     if args.in_place:
@@ -6797,7 +6804,9 @@ def resolve_stack_rebuild_location(repo_root, stack, args):
         return None, True
     if existing:
         return existing, False
-    return default_worktree_path(repo_root, stack['branch']), False
+    return configured_worktree_path(
+        repo_root, stack['branch'], effective_worktree_root(manifest)
+    ), False
 
 
 def resolve_int_rebuild_location(repo_root, manifest, args):
@@ -6819,7 +6828,9 @@ def resolve_int_rebuild_location(repo_root, manifest, args):
         return None, True
     if existing:
         return existing, False
-    return default_worktree_path(repo_root, integration['branch']), False
+    return configured_worktree_path(
+        repo_root, integration['branch'], effective_worktree_root(manifest)
+    ), False
 
 
 REPLAY_MODE_CHOICES = ('auto', 'plumbing', 'in-place', 'ephemeral', 'desk')
@@ -12577,7 +12588,7 @@ def command_stack_rebuild(args):
         manifest,
         args,
         stack['branch'],
-        resolve_stack_rebuild_location(repo_root, stack, args),
+        resolve_stack_rebuild_location(repo_root, manifest, stack, args),
     )
     rebuild_stack_from_manifest(
         repo_root,
@@ -12651,7 +12662,9 @@ def command_stack_git(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
-    worktree = resolve_git_worktree(repo_root, stack['branch'], args.worktree, args.auto_worktree)
+    worktree = resolve_git_worktree(
+        repo_root, stack['branch'], manifest, args.worktree, args.auto_worktree
+    )
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('stack git requires git arguments after --')
@@ -12843,10 +12856,7 @@ def reconcile_worktree_path(repo_root, branch, worktree_root):
         existing_path = Path(existing).resolve()
         if existing_path != Path(repo_root).resolve():
             return existing_path
-    if worktree_root:
-        safe = branch.replace('/', '-').replace('\\', '-')
-        return resolve_worktree_root_path(repo_root, worktree_root) / safe
-    return default_worktree_path(repo_root, branch)
+    return configured_worktree_path(repo_root, branch, worktree_root)
 
 
 def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root):
@@ -13788,7 +13798,7 @@ def command_int_git(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     branch = manifest['integration']['branch']
-    worktree = resolve_git_worktree(repo_root, branch, args.worktree, args.auto_worktree)
+    worktree = resolve_git_worktree(repo_root, branch, manifest, args.worktree, args.auto_worktree)
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('int git requires git arguments after --')

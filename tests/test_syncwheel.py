@@ -1591,6 +1591,35 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
 
+    def test_stack_rebuild_uses_the_configured_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
+
+        self.run_cli('stack', 'rebuild', 'feature-b', '--replay-mode', 'desk', expected=0)
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
+        self.assertFalse((self.repo.parent / f'{self.repo.name}-wt-pr-feature-b').exists())
+
+    def test_int_rebuild_uses_the_configured_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
+        self.git('switch', '-q', 'main')
+
+        self.run_cli('int', 'rebuild', '--replay-mode', 'desk', expected=0)
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'integration-reconcile').exists())
+        self.assertFalse(
+            (self.repo.parent / f'{self.repo.name}-wt-integration-reconcile').exists()
+        )
+
+    def test_auto_worktree_uses_the_configured_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
+
+        self.run_cli(
+            'stack', 'git', 'feature-b', '--auto-worktree', '--', 'status', '--short', expected=0
+        )
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
+        self.assertFalse((self.repo.parent / f'{self.repo.name}-wt-pr-feature-b').exists())
+
     def test_reconcile_apply_leaves_no_worktree_by_default(self):
         self.prepare_reconcile_apply_worktree_scenario()
         before = self.git('worktree', 'list', '--porcelain')
