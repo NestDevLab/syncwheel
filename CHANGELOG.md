@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Add plan-first `stack classify-integration` for manifest-only ownership of an
+  integration commit. The operation requires an exact plan digest, updates no
+  refs or worktrees, and preserves the commit in later cherry-pick and
+  `merge-stacks` integration projections without materializing it on the stack
+  source branch.
+
 ## 0.37.1 - 2026-09-01
 
 - Resolve the worktree path through `syncwheel_worktree_root` in `stack rebuild`,

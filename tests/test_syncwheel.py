@@ -809,7 +809,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('merge-base', '--is-ancestor', gamma, 'integration/capture-merge'), '')
         self.git('worktree', 'remove', '--force', str(integration_worktree))
 
-    def test_integration_diagnostics_offer_capture_into_a_new_draft(self):
+    def test_integration_plan_offers_declarative_classification_or_capture(self):
         self.git('branch', 'integration/capture-diagnostics', 'main')
         self.git('switch', '-q', 'integration/capture-diagnostics')
         Path(self.repo / 'gamma.txt').write_text('gamma\n')
@@ -826,8 +826,9 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         plan = json.loads(self.run_cli('plan', '--json').stdout)
         action = plan[-1]
-        self.assertEqual(action['remedy']['type'], 'capture_integration_into_new_draft')
-        self.assertIn('stack capture-integration <new-stack-id>', action['remedy']['commands'][1])
+        self.assertEqual(action['remedy']['type'], 'declare_integration_ownership')
+        self.assertIn('stack classify-integration <stack-id>', action['remedy']['commands'][0])
+        self.assertIn('stack capture-integration <stack-id>', action['remedy']['commands'][1])
 
         check = self.run_cli('check', '--no-fetch')
         self.assertIn('remedy: capture into a new draft stack:', check.stdout)
@@ -1195,6 +1196,55 @@ class SyncwheelFixtureTest(unittest.TestCase):
         validation = json.loads(self.run_cli('validate', '--json', expected=0).stdout)
         self.assertEqual(validation['warnings'], [])
         self.assertEqual(json.loads(self.run_cli('plan', '--json', expected=0).stdout), [])
+
+    def test_stack_classify_integration_is_manifest_only_and_survives_merge_rebuild(self):
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        Path(self.repo / 'gamma.txt').write_text('integration only\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'docs: integration-only classification')
+        classified = self.git('rev-parse', 'HEAD')
+
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['integration'] = {
+            'branch': 'integration/test',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        manifest['stacks'] = [manifest['stacks'][1]]
+        manifest['stacks'][0]['integration_branch'] = 'integration/test'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        refs_before = self.git('show-ref', '--heads')
+        stack_before = self.git('rev-parse', 'pr/feature-b')
+        preview = json.loads(self.run_cli(
+            'stack', 'classify-integration', 'feature-b', classified, expected=0,
+        ).stdout)
+        self.assertEqual(preview['refUpdates'], [])
+        self.assertEqual(preview['worktreeUpdates'], [])
+        self.assertEqual(refs_before, self.git('show-ref', '--heads'))
+
+        self.run_cli(
+            'stack', 'classify-integration', 'feature-b', classified,
+            '--apply', '--plan-digest', preview['planDigest'], expected=0,
+        )
+        self.assertEqual(refs_before, self.git('show-ref', '--heads'))
+        self.assertEqual(stack_before, self.git('rev-parse', 'pr/feature-b'))
+        updated = self.read_manifest()
+        stack = updated['stacks'][0]
+        self.assertEqual(stack['integration_only_commits'], [classified])
+        self.assertEqual(len(stack['commits']), 2)
+        validation = json.loads(self.run_cli('validate', '--json', expected=0).stdout)
+        self.assertEqual(validation['details']['integration']['unmapped_commits'], [])
+
+        self.git('switch', '-q', 'main')
+        worktree = self.tmp / 'wt-classified-integration'
+        self.run_cli('int', 'rebuild', '--worktree', str(worktree), expected=0)
+        self.assertEqual(stack_before, self.git('rev-parse', 'pr/feature-b'))
+        rebuilt_validation = json.loads(self.run_cli('validate', '--json', expected=1).stdout)
+        self.assertEqual(rebuilt_validation['details']['integration']['unmapped_commits'], [])
+        self.assertTrue((worktree / 'gamma.txt').exists())
 
     def test_stack_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--', '--force-with-lease', expected=0)

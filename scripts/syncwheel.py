@@ -2672,6 +2672,15 @@ def load_manifest(repo_root, manifest_path=None):
             raise SyncwheelError(
                 f'stack {stack_id} integration_commits must be a string array when present'
             )
+        integration_only_commits = stack.get('integration_only_commits')
+        if integration_only_commits is not None and (
+            not isinstance(integration_only_commits, list)
+            or not all(isinstance(c, str) and c for c in integration_only_commits)
+            or len(integration_only_commits) != len(set(integration_only_commits))
+        ):
+            raise SyncwheelError(
+                f'stack {stack_id} integration_only_commits must be a unique string array when present'
+            )
         seen_ids.add(stack_id)
         seen_branches.add(branch)
         stack.setdefault('base', defaults['base_ref'])
@@ -2782,8 +2791,8 @@ def save_manifest(path, manifest):
             temporary_path.unlink(missing_ok=True)
 
 
-def stack_integration_commits(stack):
-    """Return the commits that materialize a stack on integration.
+def stack_integration_base_commits(stack):
+    """Return the source or resolved commits that materialize a stack on integration.
 
     Source commits remain authoritative for rebuilding the stack branch. A resolved
     integration projection can be recorded separately after conflict resolution so
@@ -2791,6 +2800,19 @@ def stack_integration_commits(stack):
     commits.
     """
     return list(stack.get('integration_commits', stack['commits']))
+
+
+def stack_integration_only_commits(stack):
+    """Return commits owned by a stack only in its integration projection."""
+    return list(stack.get('integration_only_commits') or [])
+
+
+def stack_integration_commits(stack):
+    """Return every commit owned by a stack in the integration projection."""
+    return list(dict.fromkeys([
+        *stack_integration_base_commits(stack),
+        *stack_integration_only_commits(stack),
+    ]))
 
 
 def external_ledger_root(manifest_path):
@@ -3077,6 +3099,7 @@ def manifest_stack_history_summary(stack):
         'state': stack.get('state', 'published'),
         'commits': list(stack['commits']),
         'integration_commits': stack_integration_commits(stack),
+        'integration_only_commits': stack_integration_only_commits(stack),
         'meta': dict(stack.get('meta', {})),
     }
     if stack.get('depends_on'):
@@ -7853,11 +7876,11 @@ def build_plan(repo_root, manifest, validation):
             'branch': integration['branch'],
             'commits': commits,
             'remedy': {
-                'type': 'capture_integration_into_new_draft',
+                'type': 'declare_integration_ownership',
                 'commands': [
-                    'syncwheel stack create --draft <new-stack-id> '
-                    '--purpose "Classify integration-first work"',
-                    'syncwheel stack capture-integration <new-stack-id> '
+                    'syncwheel stack classify-integration <stack-id> '
+                    + ' '.join(commit_short_sha(repo_root, commit) for commit in commits),
+                    'syncwheel stack capture-integration <stack-id> '
                     + ' '.join(commit_short_sha(repo_root, commit) for commit in commits),
                 ],
             },
@@ -8493,7 +8516,11 @@ def replay_plan(repo_root, manifest, target, mode):
             plumbing_commits = [
                 commit
                 for stack_id in integration['stacks']
-                for commit in stack_integration_commits(stacks_by_id[stack_id])
+                for commit in stack_integration_base_commits(stacks_by_id[stack_id])
+            ] + [
+                commit
+                for stack_id in integration['stacks']
+                for commit in stack_integration_only_commits(stacks_by_id[stack_id])
             ]
         else:
             raise SyncwheelError('replay mode plumbing supports cherry-pick integration only')
@@ -8518,7 +8545,13 @@ def replay_plan(repo_root, manifest, target, mode):
     elif integration.get('strategy', 'cherry-pick') == 'cherry-pick':
         stacks_by_id = stack_map(manifest)
         for stack_id in integration['stacks']:
-            for commit in stack_integration_commits(stacks_by_id[stack_id]):
+            for commit in stack_integration_base_commits(stacks_by_id[stack_id]):
+                steps.append(replay_exec_step(
+                    [*prefix, 'cherry-pick', commit],
+                    replay_commit_env(repo_root, commit),
+                ))
+        for stack_id in integration['stacks']:
+            for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
                     [*prefix, 'cherry-pick', commit],
                     replay_commit_env(repo_root, commit),
@@ -8540,6 +8573,12 @@ def replay_plan(repo_root, manifest, target, mode):
                 ],
                 replay_commit_env(repo_root, stack_ref),
             ))
+        for stack_id in integration['stacks']:
+            for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
+                steps.append(replay_exec_step(
+                    [*prefix, 'cherry-pick', commit],
+                    replay_commit_env(repo_root, commit),
+                ))
     else:
         raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
 
@@ -12406,6 +12445,125 @@ def command_stack_resolve_integration(args):
         {'stack': args.stack, 'integration_branch': integration_branch, 'commits': commits},
     )
     print(f"{args.stack}: recorded {len(commits)} resolved integration commits")
+    return 0
+
+
+def build_stack_classify_integration_plan(repo_root, manifest, manifest_path, stack_id, specs):
+    """Plan manifest-only ownership of commits already present on integration."""
+    stack = require_stack(manifest, stack_id)
+    integration_branch = manifest['integration']['branch']
+    if stack_id not in manifest['integration'].get('stacks', []):
+        raise SyncwheelError(
+            f'stack is not included in {integration_branch}: {stack_id}'
+        )
+    if not branch_exists(repo_root, integration_branch):
+        raise SyncwheelError(f'integration branch does not exist: {integration_branch}')
+    commits = []
+    for spec in specs:
+        commits.extend(commit_list_for_spec(repo_root, spec))
+    commits = list(dict.fromkeys(commit_full_sha(repo_root, commit) for commit in commits))
+    if not commits:
+        raise SyncwheelError('provide at least one integration commit to classify')
+    for commit in commits:
+        if not branch_contains(repo_root, integration_branch, commit):
+            raise SyncwheelError(
+                f'integration-only commit is not on {integration_branch}: {commit}'
+            )
+    owners = {}
+    for candidate in manifest['stacks']:
+        for commit in stack_integration_commits(candidate):
+            if commit_exists(repo_root, commit):
+                owners.setdefault(commit_full_sha(repo_root, commit), candidate['id'])
+    conflicts = {
+        commit: owners[commit]
+        for commit in commits
+        if commit in owners and owners[commit] != stack_id
+    }
+    if conflicts:
+        detail = ', '.join(f'{commit} ({owner})' for commit, owner in conflicts.items())
+        raise SyncwheelError(f'integration commit already belongs to another stack: {detail}')
+
+    proposed = copy.deepcopy(manifest)
+    proposed_stack = require_stack(proposed, stack_id)
+    before = stack_integration_only_commits(proposed_stack)
+    proposed_stack['integration_only_commits'] = list(dict.fromkeys([*before, *commits]))
+    added = [commit for commit in commits if commit not in before]
+    plan = {
+        'schemaVersion': 1,
+        'kind': 'stackIntegrationClassificationPlan',
+        'stack': stack_id,
+        'integrationBranch': integration_branch,
+        'commits': commits,
+        'addedCommits': added,
+        'manifestPath': str(manifest_path),
+        'manifestDigestBefore': manifest_digest(manifest),
+        'proposedManifestDigest': manifest_digest(proposed),
+        'before': {'integrationOnlyCommits': before},
+        'after': {
+            'integrationOnlyCommits': proposed_stack['integration_only_commits'],
+        },
+        'actions': [{
+            'type': 'update_manifest',
+            'path': str(manifest_path),
+            'stack': stack_id,
+        }],
+        'refUpdates': [],
+        'worktreeUpdates': [],
+        'applyRequired': True,
+    }
+    plan['planDigest'] = canonical_json_digest(plan)
+    return plan, proposed
+
+
+def command_stack_classify_integration(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    plan, proposed = build_stack_classify_integration_plan(
+        repo_root, manifest, manifest_path, args.stack, args.specs
+    )
+    if not args.apply:
+        print(json.dumps(plan, indent=2))
+        return 0
+    if not isinstance(args.plan_digest, str) or not args.plan_digest:
+        raise SyncwheelError('--plan-digest is required with --apply')
+    if args.plan_digest != plan['planDigest']:
+        raise SyncwheelError(
+            'integration classification plan is stale; generate a new preview and use its exact planDigest'
+        )
+    with manifest_write_transaction(
+        repo_root, manifest_path, f'stack-classify-integration-{args.stack}'
+    ):
+        current = require_locked_manifest_observation(repo_root, manifest_path, plan)
+        current_plan, proposed = build_stack_classify_integration_plan(
+            repo_root, current, manifest_path, args.stack, args.specs
+        )
+        if current_plan['planDigest'] != args.plan_digest:
+            raise SyncwheelError(
+                'integration classification plan is stale after revalidation; generate a new preview'
+            )
+        save_manifest_with_ledger(
+            repo_root,
+            manifest_path,
+            proposed,
+            'stack_classify_integration',
+            {
+                'stack': args.stack,
+                'integration_branch': current_plan['integrationBranch'],
+                'added_commits': current_plan['addedCommits'],
+                'plan_digest': current_plan['planDigest'],
+            },
+        )
+    print(json.dumps({
+        'status': 'applied',
+        'stack': args.stack,
+        'commits': current_plan['commits'],
+        'manifestDigest': current_plan['proposedManifestDigest'],
+        'planDigest': current_plan['planDigest'],
+        'refUpdates': [],
+        'worktreeUpdates': [],
+    }, indent=2))
     return 0
 
 
@@ -16999,6 +17157,17 @@ def build_parser():
         help='record that this stack was absorbed by the integration base or another resolved stack',
     )
     stack_resolve_p.set_defaults(func=command_stack_resolve_integration)
+
+    stack_classify_p = stack_sub.add_parser(
+        'classify-integration',
+        parents=[common],
+        help='declare integration-only stack ownership without rebuilding refs',
+    )
+    stack_classify_p.add_argument('stack')
+    stack_classify_p.add_argument('specs', nargs='+')
+    stack_classify_p.add_argument('--plan-digest')
+    stack_classify_p.add_argument('-a', '--apply', action='store_true')
+    stack_classify_p.set_defaults(func=command_stack_classify_integration)
 
     stack_add_p = stack_sub.add_parser('add', parents=[common])
     stack_add_p.add_argument('stack')
