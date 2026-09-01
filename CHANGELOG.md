@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.38.1 - 2026-09-01
+
+- Guard the base branch and every stack landing target in the `pre-push` hook.
+  A raw `git push origin HEAD:main` used to go through while the same push to
+  the integration branch was refused; only `stack land` may publish there now.
+
 ## 0.38.0 - 2026-09-01
 
 - Add explicit, clone-local governed worktree lanes through `syncwheel worktree
