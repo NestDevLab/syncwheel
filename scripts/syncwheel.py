@@ -1021,6 +1021,7 @@ def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None)
 
 def managed_push_refs(repo_root, manifest):
     refs = set(managed_ref_names(manifest))
+    refs.update(delivery_ref_names(manifest))
     config = coordination_config(manifest)
     if config and config.get('mode') == 'active-active':
         refs.add(coordination_state_ref(config))
@@ -4525,6 +4526,17 @@ def managed_ref_names(manifest):
     names.append(f"refs/heads/{manifest['integration']['branch']}")
     for channel in manifest.get('channels', []):
         names.append(f"refs/heads/{channel['branch']}")
+    return list(dict.fromkeys(names))
+
+
+def delivery_ref_names(manifest):
+    names = []
+    base_branch = (manifest.get('defaults') or {}).get('base_branch')
+    if base_branch:
+        names.append(f'refs/heads/{base_branch}')
+    for stack in manifest.get('stacks', []):
+        if stack.get('target_branch'):
+            names.append(f"refs/heads/{stack['target_branch']}")
     return list(dict.fromkeys(names))
 
 
@@ -17687,9 +17699,12 @@ def command_hooks_guard(args):
         for stack in manifest.get('stacks', [])
         if stack.get('branch')
     }
+    delivery_refs = set(delivery_ref_names(manifest))
     for ref in protected:
         if ref == integration_ref:
             remedies.append('syncwheel int push')
+        elif ref in delivery_refs:
+            remedies.append('syncwheel stack land <stack> (or a pull request)')
         elif ref == state_ref:
             remedies.append('syncwheel publish (or the reviewed coordination repair workflow)')
         elif manifest.get('repository_mode') == 'journal' and ref == f"refs/heads/{manifest['journal']['branch']}":
