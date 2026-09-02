@@ -4560,7 +4560,8 @@ def ensure_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
         return
     if current is not None:
         raise SyncwheelError(
-            f'governed worktree recovery ref {recovery_ref} points to {current} instead of {tip}'
+            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
+            f'points to {current} instead of {tip}'
         )
     result = git(repo_root, 'update-ref', recovery_ref, tip, ZERO_OBJECT_ID, check=False)
     if result.returncode == 0:
@@ -4570,12 +4571,119 @@ def ensure_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
         return
     if current is not None:
         raise SyncwheelError(
-            f'governed worktree recovery ref {recovery_ref} points to {current} instead of {tip}'
+            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
+            f'points to {current} instead of {tip}'
         )
     raise SyncwheelError(
         result.stderr.strip() or result.stdout.strip()
         or f'could not create governed worktree recovery ref {recovery_ref}'
     )
+
+
+def verify_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
+    current = ref_tip(repo_root, recovery_ref)
+    if current != tip:
+        actual = current or 'missing'
+        raise SyncwheelError(
+            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
+            f'points to {actual} instead of {tip}; restore the anchored tip before retrying cleanup'
+        )
+
+
+def reassess_governed_worktree_before_removal(repo_root, manifest, lane, persist=None):
+    worktree = find_worktree_record_for_branch(repo_root, lane['branch'])
+    path = Path(lane['path']).resolve(strict=False)
+    if worktree and worktree.get('path'):
+        actual_path = Path(worktree['path']).resolve(strict=False)
+        if actual_path != path:
+            lane['path'] = str(actual_path)
+            path = actual_path
+            if persist:
+                persist()
+    detail = governed_worktree_lane_status(repo_root, manifest, lane)
+    if worktree and worktree.get('locked'):
+        return worktree, path, {
+            **detail,
+            'code': 'locked',
+            'remedy': 'unlock the Git worktree before retrying cleanup',
+        }
+    if not path.exists():
+        return worktree, path, None
+    if not path_is_relative_to(path, governed_worktree_root(repo_root, manifest)):
+        return worktree, path, {
+            **detail,
+            'code': 'outside_root',
+            'remedy': 'inspect and recover this lane; Syncwheel will not move or remove it',
+        }
+    registered = (
+        Path(worktree['path']).resolve(strict=False)
+        if worktree and worktree.get('path') else None
+    )
+    if registered != path:
+        return worktree, path, {
+            **detail,
+            'code': 'unregistered_worktree',
+            'remedy': 'inspect the path and branch; Syncwheel will not remove an unregistered worktree',
+        }
+    dirty = local_worktree_status(path)
+    if dirty is None:
+        return worktree, path, {
+            **detail,
+            'code': 'unavailable',
+            'remedy': 'restore the worktree before attempting cleanup',
+        }
+    if dirty:
+        return worktree, path, {
+            **detail,
+            'code': 'dirty',
+            'remedy': 'the worktree became dirty before removal; '
+            + governed_lane_remedy(manifest, lane, commit_first=True),
+        }
+    return worktree, path, None
+
+
+def delete_governed_worktree_branch_with_anchor(repo_root, lane, tip):
+    recovery_ref = lane['recovery_ref']
+    branch_ref = f'refs/heads/{lane["branch"]}'
+    transaction = '\n'.join([
+        'start',
+        f'update {recovery_ref} {tip} {tip}',
+        f'delete {branch_ref} {tip}',
+        'prepare',
+        'commit',
+        '',
+    ])
+    deletion = git(
+        repo_root,
+        'update-ref',
+        '--stdin',
+        check=False,
+        input_text=transaction,
+    )
+    if deletion.returncode == 0:
+        return True, None
+    recovery_tip = ref_tip(repo_root, recovery_ref)
+    branch_tip = ref_tip(repo_root, lane['branch'])
+    if recovery_tip == tip and branch_tip is None:
+        return True, None
+    if recovery_tip != tip:
+        actual = recovery_tip or 'missing'
+        return False, {
+            'code': 'recovery_ref_moved',
+            'remedy': (
+                f'restore recovery ref {recovery_ref} from {actual} to anchored tip {tip}, '
+                'then retry cleanup'
+            ),
+        }
+    if branch_tip != tip:
+        return False, {
+            'code': 'branch_advanced',
+            'remedy': 'inspect the retained lane branch; its recovery ref is immutable',
+        }
+    return False, {
+        'code': 'branch_delete_failed',
+        'remedy': deletion.stderr.strip() or deletion.stdout.strip() or 'retry cleanup',
+    }
 
 
 def governed_worktree_cleanup_candidates(repo_root, manifest, registry=None):
@@ -4608,7 +4716,17 @@ def reap_governed_worktree_lane(
         if persist:
             persist()
         status = governed_worktree_lane_status(repo_root, manifest, lane)
-    if lane['state'] != 'captured_pending_cleanup' and status['code'] not in {None, 'expired'}:
+    missing_release_path = (
+        event_type == 'governed_worktree_released'
+        and status['code'] == 'unregistered_worktree'
+        and not Path(lane['path']).resolve(strict=False).exists()
+        and find_worktree_record_for_branch(repo_root, lane['branch']) is None
+    )
+    if (
+        lane['state'] != 'captured_pending_cleanup'
+        and status['code'] not in {None, 'expired'}
+        and not missing_release_path
+    ):
         if not (lane['state'] == 'reaped' and status['code'] == 'ledger_pending'):
             return False, status
     tip = governed_worktree_cleanup_tip(repo_root, lane)
@@ -4668,51 +4786,72 @@ def reap_governed_worktree_lane(
         if persist:
             persist()
         return False, {**status, 'code': 'branch_advanced', 'remedy': 'inspect the retained lane branch; its recovery ref is immutable'}
-    if lane.get('recovery_ref') and lane.get('cleanup_tip'):
-        ensure_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], lane['cleanup_tip'])
-    if lane.get('pending_reason') == 'branch_delete_failed':
-        expected = lane.get('branch_delete_tip') or lane.get('cleanup_tip')
-        current_tip = ref_tip(repo_root, lane['branch'])
-        if current_tip is None and expected and lane.get('recovery_ref'):
-            recovery_tip = ref_tip(repo_root, lane['recovery_ref'])
-            if recovery_tip == expected:
-                lane['state'] = 'reaped'
-                lane['reaped_at'] = iso_utc_now()
-                lane['pending_reason'] = 'ledger_pending'
-                if persist:
-                    persist()
-                return True, governed_worktree_lane_status(repo_root, manifest, lane)
-        if not expected or current_tip != expected:
-            lane['pending_reason'] = 'branch_advanced'
-            if persist:
-                persist()
-            return False, {**status, 'code': 'branch_advanced', 'remedy': 'inspect the retained lane branch; its recovery ref is immutable'}
-        deletion = git(repo_root, 'update-ref', '-d', f'refs/heads/{lane["branch"]}', expected, check=False)
-        if deletion.returncode != 0:
-            return False, {**status, 'code': 'branch_delete_failed', 'remedy': governed_worktree_pending_remedy(manifest, lane)}
-        lane['state'] = 'reaped'
-        lane['reaped_at'] = iso_utc_now()
-        lane['pending_reason'] = 'ledger_pending'
-        if persist:
-            persist()
-        return True, governed_worktree_lane_status(repo_root, manifest, lane)
-
     current_tip = ref_tip(repo_root, lane['branch'])
     if current_tip and not lane.get('cleanup_tip'):
         lane['cleanup_tip'] = current_tip
     lane['state'] = 'captured_pending_cleanup'
     lane['pending_reason'] = 'reaping'
-    if current_tip:
+    anchored_tip = lane.get('cleanup_tip') or current_tip
+    if anchored_tip:
         recovery_ref = lane.get('recovery_ref') or governed_worktree_recovery_ref(lane)
         lane['recovery_ref'] = recovery_ref
-        lane['cleanup_tip'] = current_tip
+        lane['cleanup_tip'] = anchored_tip
         lane['cleanup_idempotency_key'] = governed_worktree_cleanup_key(lane)
     if persist:
         persist()
-    if current_tip:
-        ensure_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], current_tip)
-    if path.exists():
-        removal = run(['git', 'worktree', 'remove', str(path)], cwd=repo_root, check=False)
+    if anchored_tip:
+        try:
+            ensure_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
+            verify_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
+        except SyncwheelError:
+            lane['pending_reason'] = 'recovery_ref_moved'
+            if persist:
+                persist()
+            raise
+        post_anchor_tip = ref_tip(repo_root, lane['branch'])
+        if post_anchor_tip is not None and post_anchor_tip != anchored_tip:
+            lane['pending_reason'] = 'branch_advanced'
+            if persist:
+                persist()
+            return False, {
+                **status,
+                'code': 'branch_advanced',
+                'remedy': 'inspect the retained lane branch; its recovery ref is immutable',
+            }
+
+    worktree, path, reassessment = reassess_governed_worktree_before_removal(
+        repo_root,
+        manifest,
+        lane,
+        persist,
+    )
+    if reassessment:
+        if reassessment['code'] == 'dirty':
+            lane['pending_reason'] = 'worktree_remove_failed'
+        else:
+            lane['pending_reason'] = reassessment['code']
+        if persist:
+            persist()
+        return False, reassessment
+
+    current = run(['git', 'rev-parse', '--show-toplevel'], check=False)
+    current_path = Path(current.stdout.strip()).resolve(strict=False) if current.returncode == 0 else None
+    if current_path == path:
+        lane['pending_reason'] = 'current_directory'
+        if persist:
+            persist()
+        return False, {
+            **status,
+            'code': 'current_directory',
+            'remedy': 'leave the lane directory, then run a Syncwheel mutation again',
+        }
+
+    if worktree:
+        removal_command = ['git', 'worktree', 'remove']
+        if not path.exists():
+            removal_command.append('--force')
+        removal_command.append(str(path))
+        removal = run(removal_command, cwd=repo_root, check=False)
         if removal.returncode != 0:
             dirty = local_worktree_status(path)
             if dirty:
@@ -4731,15 +4870,57 @@ def reap_governed_worktree_lane(
                 removal.stderr.strip() or removal.stdout.strip()
                 or f'could not remove governed worktree {path}'
             )
-    if current_tip:
-        deletion = git(repo_root, 'update-ref', '-d', f'refs/heads/{lane["branch"]}', current_tip, check=False)
-        if deletion.returncode != 0:
+
+    remaining = find_worktree_record_for_branch(repo_root, lane['branch'])
+    if remaining:
+        _, _, remaining_detail = reassess_governed_worktree_before_removal(
+            repo_root,
+            manifest,
+            lane,
+            persist,
+        )
+        detail = remaining_detail or {
+            **status,
+            'code': 'worktree_remove_failed',
+            'remedy': 'Git still registers the lane worktree; retry cleanup after inspecting it',
+        }
+        lane['pending_reason'] = detail['code']
+        if persist:
+            persist()
+        return False, detail
+
+    current_tip = ref_tip(repo_root, lane['branch'])
+    if current_tip is not None:
+        if not anchored_tip or current_tip != anchored_tip:
             lane['state'] = 'captured_pending_cleanup'
-            lane['pending_reason'] = 'branch_delete_failed'
-            lane['branch_delete_tip'] = current_tip
+            lane['pending_reason'] = 'branch_advanced'
             if persist:
                 persist()
-            return False, {**status, 'code': 'branch_delete_failed', 'remedy': governed_worktree_pending_remedy(manifest, lane)}
+            return False, {
+                **status,
+                'code': 'branch_advanced',
+                'remedy': 'inspect the retained lane branch; its recovery ref is immutable',
+            }
+        deleted, delete_detail = delete_governed_worktree_branch_with_anchor(
+            repo_root,
+            lane,
+            anchored_tip,
+        )
+        if not deleted:
+            lane['state'] = 'captured_pending_cleanup'
+            lane['pending_reason'] = delete_detail['code']
+            lane['branch_delete_tip'] = anchored_tip
+            if persist:
+                persist()
+            return False, {**status, **delete_detail}
+    elif anchored_tip:
+        try:
+            verify_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
+        except SyncwheelError:
+            lane['pending_reason'] = 'recovery_ref_moved'
+            if persist:
+                persist()
+            raise
     lane['state'] = 'reaped'
     lane['reaped_at'] = iso_utc_now()
     lane['pending_reason'] = 'ledger_pending'
@@ -9958,6 +10139,11 @@ def command_worktree_release(args):
             lane['path'] = status['path']
             save_governed_worktree_registry(repo_root, registry)
             status = governed_worktree_lane_status(repo_root, manifest, lane)
+        missing_abandoned_path = (
+            status['code'] == 'unregistered_worktree'
+            and not Path(lane['path']).resolve(strict=False).exists()
+            and find_worktree_record_for_branch(repo_root, lane['branch']) is None
+        )
         if status['code'] not in {
             None,
             'expired',
@@ -9966,7 +10152,8 @@ def command_worktree_release(args):
             'worktree_remove_failed',
             'branch_delete_failed',
             'ledger_pending',
-        }:
+            'recovery_ref_moved',
+        } and not missing_abandoned_path:
             raise SyncwheelError(
                 f"cannot release governed worktree lane {lane_id!r}: {status['code']}; {status['remedy']}"
             )
@@ -18868,7 +19055,7 @@ def governed_worktree_preflight(args):
             'dirty', 'outside_root', 'unregistered_worktree', 'unavailable',
             'invalid_lease', 'current_directory', 'branch_delete_failed',
             'branch_advanced', 'locked', 'worktree_remove_failed', 'reaping',
-            'ledger_pending',
+            'ledger_pending', 'recovery_ref_moved',
         }
     ]
     if blocked:

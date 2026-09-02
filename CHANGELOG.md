@@ -21,6 +21,11 @@
 - Make recovery-ref creation, pending cleanup, and ledger append retries
   idempotent, preserving release event type and reason after interruptions, and
   make `gc` preview and apply enumerate the same pending categories.
+- Verify the anchored recovery ref in the same expected-old ref transaction
+  that deletes a lane branch, re-evaluate moved, locked, or dirty worktrees
+  after anchoring, remove prunable Git worktree registrations for missing
+  directories, and allow explicit release of a clean record whose path already
+  disappeared.
 
 ## 0.40.1 - 2026-09-02
 
