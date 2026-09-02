@@ -932,11 +932,13 @@ HEAD` for already committed primary work. A switch away from integration still f
 visibly after Git completes it, so restore a mismatch losslessly rather than resetting
 dirty work.
 
-Before a built-in mutation, Syncwheel refuses a dirty primary before side effects and
+Before a built-in mutation, Syncwheel refuses a dirty primary before side effects (except
+the explicit recovery remedies `worktree open`, `stack capture-integration`, and reasoned
+hook lifecycle commands) and
 names those same remedies. Read-only commands continue and show a yellow TTY warning
 with the dirty-file count; the primary is shared and its changes are treated as not
 owned by the invoking user. Generated hooks use the installed CLI, never a transient
-worktree script, and fail open if that CLI or its interpreter is unavailable.
+worktree script, and fail closed if that CLI or its interpreter is unavailable.
 
 For `git-tracked` repositories the bundle is required by default. Every normal
 repo-aware Syncwheel command, including `repo tracking status`, `validate`, and

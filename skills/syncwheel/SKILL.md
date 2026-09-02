@@ -212,7 +212,9 @@ and names `worktree open` or `stack capture-integration` as the remedy. Read-onl
 available and emit a yellow TTY warning with the dirty-file count; treat the changes as foreign to the
 invoking user. Use `--dry-run` on rebuild/push commands. If the manifest and Git disagree, fix the
 manifest or call out the conflict — do not claim a repo is aligned while integration and PR branches
-still differ.
+still differ. The named recovery commands remain executable while it is dirty. The
+primary guard is fail-closed and uses a single-use internal nonce; `hooks status`
+reports a degraded bundle and `hooks install --apply` repairs it explicitly.
 
 ## Replay modes
 

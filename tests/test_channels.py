@@ -284,7 +284,11 @@ class DeploymentChannelTest(unittest.TestCase):
             with self.assertRaisesRegex(module.SyncwheelError, 'plan is stale'):
                 module.command_channel_create(args)
         self.assertEqual(manifest_path.read_bytes(), before)
-        self.assertEqual(module.load_ledger_events(self.repo, manifest_path), [])
+        self.assertEqual(
+            [event for event in module.load_ledger_events(self.repo, manifest_path)
+             if event['type'] != 'primary_guard_disabled'],
+            [],
+        )
 
     def test_invalid_draft_dependency_never_materializes_a_stack_ref(self):
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'

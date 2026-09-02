@@ -25,9 +25,10 @@ overwritten. `local-only` contribution clones are optional. A clone can
 persist `hooks.mode=disabled` only through `hooks remove --disable --reason ...`;
 the reason remains visible in status and validation.
 
-Generated hooks invoke the installed `syncwheel` CLI resolved at installation,
-never the checkout that happened to install a hook. They fail open if that CLI or
-its interpreter is unavailable: only an explicit policy refusal blocks Git.
+Generated hooks invoke a stable installed `syncwheel` CLI resolved at installation,
+never a lane or worktree script. They fail closed if that CLI or its interpreter is
+unavailable. Their common Git directory stores the integration branch and opt-out
+state, so a missing or older working-tree manifest cannot disable the guard.
 
 ## Primary checkout
 
@@ -37,8 +38,9 @@ visible failure if a checkout moved it elsewhere. Git has already completed the
 switch when this hook runs, so the guard deliberately does not reset, clean, stash,
 or switch anything automatically. The `pre-commit` guard blocks both a mismatch
 and a manual commit while the primary is correctly on integration. Syncwheel's own
-control and in-place rebuild commits pass through the same per-child authorization
-used for managed ref moves. Both guards allow commits in dedicated feature worktrees
+control and in-place rebuild commits pass through a short-lived, single-use nonce
+used for managed ref moves. The reference-transaction hook blocks every unauthorized
+integration-ref move, including fast-forward moves. Both guards allow commits in dedicated feature worktrees
 and plumbing-materialized branches.
 
 The refusal names `syncwheel worktree open <lane> --into <stack>` for new work and
@@ -49,6 +51,7 @@ visible. This is an operational recovery path, not an identity boundary.
 
 Before a built-in mutation starts, Syncwheel also checks the primary working tree.
 Tracked changes stop the operation before side effects and name the same remedies.
+Those remedy commands themselves bypass this preflight so recovery remains possible.
 Read-only commands continue; on a TTY they show a yellow warning with the dirty-file
 count and state that the shared primary changes are not owned by the invoking user.
 
@@ -80,9 +83,11 @@ carries an authorization variable. That authorization is injected per child
 process and never into Syncwheel's own environment, so it cannot leak to an
 unrelated caller sharing the process.
 
-Every generated hook fails open. It aborts a transaction only on an explicit
-refusal; a missing installed CLI or interpreter leaves Git working normally. A local
-hook is a safety guard, not a security boundary:
+Every generated hook fails closed. A missing stable installed CLI, interpreter, or
+guard configuration blocks the transaction and is reported as degraded by `hooks status`.
+The installed bundle is explicit: `pre-push` guards publication, `pre-commit` guards
+manual primary commits, `post-checkout` reports primary branch mismatch, and
+`reference-transaction` guards every integration-ref update. A local hook is a safety guard, not a security boundary:
 `core.hooksPath`, `--no-verify`, and a fresh clone all bypass it.
 
 ## Managed-ref publication

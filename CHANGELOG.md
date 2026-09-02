@@ -4,7 +4,8 @@
 
 - Guard the shared primary checkout against manual integration commits and tracked
   changes before built-in mutations, with manifest-derived capture or queue remedies,
-  a visible reasoned opt-out, and fail-open installed hooks.
+  a visible reasoned opt-out, persistent common-Git guard state, and fail-closed
+  stable installed hooks with single-use authorization nonces.
 
 ## 0.40.1 - 2026-09-02
 
