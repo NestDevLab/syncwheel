@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.40.2 - 2026-09-02
+
+- Guard the shared primary checkout against manual integration commits and tracked
+  changes before built-in mutations, with manifest-derived capture or queue remedies,
+  a visible reasoned opt-out, and fail-open installed hooks.
+
 ## 0.40.1 - 2026-09-02
 
 - Pass the managed ref move handshake to shell replay steps, so plumbing
