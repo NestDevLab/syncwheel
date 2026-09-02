@@ -119,6 +119,29 @@ before continuing. See [`manifest-tracking.md`](manifest-tracking.md) for the
 full policy and migration behavior. An installable agent skill that encodes this
 lives in [`skills/syncwheel/SKILL.md`](../skills/syncwheel/SKILL.md).
 
+## Repository authority
+
+The manifest can also say how much of the delivery pipeline you may run without
+a human gate:
+
+```bash
+syncwheel repo authority status
+```
+
+- `human-gated` (or no block at all): ask before commit, push, PR, and merge, as
+  the repository's own instructions require.
+- `ai-managed` with `source_change` allowed: carry a scoped change through
+  commit, push, PR, and merge without re-asking at each stage. Still stop for
+  anything outside the named scope, for external side effects, and for
+  anything destructive.
+- `runtime_change` is allowed only when listed: release, deploy, and service
+  restarts otherwise remain gated.
+- `destructive_rewrite` is never allowed, whatever the block says: force
+  pushes, history rewrites, and deleting work always need a human.
+
+Only a maintainer sets this policy (`syncwheel repo authority set ... --apply`).
+Never set it, widen it, or infer it for yourself.
+
 ## Agentwheel installable skill
 
 When Agentwheel is available, install the Syncwheel agent skill into the local

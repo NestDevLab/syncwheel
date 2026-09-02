@@ -9,6 +9,11 @@ The preferred source of truth is `.syncwheel/manifest.json`.
   "version": 1,
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": ".syncwheel/wt",
+  "authority": {
+    "mode": "ai-managed",
+    "allow": ["source_change"],
+    "deny": ["destructive_rewrite"]
+  },
   "defaults": {
     "canonical_remote": "origin",
     "publication_remote": "fork",
@@ -305,6 +310,15 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `version` is `1` for legacy manifests, `2` for manifests with a required
   `coordination` block, or `3` for channel-aware delivery manifests
 - `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
+- `authority`, when present, declares how much of the delivery pipeline agents
+  may run without a human gate. `mode` is `human-gated` or `ai-managed`;
+  `allow` lists the classes granted (`source_change`: edit, test, commit, push,
+  PR, merge; `runtime_change`: release, deploy, service restart);
+  `destructive_rewrite` (force pushes, history rewrites, deleting work) is
+  always denied and can never be allowed. `human-gated` allows nothing;
+  `ai-managed` needs at least one allowed class. An absent block means
+  `human-gated`. Set it with `syncwheel repo authority set`; it is never
+  enabled automatically and is not part of coordination state
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
 - new manifests set `defaults.integration_membership` to `required`; legacy
   manifests without it remain compatible until explicitly migrated

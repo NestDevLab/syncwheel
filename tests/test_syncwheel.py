@@ -658,6 +658,81 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['coordination']['mode'], 'disabled')
         self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
 
+    def test_manifest_without_authority_defaults_to_human_gated(self):
+        module = self.load_syncwheel_module()
+
+        manifest, _ = module.load_manifest(self.repo)
+
+        self.assertNotIn('authority', manifest)
+        self.assertEqual(
+            module.manifest_authority(manifest),
+            {'mode': 'human-gated', 'allow': [], 'deny': ['destructive_rewrite']},
+        )
+        self.assertFalse(module.authority_allows(manifest, 'source_change'))
+        self.assertNotIn('authority', module.coordination_manifest_snapshot(manifest))
+
+    def test_repo_authority_status_reports_undeclared_policy(self):
+        result = self.run_cli('repo', 'authority', 'status', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertFalse(data['authority_present'])
+        self.assertEqual(data['authority']['mode'], 'human-gated')
+        self.assertIn('authority is not declared', data['warnings'][0])
+
+    def test_repo_authority_set_dry_run_does_not_write(self):
+        before = (self.repo / '.syncwheel' / 'manifest.json').read_text()
+
+        result = self.run_cli('repo', 'authority', 'set', 'ai-managed', '--allow', 'source_change', expected=0)
+
+        self.assertIn('proposed_authority: ai-managed allow=source_change deny=destructive_rewrite', result.stdout)
+        self.assertIn('dry_run', result.stdout)
+        self.assertEqual((self.repo / '.syncwheel' / 'manifest.json').read_text(), before)
+
+    def test_repo_authority_set_ai_managed_writes_policy_and_stages_tracked_manifest(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'chore: track manifest')
+
+        result = self.run_cli(
+            'repo', 'authority', 'set', 'ai-managed', '--allow', 'source_change', '--apply', '--json',
+            expected=0,
+        )
+        data = json.loads(result.stdout)
+
+        self.assertTrue(data['authority_present'])
+        self.assertEqual(
+            self.read_manifest()['authority'],
+            {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': ['destructive_rewrite']},
+        )
+        self.assertIn('M  .syncwheel/manifest.json', self.git('status', '--porcelain'))
+        tracking = json.loads(self.run_cli('repo', 'tracking', 'status', '--json', expected=0).stdout)
+        self.assertEqual(tracking['authority']['mode'], 'ai-managed')
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        self.assertEqual(status['authority']['allow'], ['source_change'])
+
+    def test_repo_authority_set_refuses_destructive_rewrite(self):
+        result = self.run_cli(
+            'repo', 'authority', 'set', 'ai-managed', '--allow', 'destructive_rewrite', '--apply', expected=2
+        )
+
+        self.assertIn('invalid choice', result.stderr)
+        self.assertNotIn('authority', self.read_manifest())
+
+    def test_manifest_authority_is_validated_on_load(self):
+        data = self.read_manifest()
+        cases = [
+            ({'mode': 'ai-managed', 'allow': [], 'deny': []}, 'requires at least one allowed class'),
+            ({'mode': 'human-gated', 'allow': ['source_change'], 'deny': []}, 'cannot allow any class'),
+            ({'mode': 'ai-managed', 'allow': ['destructive_rewrite'], 'deny': []}, 'may never contain'),
+            ({'mode': 'ai-managed', 'allow': ['deploy'], 'deny': []}, 'unknown classes'),
+            ({'mode': 'autonomous', 'allow': [], 'deny': []}, 'authority.mode must be one of'),
+        ]
+        for policy, message in cases:
+            with self.subTest(policy=policy):
+                data['authority'] = policy
+                (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+                result = self.run_cli('repo', 'authority', 'status', expected=2)
+                self.assertIn(message, result.stderr)
+
     def test_repo_tracking_status_reports_missing_policy(self):
         result = self.run_cli('repo', 'tracking', 'status', '--json', expected=0)
         data = json.loads(result.stdout)

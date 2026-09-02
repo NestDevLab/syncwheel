@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.40.0 - 2026-09-02
+
+- Add an optional `authority` block to the manifest so a repository can declare
+  how far agents may take a change without a human gate: `human-gated` or
+  `ai-managed`, with `source_change` and `runtime_change` as grantable classes
+  and `destructive_rewrite` always denied. Absent means `human-gated`; the block
+  is validated on load, never injected or enabled automatically, and stays out
+  of coordination state.
+- Add `syncwheel repo authority status` and `syncwheel repo authority set`
+  (dry-run by default, `--apply` to write) and report the policy in
+  `repo tracking status` and `status --json`.
+
 ## 0.39.1 - 2026-09-01
 
 - Name manifest-derived capture or queue commands whenever an occupied primary
