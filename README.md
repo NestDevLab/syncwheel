@@ -923,10 +923,20 @@ then names the corresponding Syncwheel publisher. Existing
 hooks are chained and restored on removal; `core.hooksPath` is honored.
 
 The same bundle installs `post-checkout` and `pre-commit` guards for the primary
-checkout. A switch away from the manifest integration branch returns a visible
-failure after Git completes the switch; the following commit is blocked. Dedicated
-feature worktrees remain valid. The checkout hook cannot undo Git's completed branch
-switch, so restore a mismatched checkout losslessly rather than resetting dirty work.
+checkout. It is the shared integration projection, not an authoring desk: a manual
+commit there is blocked even when it remains on the manifest integration branch.
+Syncwheel's own control and in-place rebuild commits carry a per-child authorization;
+dedicated feature worktrees remain valid. The refusal names `syncwheel worktree open
+<lane> --into <stack>` for new work and `syncwheel stack capture-integration <stack>
+HEAD` for already committed primary work. A switch away from integration still fails
+visibly after Git completes it, so restore a mismatch losslessly rather than resetting
+dirty work.
+
+Before a built-in mutation, Syncwheel refuses a dirty primary before side effects and
+names those same remedies. Read-only commands continue and show a yellow TTY warning
+with the dirty-file count; the primary is shared and its changes are treated as not
+owned by the invoking user. Generated hooks use the installed CLI, never a transient
+worktree script, and fail open if that CLI or its interpreter is unavailable.
 
 For `git-tracked` repositories the bundle is required by default. Every normal
 repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
@@ -937,7 +947,8 @@ can inspect and administer an absent bundle; the generated hook callbacks are al
 excluded to prevent recursion. Existing non-Syncwheel hooks are chained and restored
 on removal. `local-only` contribution clones remain opt-in. The only escape hatch is
 a persisted clone-local disable with a non-empty reason, which stays visible in
-validation.
+validation. This is also the explicit, reasoned opt-out for a deliberate manual
+recovery; its disabled state and reason remain visible.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
 remote and allowed destination refset.

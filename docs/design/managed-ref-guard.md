@@ -25,15 +25,32 @@ overwritten. `local-only` contribution clones are optional. A clone can
 persist `hooks.mode=disabled` only through `hooks remove --disable --reason ...`;
 the reason remains visible in status and validation.
 
+Generated hooks invoke the installed `syncwheel` CLI resolved at installation,
+never the checkout that happened to install a hook. They fail open if that CLI or
+its interpreter is unavailable: only an explicit policy refusal blocks Git.
+
 ## Primary checkout
 
-The primary worktree is reserved for the manifest integration branch. The
+The primary worktree is a shared integration projection, not an authoring desk. The
 `post-checkout` guard compares that worktree with the declared branch and returns a
 visible failure if a checkout moved it elsewhere. Git has already completed the
 switch when this hook runs, so the guard deliberately does not reset, clean, stash,
-or switch anything automatically. The `pre-commit` guard then blocks commits until
-the checkout is restored losslessly. Both guards allow commits in dedicated feature
-worktrees and plumbing-materialized branches.
+or switch anything automatically. The `pre-commit` guard blocks both a mismatch
+and a manual commit while the primary is correctly on integration. Syncwheel's own
+control and in-place rebuild commits pass through the same per-child authorization
+used for managed ref moves. Both guards allow commits in dedicated feature worktrees
+and plumbing-materialized branches.
+
+The refusal names `syncwheel worktree open <lane> --into <stack>` for new work and
+`syncwheel stack capture-integration <stack> HEAD` for work already committed on
+the primary. The only deliberate local escape hatch is the reasoned, clone-local
+`syncwheel hooks remove --disable --reason "..." --apply`; its reason remains
+visible. This is an operational recovery path, not an identity boundary.
+
+Before a built-in mutation starts, Syncwheel also checks the primary working tree.
+Tracked changes stop the operation before side effects and name the same remedies.
+Read-only commands continue; on a TTY they show a yellow warning with the dirty-file
+count and state that the shared primary changes are not owned by the invoking user.
 
 Git has no pre-checkout hook, so preventing the ref move itself is not portable.
 The combination of immediate post-checkout failure, commit blocking, validation,
@@ -63,9 +80,9 @@ carries an authorization variable. That authorization is injected per child
 process and never into Syncwheel's own environment, so it cannot leak to an
 unrelated caller sharing the process.
 
-The hook fails open. It aborts a transaction only on an explicit refusal; a
-missing interpreter, an unusable `PATH`, or an unreachable `syncwheel` leaves Git
-working normally. A local hook is a safety guard, not a security boundary:
+Every generated hook fails open. It aborts a transaction only on an explicit
+refusal; a missing installed CLI or interpreter leaves Git working normally. A local
+hook is a safety guard, not a security boundary:
 `core.hooksPath`, `--no-verify`, and a fresh clone all bypass it.
 
 ## Managed-ref publication

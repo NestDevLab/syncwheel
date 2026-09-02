@@ -32,9 +32,12 @@ class ManagedRefGuardTests(unittest.TestCase):
         syncwheel_bin.chmod(0o755)
         self.hook_env = os.environ.copy()
         self.hook_env['PATH'] = os.fspath(self.bin_dir) + os.pathsep + self.hook_env['PATH']
+        self.original_path = os.environ.get('PATH')
+        os.environ['PATH'] = self.hook_env['PATH']
         subprocess.run(['git', 'init', '-q', str(self.repo)], check=True)
         subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=self.repo, check=True)
         subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'], cwd=self.repo, check=True)
+        (self.repo / '.git' / 'info' / 'exclude').write_text('.test-*\n')
         (self.repo / 'seed').write_text('seed\n')
         subprocess.run(['git', 'add', 'seed'], cwd=self.repo, check=True)
         subprocess.run(['git', 'commit', '-qm', 'seed'], cwd=self.repo, check=True)
@@ -68,6 +71,10 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        if self.original_path is None:
+            os.environ.pop('PATH', None)
+        else:
+            os.environ['PATH'] = self.original_path
         self.temp.cleanup()
 
     def args(self):
@@ -120,11 +127,20 @@ class ManagedRefGuardTests(unittest.TestCase):
     def _install_and_branch(self, branch):
         syncwheel.install_managed_push_hook(self.repo, apply=True)
         subprocess.run(['git', 'checkout', '-qb', branch], cwd=self.repo, check=True)
+        if (self.repo / '.gitignore').exists():
+            subprocess.run(['git', 'add', '.gitignore'], cwd=self.repo, check=True)
+            subprocess.run(
+                ['git', 'commit', '-qm', 'syncwheel ignore rules'], cwd=self.repo,
+                env=self._syncwheel_authorized_env(), check=True,
+            )
         tips = []
         for name in ('one', 'two'):
             (self.repo / name).write_text(name + '\n')
             subprocess.run(['git', 'add', name], cwd=self.repo, check=True)
-            subprocess.run(['git', 'commit', '-qm', name], cwd=self.repo, check=True)
+            subprocess.run(
+                ['git', 'commit', '-qm', name], cwd=self.repo,
+                env=self._syncwheel_authorized_env(), check=True,
+            )
             tips.append(subprocess.run(
                 ['git', 'rev-parse', 'HEAD'], cwd=self.repo, check=True,
                 capture_output=True, text=True,
@@ -134,6 +150,11 @@ class ManagedRefGuardTests(unittest.TestCase):
     def _clean_env(self):
         env = dict(self.hook_env)
         env.pop(syncwheel.MANAGED_REF_MOVE_AUTH_ENV, None)
+        return env
+
+    def _syncwheel_authorized_env(self):
+        env = self._clean_env()
+        env[syncwheel.MANAGED_REF_MOVE_AUTH_ENV] = '1'
         return env
 
     def _reset_hard(self, target, env=None):
@@ -156,13 +177,27 @@ class ManagedRefGuardTests(unittest.TestCase):
             'two',
         )
 
-    def test_advancing_a_managed_branch_is_allowed(self):
+    def test_primary_checkout_refuses_manual_integration_commit_with_named_remedies(self):
         self._install_and_branch('main-integration')
         (self.repo / 'three').write_text('three\n')
         subprocess.run(['git', 'add', 'three'], cwd=self.repo, check=True)
         result = subprocess.run(
             ['git', 'commit', '-qm', 'three'], cwd=self.repo,
-            env=self.hook_env, capture_output=True, text=True,
+            env=self._clean_env(), capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('primary checkout commit blocked', result.stderr)
+        self.assertIn('syncwheel worktree open <lane> --into feature', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature HEAD', result.stderr)
+
+    def test_syncwheel_authorization_permits_primary_control_commit(self):
+        self._install_and_branch('main-integration')
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        subprocess.run(['git', 'add', '.syncwheel/manifest.json'], cwd=self.repo, check=True)
+        result = subprocess.run(
+            ['git', 'commit', '-qm', 'syncwheel control'], cwd=self.repo,
+            env=self._syncwheel_authorized_env(), capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -176,14 +211,30 @@ class ManagedRefGuardTests(unittest.TestCase):
 
     def test_guard_fails_open_when_it_cannot_run(self):
         # A local safety guard that cannot execute must not be able to brick the
-        # repository, so an unusable PATH has to leave ordinary Git working.
+        # repository, so a missing installed CLI has to leave ordinary Git working.
         self._install_and_branch('main-integration')
         env = self._clean_env()
-        # Git stays reachable; the syncwheel shim in .test-bin does not.
+        (self.bin_dir / 'syncwheel').unlink()
+        # Git stays reachable; neither the configured CLI nor PATH can run Syncwheel.
         env['PATH'] = '/usr/bin:/bin'
         result = subprocess.run(
             ['git', 'commit', '-q', '--allow-empty', '-m', 'still works'],
             cwd=self.repo, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_primary_checkout_guard_fails_open_when_installed_cli_is_missing(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        switched = subprocess.run(
+            ['git', 'switch', '-c', 'feature'], cwd=self.repo,
+            env=self.hook_env, capture_output=True, text=True,
+        )
+        self.assertNotEqual(switched.returncode, 0)
+        (self.bin_dir / 'syncwheel').unlink()
+        result = subprocess.run(
+            ['git', 'commit', '-q', '--allow-empty', '-m', 'recovery remains possible'],
+            cwd=self.repo, env=self.hook_env, capture_output=True, text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
@@ -291,6 +342,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             'PYTHONDONTWRITEBYTECODE': '1',
             'PYTHONPATH': str(poison_path),
             'SYNCWHEEL_TEST_NETWORK_LOG': str(network_log),
+            syncwheel.MANAGED_REF_MOVE_AUTH_ENV: '1',
             syncwheel.ENV_UPDATE_INTERVAL_SECONDS: '0',
             syncwheel.ENV_UPDATE_MODE: 'auto',
             syncwheel.ENV_UPDATE_SETTINGS_PATH: str(settings_path),
@@ -552,6 +604,73 @@ class ManagedRefGuardTests(unittest.TestCase):
         policy = syncwheel.require_managed_push_guard(self.repo, self.manifest)
         self.assertTrue(policy['disabled'])
         self.assertEqual(policy['disabledReason'], 'external contribution clone')
+
+    def test_reasoned_disable_allows_a_manual_primary_commit_and_is_visible_in_status(self):
+        self._install_and_branch('main-integration')
+        disabled = self.run_syncwheel(
+            'hooks', 'remove', '--disable', '--reason', 'deliberate recovery',
+            '--apply', '--repo', str(self.repo),
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        (self.repo / 'manual').write_text('manual\n')
+        subprocess.run(['git', 'add', 'manual'], cwd=self.repo, check=True)
+        committed = subprocess.run(
+            ['git', 'commit', '-qm', 'deliberate manual recovery'], cwd=self.repo,
+            env=self._clean_env(), capture_output=True, text=True,
+        )
+        self.assertEqual(committed.returncode, 0, committed.stderr)
+        status = self.run_syncwheel('hooks', 'status', '--repo', str(self.repo))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertTrue(report['disabled'])
+        self.assertEqual(report['disabledReason'], 'deliberate recovery')
+
+    def test_dirty_primary_blocks_mutation_but_read_only_commands_warn(self):
+        self._install_and_branch('main-integration')
+        (self.repo / 'seed').write_text('changed\n')
+        manifest_before = (self.repo / '.syncwheel' / 'manifest.json').read_text()
+
+        mutation = self.run_syncwheel(
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(mutation.returncode, 2)
+        self.assertIn('primary checkout is dirty: 1 tracked file', mutation.stderr)
+        self.assertIn('not owned by the current user', mutation.stderr)
+        self.assertIn('syncwheel worktree open <lane> --into feature', mutation.stderr)
+        self.assertIn('syncwheel stack capture-integration feature HEAD', mutation.stderr)
+        self.assertEqual((self.repo / '.syncwheel' / 'manifest.json').read_text(), manifest_before)
+
+        status = self.run_syncwheel('status', '--repo', str(self.repo))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        passthrough_status = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'status', '--short',
+        )
+        self.assertEqual(passthrough_status.returncode, 0, passthrough_status.stderr)
+        passthrough_mutation = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'add', 'seed',
+        )
+        self.assertEqual(passthrough_mutation.returncode, 2)
+        self.assertIn('syncwheel stack capture-integration feature HEAD', passthrough_mutation.stderr)
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'diff', '--cached', '--name-only'], cwd=self.repo,
+                capture_output=True, text=True, check=True,
+            ).stdout,
+            '',
+        )
+        self.assertEqual(
+            syncwheel.primary_checkout_dirty_warning_lines(self.repo, self.manifest),
+            ['primary checkout is dirty: 1 tracked file not owned by the current user'],
+        )
+        tty_stderr = io.StringIO()
+        tty_stderr.isatty = lambda: True
+        with mock.patch.object(syncwheel.sys, 'stderr', tty_stderr):
+            syncwheel.emit_primary_checkout_dirty_warnings(self.repo, self.manifest)
+        self.assertIn(
+            'WARNING: primary checkout is dirty: 1 tracked file not owned by the current user',
+            tty_stderr.getvalue(),
+        )
 
     def test_guard_blocks_all_push_forms_targeting_managed_ref(self):
         zero = '0' * 40

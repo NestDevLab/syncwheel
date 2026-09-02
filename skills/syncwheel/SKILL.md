@@ -60,11 +60,12 @@ The script owns: repo-state discovery, manifest validation, deterministic branch
 and integration reconstruction. The agent owns: judgment, communication,
 project-specific validation after a rebuild, and safe execution.
 
-The primary Git worktree stays on `manifest.integration.branch`, and you work there. Rebuilds no
-longer create a worktree: replay runs through Git plumbing where available, or a temporary worktree
-that is removed before the command returns. A clean, bounded integration operation may switch the
-primary checkout temporarily, but must restore and verify the integration branch before completion.
-Treat any other primary-checkout mismatch as a validation error and blocked handoff.
+The primary Git worktree stays on `manifest.integration.branch` as the shared test projection; do
+not author or commit there. Open a governed lane before authoring. Rebuilds no longer create a
+worktree: replay runs through Git plumbing where available, or a temporary worktree that is removed
+before the command returns. A clean, bounded integration operation may switch the primary checkout
+temporarily, but must restore and verify the integration branch before completion. Treat any other
+primary-checkout mismatch as a validation error and blocked handoff.
 
 Desk is an escalation/validation surface, not routine authoring: begin routine implementation,
 dependency installation, builds, and tests on integration. Use `--replay-mode desk` only to resolve a
@@ -206,9 +207,12 @@ through plumbing; older Git uses a self-removing temporary worktree.
 `syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
 wheel metaphor helps, but the manifest field remains `stacks`.
 
-Never mutate branches from a dirty checkout. Use `--dry-run` on rebuild/push commands. If the manifest
-and Git disagree, fix the manifest or call out the conflict — do not claim a repo is aligned while
-integration and PR branches still differ.
+Never run a built-in mutation while the shared primary checkout is dirty: it stops before side effects
+and names `worktree open` or `stack capture-integration` as the remedy. Read-only commands remain
+available and emit a yellow TTY warning with the dirty-file count; treat the changes as foreign to the
+invoking user. Use `--dry-run` on rebuild/push commands. If the manifest and Git disagree, fix the
+manifest or call out the conflict — do not claim a repo is aligned while integration and PR branches
+still differ.
 
 ## Replay modes
 
@@ -267,7 +271,8 @@ syncwheel repo tracking status
 syncwheel repo tracking set git-tracked --apply # or local-only
 # 3. Declare the stack
 syncwheel stack create feature-a --branch pr/feature-a --base origin/main
-# 4. Author on the integration branch, in the checkout you are already in
+# 4. Author in a governed lane, never on the shared integration checkout
+# syncwheel worktree open feature-a --into feature-a
 #    ... make and commit your changes ...
 # 5. Record the commits into the manifest, then validate and push
 syncwheel stack set feature-a origin/main..HEAD
@@ -277,14 +282,14 @@ syncwheel stack push feature-a
 
 ## When you do not know which PR owns the change yet
 
-Commit on integration, then put the commit in a drawer and decide later. A draft stack owns its
-commits but is forbidden from becoming a pull request until you promote it, so the work is tracked from
-the first commit instead of sitting unowned until the next rebuild drops it.
+Create a draft, then author in a governed lane. A draft owns its commits but is forbidden from
+becoming a pull request until you promote it, so the work is tracked from the first commit instead of
+sitting unowned until the next rebuild drops it.
 
 ```bash
 syncwheel stack create --draft caching-experiment       # owned, not proposed
-syncwheel stack capture-integration caching-experiment HEAD
-#    ... keep working; capture more commits into the same draft, or start another ...
+syncwheel worktree open caching-experiment --into caching-experiment
+#    ... commit in that lane, then own it through the stack flow ...
 syncwheel stack promote caching-experiment --branch pr/caching   # now it is a real PR branch
 ```
 

@@ -701,32 +701,38 @@ def managed_hook_paths(repo_root, hook_name):
 
 
 def managed_hook_syncwheel_command():
-    if not sys.executable or not __file__:
-        raise SyncwheelError('cannot resolve the current Syncwheel invocation for repository hooks')
-    executable = os.path.abspath(sys.executable)
-    source = os.path.abspath(__file__)
-    return f'{shlex.quote(executable)} {shlex.quote(source)}'
+    """Resolve the installed CLI, never the mutable checkout that installed a hook."""
+    executable = shutil.which('syncwheel')
+    return shlex.quote(os.path.abspath(executable)) if executable else None
 
 
 def managed_push_hook_content(backup_exists):
     syncwheel_command = managed_hook_syncwheel_command()
     chain = (
         'if [ -x "$hook_dir/pre-push.syncwheel-chain" ]; then\n'
-        '  "$hook_dir/pre-push.syncwheel-chain" "$@" <"$input"\n'
+        '  "$hook_dir/pre-push.syncwheel-chain" "$@" <"$input" || exit $?\n'
         'fi\n'
         if backup_exists else ''
     )
     return (
         '#!/bin/sh\n'
         f'{MANAGED_PUSH_HOOK_MARKER}\n'
-        'set -eu\n'
+        'set -u\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         'input=$(mktemp "${TMPDIR:-/tmp}/syncwheel-pre-push.XXXXXX")\n'
         'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
         'cat >"$input"\n'
-        + chain +
-        f'{syncwheel_command} hooks guard '
-        '--remote-name "${1:-}" --remote-url "${2:-}" <"$input"\n'
+        + chain
+        + (
+            f'if [ -x {syncwheel_command} ]; then\n'
+            f'  {syncwheel_command} hooks guard --remote-name "${{1:-}}" '
+            '--remote-url "${2:-}" <"$input"\n'
+            '  status=$?\n'
+            '  [ "$status" -eq 2 ] && exit 1\n'
+            'fi\n'
+            'exit 0\n'
+            if syncwheel_command else 'exit 0\n'
+        )
     )
 
 
@@ -740,7 +746,7 @@ def managed_worktree_hook_content(hook_name, backup_exists):
     )
     chain = (
         f'if [ -x "$hook_dir/{hook_name}.syncwheel-chain" ]; then\n'
-        f'  "$hook_dir/{hook_name}.syncwheel-chain" "$@"\n'
+        f'  "$hook_dir/{hook_name}.syncwheel-chain" "$@" || exit $?\n'
         'fi\n'
         if backup_exists else ''
     )
@@ -748,10 +754,18 @@ def managed_worktree_hook_content(hook_name, backup_exists):
     return (
         '#!/bin/sh\n'
         f'{marker}\n'
-        'set -eu\n'
+        'set -u\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         + chain
-        + f'{syncwheel_command} hooks worktree-guard --event {hook_name}\n'
+        + (
+            f'if [ -x {syncwheel_command} ]; then\n'
+            f'  {syncwheel_command} hooks worktree-guard --event {hook_name}\n'
+            '  status=$?\n'
+            '  [ "$status" -eq 2 ] && exit 1\n'
+            'fi\n'
+            'exit 0\n'
+            if syncwheel_command else 'exit 0\n'
+        )
     )
 
 
@@ -775,12 +789,17 @@ def managed_ref_move_hook_content(backup_exists):
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 0\n'
         'input=$(cat) || exit 0\n'
         '[ -n "$input" ] || exit 0\n'
-        + chain +
-        f'printf \'%s\\n\' "$input" | {syncwheel_command} '
-        'hooks ref-guard --phase "$1"\n'
-        'status=$?\n'
-        '[ "$status" -eq 2 ] && exit 1\n'
-        'exit 0\n'
+        + chain
+        + (
+            f'if [ -x {syncwheel_command} ]; then\n'
+            f'  printf \'%s\\n\' "$input" | {syncwheel_command} '
+            'hooks ref-guard --phase "$1"\n'
+            '  status=$?\n'
+            '  [ "$status" -eq 2 ] && exit 1\n'
+            'fi\n'
+            'exit 0\n'
+            if syncwheel_command else 'exit 0\n'
+        )
     )
 
 
@@ -1788,6 +1807,49 @@ def primary_checkout_state(repo_root, manifest):
 def format_remedy_suffix(commands):
     commands = list(dict.fromkeys(command for command in commands if command))
     return f'. Use: {"; ".join(commands)}' if commands else ''
+
+
+def primary_checkout_dirty_entries(repo_root):
+    worktrees = get_worktrees(repo_root)
+    primary_path = Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
+    entries = local_worktree_status(primary_path)
+    if entries is None:
+        raise SyncwheelError(f'cannot inspect primary checkout: {primary_path}')
+    # The primary authoring guard owns tracked work. Repo-local Syncwheel state
+    # and other untracked files have dedicated command preflights already; treating
+    # them as shared product changes would block harmless diagnostics and setup.
+    return [entry for entry in entries if not entry.startswith('?? ')]
+
+
+def primary_checkout_dirty_warning_lines(repo_root, manifest):
+    entries = primary_checkout_dirty_entries(repo_root)
+    if not entries:
+        return []
+    return [
+        'primary checkout is dirty: ' + str(len(entries)) + ' tracked file'
+        + ('' if len(entries) == 1 else 's')
+        + ' not owned by the current user'
+    ]
+
+
+def emit_primary_checkout_dirty_warnings(repo_root, manifest, json_mode=False):
+    lines = primary_checkout_dirty_warning_lines(repo_root, manifest)
+    if not lines or json_mode or not sys.stderr.isatty():
+        return lines
+    color = '' if os.environ.get('NO_COLOR') else YELLOW
+    reset = '' if not color else RESET
+    for line in lines:
+        print(f'{color}WARNING: {line}{reset}', file=sys.stderr)
+    return lines
+
+
+def require_clean_primary_checkout(repo_root, manifest):
+    lines = primary_checkout_dirty_warning_lines(repo_root, manifest)
+    if not lines:
+        return
+    raise SyncwheelError(
+        lines[0] + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
+    )
 
 
 def ensure_clean_worktree(path, allowed_status_prefixes=None, remedy_commands=None):
@@ -18155,7 +18217,19 @@ def command_hooks_worktree_guard(args):
     primary = primary_checkout_state(primary_root, manifest)
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
     primary_path = Path(primary['path']).resolve() if primary.get('path') else None
-    if primary_path is None or current_path != primary_path or primary['compliant']:
+    if primary_path is None or current_path != primary_path:
+        return 0
+    if args.event == 'pre-commit' and primary['compliant']:
+        if os.environ.get(MANAGED_REF_MOVE_AUTH_ENV) == '1':
+            return 0
+        raise SyncwheelError(
+            f'primary checkout commit blocked: {primary_path} is the shared integration projection. '
+            'Only a Syncwheel-authorized control commit may be created there.'
+            + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
+            + '. This local hook is a safety guard, not a security boundary; '
+            'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
+        )
+    if primary['compliant']:
         return 0
     action = 'commit blocked' if args.event == 'pre-commit' else 'branch mismatch detected after checkout'
     raise SyncwheelError(
@@ -18288,6 +18362,82 @@ def manifest_mutation_requested(args):
     return False
 
 
+def syncwheel_mutation_requested(args):
+    """Classify built-in mutations before they can change shared repository state."""
+    if manifest_mutation_requested(args):
+        return True
+    if args.func in {
+        command_worktree_open,
+        command_worktree_lock,
+        command_worktree_unlock,
+        command_stack_rebuild,
+        command_stack_push,
+        command_int_align_remote,
+        command_int_rebuild,
+        command_int_push,
+    }:
+        return not bool(getattr(args, 'dry_run', False))
+    if args.func in {command_gc, command_hooks_install, command_hooks_remove}:
+        return bool(getattr(args, 'apply', False))
+    if args.func in {command_coordination_repair, command_coordination_compose}:
+        return bool(getattr(args, 'apply', False))
+    if args.func == command_repo_authority_set:
+        return bool(getattr(args, 'apply', False))
+    if args.func == command_replay_mode:
+        return bool(getattr(args, 'mode', None) or getattr(args, 'clear', False))
+    if args.func == command_use:
+        return bool(getattr(args, 'personal', None) or getattr(args, 'shared', False))
+    if args.func in {command_journal_snapshot, command_journal_publish}:
+        return bool(getattr(args, 'apply', False))
+    if args.func == command_journal_schedule:
+        return bool(
+            getattr(args, 'apply', False)
+            and getattr(args, 'schedule_command', None) in {'install', 'remove'}
+        )
+    if args.func in {command_stack_git, command_int_git}:
+        return git_passthrough_mutation_requested(getattr(args, 'git_args', []))
+    return False
+
+
+def git_passthrough_mutation_requested(git_args):
+    """Fail closed for Git passthroughs except its unambiguous read-only verbs."""
+    read_only = {
+        'blame', 'cat-file', 'describe', 'diff', 'for-each-ref', 'fsck', 'grep',
+        'log', 'ls-files', 'ls-remote', 'name-rev', 'rev-list', 'rev-parse',
+        'shortlog', 'show', 'show-ref', 'status', 'version',
+    }
+    command = next((value for value in git_args if not value.startswith('-')), None)
+    return command not in read_only
+
+
+def primary_checkout_preflight(args):
+    if not hasattr(args, 'repo') or args.func in {
+        command_hooks_guard,
+        command_hooks_worktree_guard,
+        command_hooks_ref_guard,
+    }:
+        return
+    repo_root = resolve_repo_root(args.repo)
+    worktrees = get_worktrees(repo_root)
+    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+    manifest_path = resolve_manifest_path(
+        primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
+    manifest, _ = load_manifest(primary_root, manifest_path)
+    if manifest is None:
+        return
+    # Journal repositories deliberately turn tracked working-tree changes into
+    # snapshots. Their journal commands own that separate lifecycle, so the
+    # shared integration checkout guard does not apply there.
+    if manifest.get('repository_mode') == 'journal':
+        return
+    emit_primary_checkout_dirty_warnings(
+        primary_root, manifest, json_mode=bool(getattr(args, 'json', False))
+    )
+    if syncwheel_mutation_requested(args):
+        require_clean_primary_checkout(primary_root, manifest)
+
+
 def default_hook_convergence_requested(args):
     if not hasattr(args, 'repo'):
         return False
@@ -18418,6 +18568,8 @@ def main():
         global SYNCWHEEL_OWNS_REF_MOVES
         SYNCWHEEL_OWNS_REF_MOVES = True
     try:
+        if args.command != 'revision-provider':
+            primary_checkout_preflight(args)
         if (
             args.command != 'revision-provider'
             and args.func not in {
