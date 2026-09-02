@@ -4255,7 +4255,15 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(updated_commit, self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
-        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '3')
+        module = self.load_syncwheel_module()
+        committed = json.loads(self.git('show', 'integration/reconcile:.syncwheel/manifest.json'))
+        normalized, _ = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(normalized))
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', 'integration/reconcile'),
+            'chore: restore Syncwheel control manifest',
+        )
 
     def prepare_reconcile_apply_worktree_scenario(self, worktree_root=None):
         beta = self.git('rev-parse', 'main')
@@ -5363,6 +5371,125 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             module.preflight_control_manifest_digest(
                 self.repo, manifest_path, control_manifest
             )
+
+    def test_control_manifest_commit_targets_integration_tree_for_external_manifest(self):
+        module = self.load_syncwheel_module()
+        external = self.tmp / 'external-manifest.json'
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        external.write_text(json.dumps(control, indent=2) + '\n')
+        parent = self.git('rev-parse', 'HEAD')
+
+        commit = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        committed = json.loads(self.git('show', f'{commit}:.syncwheel/manifest.json'))
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(control))
+        self.assertTrue(external.exists())
+
+    def test_control_manifest_commit_never_uses_the_shared_index(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        Path(self.repo / 'alpha.txt').write_text('unrelated staged content\n')
+        self.git('add', 'alpha.txt')
+        parent = self.git('rev-parse', 'HEAD')
+
+        commit = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        self.assertEqual(self.git('show', '--format=', '--name-only', commit), '.syncwheel/manifest.json')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'alpha.txt')
+
+    def test_control_manifest_commit_is_deterministic_from_its_parent_and_manifest(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        parent = self.git('rev-parse', 'HEAD')
+
+        first = module.materialize_control_manifest_commit(self.repo, control, parent)
+        second = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        self.assertEqual(first, second)
+
+    def test_int_rebuild_is_classified_as_a_manifest_mutation(self):
+        module = self.load_syncwheel_module()
+
+        self.assertTrue(module.manifest_mutation_requested(SimpleNamespace(
+            func=module.command_int_rebuild, dry_run=False,
+        )))
+
+    def test_manifest_mutation_requested_covers_commands_that_save_manifest_state(self):
+        module = self.load_syncwheel_module()
+        manifest_savers = (
+            module.command_stack_close,
+            module.command_stack_create,
+            module.command_stack_promote,
+            module.command_stack_demote,
+            module.command_stack_sync,
+            module.command_stack_absorb,
+            module.command_stack_set,
+            module.command_stack_resolve_integration,
+            module.command_stack_add,
+            module.command_stack_capture_integration,
+            module.command_int_rebuild,
+        )
+
+        for command in manifest_savers:
+            with self.subTest(command=command.__name__):
+                self.assertTrue(module.manifest_mutation_requested(SimpleNamespace(
+                    func=command, dry_run=False,
+                )))
+
+    def test_ai_managed_int_rebuild_requires_an_operator_reason(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['authority'] = {
+            'mode': 'ai-managed',
+            'allow': ['source_change'],
+            'deny': ['destructive_rewrite'],
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli('int', 'rebuild', '--in-place', expected=2)
+
+        self.assertIn('requires --reason for an ai-managed repository', result.stderr)
+
+    def test_control_manifest_event_has_actor_reason_and_command(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+
+        payload = module.control_manifest_event_payload(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json', control,
+            'abc123', 'in-place', 'operator-request', 'int rebuild', None,
+        )
+
+        self.assertEqual(payload['actor'], 'Syncwheel Fixture <syncwheel@example.com>')
+        self.assertEqual(payload['reason'], 'operator-request')
+        self.assertEqual(payload['command'], 'int rebuild')
+        self.assertEqual(payload['control_commit'], 'abc123')
+
+    def test_control_manifest_difference_reports_order_base_commit_and_configuration(self):
+        module = self.load_syncwheel_module()
+        expected, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        observed = json.loads(json.dumps(expected))
+        observed['stacks'].reverse()
+        observed['stacks'][0]['base'] = 'different-base'
+        observed['stacks'][0]['commits'] = ['different-commit']
+        observed['stacks'][0]['state'] = 'draft'
+
+        detail = module.control_manifest_difference(expected, observed)
+
+        self.assertIn('stack order differs', detail)
+        self.assertIn('base differs', detail)
+        self.assertIn('commits differ', detail)
+        self.assertIn('configuration differs', detail)
+
+    def test_control_manifest_preflight_names_an_executable_restore_command(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, manifest_path)
+        divergent = json.loads(manifest_path.read_text())
+        divergent['stacks'].reverse()
+        manifest_path.write_text(json.dumps(divergent, indent=2) + '\n')
+
+        with self.assertRaisesRegex(module.SyncwheelError, r'git restore --source=HEAD -- \.syncwheel/manifest\.json'):
+            module.preflight_control_manifest_digest(self.repo, manifest_path, control)
 
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'

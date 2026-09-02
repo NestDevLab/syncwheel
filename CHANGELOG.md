@@ -4,7 +4,9 @@
 
 - Preserve the control manifest across integration rebuilds: reject an
   unexplained pre-rebuild manifest divergence, then restore and commit the
-  manifest when the rebuild itself replaces it.
+  manifest when the rebuild itself replaces it. The manifest-only control
+  commit is built deterministically with an isolated index, verified before
+  its integration ref CAS, and recorded with actor, command, and reason.
 
 ## 0.42.0 - 2026-09-02
 

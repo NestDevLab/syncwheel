@@ -6,16 +6,23 @@ The preferred source of truth is `.syncwheel/manifest.json`.
 
 Before a mutating integration rebuild, Syncwheel compares the on-disk manifest
 with the control manifest it loaded for the command. A mismatch stops before
-any rebuild and names the stack membership difference; restore the control
-manifest before retrying.
+any rebuild, reports stack order, base, commits, and configuration differences,
+and prints an executable restore command.
 
 An integration replay can legitimately replace the checked-out manifest with
 an older copy from its base or a stack. After a successful replay, Syncwheel
-restores the command's control manifest, records a ledger event, and creates a
+restores the command's final in-memory control manifest on the integration ref,
+including when `--manifest` names an external file. It creates a
 `chore: restore Syncwheel control manifest` commit containing only
-`.syncwheel/manifest.json`. It verifies the restored digest before continuing.
-This control commit is part of the integration projection and is recreated on
-later rebuilds; do not treat it as a stack-owned product commit.
+`.syncwheel/manifest.json` with an isolated temporary index and `commit-tree`.
+The object is verified before an exact ref CAS, so hooks and staged files cannot
+alter it. Its identity and dates are inherited deterministically from the replay
+parent; the same parent and manifest produce the same SHA. After the ref moves,
+the manifest source is saved and the ledger receipt records the actual SHA,
+digest, actor, reason, command, and replay mode. `int rebuild --reason TEXT` is
+required for an `ai-managed` repository. This control commit is part of the
+integration projection and is recreated on later rebuilds; do not treat it as a
+stack-owned product commit.
 
 ## Shape
 

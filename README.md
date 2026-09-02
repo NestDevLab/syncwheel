@@ -40,8 +40,9 @@ Syncwheel adds that missing control plane:
 - one manifest declares commit ownership
 - each stack maps to one PR branch
 - integration is a disposable projection of the manifest
-- a rebuild restores and records the manifest control commit when its projected
-  tree carries an older manifest
+- a rebuild restores and records a deterministic, manifest-only control commit
+  when its projected tree carries an older manifest; `int rebuild --reason` is
+  required for `ai-managed` repositories
 - deployment channels pin selected stack revisions into ordered, rebuildable
   branch compositions
 - `reconcile` compares local branches, remote tips, and manifest projections
