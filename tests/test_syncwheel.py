@@ -602,7 +602,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         ).stdout.strip()
 
         released = json.loads(self.run_cli(
-            'worktree', 'release', 'abandoned', '--reason', 'superseded work', '--json'
+            'worktree', 'release', 'abandoned', '--reason', 'superseded work', '--apply', '--json'
         ).stdout)
 
         self.assertEqual(released['lane']['id'], 'abandoned')
@@ -613,6 +613,20 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertFalse(lane_path.exists())
         ledger = self.read_ledger_state()
         self.assertEqual(ledger['recent_events'][-1]['type'], 'governed_worktree_released')
+
+    def test_worktree_release_is_a_dry_run_until_apply(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'release-preview', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+
+        preview = json.loads(self.run_cli(
+            'worktree', 'release', 'release-preview', '--reason', 'no longer needed', '--json'
+        ).stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertTrue(lane_path.is_dir())
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['state'], 'active')
+        self.assertEqual(self.read_ledger_state()['recent_events'], [])
 
     def test_worktree_release_refuses_a_dirty_lane(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'dirty-release', '--json').stdout)

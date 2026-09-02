@@ -86,9 +86,24 @@ so do not defeat the light-lane boundary with raw install/test commands. The
 lane is clone-local and bounded to four active entries. After its commits are
 owned through the existing `stack create`, `stack add`, or
 `stack capture-integration` flow, Syncwheel stores a local recovery ref and
-reaps only a clean lane. Dirty, unknown, outside-root, or current-directory
-lanes stay visible and require explicit recovery. Check governed-worktree
-warnings before a mutating lifecycle command.
+reaps only a clean lane. A missing lane with an expired lease or a known-dead
+local owner is eligible even if its retained registry path is outside the
+configured root; a dirty, unknown, or current-directory lane stays visible and
+requires explicit recovery. Check governed-worktree warnings before a mutating
+lifecycle command.
+
+To retire a named dead or abandoned lane, first preview and then explicitly
+apply the release:
+
+```bash
+syncwheel worktree release <lane> --reason "<why>"
+syncwheel worktree release <lane> --reason "<why>" --apply
+```
+
+The preview does not write. Applying stores a recovery ref for an existing lane
+branch tip, removes the registry record, and appends a ledger event. It refuses
+an existing dirty worktree and names the recovery remedy. `gc --apply` reaps
+eligible expired lanes even when active-active coordination is disabled.
 
 ## Locate the CLI
 

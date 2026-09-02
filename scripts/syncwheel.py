@@ -9608,6 +9608,24 @@ def command_worktree_release(args):
             raise SyncwheelError(
                 f"governed worktree lane {lane_id!r} is already {lane['state']}; it cannot be released"
             )
+        status = governed_worktree_lane_status(repo_root, manifest, lane)
+        if status['code'] not in {None, 'expired', 'captured_pending_cleanup'}:
+            raise SyncwheelError(
+                f"cannot release governed worktree lane {lane_id!r}: {status['code']}; {status['remedy']}"
+            )
+        if not args.apply:
+            output = {
+                'lane': lane,
+                'reason': reason,
+                'registry_path': str(registry_path),
+                'applied': False,
+            }
+            if args.json:
+                print(json.dumps(output, indent=2, sort_keys=True))
+            else:
+                print(f"would release governed worktree {lane_id}: {lane['path']}")
+                print('  rerun with --apply to create any recovery ref and remove the lane record')
+            return 0
         released, detail = reap_governed_worktree_lane(repo_root, manifest, lane)
         if not released:
             raise SyncwheelError(
@@ -9628,7 +9646,7 @@ def command_worktree_release(args):
         },
         manifest_path,
     )
-    output = {'lane': lane, 'reason': reason, 'registry_path': str(registry_path)}
+    output = {'lane': lane, 'reason': reason, 'registry_path': str(registry_path), 'applied': True}
     if args.json:
         print(json.dumps(output, indent=2, sort_keys=True))
     else:
@@ -17527,6 +17545,7 @@ def build_parser():
     worktree_release_p = worktree_sub.add_parser('release', parents=[common])
     worktree_release_p.add_argument('lane')
     worktree_release_p.add_argument('--reason', required=True, help='why this dead or abandoned lane is being released')
+    worktree_release_p.add_argument('-a', '--apply', action='store_true', help='create any recovery ref and remove the released lane record')
     worktree_release_p.add_argument('-j', '--json', action='store_true')
     worktree_release_p.set_defaults(func=command_worktree_release)
 

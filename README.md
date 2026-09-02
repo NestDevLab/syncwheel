@@ -239,8 +239,26 @@ destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
 the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
-worktree and local lane branch. A dirty, unavailable, outside-root, or current
-directory lane is retained and reported; it is never removed automatically.
+worktree and local lane branch. A dirty, unavailable, or current-directory lane
+is retained and reported; it is never removed automatically. A missing lane
+whose lease expired, or whose local owner PID is known to be dead, is reaped on
+the next applicable mutation even when an old registry path is outside the
+current configured root; its branch is anchored first when it has a distinct
+tip.
+
+To retire a known dead or abandoned lane deliberately, preview the operation
+first and provide a durable reason:
+
+```bash
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example"
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --apply
+```
+
+`release` is dry-run by default. With `--apply`, it creates a recovery ref for
+an existing lane-branch tip, removes the registry record, and appends a ledger
+event. It refuses an existing dirty lane and names the recovery remedy instead
+of removing it. `gc --apply` also reaps eligible expired lanes when active-active
+coordination is disabled.
 
 `status`, `check`, `handoff`, and `gc` include structured governed-worktree
 diagnostics in JSON. Repo-aware terminal commands show actionable yellow
