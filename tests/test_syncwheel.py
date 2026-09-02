@@ -542,6 +542,114 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertTrue(Path(opened['lane']['path']).is_relative_to(self.repo / '.syncwheel' / 'wt'))
         self.assertIsNone(lane['code'])
 
+    def test_worktree_open_honours_a_declared_nondefault_root(self):
+        manifest = self.read_manifest()
+        manifest['syncwheel_worktree_root'] = 'var/syncwheel'
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+        opened = json.loads(self.run_cli('worktree', 'open', 'declared-root', '--json').stdout)
+
+        self.assertTrue(Path(opened['lane']['path']).is_relative_to(self.repo / 'var' / 'syncwheel'))
+
+    def test_missing_expired_lane_outside_root_is_reaped_with_a_recovery_ref(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'missing-expired', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: recover dead lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['path'] = str(self.tmp / 'outside-configured-root' / 'missing-expired')
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        reported = status['governed_worktrees']['lanes'][0]
+        self.assertEqual(reported['code'], 'expired')
+        self.run_cli('worktree', 'open', 'after-missing-expired', '--json')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        expired = next(item for item in registry['lanes'] if item['id'] == 'missing-expired')
+        self.assertEqual(expired['state'], 'reaped')
+        self.assertEqual(self.git('rev-parse', expired['recovery_ref']), tip)
+        self.assertIsNone(module.ref_tip(self.repo, 'syncwheel/lane/missing-expired'))
+
+    def test_dead_owner_with_a_missing_lane_is_expired(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dead-owner', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['owner'] = f'agent@{module.socket.gethostname()}:999999999'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+
+        self.assertEqual(status['governed_worktrees']['lanes'][0]['code'], 'expired')
+
+    def test_worktree_release_removes_an_abandoned_clean_record_and_keeps_recovery(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'abandoned', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: abandoned lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'abandoned', '--reason', 'superseded work', '--json'
+        ).stdout)
+
+        self.assertEqual(released['lane']['id'], 'abandoned')
+        self.assertEqual(released['reason'], 'superseded work')
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'], [])
+        self.assertFalse(lane_path.exists())
+        ledger = self.read_ledger_state()
+        self.assertEqual(ledger['recent_events'][-1]['type'], 'governed_worktree_released')
+
+    def test_worktree_release_refuses_a_dirty_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dirty-release', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'draft.txt').write_text('keep me\n')
+
+        result = self.run_cli(
+            'worktree', 'release', 'dirty-release', '--reason', 'cannot discard', expected=2
+        )
+
+        self.assertIn('dirty', result.stderr)
+        self.assertTrue(lane_path.is_dir())
+        self.assertEqual((lane_path / 'draft.txt').read_text(), 'keep me\n')
+
+    def test_gc_reaps_an_expired_missing_lane_without_active_active_coordination(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gc-expired', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: gc recovery lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        gc = json.loads(self.run_cli('gc', '--apply', '--no-fetch', '--json').stdout)
+
+        self.assertFalse(gc['enabled'])
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        expired = registry['lanes'][0]
+        self.assertEqual(expired['state'], 'reaped')
+        self.assertEqual(self.git('rev-parse', expired['recovery_ref']), tip)
+
     def test_dirty_lane_is_reported_but_not_reaped(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'dirty', '--json').stdout)
         lane_path = Path(opened['lane']['path'])

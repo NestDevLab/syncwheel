@@ -4317,6 +4317,39 @@ def governed_worktree_root(repo_root, manifest):
     return resolve_worktree_root_path(primary, effective_worktree_root(manifest)).resolve()
 
 
+def governed_worktree_owner_is_dead(owner):
+    """Return true only for a dead PID that belongs to this host.
+
+    Owners are advisory identifiers, so an unparseable or remote owner must never
+    make a lane eligible for deletion.  A missing local process is enough to reap
+    a missing lane because there is no worktree left to protect.
+    """
+    if not isinstance(owner, str):
+        return False
+    owner_and_host, separator, raw_pid = owner.rpartition(':')
+    user, at, hostname = owner_and_host.rpartition('@')
+    if not separator or not at or not user or hostname != socket.gethostname():
+        return False
+    try:
+        pid = int(raw_pid)
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False
+
+
+def governed_worktree_lane_lease_expired(lane, now):
+    expires = parse_coordination_timestamp(lane['lease_expires_at'])
+    return bool(expires and expires <= now)
+
+
 def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     root = governed_worktree_root(repo_root, manifest)
@@ -4335,24 +4368,36 @@ def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
             remedy=governed_lane_remedy(manifest, lane),
         )
         return status
-    if not path_is_relative_to(path, root):
+    worktree = find_worktree_for_branch(repo_root, lane['branch'])
+    if path.exists():
+        if worktree is None or Path(worktree).resolve(strict=False) != path:
+            status.update(code='unregistered_worktree', remedy='inspect the path and branch; Syncwheel will not remove an unregistered worktree')
+            return status
+        dirty = local_worktree_status(path)
+        if dirty is None:
+            status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
+            return status
+        if dirty:
+            status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
+            return status
+        if governed_worktree_lane_lease_expired(lane, now):
+            status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
+            return status
+    elif governed_worktree_lane_lease_expired(lane, now) or governed_worktree_owner_is_dead(lane['owner']):
+        # An expired or dead owner cannot keep a missing path alive merely
+        # because an old root configuration no longer contains that path.
+        status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
+        return status
+    elif not path_is_relative_to(path, root):
         status.update(code='outside_root', remedy='inspect and recover this lane; Syncwheel will not move or remove it')
         return status
-    worktree = find_worktree_for_branch(repo_root, lane['branch'])
-    if worktree is None or Path(worktree).resolve(strict=False) != path:
+    elif worktree is None or Path(worktree).resolve(strict=False) != path:
         status.update(code='unregistered_worktree', remedy='inspect the path and branch; Syncwheel will not remove an unregistered worktree')
-        return status
-    dirty = local_worktree_status(path)
-    if dirty is None:
-        status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
-        return status
-    if dirty:
-        status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
         return status
     expires = parse_coordination_timestamp(lane['lease_expires_at'])
     if expires is None:
         status.update(code='invalid_lease', remedy='repair the local registry before any cleanup')
-    elif expires <= now:
+    elif governed_worktree_lane_lease_expired(lane, now):
         status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
     return status
 
@@ -7087,13 +7132,17 @@ def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info
 def command_gc(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    governed_reaped = reconcile_governed_worktrees(repo_root, manifest) if args.apply else []
     plan = run_coordination_gc(repo_root, manifest, apply=args.apply, fetch=args.fetch)
     plan['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest)
+    plan['governed_worktree_reaped'] = governed_reaped
     if args.json:
         print(json.dumps(plan, indent=2))
     else:
         if not plan['enabled']:
             print('gc: active-active coordination is not enabled')
+        if governed_reaped:
+            print(f"gc: reaped {len(governed_reaped)} expired governed lane(s)")
         elif not plan['candidates']:
             print('gc: no eligible local worktrees, branches, or backups')
         else:
@@ -9540,6 +9589,52 @@ def command_worktree_open(args):
         print(f"  lease: {lane['lease_expires_at']}")
         if lane['target']:
             print(f"  target stack: {lane['target']}")
+    return 0
+
+
+def command_worktree_release(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    lane_id = safe_ref_segment(args.lane)
+    reason = args.reason.strip() if isinstance(args.reason, str) else ''
+    if not reason:
+        raise SyncwheelError('worktree release requires a non-empty --reason')
+    with governed_worktree_registry_lock(repo_root):
+        registry, registry_path = load_governed_worktree_registry(repo_root)
+        lane = next((item for item in registry['lanes'] if item['id'] == lane_id), None)
+        if lane is None:
+            raise SyncwheelError(f'unknown governed worktree lane: {lane_id}')
+        if lane['state'] not in {'active', 'captured_pending_cleanup'}:
+            raise SyncwheelError(
+                f"governed worktree lane {lane_id!r} is already {lane['state']}; it cannot be released"
+            )
+        released, detail = reap_governed_worktree_lane(repo_root, manifest, lane)
+        if not released:
+            raise SyncwheelError(
+                f"cannot release governed worktree lane {lane_id!r}: {detail['code']}; {detail['remedy']}"
+            )
+        registry['lanes'] = [item for item in registry['lanes'] if item['id'] != lane_id]
+        save_governed_worktree_registry(repo_root, registry)
+    append_ledger_event(
+        repo_root,
+        'governed_worktree_released',
+        {
+            'lane': lane_id,
+            'branch': lane['branch'],
+            'reason': reason,
+            'recovery_ref': lane.get('recovery_ref'),
+            'target': lane.get('target'),
+            'full': lane['full'],
+        },
+        manifest_path,
+    )
+    output = {'lane': lane, 'reason': reason, 'registry_path': str(registry_path)}
+    if args.json:
+        print(json.dumps(output, indent=2, sort_keys=True))
+    else:
+        print(f"released governed worktree {lane_id}: {lane['path']}")
+        if lane.get('recovery_ref'):
+            print(f"  recovery ref: {lane['recovery_ref']}")
     return 0
 
 
@@ -17429,6 +17524,12 @@ def build_parser():
     worktree_open_p.add_argument('-j', '--json', action='store_true')
     worktree_open_p.set_defaults(func=command_worktree_open)
 
+    worktree_release_p = worktree_sub.add_parser('release', parents=[common])
+    worktree_release_p.add_argument('lane')
+    worktree_release_p.add_argument('--reason', required=True, help='why this dead or abandoned lane is being released')
+    worktree_release_p.add_argument('-j', '--json', action='store_true')
+    worktree_release_p.set_defaults(func=command_worktree_release)
+
     worktree_lock_p = worktree_sub.add_parser('lock', parents=[common])
     worktree_lock_p.add_argument('stack')
     worktree_lock_p.set_defaults(func=command_worktree_lock)
@@ -18332,9 +18433,7 @@ def governed_worktree_preflight(args):
     if manifest is None:
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
-    reaping = args.func == command_worktree_open or (
-        args.func == command_gc and bool(getattr(args, 'apply', False))
-    ) or args.func in {command_sync, command_publish} or (
+    reaping = args.func == command_worktree_open or args.func in {command_sync, command_publish} or (
         args.func in {command_reconcile, command_resume, command_stack_land}
         and bool(getattr(args, 'apply', False))
     ) or (
