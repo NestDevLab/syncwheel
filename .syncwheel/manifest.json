@@ -37,7 +37,8 @@
   "authority": {
     "mode": "ai-managed",
     "allow": [
-      "source_change"
+      "source_change",
+      "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
