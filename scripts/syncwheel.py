@@ -218,12 +218,17 @@ def resolve_runtime_version(root=None):
 VERSION = resolve_runtime_version()
 
 
-def run(cmd, cwd=None, check=True, input_text=None, env=None):
+def managed_process_env(extra=None):
     process_env = os.environ.copy()
     if SYNCWHEEL_OWNS_REF_MOVES:
         process_env[MANAGED_REF_MOVE_AUTH_ENV] = '1'
-    if env:
-        process_env.update(env)
+    if extra:
+        process_env.update(extra)
+    return process_env
+
+
+def run(cmd, cwd=None, check=True, input_text=None, env=None):
+    process_env = managed_process_env(env)
     result = subprocess.run(
         cmd,
         cwd=cwd,
@@ -9031,9 +9036,7 @@ def execute_replay_steps(repo_root, plan):
                 effective_argv = argv if env is not None else with_git_identity(repo_root, argv)
                 run(effective_argv, cwd=repo_root, env=env)
             elif step['kind'] == 'shell':
-                process_env = os.environ.copy()
-                if step['env']:
-                    process_env.update(step['env'])
+                process_env = managed_process_env(step['env'])
                 result_shell = subprocess.run(
                     step['render'],
                     cwd=repo_root,
