@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.42.2 - 2026-09-03
+
+- Preserve the control manifest across integration rebuilds: reject an
+  unexplained pre-rebuild manifest divergence, then restore and commit the
+  manifest when the rebuild itself replaces it.
+
 ## 0.42.0 - 2026-09-02
 
 - Project Agentwheel revision-provider commits authored on a declared
