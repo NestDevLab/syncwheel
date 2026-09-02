@@ -100,16 +100,19 @@ class RevisionProviderRepository:
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
         manifest_path.parent.mkdir(parents=True)
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
-        # This fixture models a pre-existing isolated clone. Set its local
-        # recovery policy directly so ledger-durability tests start with an
-        # empty event stream; command-level disable/audit behavior is covered
-        # by the managed-ref-guard suite.
-        SYNCWHEEL.save_repo_profile(self.repo, {
-            'hooks': {
-                'mode': 'disabled',
-                'reason': 'isolated revision-provider fixture',
-            },
-        })
+        # This fixture models a pre-existing isolated clone. Persist its
+        # authoritative common-Git guard state directly so ledger-durability
+        # tests start with an empty event stream; command-level disable/audit
+        # behavior is covered by the managed-ref-guard suite.
+        SYNCWHEEL.ensure_syncwheel_metadata_excluded(
+            self.repo, 'git-tracked', manifest['syncwheel_worktree_root']
+        )
+        SYNCWHEEL.save_primary_guard(
+            self.repo,
+            manifest,
+            enabled=False,
+            reason='isolated revision-provider fixture',
+        )
         self.git('add', '.gitignore', 'base.txt', '.syncwheel/manifest.json')
         self.git('commit', '-q', '-m', 'test: initialize managed repository')
         self.git('push', '-q', '-u', 'origin', 'main')

@@ -8,6 +8,10 @@
   stable installed hooks with single-use authorization nonces. Required hook status
   is explicit: absent hooks do not block ordinary Syncwheel commands, while an
   installed hook without its stable CLI fails closed and reports as degraded.
+- Make `guard.json` the atomic common-Git source of truth, run Syncwheel before every
+  chained hook while propagating either failure, preserve live concurrent-process
+  nonces, reject CLI paths from repository/lane/worktree state, audit disable intent
+  before removal, and derive mutation preflight from one exhaustive command table.
 
 ## 0.40.1 - 2026-09-02
 

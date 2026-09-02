@@ -148,8 +148,9 @@ install`, review the reported hook/chaining path and digest, then apply with
 raw pushes, but `--no-verify` remains a local bypass and the hook is not a security
 boundary. A required guard is reported as pending until this explicit installation;
 normal Syncwheel commands do not install it implicitly. Once installed, an
-unresolvable stable CLI makes the hook fail closed and `hooks status` reports it
-as degraded.
+unresolvable stable CLI or an altered/partial hook bundle makes the guard fail closed
+and `hooks status` reports `degraded` with the cause. Syncwheel's guard runs before
+every chained user hook, both execute, and either failure rejects the operation.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.
@@ -217,7 +218,11 @@ invoking user. Use `--dry-run` on rebuild/push commands. If the manifest and Git
 manifest or call out the conflict — do not claim a repo is aligned while integration and PR branches
 still differ. The named recovery commands remain executable while it is dirty. The
 primary guard is fail-closed and uses a single-use internal nonce; `hooks status`
-reports a degraded bundle and `hooks install --apply` repairs it explicitly.
+reports a degraded bundle and `hooks install --apply` repairs it explicitly. Guard
+state comes only from atomic `guard.json` under the Git common directory. Re-enable
+state precedes hook installation; reasoned disable is ledgered before hook removal.
+Nonce cleanup preserves other live processes. Mutation/read-only/remedy behavior is
+declared once in the command table, so `--apply` previews remain read-only.
 
 ## Replay modes
 

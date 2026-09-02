@@ -1,4 +1,5 @@
 import argparse
+import ast
 import importlib.util
 import io
 import json
@@ -22,12 +23,18 @@ SPEC.loader.exec_module(syncwheel)
 class ManagedRefGuardTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.repo = Path(self.temp.name)
-        self.bin_dir = self.repo / '.test-bin'
+        self.temp_root = Path(self.temp.name)
+        self.repo = self.temp_root / 'repo'
+        self.repo.mkdir()
+        self.bin_dir = self.temp_root / 'bin'
         self.bin_dir.mkdir()
         syncwheel_bin = self.bin_dir / 'syncwheel'
         syncwheel_bin.write_text(
-            '#!/bin/sh\nexec "' + os.fspath(Path(os.sys.executable)) + '" "'
+            '#!/bin/sh\n'
+            'if [ -n "${SYNCWHEEL_TEST_CLI_LOG:-}" ]; then\n'
+            '  printf "%s\\n" guard >>"$SYNCWHEEL_TEST_CLI_LOG"\n'
+            'fi\n'
+            'exec "' + os.fspath(Path(os.sys.executable)) + '" "'
             + os.fspath(MODULE_PATH) + '" "$@"\n'
         )
         syncwheel_bin.chmod(0o755)
@@ -108,11 +115,32 @@ class ManagedRefGuardTests(unittest.TestCase):
             _, hook, backup, metadata, _ = syncwheel.managed_hook_paths(self.repo, name)
             paths.extend((hook, backup, metadata))
         paths.append(self.repo / '.syncwheel' / 'profile.local.json')
+        paths.append(syncwheel.primary_guard_path(self.repo))
         return {
             str(path.relative_to(self.repo)): path.read_bytes()
             for path in paths
             if path.exists()
         }
+
+    def write_executable(self, path, body='#!/bin/sh\nexit 0\n'):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(body)
+        path.chmod(0o755)
+        return path
+
+    def descendant_commit(self, subject='descendant'):
+        old = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True
+        ).strip()
+        tree = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD^{tree}'], cwd=self.repo, text=True
+        ).strip()
+        new = subprocess.check_output(
+            ['git', 'commit-tree', tree, '-p', old, '-m', subject],
+            cwd=self.repo,
+            text=True,
+        ).strip()
+        return old, new
 
     def test_bundle_installs_primary_checkout_guards_and_reports_ready(self):
         result = syncwheel.install_managed_push_hook(self.repo, apply=True)
@@ -488,12 +516,13 @@ class ManagedRefGuardTests(unittest.TestCase):
 
     def test_missing_required_bundle_stays_pending_until_explicit_install(self):
         syncwheel.install_managed_push_hook(self.repo, apply=True)
-        profile_path = self.repo / '.syncwheel' / 'profile.local.json'
-        profile_path.unlink()
+        syncwheel.primary_guard_path(self.repo).unlink()
 
         before = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
-        self.assertTrue(before['ready'])
+        self.assertFalse(before['ready'])
         self.assertTrue(before['migrationPending'])
+        self.assertTrue(before['degraded'])
+        self.assertIn('configuration is missing', before['degradedCauses'][0])
 
         after = syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
         self.assertTrue(after['migrationPending'])
@@ -782,12 +811,271 @@ class ManagedRefGuardTests(unittest.TestCase):
             with self.assertRaisesRegex(syncwheel.SyncwheelError, 'configuration is missing'):
                 syncwheel.command_hooks_ref_guard(types.SimpleNamespace(repo=self.repo, phase='prepared'))
 
+    def test_ref_guard_precedes_and_cannot_be_bypassed_by_failing_chain(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        _, hook, _, _, _ = syncwheel.managed_hook_paths(
+            self.repo, 'reference-transaction'
+        )
+        order_log = self.temp_root / 'hook-order.log'
+        self.write_executable(
+            hook,
+            '#!/bin/sh\n'
+            'printf "user-%s\\n" "${1:-unknown}" >>"$SYNCWHEEL_TEST_CLI_LOG"\n'
+            'exit 7\n',
+        )
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        old, new = self.descendant_commit()
+        env = self._clean_env()
+        env['SYNCWHEEL_TEST_CLI_LOG'] = str(order_log)
+
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True).strip(),
+            old,
+        )
+        order = order_log.read_text().splitlines()
+        self.assertEqual(order[:2], ['guard', 'user-prepared'])
+        self.assertIn('user-aborted', order)
+        self.assertIn('refusing unauthorized primary integration ref move', moved.stderr)
+        self.assertNotIn('stable syncwheel CLI failed', moved.stderr)
+
+    def test_failing_chain_rejects_a_syncwheel_authorized_ref_move(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        _, hook, _, _, _ = syncwheel.managed_hook_paths(
+            self.repo, 'reference-transaction'
+        )
+        order_log = self.temp_root / 'authorized-hook-order.log'
+        self.write_executable(
+            hook,
+            '#!/bin/sh\n'
+            'printf "user-%s\\n" "${1:-unknown}" >>"$SYNCWHEEL_TEST_CLI_LOG"\n'
+            'exit 7\n',
+        )
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        old, new = self.descendant_commit('authorized descendant')
+        env = self._syncwheel_authorized_env()
+        env['SYNCWHEEL_TEST_CLI_LOG'] = str(order_log)
+
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True).strip(),
+            old,
+        )
+        order = order_log.read_text().splitlines()
+        self.assertEqual(order[:2], ['guard', 'user-prepared'])
+        self.assertIn('user-aborted', order)
+
+    def test_primary_guard_state_write_is_atomic(self):
+        syncwheel.save_primary_guard(
+            self.repo, self.manifest, enabled=False, reason='keep this state'
+        )
+        path = syncwheel.primary_guard_path(self.repo)
+        before = path.read_bytes()
+
+        with mock.patch.object(syncwheel.os, 'replace', side_effect=OSError('replace failed')):
+            with self.assertRaisesRegex(OSError, 'replace failed'):
+                syncwheel.save_primary_guard(self.repo, self.manifest, enabled=True)
+
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_guard_json_is_the_only_guard_state_for_hooks_and_status(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        profile_path = self.repo / '.syncwheel' / 'profile.local.json'
+        profile_path.write_text(json.dumps({
+            'hooks': {'mode': 'disabled', 'reason': 'stale legacy state'},
+        }))
+
+        enabled = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+        self.assertTrue(enabled['enforced'])
+        self.assertFalse(enabled['disabled'])
+
+        syncwheel.save_primary_guard(
+            self.repo, self.manifest, enabled=False, reason='guard json opt-out'
+        )
+        profile_path.write_text(json.dumps({'hooks': {'mode': 'required'}}))
+        disabled = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+        self.assertTrue(disabled['disabled'])
+        self.assertEqual(disabled['disabledReason'], 'guard json opt-out')
+        self.assertEqual(
+            syncwheel.command_hooks_worktree_guard(types.SimpleNamespace(
+                repo=self.repo, manifest=None, personal=None, event='pre-commit'
+            )),
+            0,
+        )
+
+    def test_reenable_writes_guard_before_hooks_and_partial_failure_is_degraded(self):
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        syncwheel.remove_managed_push_hook(
+            self.repo, apply=True, disable=True, reason='temporary recovery'
+        )
+        original = syncwheel.install_one_managed_hook
+        observed_enabled = []
+
+        def fail_partway(repo_root, hook_name, apply=False):
+            if apply:
+                observed_enabled.append(syncwheel.load_primary_guard(repo_root)['enabled'])
+                if hook_name == 'post-checkout':
+                    raise OSError('injected hook failure')
+            return original(repo_root, hook_name, apply=apply)
+
+        with mock.patch.object(
+            syncwheel, 'install_one_managed_hook', side_effect=fail_partway
+        ):
+            with self.assertRaisesRegex(OSError, 'injected hook failure'):
+                syncwheel.install_managed_push_hook(self.repo, apply=True)
+
+        self.assertTrue(observed_enabled)
+        self.assertTrue(all(observed_enabled))
+        policy = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+        self.assertTrue(policy['enforced'])
+        self.assertTrue(policy['degraded'])
+        self.assertTrue(
+            any('post-checkout' in cause for cause in policy['degradedCauses']),
+            policy,
+        )
+
+    def test_disable_ledger_failure_preserves_enabled_guard_and_hooks(self):
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        before = self.hook_bundle_bytes()
+
+        with mock.patch.object(
+            syncwheel, 'append_ledger_event', side_effect=OSError('ledger append failed')
+        ):
+            with self.assertRaisesRegex(OSError, 'ledger append failed'):
+                syncwheel.remove_managed_push_hook(
+                    self.repo, apply=True, disable=True, reason='audited recovery'
+                )
+
+        self.assertEqual(self.hook_bundle_bytes(), before)
+        self.assertTrue(syncwheel.load_primary_guard(self.repo)['enabled'])
+
+    def test_concurrent_process_cleanup_preserves_live_foreign_nonce(self):
+        owner_script = (
+            'import importlib.util, os, sys, time\n'
+            'spec = importlib.util.spec_from_file_location("guard_owner", sys.argv[1])\n'
+            'module = importlib.util.module_from_spec(spec)\n'
+            'spec.loader.exec_module(module)\n'
+            'print(module.authorize_ref_move(sys.argv[2]), flush=True)\n'
+            'time.sleep(30)\n'
+        )
+        owner = subprocess.Popen(
+            [os.sys.executable, '-c', owner_script, str(MODULE_PATH), str(self.repo)],
+            cwd=self.repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertIsNotNone(owner.stdout)
+        nonce = owner.stdout.readline().strip()
+        nonce_path = syncwheel.ref_auth_dir(self.repo) / nonce
+        try:
+            self.assertTrue(nonce_path.exists())
+            status = self.run_syncwheel('hooks', 'status', '--repo', str(self.repo))
+            self.assertEqual(status.returncode, 0, status.stderr)
+            self.assertTrue(nonce_path.exists())
+        finally:
+            owner.terminate()
+            owner.communicate(timeout=5)
+        syncwheel.clear_ref_authorizations(self.repo)
+        self.assertFalse(nonce_path.exists())
+
+    def test_cli_resolver_rejects_repository_lane_and_registered_worktree_shims(self):
+        inside = self.write_executable(self.repo / 'bin' / 'syncwheel')
+        common = self.write_executable(self.repo / '.git' / 'bin' / 'syncwheel')
+        lane = self.write_executable(
+            self.repo / '.syncwheel' / 'wt' / 'lane' / 'bin' / 'syncwheel'
+        )
+        configured_root = self.temp_root / 'configured-lanes'
+        configured = self.write_executable(configured_root / 'lane' / 'bin' / 'syncwheel')
+        configured_manifest = dict(self.manifest)
+        configured_manifest['syncwheel_worktree_root'] = str(configured_root)
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(configured_manifest, indent=2) + '\n'
+        )
+        registered = self.temp_root / 'registered-worktree'
+        subprocess.run(
+            ['git', 'worktree', 'add', '-qb', 'resolver-worktree', str(registered), 'HEAD'],
+            cwd=self.repo,
+            check=True,
+        )
+        registered_shim = self.write_executable(registered / 'bin' / 'syncwheel')
+        non_executable = self.temp_root / 'not-executable-syncwheel'
+        non_executable.write_text('#!/bin/sh\nexit 0\n')
+        unstable_interpreter = self.write_executable(
+            self.temp_root / 'unstable-interpreter-syncwheel',
+            '#!/definitely/missing/python\n',
+        )
+        path_interpreter = self.write_executable(
+            self.temp_root / 'path-interpreter-syncwheel',
+            '#!/usr/bin/env python3\n',
+        )
+        try:
+            for candidate in (
+                inside,
+                common,
+                lane,
+                configured,
+                registered_shim,
+                non_executable,
+                unstable_interpreter,
+                path_interpreter,
+            ):
+                with self.subTest(candidate=candidate), mock.patch.object(
+                    syncwheel.shutil, 'which', return_value=str(candidate)
+                ):
+                    self.assertIsNone(syncwheel.managed_hook_syncwheel_command(self.repo))
+            with mock.patch.object(
+                syncwheel.shutil, 'which', return_value=str(self.bin_dir / 'syncwheel')
+            ):
+                self.assertEqual(
+                    syncwheel.managed_hook_syncwheel_command(self.repo),
+                    shlex.quote(str((self.bin_dir / 'syncwheel').resolve())),
+                )
+        finally:
+            registered_shim.unlink(missing_ok=True)
+            registered_shim.parent.rmdir()
+            subprocess.run(
+                ['git', 'worktree', 'remove', str(registered)], cwd=self.repo, check=True
+            )
+
+    def test_tampered_hook_marks_guard_degraded_with_cause(self):
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        _, hook, _, _, _ = syncwheel.managed_hook_paths(self.repo, 'pre-commit')
+        hook.write_text(hook.read_text() + '# tampered\n')
+
+        policy = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+
+        self.assertTrue(policy['degraded'])
+        self.assertEqual(policy['status'], 'degraded')
+        self.assertFalse(policy['ready'])
+        self.assertTrue(
+            any('pre-commit' in cause for cause in policy['degradedCauses']),
+            policy,
+        )
+
     def test_missing_or_lane_cli_is_degraded_and_never_generates_a_noop_hook(self):
         with mock.patch.object(syncwheel.shutil, 'which', return_value=None):
-            self.assertIn('exit 1', syncwheel.managed_worktree_hook_content('pre-commit', False))
+            self.assertIn('exit 1', syncwheel.managed_worktree_hook_content(self.repo, 'pre-commit', False))
             self.assertTrue(syncwheel.managed_hook_status(self.repo, 'pre-commit')['degraded'])
         with mock.patch.object(syncwheel.shutil, 'which', return_value='/tmp/repo/var/worktrees/lane/syncwheel'):
-            self.assertIsNone(syncwheel.managed_hook_syncwheel_command())
+            self.assertIsNone(syncwheel.managed_hook_syncwheel_command(self.repo))
 
     def test_nonce_cannot_authorise_a_second_manual_commit(self):
         self._install_and_branch('main-integration')
@@ -811,9 +1099,68 @@ class ManagedRefGuardTests(unittest.TestCase):
             args.git_args = []
             self.assertTrue(syncwheel.primary_guard_remedy_requested(args))
 
-    def test_classify_integration_is_a_primary_guard_mutation(self):
-        args = argparse.Namespace(func=syncwheel.command_stack_classify_integration, apply=True)
-        self.assertTrue(syncwheel.manifest_mutation_requested(args))
+    def test_classify_integration_preview_is_read_only_and_apply_is_mutating(self):
+        parser = syncwheel.build_parser()
+        preview = parser.parse_args([
+            'stack', 'classify-integration', 'feature', 'HEAD', '--repo', str(self.repo),
+        ])
+        apply = parser.parse_args([
+            'stack', 'classify-integration', 'feature', 'HEAD', '--apply',
+            '--plan-digest', 'digest', '--repo', str(self.repo),
+        ])
+        self.assertFalse(syncwheel.syncwheel_mutation_requested(preview))
+        self.assertFalse(syncwheel.manifest_mutation_requested(preview))
+        self.assertTrue(syncwheel.syncwheel_mutation_requested(apply))
+        self.assertTrue(syncwheel.manifest_mutation_requested(apply))
+
+        self._install_and_branch('main-integration')
+        (self.repo / 'seed').write_text('dirty preview\n')
+        result = self.run_syncwheel(
+            'stack', 'classify-integration', 'feature', 'HEAD',
+            '--repo', str(self.repo),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)['kind'], 'stackIntegrationClassificationPlan')
+
+    def test_every_manifest_or_ledger_writer_command_has_mutation_metadata(self):
+        tree = ast.parse(MODULE_PATH.read_text())
+        functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        calls = {}
+        writers = set()
+        saver_names = {'save_manifest', 'save_manifest_with_ledger', 'append_ledger_event'}
+        for name, node in functions.items():
+            called = {
+                child.func.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+            }
+            calls[name] = called
+            if called.intersection(saver_names):
+                writers.add(name)
+        changed = True
+        while changed:
+            changed = False
+            for name, called in calls.items():
+                if name not in writers and called.intersection(writers):
+                    writers.add(name)
+                    changed = True
+
+        writer_commands = {
+            getattr(syncwheel, name)
+            for name in writers
+            if name.startswith('command_') and hasattr(syncwheel, name)
+        }
+        behaviors = syncwheel.command_behavior_table()
+        missing = sorted(
+            func.__name__
+            for func in writer_commands
+            if behaviors.get(func, {}).get('mutates') in {None, 'never'}
+        )
+        self.assertEqual(missing, [])
 
     def test_staged_primary_change_is_blocked(self):
         self._install_and_branch('main-integration')
@@ -828,6 +1175,43 @@ class ManagedRefGuardTests(unittest.TestCase):
         result = self.run_syncwheel('hooks', 'remove', '--apply', '--repo', str(self.repo))
         self.assertEqual(result.returncode, 2)
         self.assertIn('requires --disable --reason', result.stderr)
+
+    def test_remove_disable_apply_requires_reason_without_removing_guard(self):
+        self._install_and_branch('main-integration')
+        before = self.hook_bundle_bytes()
+
+        result = self.run_syncwheel(
+            'hooks', 'remove', '--disable', '--apply', '--repo', str(self.repo)
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('--disable requires --reason', result.stderr)
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
+    def test_normal_ref_refusal_does_not_report_cli_failure(self):
+        self._install_and_branch('main-integration')
+
+        result = self._reset_hard('HEAD~1')
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refusing unauthorized primary integration ref move', result.stderr)
+        self.assertNotIn('stable syncwheel CLI failed', result.stderr)
+
+    def test_unexecutable_cli_process_reports_degraded_remedy(self):
+        self._install_and_branch('main-integration')
+        self.write_executable(self.bin_dir / 'syncwheel', '#!/bin/sh\nexit 127\n')
+
+        result = subprocess.run(
+            ['git', 'commit', '--allow-empty', '-m', 'blocked'],
+            cwd=self.repo,
+            env=self._clean_env(),
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('stable syncwheel CLI failed to execute', result.stderr)
+        self.assertIn('syncwheel hooks install --apply', result.stderr)
 
 
 if __name__ == '__main__':

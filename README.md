@@ -920,12 +920,15 @@ including integration, stack and draft sources, channels, coordination state, an
 owned journal branch, and the delivery branches that only `stack land` may publish.
 It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes,
 then names the corresponding Syncwheel publisher. Existing
-hooks are chained and restored on removal; `core.hooksPath` is honored.
+hooks are chained and restored on removal; `core.hooksPath` is honored. The
+Syncwheel guard always runs before a chained user hook, both hooks run even when
+one fails, and any failure rejects the Git operation.
 For a git-tracked repository, `hooks status` reports the bundle as required when
 it is absent, stale, or tampered, but Syncwheel never installs it implicitly.
 Run `syncwheel hooks install --apply` explicitly. An installed hook that cannot
-resolve its stable CLI fails closed and is reported as degraded; a repository
-without the bundle remains unguarded until it is installed.
+resolve its stable CLI fails closed. Missing, partially installed, stale, or
+tampered hooks are reported as degraded with their causes; a repository without
+the bundle remains unguarded until it is installed.
 
 The same bundle installs `post-checkout` and `pre-commit` guards for the primary
 checkout. It is the shared integration projection, not an authoring desk: a manual
@@ -937,25 +940,32 @@ HEAD` for already committed primary work. A switch away from integration still f
 visibly after Git completes it, so restore a mismatch losslessly rather than resetting
 dirty work.
 
+The clone-local authority state has one source of truth:
+`guard.json` under the Git common directory. Syncwheel replaces that file
+atomically. Re-enabling writes enabled state before installing hooks, so any
+partial hook failure remains fail-closed and visible as degraded. Disabling first
+appends a `primary_guard_disabled` intent with actor and reason to the ledger,
+then removes the managed hooks, and writes disabled state last. If the audit
+append fails, the guard and hooks remain intact.
+
 Before a built-in mutation, Syncwheel refuses a dirty primary before side effects (except
 the explicit recovery remedies `worktree open`, `stack capture-integration`, and reasoned
 hook lifecycle commands) and
 names those same remedies. Read-only commands continue and show a yellow TTY warning
 with the dirty-file count; the primary is shared and its changes are treated as not
-owned by the invoking user. Generated hooks use the installed CLI, never a transient
-worktree script, and fail closed if that CLI or its interpreter is unavailable.
+owned by the invoking user. Mutation behavior comes from the command table, including
+`--apply` gating, so previews such as `stack classify-integration` remain read-only.
+Generated hooks use an executable installed CLI outside the repository, Git common
+directory, configured/default lane roots, and every registered worktree. They never
+pin a transient worktree shim and fail closed if the stable executable is unavailable.
 
-For `git-tracked` repositories the bundle is required by default. Every normal
-repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
-`status`, checks and converges the bundle before continuing. Initialization and a
-transition to `git-tracked` converge it in the same command. Explicit `hooks
-status|install|remove` lifecycle commands remain observational or plan-first so they
-can inspect and administer an absent bundle; the generated hook callbacks are also
-excluded to prevent recursion. Existing non-Syncwheel hooks are chained and restored
-on removal. `local-only` contribution clones remain opt-in. The only escape hatch is
-a persisted clone-local disable with a non-empty reason, which stays visible in
-validation. This is also the explicit, reasoned opt-out for a deliberate manual
-recovery; its disabled state and reason remain visible.
+For `git-tracked` repositories the bundle is required by default, but normal commands
+do not install or rewrite it. Explicit `hooks status|install|remove` lifecycle
+commands remain observational or plan-first so they can inspect and administer an
+absent bundle; generated hook callbacks are excluded to prevent recursion.
+`local-only` contribution clones remain opt-in. The only escape hatch is
+`hooks remove --disable --reason ... --apply`; omitting the reason is rejected before
+anything is removed, and the audited disabled state remains visible in validation.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
 remote and allowed destination refset.
