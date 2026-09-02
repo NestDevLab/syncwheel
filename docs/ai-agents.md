@@ -130,12 +130,15 @@ syncwheel repo authority status
 
 - `human-gated` (or no block at all): ask before commit, push, PR, and merge, as
   the repository's own instructions require.
-- `ai-managed` with `source_change` allowed: carry a scoped change through
-  commit, push, PR, and merge without re-asking at each stage. Still stop for
-  anything outside the named scope, for external side effects, and for
-  anything destructive.
-- `runtime_change` is allowed only when listed: release, deploy, and service
-  restarts otherwise remain gated.
+- `ai-managed`: the repository's configured Syncwheel pipeline runs unattended.
+  The manifest defines the pipeline (stacks, PRs, landing, channels, or journal
+  publish); `authority` only says whether you may run it without a human at
+  each stage. Still stop for anything outside the named scope, for external
+  side effects, and for anything destructive.
+- `source_change` covers source delivery up to and including merge or
+  `journal publish`. `runtime_change` covers the rollout that pipeline leads to
+  (deployment channels, install, service restarts) and must be listed on its
+  own; otherwise rollout remains gated.
 - `destructive_rewrite` is never allowed, whatever the block says: force
   pushes, history rewrites, and deleting work always need a human.
 

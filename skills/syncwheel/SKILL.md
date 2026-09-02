@@ -395,9 +395,14 @@ Then read how far you may take a change without asking:
 syncwheel repo authority status
 ```
 
-`ai-managed` with `source_change` allowed means commit, push, PR, and merge of
-a scoped change proceed without a gate at each stage; `runtime_change` only if
-listed; `destructive_rewrite` never. Missing block means `human-gated`. Never
+`ai-managed` means the repository's configured Syncwheel pipeline runs
+unattended. The manifest defines the pipeline (stacks, PRs, landing, channels,
+or journal publish); `authority` only says whether you may run it without a
+human at each stage. `source_change` covers source delivery up to and including
+merge or `journal publish`; `runtime_change` covers the rollout that pipeline
+leads to (deployment channels, install, restart) and must be listed on its own.
+`destructive_rewrite`, external sends, money, and work outside the named scope
+stay gated whatever the block says. Missing block means `human-gated`. Never
 set or widen this policy yourself.
 
 ### `git-tracked` → commit the manifest
