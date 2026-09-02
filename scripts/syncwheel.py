@@ -8343,6 +8343,8 @@ def validate_coordination_publication_base(
     tombstone=None,
     rename=None,
     state_transition=None,
+    remedy_stack=None,
+    creation_remedy=False,
 ):
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
@@ -8517,9 +8519,27 @@ def validate_coordination_publication_base(
         stack_id for stack_id in added if stack_id not in changed_stack_refs
     )
     if missing_added_refs:
+        remedy = ''
+        if creation_remedy:
+            first_missing = missing_added_refs[0]
+            remedy = (
+                f'; close or publish {", ".join(missing_added_refs)} first. '
+                'For an unpublished local draft, run:\n  '
+                f'syncwheel stack close {first_missing} --force\n'
+                'Then retry the stack create command.'
+            )
+        elif remedy_stack and expected.get('tip') and state.get('manifest_digest'):
+            remedy = (
+                f'; publish or close {", ".join(missing_added_refs)} first. '
+                'Then coordinate the remaining local proposal with:\n  '
+                f'syncwheel coordination compose --stack {remedy_stack} '
+                f'--known-base-state {expected["tip"]} '
+                f'--known-base-snapshot-digest {state["manifest_digest"]}'
+            )
         raise SyncwheelError(
             'new stack(s) require their managed branch in the coordinated publication: '
             + ', '.join(missing_added_refs)
+            + remedy
         )
 
     for stack_id in sorted(remote_ids & local_ids):
@@ -8602,6 +8622,8 @@ def coordinated_publish(
     state_transition=None,
     expected_coordination_state_tip=None,
     expected_observed_refs=None,
+    remedy_stack=None,
+    creation_remedy=False,
 ):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
@@ -8652,6 +8674,8 @@ def coordinated_publish(
         tombstone=tombstone,
         rename=rename,
         state_transition=state_transition,
+        remedy_stack=remedy_stack,
+        creation_remedy=creation_remedy,
     )
     for ref, sha in changed_refs.items():
         if not sha:
@@ -14896,6 +14920,22 @@ def command_stack_close(args):
             + '; close or update those dependent stacks first'
         )
 
+    reason = args.reason or 'closed'
+    if reason == 'absorbed':
+        delivery_base = f"{stack['target_remote']}/{stack['target_branch']}"
+        base_patch_ids = patch_ids_reachable_from_ref(repo_root, delivery_base)
+        unabsorbed = [
+            sha for sha in stack.get('commits') or []
+            if not branch_contains(repo_root, delivery_base, sha)
+            and (not (patch_id := commit_patch_id(repo_root, sha)) or patch_id not in base_patch_ids)
+        ]
+        if unabsorbed:
+            raise SyncwheelError(
+                f"{args.stack}: cannot close as absorbed: content is not reachable from delivery base "
+                f"{delivery_base}; rebuilding integration projection {manifest['integration']['branch']} "
+                'would drop it. Deliver or preserve the stack first, then use a different close reason.'
+            )
+
     # Check whether every commit in the stack is already reachable from base_ref.
     unmerged = []
     for sha in stack.get('commits') or []:
@@ -14903,6 +14943,8 @@ def command_stack_close(args):
         if result.returncode != 0:
             unmerged.append(sha)
 
+    if reason == 'absorbed':
+        unmerged = []
     if unmerged and not args.force:
         short = [commit_short_sha(repo_root, sha) for sha in unmerged[:5]]
         extra = f' (and {len(unmerged) - 5} more)' if len(unmerged) > 5 else ''
@@ -14922,12 +14964,35 @@ def command_stack_close(args):
             s for s in manifest['integration']['stacks'] if s != args.stack
         ]
 
-    reason = args.reason or ('merged' if not unmerged else 'closed')
+    if args.reason is None:
+        reason = 'merged' if not unmerged else 'closed'
     coordination_result = None
-    require_manifest_transaction_current(manifest_path)
-    if coordination_is_active(manifest):
+    local_only_draft_close = False
+    config = None
+    closed_ref = f'refs/heads/{branch}'
+    if coordination_is_active(manifest) and stack.get('state', 'published') == 'draft':
         config = coordination_config(manifest)
-        closed_ref = f'refs/heads/{branch}'
+        published = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        published_stacks = stack_snapshot_map((published.get('state') or {}).get('manifest') or {})
+        published_refs = (published.get('state') or {}).get('managed_refs') or {}
+        remote_tip = remote_ref_tips(repo_root, config['remote'], [closed_ref])[closed_ref]
+        local_only_draft_close = (
+            args.stack not in published_stacks
+            and closed_ref not in published_refs
+            and remote_tip is None
+        )
+    require_manifest_transaction_current(manifest_path)
+    if local_only_draft_close:
+        current = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        current_ref_tip = remote_ref_tips(repo_root, config['remote'], [closed_ref])[closed_ref]
+        if current['tip'] != published['tip'] or current_ref_tip != remote_tip:
+            local_only_draft_close = False
+    if coordination_is_active(manifest) and not local_only_draft_close:
+        config = config or coordination_config(manifest)
         remote_tip = remote_ref_tips(repo_root, config['remote'], [closed_ref])[closed_ref]
         coordination_result = coordinated_publish(
             repo_root,
@@ -14944,6 +15009,7 @@ def command_stack_close(args):
                 'closed_at': iso_utc_now(),
                 'remote_tip': remote_tip,
             },
+            remedy_stack=args.stack,
         )
     save_manifest(manifest_path, manifest)
     append_ledger_event(
@@ -14977,11 +15043,92 @@ def command_stack_close(args):
     return 0
 
 
+def stack_create_recorded(repo_root, manifest_path, stack_id):
+    return any(
+        event.get('type') == 'manifest_saved'
+        and (event.get('payload') or {}).get('reason') == 'stack_create'
+        and ((event.get('payload') or {}).get('context') or {}).get('stack') == stack_id
+        for event in load_ledger_events(repo_root, manifest_path)
+    )
+
+
+def recover_equivalent_draft_create(repo_root, manifest, manifest_path, stack):
+    """Adopt a completed atomic draft publication after a local persistence failure."""
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    source_ref = f"refs/heads/{stack['branch']}"
+    local_tip = ref_tip(repo_root, stack['branch'])
+    published = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    state = published.get('state') or {}
+    if (
+        not local_tip
+        or state.get('managed_refs', {}).get(source_ref) != local_tip
+        or state.get('manifest_digest') != canonical_json_digest(
+            coordination_manifest_snapshot(manifest, repo_root)
+        )
+    ):
+        return None
+    return {'status': 'equivalent', 'state_tip': published['tip']}
+
+
+def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
+    """Validate ownership and composition before creating the local source branch."""
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    source_ref = f"refs/heads/{stack['branch']}"
+    planned_tip = deterministic_stack_replay_tip(repo_root, stack['base'], stack['commits'])
+    if not planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: cannot deterministically materialize draft source before coordinated publication"
+        )
+    expected = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    observed = remote_ref_tips(repo_root, config['remote'], [source_ref])
+    if observed[source_ref] is not None and observed[source_ref] != planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: unowned remote draft ref {source_ref} has a different tip; "
+            'refusing to replace it'
+        )
+    validate_coordination_publication_base(
+        repo_root,
+        manifest,
+        config,
+        expected,
+        {source_ref: planned_tip},
+        remedy_stack=stack['id'],
+        creation_remedy=True,
+    )
+    return {'source_ref': source_ref, 'planned_tip': planned_tip}
+
+
 def command_stack_create(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stacks = stack_map(manifest)
     if args.stack in stacks:
+        existing = stacks[args.stack]
+        if (
+            args.draft
+            and existing.get('state', 'published') == 'draft'
+            and branch_exists(repo_root, existing['branch'])
+            and not stack_create_recorded(repo_root, manifest_path, args.stack)
+        ):
+            append_ledger_event(
+                repo_root,
+                'manifest_saved',
+                manifest_event_payload(
+                    manifest_path, manifest, 'stack_create',
+                    {'stack': args.stack, 'branch': existing['branch'], 'recovered': True},
+                ),
+                manifest_path,
+            )
+            print(f"{args.stack}: recovered missing stack_create ledger event")
+            return 0
         raise SyncwheelError(f"stack already exists: {args.stack}")
     if args.draft and args.branch:
         raise SyncwheelError('--draft chooses the reserved syncwheel/draft branch name; omit --branch')
@@ -14992,8 +15139,6 @@ def command_stack_create(args):
     )
     if any(stack['branch'] == branch for stack in manifest['stacks']):
         raise SyncwheelError(f'stack branch already exists in manifest: {branch}')
-    if args.draft and branch_exists(repo_root, branch):
-        raise SyncwheelError(f'draft stack branch already exists locally: {branch}')
     commits = []
     for spec in args.specs:
         commits.extend(commit_list_for_spec(repo_root, spec))
@@ -15023,21 +15168,53 @@ def command_stack_create(args):
         manifest['stacks'],
         require_declared_dependencies=manifest['version'] == MANIFEST_VERSION_CHANNELS,
     )
-    if args.draft:
-        require_manifest_transaction_current(manifest_path)
-        materialize_new_stack_branch(repo_root, stack)
     integration_membership = manifest['defaults']['integration_membership']
     if (
         integration_membership == INTEGRATION_MEMBERSHIP_REQUIRED
         or args.include_in_integration
     ) and args.stack not in manifest['integration']['stacks']:
         manifest['integration']['stacks'].append(args.stack)
+    coordination_result = None
+    if args.draft:
+        require_manifest_transaction_current(manifest_path)
+        if branch_exists(repo_root, branch):
+            coordination_result = recover_equivalent_draft_create(
+                repo_root, manifest, manifest_path, stack
+            )
+            if coordination_result is None:
+                raise SyncwheelError(f'draft stack branch already exists locally: {branch}')
+        else:
+            preflight = preflight_active_draft_create(repo_root, manifest, manifest_path, stack)
+            if preflight:
+                append_ledger_event(
+                    repo_root,
+                    'stack_create_intent',
+                    {'stack': args.stack, 'branch': branch, 'tip': preflight['planned_tip']},
+                    manifest_path,
+                )
+            materialize_new_stack_branch(repo_root, stack)
+            if preflight and ref_tip(repo_root, branch) != preflight['planned_tip']:
+                raise SyncwheelError(f"{args.stack}: materialized draft tip differs from its reviewed projection")
+        if coordination_is_active(manifest) and coordination_result is None:
+            coordination_result = coordinated_publish(
+                repo_root,
+                manifest,
+                manifest_path,
+                {f"refs/heads/{branch}": ref_tip(repo_root, branch)},
+                f'create:{args.stack}',
+                'partial',
+                remedy_stack=args.stack,
+            )
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
         manifest,
         'stack_create',
-        {'stack': args.stack, 'branch': branch},
+        {
+            'stack': args.stack,
+            'branch': branch,
+            'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+        },
     )
     capture_governed_worktrees_for_stack(
         repo_root,
@@ -15046,6 +15223,8 @@ def command_stack_create(args):
         manifest_path=manifest_path,
     )
     print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
+    if coordination_result:
+        print(f"  coordination state: {coordination_result['status']}")
     return 0
 
 
@@ -15737,6 +15916,7 @@ def command_stack_push(args):
             f"stack:{stack['id']}",
             'partial',
             dry_run=args.dry_run,
+            remedy_stack=stack['id'],
         )
         if not args.dry_run:
             append_ledger_event(
