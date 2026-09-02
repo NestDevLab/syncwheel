@@ -5,7 +5,9 @@
 - Guard the shared primary checkout against manual integration commits and tracked
   changes before built-in mutations, with manifest-derived capture or queue remedies,
   a visible reasoned opt-out, persistent common-Git guard state, and fail-closed
-  stable installed hooks with single-use authorization nonces.
+  stable installed hooks with single-use authorization nonces. Required hook status
+  is explicit: absent hooks do not block ordinary Syncwheel commands, while an
+  installed hook without its stable CLI fails closed and reports as degraded.
 
 ## 0.40.1 - 2026-09-02
 

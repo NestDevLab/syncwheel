@@ -43,9 +43,19 @@ from _replay_support import (
 class ReplayModesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-replay-modes-'))
+        stable_bin = self.tmp / 'stable-bin'
+        stable_bin.mkdir()
+        stable_cli = stable_bin / 'syncwheel'
+        stable_cli.write_text(
+            '#!/bin/sh\nexec "' + sys.executable + '" "'
+            + str(Path(__file__).parents[1] / 'scripts' / 'syncwheel.py') + '" "$@"\n'
+        )
+        stable_cli.chmod(0o755)
+        environment = hermetic_environment(self.tmp)
+        environment['PATH'] = str(stable_bin) + os.pathsep + environment['PATH']
         self.environment_patch = mock.patch.dict(
             os.environ,
-            hermetic_environment(self.tmp),
+            environment,
             clear=True,
         )
         self.environment_patch.start()

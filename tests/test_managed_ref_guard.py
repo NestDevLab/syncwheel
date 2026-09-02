@@ -213,21 +213,19 @@ class ManagedRefGuardTests(unittest.TestCase):
         result = self._reset_hard('HEAD~1', env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_guard_fails_open_when_it_cannot_run(self):
-        # A local safety guard that cannot execute must not be able to brick the
-        # repository, so a missing installed CLI has to leave ordinary Git working.
+    def test_installed_guard_fails_closed_when_its_cli_cannot_run(self):
         self._install_and_branch('main-integration')
         env = self._clean_env()
         (self.bin_dir / 'syncwheel').unlink()
-        # Git stays reachable; neither the configured CLI nor PATH can run Syncwheel.
         env['PATH'] = '/usr/bin:/bin'
         result = subprocess.run(
-            ['git', 'commit', '-q', '--allow-empty', '-m', 'still works'],
+            ['git', 'commit', '-q', '--allow-empty', '-m', 'must be guarded'],
             cwd=self.repo, env=env, capture_output=True, text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('syncwheel guard degraded: stable syncwheel CLI is unavailable', result.stderr)
 
-    def test_primary_checkout_guard_fails_open_when_installed_cli_is_missing(self):
+    def test_installed_guard_does_not_fall_back_to_path_when_its_cli_is_missing(self):
         subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
         syncwheel.install_managed_push_hook(self.repo, apply=True)
         switched = subprocess.run(
@@ -237,10 +235,11 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertNotEqual(switched.returncode, 0)
         (self.bin_dir / 'syncwheel').unlink()
         result = subprocess.run(
-            ['git', 'commit', '-q', '--allow-empty', '-m', 'recovery remains possible'],
+            ['git', 'commit', '-q', '--allow-empty', '-m', 'must be guarded'],
             cwd=self.repo, env=self.hook_env, capture_output=True, text=True,
         )
-        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('syncwheel guard degraded: stable syncwheel CLI is unavailable', result.stderr)
 
     def test_owned_ref_moves_stay_out_of_the_ambient_environment(self):
         # Authorization must reach spawned Git only; leaking it into os.environ
@@ -427,9 +426,10 @@ class ManagedRefGuardTests(unittest.TestCase):
         finally:
             subprocess.run(['git', 'worktree', 'remove', str(feature)], cwd=self.repo, check=True)
 
-    def test_required_hooks_require_explicit_install(self):
-        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'run syncwheel hooks install'):
-            syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+    def test_required_hooks_remain_visible_without_auto_install(self):
+        policy = syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+        self.assertFalse(policy['ready'])
+        self.assertTrue(policy['required'])
 
     def test_tracking_status_does_not_rewrite_missing_required_hooks(self):
         first = self.run_syncwheel(
@@ -462,7 +462,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             'repo', 'tracking', 'set', 'git-tracked',
             '--repo', str(self.repo), '--apply', '--json',
         )
-        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_normal_command_respects_local_only_and_reasoned_disable(self):
         self.manifest['syncwheel_tracking'] = 'local-only'
@@ -486,7 +486,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(disabled.returncode, 0, disabled.stderr)
         self.assertEqual(self.hook_bundle_bytes(), disabled_before)
 
-    def test_missing_required_bundle_requires_explicit_install(self):
+    def test_missing_required_bundle_stays_pending_until_explicit_install(self):
         syncwheel.install_managed_push_hook(self.repo, apply=True)
         profile_path = self.repo / '.syncwheel' / 'profile.local.json'
         profile_path.unlink()
@@ -495,8 +495,9 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertTrue(before['ready'])
         self.assertTrue(before['migrationPending'])
 
-        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'run syncwheel hooks install'):
-            syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+        after = syncwheel.ensure_managed_repository_hooks(self.repo, self.manifest)
+        self.assertTrue(after['migrationPending'])
+        self.assertFalse(after['enforced'])
 
     def test_install_is_plan_first_idempotent_and_restores_existing_hook(self):
         subprocess.run(
@@ -771,6 +772,14 @@ class ManagedRefGuardTests(unittest.TestCase):
         payload = f"{'a' * 40} {'b' * 40} refs/heads/main-integration\n"
         with mock.patch('sys.stdin', io.StringIO(payload)):
             with self.assertRaisesRegex(syncwheel.SyncwheelError, 'unauthorized primary integration ref move'):
+                syncwheel.command_hooks_ref_guard(types.SimpleNamespace(repo=self.repo, phase='prepared'))
+
+    def test_installed_ref_guard_fails_closed_when_its_configuration_is_missing(self):
+        self._install_and_branch('main-integration')
+        syncwheel.primary_guard_path(self.repo).unlink()
+        payload = f"{'a' * 40} {'b' * 40} refs/heads/main-integration\n"
+        with mock.patch('sys.stdin', io.StringIO(payload)):
+            with self.assertRaisesRegex(syncwheel.SyncwheelError, 'configuration is missing'):
                 syncwheel.command_hooks_ref_guard(types.SimpleNamespace(repo=self.repo, phase='prepared'))
 
     def test_missing_or_lane_cli_is_degraded_and_never_generates_a_noop_hook(self):

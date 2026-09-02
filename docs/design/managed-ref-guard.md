@@ -15,13 +15,14 @@ digests. Removal is also plan-first, refuses modified/unowned hooks, and restore
 every chained hook.
 
 The policy is required-by-default for `git-tracked` clones with managed refs,
-active-active coordination, or an owned journal branch. Every normal repo-aware
-Syncwheel command checks and converges the bundle before continuing, including
-status and validation commands. Initialization and a transition to `git-tracked`
-converge it in the same command. Explicit `hooks status|install|remove` lifecycle
-commands retain their observational or plan-first semantics, and generated hook
-callbacks are excluded to prevent recursion. A foreign hook is chained rather than
-overwritten. `local-only` contribution clones are optional. A clone can
+active-active coordination, or an owned journal branch. Required means status and
+validation report an absent, stale, or tampered bundle; it does not make hook
+installation an implicit prerequisite of ordinary Syncwheel commands. Install or
+repair it explicitly with `syncwheel hooks install --apply`. Explicit
+`hooks status|install|remove` lifecycle commands retain their observational or
+plan-first semantics, and generated hook callbacks are excluded to prevent
+recursion. A foreign hook is chained rather than overwritten. `local-only`
+contribution clones are optional. A clone can
 persist `hooks.mode=disabled` only through `hooks remove --disable --reason ...`;
 the reason remains visible in status and validation.
 
@@ -69,14 +70,9 @@ from a managed branch without any guard reporting it, and the loss only surfaces
 later as an unexplained divergence from the published tip.
 
 The `reference-transaction` hook closes that gap. In the `prepared` phase it
-refuses an update to a manifest-managed branch when the incoming tip does not
-contain the current one. Creation and deletion are untouched, unmanaged branches
-are untouched, and fast-forward updates are untouched, so ordinary Git use is
-unaffected.
-
-`git branch -f` reports a zero old value, which makes a rewind indistinguishable
-from a creation. The guard resolves the ref itself in that case, because the
-prepared phase still runs before the ref moves.
+refuses every unauthorized update to the configured integration ref, including a
+fast-forward, rewind, creation, or deletion. Unmanaged branches are untouched, so
+ordinary Git use outside the shared integration projection is unaffected.
 
 Syncwheel rebuilds managed branches legitimately, so every Git process it spawns
 carries an authorization variable. That authorization is injected per child

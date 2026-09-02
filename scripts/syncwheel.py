@@ -818,16 +818,18 @@ def managed_push_hook_content(backup_exists):
         'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
         'cat >"$input"\n'
         + chain
-        + (
-            f'if [ -x {syncwheel_command} ]; then\n'
-            f'  {syncwheel_command} hooks guard --remote-name "${{1:-}}" '
-            '--remote-url "${2:-}" <"$input"\n'
-            '  status=$?\n'
-            '  [ "$status" -ne 0 ] && exit 1\n'
-            'fi\n'
-            'exit 0\n'
-            if syncwheel_command else 'exit 0\n'
-        )
+        + f'if [ ! -x {syncwheel_command} ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI is unavailable; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  exit 1\n'
+        + 'fi\n'
+        + f'{syncwheel_command} hooks guard --remote-name "${{1:-}}" '
+        + '--remote-url "${2:-}" <"$input"\n'
+        + 'status=$?\n'
+        + 'if [ "$status" -ne 0 ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI failed; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  exit 1\n'
+        + 'fi\n'
+        + 'exit 0\n'
     )
 
 
@@ -854,15 +856,17 @@ def managed_worktree_hook_content(hook_name, backup_exists):
         'set -u\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         + chain
-        + (
-            f'if [ -x {syncwheel_command} ]; then\n'
-            f'  {syncwheel_command} hooks worktree-guard --event {hook_name}\n'
-            '  status=$?\n'
-            '  [ "$status" -ne 0 ] && exit 1\n'
-            'fi\n'
-            'exit 0\n'
-            if syncwheel_command else 'exit 0\n'
-        )
+        + f'if [ ! -x {syncwheel_command} ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI is unavailable; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  exit 1\n'
+        + 'fi\n'
+        + f'{syncwheel_command} hooks worktree-guard --event {hook_name}\n'
+        + 'status=$?\n'
+        + 'if [ "$status" -ne 0 ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI failed; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  exit 1\n'
+        + 'fi\n'
+        + 'exit 0\n'
     )
 
 
@@ -887,16 +891,18 @@ def managed_ref_move_hook_content(backup_exists):
         'input=$(cat) || exit 0\n'
         '[ -n "$input" ] || exit 0\n'
         + chain
-        + (
-            f'if [ -x {syncwheel_command} ]; then\n'
-            f'  printf \'%s\\n\' "$input" | {syncwheel_command} '
-            'hooks ref-guard --phase "$1"\n'
-            '  status=$?\n'
-            '  [ "$status" -ne 0 ] && exit 1\n'
-            'fi\n'
-            'exit 0\n'
-            if syncwheel_command else 'exit 0\n'
-        )
+        + f'if [ ! -x {syncwheel_command} ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI is unavailable; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  exit 1\n'
+        + 'fi\n'
+        + f'printf \'%s\\n\' "$input" | {syncwheel_command} '
+        + 'hooks ref-guard --phase "$1"\n'
+        + 'status=$?\n'
+        + 'if [ "$status" -ne 0 ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI failed; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  exit 1\n'
+        + 'fi\n'
+        + 'exit 0\n'
     )
 
 
@@ -1032,9 +1038,10 @@ def ensure_managed_repository_hooks(repo_root, manifest):
     policy = managed_push_guard_policy(repo_root, manifest)
     if not policy['required'] or policy['disabled']:
         return policy
-    if policy['ready'] and policy['enforced']:
-        return policy
-    raise SyncwheelError('managed repository hooks are missing, stale, or degraded; run syncwheel hooks install --apply explicitly')
+    # An absent bundle is visible in status but does not turn ordinary repository
+    # commands into an installation gate. Only an installed hook decides Git
+    # mutations, where a missing CLI fails closed in the hook itself.
+    return policy
 
 
 def install_one_managed_hook(repo_root, hook_name, apply=False):
@@ -8042,13 +8049,12 @@ def validate_manifest(repo_root, manifest):
     elif hooks['migrationPending']:
         warnings.append(
             'managed repository guards required; this clone is pending migration. '
-            'The next mutating Syncwheel command will install them automatically; '
-            'use `syncwheel hooks install --apply` to install now'
+            'use `syncwheel hooks install --apply` to install them'
         )
     elif hooks['required'] and not hooks['ready']:
         warnings.append(
             'managed repository guards are missing, stale, or tampered. '
-            'The next mutating Syncwheel command will repair them or stop on a chaining conflict'
+            'run `syncwheel hooks install --apply` to install or repair them'
         )
     if manifest.get('repository_mode') == 'journal':
         journal = manifest['journal']
@@ -9441,9 +9447,6 @@ def command_init(args):
     save_manifest(manifest_path, manifest)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
-    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
-        hook_result = install_managed_push_hook(repo_root, apply=True)
-        print('managed-ref guard: ' + json.dumps(hook_result, sort_keys=True))
     return 0
 
 
@@ -9477,13 +9480,9 @@ def command_coordination_init(args):
             'migration': 'active-active',
             'coordination': proposed['coordination'],
             'remote_state_created': False,
-            'managed_ref_guard': install_managed_push_hook(repo_root, apply=False),
             'dry_run': True,
         }, indent=2))
         return 0
-    hook_result = None
-    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
-        hook_result = install_managed_push_hook(repo_root, apply=True)
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
@@ -9492,8 +9491,6 @@ def command_coordination_init(args):
         {'coordination_id': proposed['coordination']['id'], 'remote': remote},
     )
     print(f"coordination enabled: {proposed['coordination']['id']}")
-    if hook_result:
-        print('managed-ref guard: ' + json.dumps(hook_result, sort_keys=True))
     print('remote state will be created by the first successful coordinated publish')
     return 0
 
@@ -18360,8 +18357,8 @@ def command_hooks_worktree_guard(args):
 
 def command_hooks_ref_guard(args):
     # Git runs this for every ref transaction. Only the "prepared" phase can
-    # veto, and only a rewind of a managed branch is worth vetoing: everything
-    # else must stay out of the way of ordinary Git use.
+    # veto. The integration ref is guarded regardless of move direction;
+    # non-managed refs remain outside this hook's scope.
     if args.phase != 'prepared':
         return 0
     updates = []
@@ -18375,7 +18372,9 @@ def command_hooks_ref_guard(args):
     worktrees = get_worktrees(repo_root)
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
     guard = load_primary_guard(repo_root)
-    if not guard or not guard.get('enabled', True):
+    if not guard:
+        raise SyncwheelError('primary guard configuration is missing; run syncwheel hooks install --apply')
+    if not guard.get('enabled', True):
         return 0
     integration_ref = f"refs/heads/{guard.get('integrationBranch')}"
     protected = []

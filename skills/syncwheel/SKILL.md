@@ -146,7 +146,10 @@ Install the plan-first managed-ref guard in each clone with `syncwheel hooks
 install`, review the reported hook/chaining path and digest, then apply with
 `syncwheel hooks install --apply`. The guard is composable and catches accidental
 raw pushes, but `--no-verify` remains a local bypass and the hook is not a security
-boundary.
+boundary. A required guard is reported as pending until this explicit installation;
+normal Syncwheel commands do not install it implicitly. Once installed, an
+unresolvable stable CLI makes the hook fail closed and `hooks status` reports it
+as degraded.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.

@@ -921,6 +921,11 @@ owned journal branch, and the delivery branches that only `stack land` may publi
 It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes,
 then names the corresponding Syncwheel publisher. Existing
 hooks are chained and restored on removal; `core.hooksPath` is honored.
+For a git-tracked repository, `hooks status` reports the bundle as required when
+it is absent, stale, or tampered, but Syncwheel never installs it implicitly.
+Run `syncwheel hooks install --apply` explicitly. An installed hook that cannot
+resolve its stable CLI fails closed and is reported as degraded; a repository
+without the bundle remains unguarded until it is installed.
 
 The same bundle installs `post-checkout` and `pre-commit` guards for the primary
 checkout. It is the shared integration projection, not an authoring desk: a manual
