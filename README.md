@@ -349,8 +349,17 @@ syncwheel stack promote caching-experiment --branch pr/caching
 
 A draft refuses `stack push` to the target remote and names its state as the reason. Under
 active-active coordination its source ref does publish to the coordination remote, so another clone
-can rebuild the draft from the manifest alone. `stack demote` reverses the promotion, and refuses when
-the stack already records an open pull request.
+can rebuild the draft from the manifest alone. Draft creation uses a create-only ref CAS and rechecks
+cross-domain ownership at publication, so a concurrently created local ref or coordination claim is
+preserved and reported instead of replaced. A retry adopts an equivalent completed remote create
+before probing whether a new atomic push is possible. `stack demote` reverses the promotion, and
+refuses when the stack already records an open pull request.
+
+Closing a never-published draft records `stack_close_intent` before changing the manifest and
+`stack_closed` afterwards. A retry therefore completes or cancels an interrupted close instead of
+reporting an unknown stack. `stack close --reason absorbed` first fetches and records the observed
+delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
+path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
 
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.

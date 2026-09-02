@@ -2285,7 +2285,7 @@
           <div role="tabpanel" id="panel-declare" aria-labelledby="tab-declare">
             <code class="cmd"><span class="prompt">$</span> syncwheel stack sync feature-a</code>
             <code class="cmd"><span class="prompt">$</span> syncwheel stack create feature-c</code>
-            <p>Two PRs existed already — declare them in the manifest. The third is born managed.</p>
+            <p>Two PRs existed already — declare them in the manifest. The third is born managed, with create-only ref CAS and recoverable ledger intent.</p>
           </div>
           <div role="tabpanel" id="panel-integrate" aria-labelledby="tab-integrate">
             <code class="cmd"><span class="prompt">$</span> syncwheel int rebuild</code>
@@ -2418,7 +2418,7 @@
               <path d="M158 52 L130 52" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
             </svg>
             <h3>Journal</h3>
-            <p>Safe state snapshots let a human or agent resume exactly where work stopped.</p>
+            <p>Generation-bound create and close intents let a human or agent recover exactly where work stopped. Absorbed closes bind their proof to a fetched delivery SHA and the composed final content.</p>
             <span class="capability-state">state protected</span>
           </article>
         </div>
