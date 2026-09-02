@@ -33,5 +33,14 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "channels": []
+  "channels": [],
+  "authority": {
+    "mode": "ai-managed",
+    "allow": [
+      "source_change"
+    ],
+    "deny": [
+      "destructive_rewrite"
+    ]
+  }
 }
