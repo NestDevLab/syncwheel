@@ -663,6 +663,55 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('validate', expected=0)
         self.assertIn('OK', result.stdout)
 
+    def test_derived_commit_is_classified_not_unmapped(self):
+        base = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'derived-base', base)
+        self.git('switch', '-q', '-c', 'derived-integration', 'derived-base')
+        manifest = self.read_manifest()
+        manifest['version'] = 3
+        manifest['repository_mode'] = 'delivery'
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest['integration'].update(
+            {
+                'branch': 'derived-integration',
+                'base': 'derived-base',
+                'strategy': 'cherry-pick',
+                'derived_paths': ['locks/'],
+            }
+        )
+        manifest['coordination'] = {
+            'mode': 'disabled',
+            'id': 'derived-classification',
+            'remote': manifest['defaults']['publication_remote'],
+            'state_branch': 'syncwheel/state/derived-classification',
+        }
+        manifest.setdefault('channels', [])
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: configure derived projections')
+        (self.repo / 'locks').mkdir()
+        (self.repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.git('add', 'locks/codex.lock')
+        self.git(
+            'commit', '-q', '-m', 'test: derived projection', '-m',
+            'Syncwheel-Derived-Projection: classified-derived',
+        )
+        derived = self.git('rev-parse', 'HEAD')
+        module = self.load_syncwheel_module()
+        loaded, _ = module.load_manifest(self.repo)
+
+        validation = module.validate_manifest(self.repo, loaded)
+
+        self.assertEqual(validation['errors'], [])
+        self.assertEqual(
+            validation['details']['integration']['derived_commits'], [derived]
+        )
+        self.assertEqual(
+            validation['details']['integration']['unmapped_commits'], []
+        )
+
     def test_plan_reports_no_actions_when_fixture_is_aligned(self):
         result = self.run_cli('plan', '--json', expected=0)
         data = json.loads(result.stdout)

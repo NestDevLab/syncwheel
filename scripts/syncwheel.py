@@ -1725,6 +1725,23 @@ def integration_composition_digest(manifest):
     })
 
 
+def parsed_commit_trailers(repo_root, commit):
+    """Return Git's parsed trailer block without accepting trailer-like body text."""
+    message = git(repo_root, 'show', '-s', '--format=%B', commit).stdout
+    parsed = git(
+        repo_root,
+        'interpret-trailers',
+        '--parse',
+        input_text=message,
+    ).stdout
+    trailers = []
+    for line in parsed.splitlines():
+        key, separator, value = line.partition(':')
+        if separator:
+            trailers.append((key.strip(), value.strip()))
+    return trailers
+
+
 def is_derived_projection_commit(repo_root, manifest, commit):
     """Recognize a provider-owned lock projection without treating it as a stack."""
     if commit_parent_count(repo_root, commit) != 1:
@@ -1735,12 +1752,57 @@ def is_derived_projection_commit(repo_root, manifest, commit):
         any(path.startswith(prefix) for prefix in prefixes) for path in files
     ):
         return False
-    message = git(repo_root, 'show', '-s', '--format=%B', commit).stdout
-    return bool(re.search(
-        r'^Syncwheel-Derived-Projection: [A-Za-z0-9][A-Za-z0-9_-]{0,62}$',
-        message,
-        re.M,
-    ))
+    return any(
+        key.casefold() == 'syncwheel-derived-projection'
+        and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}', value)
+        for key, value in parsed_commit_trailers(repo_root, commit)
+    )
+
+
+def stale_derived_projection_records(repo_root, integration_branch):
+    """Return latest per-path provider projections no longer reachable from integration."""
+    latest_by_path = {}
+    for event in load_ledger_events(repo_root):
+        event_type = event.get('type')
+        payload = event.get('payload') or {}
+        if event_type == 'manifest_saved' and payload.get(
+            'reason'
+        ) == 'revision_provider_stack_ownership':
+            context = payload.get('context') or {}
+            commit = context.get('product_commit')
+            operation_id = context.get('operation_id')
+            if (
+                isinstance(commit, str)
+                and re.fullmatch(r'[0-9a-f]{40}', commit)
+                and isinstance(operation_id, str)
+            ):
+                for path in commit_changed_files(repo_root, commit):
+                    latest_by_path.pop(path, None)
+            continue
+        if event_type != 'revision_provider_derived_commit':
+            continue
+        commit = payload.get('commit')
+        operation_id = payload.get('operation_id')
+        paths = payload.get('paths')
+        if (
+            not isinstance(commit, str)
+            or not re.fullmatch(r'[0-9a-f]{40}', commit)
+            or not isinstance(operation_id, str)
+            or not isinstance(paths, list)
+        ):
+            continue
+        for path in paths:
+            if isinstance(path, str) and path:
+                latest_by_path[path] = {
+                    'path': path,
+                    'commit': commit,
+                    'operation_id': operation_id,
+                }
+    return [
+        latest_by_path[path]
+        for path in sorted(latest_by_path)
+        if not branch_contains(repo_root, integration_branch, latest_by_path[path]['commit'])
+    ]
 
 
 def branches_containing_commit(repo_root, commit, remotes=False):
@@ -5943,6 +6005,10 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
         },
         'stacks': [],
     }
+    if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
+        snapshot['integration']['derived_paths'] = list(
+            manifest['integration'].get('derived_paths') or []
+        )
     for stack in manifest['stacks']:
         snapshot_stack = {
             'id': stack['id'],
@@ -6044,6 +6110,24 @@ def validate_coordination_snapshot_refs(snapshot):
         raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
     if not isinstance(integration, dict) or 'base' not in integration:
         raise SyncwheelError('coordination state manifest is missing integration.base')
+    derived_paths = integration.get('derived_paths')
+    if snapshot.get('version') == MANIFEST_VERSION_CHANNELS:
+        if (
+            not isinstance(derived_paths, list)
+            or not all(
+                isinstance(item, str) and item and item.endswith('/')
+                for item in derived_paths
+            )
+            or len(derived_paths) != len(set(derived_paths))
+        ):
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_paths must be '
+                'a unique string array of path prefixes'
+            )
+    elif derived_paths is not None:
+        raise SyncwheelError(
+            'coordination state manifest integration.derived_paths requires version 3'
+        )
     if not isinstance(stacks, list):
         raise SyncwheelError('coordination state manifest stacks must be an array')
     if not isinstance(channels, list):
@@ -7566,7 +7650,11 @@ def deterministic_stack_projection(repo_root, base, commits):
             )
             paths = [
                 line.strip() for line in named.stdout.splitlines()
-                if line.strip() and not line.startswith(('CONFLICT ', 'Auto-merging '))
+                if (
+                    line.strip()
+                    and not line.startswith(('CONFLICT ', 'Auto-merging '))
+                    and not re.fullmatch(r'[0-9a-f]{40,64}', line.strip())
+                )
             ]
             return {
                 'status': 'conflict',
@@ -9536,6 +9624,17 @@ def validate_manifest(repo_root, manifest):
                 'not declared in any stack'
             )
 
+    stale_derived = stale_derived_projection_records(
+        repo_root, integration_branch
+    )
+    if stale_derived:
+        stale_paths = ', '.join(item['path'] for item in stale_derived)
+        errors.append(
+            'derived-projection-stale: derived projection path(s) are no longer '
+            f'present on {integration_branch}: {stale_paths}; '
+            'run a new Agentwheel update'
+        )
+
     details['integration'] = {
         'branch': integration_branch,
         'exists': integration_exists,
@@ -9548,6 +9647,7 @@ def validate_manifest(repo_root, manifest):
         'absorbed_patch_commits': absorbed_patch_commits,
         'control_commits': control_commits,
         'derived_commits': derived_commits,
+        'derived_projection_stale': stale_derived,
         'merge_commits': integration_merge_commits,
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
@@ -9631,6 +9731,16 @@ def build_plan(repo_root, manifest, validation):
                     + ' '.join(commit_short_sha(repo_root, commit) for commit in commits),
                 ],
             },
+        })
+    if details['integration'].get('derived_projection_stale'):
+        actions.append({
+            'type': 'derived-projection-stale',
+            'branch': integration['branch'],
+            'paths': [
+                item['path']
+                for item in details['integration']['derived_projection_stale']
+            ],
+            'remedy': 'run a new Agentwheel update',
         })
     return actions
 
@@ -13796,7 +13906,13 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
         if not branch_contains(repo_root, integration['branch'], commit):
             raise SyncwheelError('stack land STOP: stack is not validated on main-integration')
     expected_integration_tree = materialize_integration_projection(repo_root, manifest)
-    if ref_tree(repo_root, integration['branch']) != expected_integration_tree:
+    actual_integration_tree = ref_tree(repo_root, integration['branch'])
+    if (
+        actual_integration_tree != expected_integration_tree
+        and not trees_differ_only_by_manifest(
+            repo_root, actual_integration_tree, expected_integration_tree
+        )
+    ):
         raise SyncwheelError('stack land STOP: main-integration does not match the declared combined projection')
     remote, target_ref, delivery_revision = landing_target_observation(repo_root, manifest, stack)
     for dependency_id in stack.get('depends_on', []):
@@ -16752,13 +16868,14 @@ class SyncwheelRevisionBackend:
         if status.strip():
             self._fail('revision provider preflight requires a completely clean worktree and index')
 
-    def _ensure_after_scope(self, repo_root, request):
+    def _ensure_after_scope(self, repo_root, request, *, allowed_outside=()):
         if self._index_conflicts(repo_root):
             self._fail('revision provider refuses an index with conflicts')
         if not self._index_is_clean(repo_root):
             self._fail('revision provider refuses pre-staged changes')
         self._validate_hashes(repo_root, request, 'after')
         allowed = {item.path for item in request.paths}
+        allowed.update(allowed_outside)
         outside = sorted(self._dirty_paths(repo_root) - allowed)
         if outside:
             self._fail('mutation changed paths outside the declared allowlist: ' + ', '.join(outside))
@@ -17120,8 +17237,25 @@ class SyncwheelRevisionBackend:
             manifest, base_ref, base_ref_full_name
         )
         validation = validate_manifest(repo_root, manifest)
-        if validation['errors']:
-            self._fail('Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        stale_paths = {
+            item['path']
+            for item in validation['details']['integration'].get(
+                'derived_projection_stale'
+            ) or []
+        }
+        declared_paths = {item.path for item in request.paths}
+        repairs_all_stale_paths = bool(stale_paths) and (
+            request.action == 'check' or stale_paths <= declared_paths
+        )
+        blocking_errors = [
+            error for error in validation['errors']
+            if not (
+                repairs_all_stale_paths
+                and error.startswith('derived-projection-stale:')
+            )
+        ]
+        if blocking_errors:
+            self._fail('Syncwheel validation failed: ' + '; '.join(blocking_errors))
         missing_declared = [
             item for item in validation['details']['stacks']
             if item['id'] in manifest['integration'].get('stacks', [])
@@ -17193,9 +17327,9 @@ class SyncwheelRevisionBackend:
     def operation_lock(self, request):
         if fcntl is None:
             self._fail(f'revision-provider locking is unsupported on {sys.platform}')
-        directory = self._journal_directory(request)
+        directory = self._journal_directory(request).parent
         directory.mkdir(parents=True, exist_ok=True)
-        lock_path = directory / 'provider.lock'
+        lock_path = directory / 'revision-provider.lock'
         with lock_path.open('a+') as handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -17250,6 +17384,79 @@ class SyncwheelRevisionBackend:
         if path.parent.exists():
             self._fsync_directory(path.parent)
 
+    def _derived_paths_digest(self, paths):
+        return canonical_json_digest(list(paths or []))
+
+    def _manifest_lease_digest(self, journal):
+        if journal.get('manifestReplaced'):
+            return journal.get('manifestDigest')
+        return journal.get('observedManifestDigest')
+
+    def _pending_operation_manifest_matches(self, request, journal, manifest):
+        """Recognize the provider's own manifest write before its journal catches up."""
+        if (
+            journal.get('projectionRoute') != 'manifest-base'
+            or journal.get('phase') != 'product_committed'
+            or not journal.get('productCommitSha')
+        ):
+            return False
+        existing = stack_map(manifest).get(request.draft_stack_id)
+        if existing != self._desired_stack(request, journal, manifest):
+            return False
+        stripped = self._manifest_without_operation_stack(manifest, request)
+        return manifest_digest(stripped) == journal.get('observedManifestDigest')
+
+    def _expiration_digest_pair(self, request, journal, manifest):
+        if journal.get('projectionRoute') == 'derived':
+            observed_composition = journal.get('integrationCompositionDigest')
+            current_composition = integration_composition_digest(manifest)
+            if observed_composition != current_composition:
+                return observed_composition, current_composition
+            observed_paths = journal.get('derivedPathsDigest')
+            current_paths = self._derived_paths_digest(
+                manifest['integration'].get('derived_paths') or []
+            )
+            return observed_paths, current_paths
+        return self._manifest_lease_digest(journal), manifest_digest(manifest)
+
+    def _expire_if_operation_lease_changed(self, request, journal, manifest):
+        if journal.get('phase') in {'verified', 'expired'}:
+            return
+        route = journal.get('projectionRoute')
+        if route == 'derived':
+            current_composition = integration_composition_digest(manifest)
+            if current_composition != journal.get('integrationCompositionDigest'):
+                self.expire_manifest_invalidated(
+                    request,
+                    journal,
+                    'integration composition changed while derived projection was pending',
+                )
+            current_paths = list(manifest['integration'].get('derived_paths') or [])
+            if (
+                current_paths != list(journal.get('derivedPaths') or [])
+                or self._derived_paths_digest(current_paths)
+                != journal.get('derivedPathsDigest')
+            ):
+                self.expire_manifest_invalidated(
+                    request,
+                    journal,
+                    'integration.derived_paths changed while derived projection was pending',
+                )
+            return
+        current_digest = manifest_digest(manifest)
+        if current_digest == self._manifest_lease_digest(journal):
+            return
+        if self._pending_operation_manifest_matches(
+            request, journal, manifest
+        ):
+            return
+        reason = (
+            'manifest changed after preflight'
+            if route is None
+            else 'manifest changed while revision-provider operation was pending'
+        )
+        self.expire_manifest_invalidated(request, journal, reason)
+
     def expire_manifest_invalidated(self, request, journal, reason):
         """Terminally expire a receipt whose manifest lease can no longer recover.
 
@@ -17259,19 +17466,14 @@ class SyncwheelRevisionBackend:
         remedy = 'run a new Agentwheel update'
         repo_root = self._repo_root(request)
         manifest, manifest_path = self._manifest(repo_root)
+        observed_digest, current_digest = self._expiration_digest_pair(
+            request, journal, manifest
+        )
         expiration = journal.get('expiration') or {
             'reason': reason,
             'remedy': remedy,
-            'observedDigest': (
-                journal.get('integrationCompositionDigest')
-                if journal.get('projectionRoute') == 'derived'
-                else journal['observedManifestDigest']
-            ),
-            'currentDigest': (
-                integration_composition_digest(manifest)
-                if journal.get('projectionRoute') == 'derived'
-                else manifest_digest(manifest)
-            ),
+            'observedDigest': observed_digest,
+            'currentDigest': current_digest,
             'decidedAt': iso_utc_now(),
         }
         event_payload = {
@@ -17344,14 +17546,9 @@ class SyncwheelRevisionBackend:
             self._fail('integration branch changed after preflight')
         if ref_tip(repo_root, 'HEAD') != request.expected_head:
             self._fail('integration HEAD changed after preflight')
-        current_digest = manifest_digest(manifest)
         journal = self.load_journal(request)
-        expected_digest = (
-            journal.get('observedManifestDigest') if journal else request.expected_manifest_digest
-        )
-        if expected_digest and current_digest != expected_digest:
-            self._fail('manifest changed after preflight')
         if journal:
+            self._expire_if_operation_lease_changed(request, journal, manifest)
             expected_refs = dict(journal['managedLocalRefs'])
             expected_refs.update(journal['baselineRemoteRefs'])
             if journal.get('baseRefFullName'):
@@ -17488,7 +17685,48 @@ class SyncwheelRevisionBackend:
             'candidateProductCommitSha': prepared['commit'],
             'candidateProductTreeSha': prepared['tree'],
             'integrationCompositionDigest': integration_composition_digest(manifest),
+            'derivedPaths': list(prefixes),
+            'derivedPathsDigest': self._derived_paths_digest(prefixes),
         }
+
+    def verify_projection_route(self, request, journal):
+        """Recompute the persisted route without replacing its candidate objects."""
+        repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
+        projection = deterministic_stack_projection(
+            repo_root,
+            journal['baseRefSha'],
+            [journal['candidateProductCommitSha']],
+        )
+        reproduces_product = projection.get('status') == 'projected' and all(
+            self._tree_entry(repo_root, projection['tip'], path) == {
+                'mode': item['mode'], 'blob': item['blob'],
+            }
+            for path, item in journal['productPathObjects'].items()
+        )
+        recomputed_route = 'manifest-base' if reproduces_product else 'derived'
+        if recomputed_route != journal.get('projectionRoute'):
+            self._fail(
+                'journaled projection route no longer matches its immutable candidate'
+            )
+        if recomputed_route == 'manifest-base':
+            if (
+                projection.get('tip') != journal.get('candidateDraftCommitSha')
+                or projection.get('tree') != journal.get('candidateDraftTreeSha')
+            ):
+                self._fail('journaled draft projection object changed')
+            return
+        if projection.get('status') == 'empty':
+            self._fail('journaled derived projection became empty')
+        if journal.get('candidateDraftCommitSha') is not None:
+            self._fail('journaled derived route unexpectedly owns a draft candidate')
+        if not is_derived_projection_commit(
+            repo_root, manifest, journal['candidateProductCommitSha']
+        ):
+            self._fail(
+                'journaled derived candidate is missing its path or trailer ownership proof'
+            )
 
     def current_head(self, request):
         return ref_tip(self._repo_root(request), 'HEAD')
@@ -17579,19 +17817,18 @@ class SyncwheelRevisionBackend:
     def _assert_operation_worktree(self, repo_root, request, journal, kind):
         manifest, _ = self._manifest(repo_root)
         if kind == 'product':
-            observed_digest = (
-                integration_composition_digest(manifest)
-                if journal.get('projectionRoute') == 'derived'
-                else manifest_digest(manifest)
+            self._expire_if_operation_lease_changed(
+                request, journal, manifest
             )
-            expected_digest = (
-                journal.get('integrationCompositionDigest')
-                if journal.get('projectionRoute') == 'derived'
-                else journal['observedManifestDigest']
+            self._ensure_after_scope(
+                repo_root,
+                request,
+                allowed_outside=(
+                    (self.MANIFEST_PRODUCT_PATH,)
+                    if journal.get('projectionRoute') == 'derived'
+                    else ()
+                ),
             )
-            if observed_digest != expected_digest:
-                self._fail('manifest changed before product ref ownership')
-            self._ensure_after_scope(repo_root, request)
             return
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control ref update requires a clean, conflict-free index')
@@ -17601,8 +17838,7 @@ class SyncwheelRevisionBackend:
                 'control ref update requires only .syncwheel/manifest.json; found: '
                 + ', '.join(sorted(dirty))
             )
-        if manifest_digest(manifest) != journal['manifestDigest']:
-            self._fail('manifest changed before control ref update')
+        self._expire_if_operation_lease_changed(request, journal, manifest)
 
     def _assert_ref_leases(self, repo_root, expected):
         drift = []
@@ -17769,16 +18005,8 @@ class SyncwheelRevisionBackend:
 
     def verify_recovery_gate(self, request, journal):
         repo_root = self._repo_root(request)
-        if (
-            journal.get('projectionRoute') == 'derived'
-            and journal.get('phase') not in {'verified', 'expired'}
-        ):
-            manifest, _ = self._manifest(repo_root)
-            if integration_composition_digest(manifest) != journal.get('integrationCompositionDigest'):
-                self.expire_manifest_invalidated(
-                    request, journal,
-                    'integration composition changed while derived projection was pending',
-                )
+        manifest, _ = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
         expected = self._journal_ref_transaction_refs(request, journal)
         self._assert_no_ref_transaction_locks(repo_root, expected)
 
@@ -18192,7 +18420,7 @@ class SyncwheelRevisionBackend:
         )
         return commit
 
-    def _deterministic_index(self, repo_root, commit):
+    def _deterministic_index(self, repo_root, commit, *, allowed_worktree_paths=()):
         descriptor, temporary_name = tempfile.mkstemp(
             prefix='syncwheel-revision-aligned-index-'
         )
@@ -18210,10 +18438,22 @@ class SyncwheelRevisionBackend:
                 env=environment,
             )
             if refreshed.returncode != 0:
-                self._fail(
-                    'working tree does not match the commit during index preparation: '
-                    + (refreshed.stderr.strip() or refreshed.stdout.strip())
-                )
+                mismatched = {
+                    item
+                    for item in git(
+                        repo_root,
+                        'diff-files',
+                        '--name-only',
+                        '-z',
+                        env=environment,
+                    ).stdout.split('\0')
+                    if item
+                }
+                if mismatched - set(allowed_worktree_paths):
+                    self._fail(
+                        'working tree does not match the commit during index preparation: '
+                        + (refreshed.stderr.strip() or refreshed.stdout.strip())
+                    )
             tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
             expected_tree = ref_tree(repo_root, commit)
             if tree != expected_tree:
@@ -18406,7 +18646,15 @@ class SyncwheelRevisionBackend:
         if not expected_sha:
             self._fail(f'{kind} index alignment has no predecessor lease')
 
-        desired_payload, desired_sha = self._deterministic_index(repo_root, commit)
+        desired_payload, desired_sha = self._deterministic_index(
+            repo_root,
+            commit,
+            allowed_worktree_paths=(
+                (self.MANIFEST_PRODUCT_PATH,)
+                if kind == 'product' and journal.get('projectionRoute') == 'derived'
+                else ()
+            ),
+        )
         current_sha = self._index_sha256(repo_root)
         if current_sha not in {expected_sha, desired_sha}:
             self._fail(
@@ -18558,7 +18806,11 @@ class SyncwheelRevisionBackend:
                     self._fail(f'draft stack collision: {request.draft_stack_id}')
                 stripped = self._manifest_without_operation_stack(manifest, request)
                 if manifest_digest(stripped) != journal['observedManifestDigest']:
-                    self._fail('manifest contains changes beyond this operation draft stack')
+                    self.expire_manifest_invalidated(
+                        request,
+                        journal,
+                        'manifest contains changes beyond this operation draft stack',
+                    )
                 if not branch_exists(repo_root, request.draft_branch):
                     self._fail('owned draft stack branch is missing')
                 if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
@@ -18586,7 +18838,9 @@ class SyncwheelRevisionBackend:
                 return {'manifestDigest': manifest_digest(manifest)}
 
             if manifest_digest(manifest) != journal['observedManifestDigest']:
-                self._fail('manifest changed before draft ownership')
+                self.expire_manifest_invalidated(
+                    request, journal, 'manifest changed before draft ownership'
+                )
             self._ensure_clean(repo_root)
             if any(stack['branch'] == request.draft_branch for stack in manifest['stacks']):
                 self._fail(f'draft branch is owned by another stack: {request.draft_branch}')
@@ -18689,19 +18943,36 @@ class SyncwheelRevisionBackend:
         self.verify_recovery_gate(request, journal)
         if ref_tip(repo_root, 'HEAD') != expected_head:
             self._fail('integration HEAD does not match the operation receipt')
-        status = git(
-            repo_root,
-            'status',
-            '--porcelain',
-            '--untracked-files=all',
-            env={'GIT_OPTIONAL_LOCKS': '0'},
-        ).stdout
-        if status.strip():
-            self._fail('revision-provider operation left repository changes behind')
+        if journal.get('projectionRoute') == 'derived':
+            if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+                self._fail('derived revision-provider operation left index changes behind')
+            outside = self._dirty_paths(repo_root) - {self.MANIFEST_PRODUCT_PATH}
+            if outside:
+                self._fail(
+                    'derived revision-provider operation left product changes behind: '
+                    + ', '.join(sorted(outside))
+                )
+        else:
+            status = git(
+                repo_root,
+                'status',
+                '--porcelain',
+                '--untracked-files=all',
+                env={'GIT_OPTIONAL_LOCKS': '0'},
+            ).stdout
+            if status.strip():
+                self._fail('revision-provider operation left repository changes behind')
         manifest, _ = self._manifest(repo_root)
         digest = manifest_digest(manifest)
-        if digest != journal['manifestDigest']:
-            self._fail('manifest digest does not match the operation receipt')
+        if (
+            journal.get('projectionRoute') != 'derived'
+            and digest != journal['manifestDigest']
+        ):
+            self.expire_manifest_invalidated(
+                request,
+                journal,
+                'manifest digest changed before terminal verification',
+            )
         validation = validate_manifest(repo_root, manifest)
         if validation['errors']:
             self._fail('post-operation Syncwheel validation failed: ' + '; '.join(validation['errors']))
@@ -18757,13 +19028,10 @@ class SyncwheelRevisionBackend:
     def verify_derived_final(self, request, journal):
         repo_root = self._repo_root(request)
         manifest, manifest_path = self._manifest(repo_root)
-        if integration_composition_digest(manifest) != journal['integrationCompositionDigest']:
-            self.expire_manifest_invalidated(
-                request, journal, 'integration composition changed before derived projection verification'
-            )
+        self._expire_if_operation_lease_changed(request, journal, manifest)
         if branch_exists(repo_root, request.draft_branch) or request.draft_stack_id in stack_map(manifest):
             self._fail('derived projection must not create a draft ref or stack')
-        journal['manifestDigest'] = journal['observedManifestDigest']
+        journal['manifestDigest'] = manifest_digest(manifest)
         payload = {
             'operation_id': request.operation_id,
             'commit': journal['productCommitSha'],

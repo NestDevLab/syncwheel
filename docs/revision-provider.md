@@ -38,6 +38,10 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    take the `derived` route only in a v3 manifest and only when every path is
    contained by `integration.derived_paths`; it creates a trailer-marked commit
    on integration and no draft stack, branch, or manifest mutation.
+   The provider persists `projectionRoute` and the selected object ids before
+   any ref moves. Recovery follows that route, treats the candidate as
+   immutable, and recomputes the route proof; any route or object mismatch
+   fails closed instead of replacing an already hook-validated commit.
 5. `finalize` captures each changed file through descriptor-bound, no-follow
    reads, writes those exact bytes as Git blobs, and constructs both the product
    commit and its draft projection in the object database. Empty or conflicting
@@ -45,16 +49,20 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    and the exact projection base. Product hooks then run before
    the provider acquires the absent draft ref with compare-and-swap; only proven
    draft ownership permits the integration ref to advance. A separate
-   manifest-only control commit completes local ownership.
+   manifest-only control commit completes local ownership. `stack land`
+   compares the declared product projection independently from that control
+   commit, so the resulting `manifest-base` stack remains landable.
 6. Agentwheel may send `recover` repeatedly after an uncertain result. Recovery
    resumes only a previously journaled operation with the same intent digest. If
-   the integration composition changes while a derived receipt is pending, the
-   provider writes its terminal journal first, then appends one
+   the integration composition or its leased `derived_paths` changes while a
+   derived receipt is pending, the provider writes its terminal journal first,
+   then appends one
    `revision_provider_expired` ledger event with its recorded decision and the
    named remedy: run a
    new Agentwheel update. Later `finalize`, `recover`, or matching `preflight`
    requests reject with that same terminal reason; the provider never leaves a
-   permanently pending receipt.
+   permanently pending receipt. `check` consults the journal first and returns
+   the same terminal error for that operation id.
 7. `release` may remove only a `prepared` lease for which no Git ref or manifest
    mutation occurred. It does not discard the Agentwheel file changes.
 
@@ -73,7 +81,9 @@ ref differs, another coordination domain claims a ref, or local pending-merge,
 lock, or publication-lease state exists. Offline revision preparation is not
 supported in active-active mode. A successful preflight records the fresh state
 tip in the local operation journal; later publication remains a separate,
-explicit coordinated operation.
+explicit coordinated operation. Manifest-v3 coordination snapshots include
+`integration.derived_paths`; snapshot application and additive composition
+preserve it so a published derived integration tip remains classified.
 
 ## Protocol version 1
 
@@ -153,7 +163,8 @@ snapshot plus its exact target predecessor. A direct manifest base ref is leased
 at its exact ref-object SHA through every ref transaction and final verification.
 The persisted stack base is always its peeled manifest-base commit SHA. Derived
 receipts instead lease the ordered integration composition (base, strategy, and
-declared stack commits), so unrelated manifest edits do not expire them.
+declared stack commits) plus the exact ordered `derived_paths`, so unrelated
+manifest edits do not expire them while a path-policy change does.
 Projection never re-resolves a moving base. Recovery accepts only the expected
 parent or that exact candidate. It does not reset, rebase, force-update, delete a
 branch, or infer ownership from a similar commit.
@@ -211,9 +222,21 @@ before rename and between rename and journal persistence.
 The draft projection never uses a worktree or `cherry-pick`. Syncwheel applies
 the product delta with `merge-tree` and routes only blob-reproducing results to
 the deterministic draft ref. A non-reproducing allowed lock-only result is a
-derived integration commit carrying `Syncwheel-Derived-Projection: <operation>`;
-it is deliberately dropped by rebuild and requires a new Agentwheel update.
+derived integration commit carrying a real Git trailer parsed by
+`git interpret-trailers --parse`:
+`Syncwheel-Derived-Projection: <operation>`. Trailer-like body text does not
+qualify. The commit is deliberately dropped by rebuild. `validate` and
+maintenance planning through `plan` then report `derived-projection-stale`,
+name the affected paths, and require a new Agentwheel update; a later derived
+projection for those paths or a later manifest-base stack ownership for those
+paths reconciles the ledger record.
 Conflict diagnostics use Git's name-only output and name both paths and base.
+
+The accepted cost of the derived route is that its lock never reaches
+`origin/main` through Syncwheel. It can reach `main` only through a later update
+whose composition equals the manifest base, making the verified route
+`manifest-base`. This is intentional: a lock derived from unlanded composition
+cannot truthfully be landed on `main` by itself.
 
 The product commit contains only the declared product paths. Its full reason and
 `Agentwheel-Operation` trailer are preserved when the draft is replayed. The

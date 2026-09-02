@@ -162,6 +162,10 @@ class RevisionBackend(Protocol):
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def verify_projection_route(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> None: ...
+
     def validate_prepared_commit(
         self, request: RevisionRequest, journal: dict[str, Any], kind: str
     ) -> None: ...
@@ -541,6 +545,8 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "projectionBaseKind": observation["projectionBaseKind"],
         "integrationCompositionDigest": observation.get("integrationCompositionDigest"),
         "projectionRoute": None,
+        "derivedPaths": None,
+        "derivedPathsDigest": None,
         "baselineIndexSha256": observation["indexSha256"],
         "productIndexSha256": None,
         "controlIndexSha256": None,
@@ -572,16 +578,23 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
 def _assert_matching_journal(
     request: RevisionRequest, journal: dict[str, Any] | None
 ) -> dict[str, Any]:
+    journal = _assert_journal_envelope(request, journal)
+    if journal.get("planDigest") != request.plan_digest:
+        raise RevisionProviderError(
+            f"operationId collision for {request.operation_id}: intent digest differs"
+        )
+    return journal
+
+
+def _assert_journal_envelope(
+    request: RevisionRequest, journal: dict[str, Any] | None
+) -> dict[str, Any]:
     if journal is None:
         raise RevisionProviderError(
             f"operation {request.operation_id} has no prepared journal; run preflight first"
         )
     if journal.get("providerId") != PROVIDER_ID or journal.get("schemaVersion") != 1:
         raise RevisionProviderError(f"operation {request.operation_id} has an incompatible journal")
-    if journal.get("planDigest") != request.plan_digest:
-        raise RevisionProviderError(
-            f"operationId collision for {request.operation_id}: intent digest differs"
-        )
     phase = journal.get("phase")
     if phase not in TERMINAL_PHASES:
         raise RevisionProviderError(
@@ -668,12 +681,22 @@ def _advance(
             backend.save_journal(request, journal)
             backend.checkpoint("product_objects_prepared")
 
-        if journal.get("candidateDraftCommitSha") is None:
+        if journal.get("projectionRoute") is None:
             projection = backend.prepare_draft_projection(request, journal)
             journal.update(projection)
             candidate = journal["candidateProductCommitSha"]
             backend.save_journal(request, journal)
             backend.checkpoint("route_decided")
+        elif journal.get("projectionRoute") == "manifest-base":
+            if not journal.get("candidateDraftCommitSha"):
+                raise RevisionProviderError(
+                    "journaled manifest-base route is missing its immutable draft candidate"
+                )
+        elif journal.get("projectionRoute") != "derived":
+            raise RevisionProviderError(
+                f"operation {request.operation_id} has an invalid projection route"
+            )
+        backend.verify_projection_route(request, journal)
 
         if not journal.get("productHooksValidated"):
             backend.validate_prepared_commit(request, journal, "product")
@@ -766,7 +789,13 @@ def _advance(
 
 def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[str, Any]:
     if request.action == "check":
-        backend.check(request)
+        with backend.operation_lock(request):
+            existing = backend.load_journal(request)
+            if existing is not None:
+                existing = _assert_journal_envelope(request, existing)
+                if existing["phase"] == "expired":
+                    raise RevisionProviderError(_expired_message(request, existing))
+            backend.check(request)
         return _base_response(request.action, request.operation_id, True, "ready")
 
     with backend.operation_lock(request):

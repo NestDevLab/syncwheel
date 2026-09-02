@@ -563,6 +563,63 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'c96c05ff86ecd527db0ec077d8efbe457db0659f69bf108315dd28fecd10b38b',
         )
 
+    def test_derived_paths_survive_snapshot_and_compose_classifies_published_derived_tip(self):
+        origin = self.create_remote('derived-paths-compose')
+        repo = self.clone(origin, 'derived-paths-compose')
+        self.init_coordinated(repo, integration_membership='required')
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest.setdefault('channels', [])
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'test: configure derived projections')
+        (repo / 'locks').mkdir()
+        (repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.git(repo, 'add', 'locks/codex.lock')
+        self.git(
+            repo, 'commit', '-q', '-m', 'test: publish derived projection', '-m',
+            'Syncwheel-Derived-Projection: coordination-derived',
+        )
+        derived_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.run_cli(repo, 'int', 'push')
+        base_tip, base_state = self.remote_state(origin)
+        base_manifest = json.loads(manifest_path.read_text())
+
+        self.assertEqual(
+            base_state['manifest']['integration']['derived_paths'], ['locks/']
+        )
+        orphan_tip = self.commit_on_branch(repo, 'pr/derived-orphan', 'orphan.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'derived-orphan', orphan_tip,
+            '--branch', 'pr/derived-orphan',
+        )
+        self.run_cli(repo, 'stack', 'push', 'derived-orphan')
+        manifest_path.write_text(json.dumps(base_manifest, indent=2) + '\n')
+        new_tip = self.commit_on_branch(repo, 'pr/derived-local', 'local.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'derived-local', new_tip,
+            '--branch', 'pr/derived-local',
+        )
+        module = self.load_module()
+        local_manifest, _ = module.load_manifest(repo, manifest_path)
+
+        plan, _proposed, _remote = module.coordination_compose_stack_plan(
+            repo,
+            local_manifest,
+            'derived-local',
+            base_tip,
+            base_state['manifest_digest'],
+        )
+
+        self.assertEqual(plan['status'], 'publish-required')
+        self.assertEqual(plan['expectedIntegrationTip'], derived_tip)
+        self.assertEqual(plan['unmappedIntegrationCommits'], [])
+        self.assertEqual(
+            plan['composedSnapshot']['integration']['derived_paths'], ['locks/']
+        )
+
     def test_coordination_snapshot_round_trip_preserves_draft_state(self):
         module = self.load_module()
         manifest = {

@@ -18,6 +18,15 @@
   integration stack to be present, bind derived receipt recovery to the ordered
   integration composition, and make expiration journal-first and ledger
   idempotent. Conflict diagnostics use Git's name-only merge-tree output.
+- Make the persisted route and hook-validated candidate immutable across
+  recovery, keep manifest-base provider stacks landable despite their
+  manifest-only control commit, and return one terminal expiry result from
+  `check`, `preflight`, `finalize`, `recover`, and `release` as applicable.
+- Report `derived-projection-stale` with affected paths after rebuild, preserve
+  `derived_paths` through active-active coordination, and parse ownership only
+  from Git's actual trailer block. Accepted cost: a derived lock does not reach
+  `main` through Syncwheel until a later update qualifies for the
+  `manifest-base` route.
 
 ## 0.40.2 - 2026-09-02
 
