@@ -5287,6 +5287,83 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 self.git('rev-parse', 'HEAD'),
             )
 
+    def test_int_rebuild_restores_and_commits_the_control_manifest_after_merge_stacks(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        old_manifest = self.read_manifest()
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: track stack manifest')
+        base = self.git('rev-parse', 'HEAD')
+        stack_ids = []
+        for name in ('control-a', 'control-b'):
+            branch = f'pr/{name}'
+            stack_ids.append((name, branch))
+            self.git('branch', branch, base)
+            self.git('switch', '-q', branch)
+            Path(self.repo / f'{name}.txt').write_text(f'{name}\n')
+            self.git('add', f'{name}.txt')
+            self.git('commit', '-q', '-m', f'feat: add {name}')
+        self.git('switch', '-q', 'main')
+
+        control_manifest = json.loads(json.dumps(old_manifest))
+        control_manifest['integration'] = {
+            'branch': 'integration/control-manifest',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': [name for name, _branch in stack_ids],
+        }
+        control_manifest['stacks'] = [
+            {
+                'id': name,
+                'branch': branch,
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/control-manifest',
+                'commits': [self.git('rev-parse', branch)],
+            }
+            for name, branch in stack_ids
+        ]
+        manifest_path.write_text(json.dumps(control_manifest, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: update control manifest')
+        self.git('branch', 'integration/control-manifest', 'main')
+        self.git('switch', '-q', 'integration/control-manifest')
+        module = self.load_syncwheel_module()
+        expected_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        expected_digest = module.manifest_digest(expected_manifest)
+
+        self.run_cli('int', 'rebuild', '--in-place', expected=0)
+
+        restored_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(module.manifest_digest(restored_manifest), expected_digest)
+        self.assertEqual(self.git('show', '-s', '--format=%s', 'HEAD'), 'chore: restore Syncwheel control manifest')
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.tracked_status(), '')
+        events = module.load_ledger_events(self.repo, manifest_path)
+        self.assertIn(
+            'restore_control_manifest_after_integration_rebuild',
+            [event['payload'].get('reason') for event in events if event['type'] == 'manifest_saved'],
+        )
+
+    def test_control_manifest_preflight_rejects_unexplained_divergence(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        module = self.load_syncwheel_module()
+        control_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        divergent = json.loads(manifest_path.read_text())
+        divergent['stacks'] = divergent['stacks'][:1]
+        manifest_path.write_text(json.dumps(divergent, indent=2) + '\n')
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'control manifest differs before integration rebuild.*missing stacks.*feature-b.*Restore the control manifest',
+        ):
+            module.preflight_control_manifest_digest(
+                self.repo, manifest_path, control_manifest
+            )
+
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         data = json.loads(manifest.read_text())

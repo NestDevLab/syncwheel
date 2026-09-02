@@ -4305,6 +4305,87 @@ def acknowledge_in_place_manifest_replay(repo_root, manifest_path, replay_tip):
     transaction['expectedDigest'] = observed_normalized_digest
 
 
+def control_manifest_difference(manifest, observed):
+    """Describe stack membership differences for a control-manifest digest mismatch."""
+    expected_ids = set(stack_map(manifest))
+    observed_ids = set(stack_map(observed or {}))
+    parts = []
+    missing = sorted(expected_ids - observed_ids)
+    unexpected = sorted(observed_ids - expected_ids)
+    if missing:
+        parts.append('missing stacks: ' + ', '.join(missing))
+    if unexpected:
+        parts.append('unexpected stacks: ' + ', '.join(unexpected))
+    return '; '.join(parts) or 'stack definitions differ'
+
+
+def preflight_control_manifest_digest(repo_root, manifest_path, manifest):
+    """Fail closed if the on-disk manifest changed after command observation."""
+    observed, _ = load_manifest(repo_root, manifest_path)
+    expected_digest = manifest_digest(manifest)
+    observed_digest = manifest_digest(observed) if observed is not None else None
+    if observed_digest == expected_digest:
+        return
+    raise SyncwheelError(
+        'control manifest differs before integration rebuild: '
+        f'expected digest {expected_digest}, found {observed_digest}; '
+        + control_manifest_difference(manifest, observed)
+        + '. Restore the control manifest before retrying.'
+    )
+
+
+def restore_control_manifest_after_integration_rebuild(
+    repo_root, manifest_path, manifest, replay_tip, replay_mode,
+):
+    """Restore the observed control manifest after a replay replaced its tree."""
+    if is_external_manifest_path(repo_root, manifest_path):
+        return False
+    observed, _ = load_manifest(repo_root, manifest_path)
+    expected_digest = manifest_digest(manifest)
+    observed_digest = manifest_digest(observed) if observed is not None else None
+    if observed_digest == expected_digest:
+        return False
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        manifest,
+        'restore_control_manifest_after_integration_rebuild',
+        {
+            'replay_tip': replay_tip,
+            'replay_mode': replay_mode,
+            'replayed_manifest_digest': observed_digest,
+            'control_manifest_digest': expected_digest,
+            'difference': control_manifest_difference(manifest, observed),
+        },
+    )
+    relative_path = Path(manifest_path).resolve(strict=False).relative_to(
+        Path(repo_root).resolve()
+    ).as_posix()
+    run(['git', 'add', '-f', '--', relative_path], cwd=repo_root)
+    run(
+        with_git_identity(
+            repo_root,
+            ['git', 'commit', '-m', 'chore: restore Syncwheel control manifest'],
+        ),
+        cwd=repo_root,
+    )
+    try:
+        restored = json.loads(Path(manifest_path).read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(
+            f'control manifest is unreadable after integration rebuild restoration: {manifest_path}'
+        ) from exc
+    restored_digest = manifest_digest(restored)
+    if restored_digest != expected_digest:
+        raise SyncwheelError(
+            'control manifest digest differs after integration rebuild restoration: '
+            f'expected {expected_digest}, found {restored_digest}; '
+            + control_manifest_difference(manifest, restored)
+            + '. Restore the control manifest and retry.'
+        )
+    return True
+
+
 def ref_tip(repo_root, ref):
     result = git(repo_root, 'rev-parse', ref, check=False)
     if result.returncode != 0:
@@ -16361,6 +16442,7 @@ def command_reconcile(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    preflight_manifest = json.loads(json.dumps(manifest))
     pending_merge_manifest = None
     pending_merge_preview = None
     if getattr(args, 'accept_merge', False):
@@ -16449,6 +16531,7 @@ def command_reconcile(args):
 
     preflight_empty_desk_stack_rebuilds(repo_root, manifest, actions, args, worktree_root)
     preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root)
+    preflight_control_manifest_digest(repo_root, manifest_path, preflight_manifest)
     require_manifest_transaction_current(manifest_path)
     if is_external_manifest_path(repo_root, manifest_path):
         ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
@@ -16470,6 +16553,7 @@ def command_reconcile(args):
     coordinated_refs = {}
     coordinated_events = []
     deferred_manifest_updates = []
+    control_manifest_restored = False
     for action in actions:
         if action['type'] == 'rebuild_stack':
             stack = require_stack(manifest, action['stack'])
@@ -16606,13 +16690,17 @@ def command_reconcile(args):
                 acknowledge_in_place_manifest_replay(
                     repo_root, manifest_path, result['after_tip']
                 )
+            control_manifest_restored = restore_control_manifest_after_integration_rebuild(
+                repo_root, manifest_path, manifest, result['after_tip'], result['mode']
+            ) or control_manifest_restored
+            integration_after_tip = ref_tip(repo_root, integration['branch'])
             append_ledger_event(
                 repo_root,
                 'integration_rebuilt',
                 {
                     'branch': integration['branch'],
                     'before_tip': result['before_tip'],
-                    'after_tip': result['after_tip'],
+                    'after_tip': integration_after_tip,
                     'stacks': list(integration.get('stacks', [])),
                     'replay_mode': result['mode'],
                 },
@@ -16720,7 +16808,7 @@ def command_reconcile(args):
                 },
                 manifest_path,
             )
-    if args.apply and (resume_manifest_changed or deferred_manifest_updates):
+    if args.apply and not control_manifest_restored and (resume_manifest_changed or deferred_manifest_updates):
         reason = 'resume_manifest_update' if resume_manifest_changed else 'reconcile_update_manifest'
         context = {'stacks': deferred_manifest_updates} if deferred_manifest_updates else None
         save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, context)
@@ -16827,6 +16915,7 @@ def command_int_align_remote(args):
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    preflight_control_manifest_digest(repo_root, manifest_path, manifest)
     integration = manifest['integration']
     validation = validate_manifest(repo_root, manifest)
     narrowed = validation['details']['integration'].get(
@@ -16889,13 +16978,21 @@ def command_int_rebuild(args):
                     'commit': item['commit'],
                     'paths': list(item['paths']),
                 })
+        if mode == 'in-place':
+            acknowledge_in_place_manifest_replay(
+                repo_root, manifest_path, result['after_tip']
+            )
+        restore_control_manifest_after_integration_rebuild(
+            repo_root, manifest_path, manifest, result['after_tip'], result['mode']
+        )
+        integration_after_tip = ref_tip(repo_root, manifest['integration']['branch'])
         append_ledger_event(
             repo_root,
             'integration_rebuilt',
             {
                 'branch': manifest['integration']['branch'],
                 'before_tip': result['before_tip'],
-                'after_tip': result['after_tip'],
+                'after_tip': integration_after_tip,
                 'stacks': list(manifest['integration'].get('stacks', [])),
                 'replay_mode': result['mode'],
                 'reason': reason,

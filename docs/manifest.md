@@ -2,6 +2,21 @@
 
 The preferred source of truth is `.syncwheel/manifest.json`.
 
+## Control commits after integration rebuilds
+
+Before a mutating integration rebuild, Syncwheel compares the on-disk manifest
+with the control manifest it loaded for the command. A mismatch stops before
+any rebuild and names the stack membership difference; restore the control
+manifest before retrying.
+
+An integration replay can legitimately replace the checked-out manifest with
+an older copy from its base or a stack. After a successful replay, Syncwheel
+restores the command's control manifest, records a ledger event, and creates a
+`chore: restore Syncwheel control manifest` commit containing only
+`.syncwheel/manifest.json`. It verifies the restored digest before continuing.
+This control commit is part of the integration projection and is recreated on
+later rebuilds; do not treat it as a stack-owned product commit.
+
 ## Shape
 
 ```json
