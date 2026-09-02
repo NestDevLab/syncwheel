@@ -243,8 +243,10 @@ worktree and local lane branch. A dirty, unavailable, or current-directory lane
 is retained and reported; it is never removed automatically. A missing lane
 whose lease expired, or whose local owner PID is known to be dead, is reaped on
 the next applicable mutation even when an old registry path is outside the
-current configured root; its branch is anchored first when it has a distinct
-tip.
+current configured root; its branch tip is always anchored first, including
+when it still equals the lane base. If Git reports that the branch's worktree
+moved, Syncwheel resolves and checks the current path before deciding whether
+the lane is eligible, and retains moved dirty or locked worktrees.
 
 To retire a known dead or abandoned lane deliberately, preview the operation
 first and provide a durable reason:
@@ -257,8 +259,18 @@ syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --
 `release` is dry-run by default. With `--apply`, it creates a recovery ref for
 an existing lane-branch tip, removes the registry record, and appends a ledger
 event. It refuses an existing dirty lane and names the recovery remedy instead
-of removing it. `gc --apply` also reaps eligible expired lanes when active-active
-coordination is disabled.
+of removing it. Pending cleanup and ledger writes are retryable and idempotent;
+the original release reason is retained across retries. `gc` previews the same
+expired and pending lane set that `gc --apply` may process, including each
+pending category, and also works when active-active coordination is disabled.
+
+Automatic lane reaping runs only before an explicitly mutating lifecycle
+operation. Status, check, handoff, `gc` without `--apply`, `reconcile` or
+`resume` without `--apply`, and every other preview leave the registry,
+branches, recovery refs, and ledger unchanged. `stack git` and `int git` join
+that mutation allowlist only when `--auto-worktree` or `--worktree` explicitly
+authorizes worktree creation; passthrough Git commands in an existing worktree
+do not implicitly trigger lane reaping.
 
 `status`, `check`, `handoff`, and `gc` include structured governed-worktree
 diagnostics in JSON. Repo-aware terminal commands show actionable yellow

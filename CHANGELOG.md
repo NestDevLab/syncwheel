@@ -4,14 +4,23 @@
 
 - Reap a registered lane with a missing path when its lease expired or its local
   owner PID is dead, regardless of its old configured-root location; retain a
-  recovery ref for a distinct lane-branch tip before removing the registry
-  record.
+  recovery ref for every existing lane-branch tip before removing the registry
+  record, including a tip equal to the lane base.
 - Honour `syncwheel_worktree_root` when opening a governed worktree lane.
 - Add dry-run-first `worktree release <lane> --reason <why>` with explicit
   `--apply`, recovery refs, registry removal, and ledger evidence; existing
   dirty worktrees remain protected and name their recovery remedy.
 - Let `gc --apply` reap eligible expired governed lanes even when active-active
   coordination is disabled.
+- Resolve a moved lane through Git's current branch worktree before expiry
+  cleanup, preserve dirty or locked worktrees, and report a clear dirty-race
+  remedy if state changes immediately before removal.
+- Restrict automatic lane cleanup to commands that are actually applying a
+  mutation, while keeping previews read-only; worktree-creating `stack git` and
+  `int git` forms are explicitly included.
+- Make recovery-ref creation, pending cleanup, and ledger append retries
+  idempotent, preserving release event type and reason after interruptions, and
+  make `gc` preview and apply enumerate the same pending categories.
 
 ## 0.40.1 - 2026-09-02
 
