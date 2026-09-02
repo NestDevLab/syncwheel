@@ -5407,6 +5407,28 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertEqual(first, second)
 
+    def test_control_manifest_object_is_verified_before_the_ref_cas(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        control, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        original_git = module.git
+        observed = []
+
+        def checked_git(repo_root, *args, **kwargs):
+            if args[:2] == ('update-ref', 'refs/heads/main'):
+                committed = module.manifest_from_tree(repo_root, args[2], manifest_path)
+                self.assertEqual(module.manifest_digest(committed), module.manifest_digest(control))
+                observed.append(args[2])
+            return original_git(repo_root, *args, **kwargs)
+
+        with mock.patch.object(module, 'git', side_effect=checked_git):
+            self.assertTrue(module.restore_control_manifest_after_integration_rebuild(
+                self.repo, manifest_path, control, parent, 'plumbing',
+            ))
+
+        self.assertEqual(len(observed), 1)
+
     def test_int_rebuild_is_classified_as_a_manifest_mutation(self):
         module = self.load_syncwheel_module()
 
