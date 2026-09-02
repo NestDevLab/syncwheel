@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.42.0 - 2026-09-02
+
+- Project Agentwheel revision-provider commits authored on a declared
+  integration projection onto that exact integration tip, recording the
+  integration-first base explicitly on the resulting draft stack instead of
+  replaying conflicting lock changes against `origin/main`.
+- Expire manifest-invalidated pending provider receipts with one local ledger
+  event and the named remedy to run a new Agentwheel update; projection
+  conflicts now name both their paths and the base used.
+- Add manifest v3 `integration.derived_paths` and a verified Agentwheel
+  revision-provider route decision. A candidate whose product blobs reproduce
+  from the manifest base remains a draft stack; an allowed lock-only delta that
+  does not reproduce is a trailer-marked derived integration commit, never a
+  stack, draft ref, manifest mutation, or publication.
+- Classify only trailer-marked derived commits, require every declared
+  integration stack to be present, bind derived receipt recovery to the ordered
+  integration composition, and make expiration journal-first and ledger
+  idempotent. Conflict diagnostics use Git's name-only merge-tree output.
+
 ## 0.40.2 - 2026-09-02
 
 - Reap a registered lane with a missing path when its lease expired or its local

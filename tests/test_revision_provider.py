@@ -1081,10 +1081,17 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         repeated, _ = self.fixture.protocol_request({**request, 'action': 'recover'})
         self.assertEqual(repeated, {**finalized, 'action': 'recover'})
 
-    def test_integration_first_product_projects_on_integration_tip_and_declares_it(self):
+    def test_route_is_derived_when_projection_changes_a_product_blob(self):
         self.fixture.install_existing_stack(
             path='locks/codex.lock', content='first-owner\n'
         )
+        manifest_path = self.fixture.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: enable derived lock projections')
         request = self.fixture.request(
             'preflight',
             operation_id='integration-first-lock',
@@ -1092,7 +1099,6 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             before=self.fixture.sha256('first-owner\n'),
             after_content='second-owner\n',
         )
-        integration_tip = request['expectedHead']
         self.fixture.protocol_request(self.fixture.check_request(request))
         (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
         self.fixture.protocol_request(request)
@@ -1102,22 +1108,52 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         )
 
         self.assertEqual(finalized['status'], 'verified')
-        manifest = json.loads(
-            (self.fixture.repo / '.syncwheel' / 'manifest.json').read_text()
+        self.assertIsNone(finalized['draftStackId'])
+        self.assertIsNone(finalized['draftBranch'])
+        self.assertIsNone(finalized['draftTipSha'])
+        self.assertIn(
+            'Syncwheel-Derived-Projection: integration-first-lock',
+            self.fixture.git('show', '-s', '--format=%B', finalized['productCommitSha']),
         )
-        owned = next(
-            stack for stack in manifest['stacks']
-            if stack['id'] == 'agentwheel-integration-first-lock'
+
+    def test_derived_route_creates_no_draft_ref_and_no_manifest_delta(self):
+        """A lock delta already represented by integration is a derived commit, never a stack."""
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
         )
-        self.assertEqual(owned['base'], integration_tip)
+        manifest_path = self.fixture.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: enable derived lock projections')
+
+        request = self.fixture.request(
+            'preflight', operation_id='derived-lock', path='locks/codex.lock',
+            before=self.fixture.sha256('first-owner\n'), after_content='second-owner\n',
+        )
+        manifest_before = json.loads(manifest_path.read_text())
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+        finalized, _ = self.fixture.protocol_request({**request, 'action': 'finalize'})
+
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertIsNotNone(finalized['productCommitSha'])
+        self.assertIsNone(finalized['draftStackId'])
+        self.assertIsNone(finalized['draftBranch'])
+        self.assertIsNone(finalized['draftTipSha'])
+        self.assertEqual(json.loads(manifest_path.read_text()), manifest_before)
         self.assertEqual(
-            owned['meta']['revision_provider_projection_base'],
-            {'kind': 'integration-tip', 'sha': integration_tip},
+            self.fixture.git(
+                'rev-parse', '--verify', 'refs/heads/syncwheel/draft/agentwheel-derived-lock',
+                check=False,
+            ),
+            '',
         )
-        self.assertEqual(
-            self.fixture.git('rev-parse', f"{finalized['productCommitSha']}^"),
-            integration_tip,
-        )
+        message = self.fixture.git('show', '-s', '--format=%B', finalized['productCommitSha'])
+        self.assertIn('Syncwheel-Derived-Projection: derived-lock', message)
 
     def test_manifest_invalidated_pending_receipt_expires_with_ledger_remedy(self):
         class ManifestChangedAfterProductObjects(SYNCWHEEL.SyncwheelRevisionBackend):
@@ -2672,7 +2708,7 @@ int renameat(
         fault_points = (
             *protocol.PHASES,
             'product_objects_prepared',
-            'draft_objects_prepared',
+            'route_decided',
             'product_hooks_validated',
             'draft_ref_cas',
             'ref_transaction_prepared',

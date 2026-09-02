@@ -32,17 +32,12 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    and peeled commit; a ref that resolves to the integration, stack, or channel
    branch set is rejected before a journal or managed ref can be created. The
    operation-owned stack stores the peeled 40-hex commit as its immutable
-   manifest base, never the input shorthand. When integration already has one
-   or more declared stacks and its tip differs from that manifest base, the
-   product commit is integration-first: the provider records that exact
-   integration tip as `projectionBaseSha`, replays onto it, and writes the same
-   SHA as the new draft stack's `base`. The stack also carries
-   `meta.revision_provider_projection_base` with
-   `{ "kind": "integration-tip", "sha": "..." }`. This is an explicit
-   per-operation declaration; ordinary provider operations retain the manifest
-   base. It prevents an Agentwheel lock delta authored atop the shared
-   integration projection from being replayed as though it started at
-   `origin/main`.
+   manifest base, never the input shorthand. The provider projects the candidate
+   on that base and compares every declared product blob. Reproducing blobs take
+   the ordinary `manifest-base` draft-stack route. A non-reproducing result can
+   take the `derived` route only in a v3 manifest and only when every path is
+   contained by `integration.derived_paths`; it creates a trailer-marked commit
+   on integration and no draft stack, branch, or manifest mutation.
 5. `finalize` captures each changed file through descriptor-bound, no-follow
    reads, writes those exact bytes as Git blobs, and constructs both the product
    commit and its draft projection in the object database. Empty or conflicting
@@ -53,9 +48,10 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    manifest-only control commit completes local ownership.
 6. Agentwheel may send `recover` repeatedly after an uncertain result. Recovery
    resumes only a previously journaled operation with the same intent digest. If
-   the manifest changes before draft-object preparation, the provider expires
-   the receipt locally, appends one `revision_provider_expired` ledger event
-   with its recorded and current manifest digests, and names the remedy: run a
+   the integration composition changes while a derived receipt is pending, the
+   provider writes its terminal journal first, then appends one
+   `revision_provider_expired` ledger event with its recorded decision and the
+   named remedy: run a
    new Agentwheel update. Later `finalize`, `recover`, or matching `preflight`
    requests reject with that same terminal reason; the provider never leaves a
    permanently pending receipt.
@@ -155,9 +151,9 @@ symbolic kind, resolved object OID, and immediate symbolic target. Hook and fina
 snapshots compare all four fields. Each ref transaction leases every unaffected
 snapshot plus its exact target predecessor. A direct manifest base ref is leased
 at its exact ref-object SHA through every ref transaction and final verification.
-The persisted stack base is its peeled commit SHA unless an explicit
-integration-first receipt records the integration tip; that immutable SHA is
-then both projection and stack base.
+The persisted stack base is always its peeled manifest-base commit SHA. Derived
+receipts instead lease the ordered integration composition (base, strategy, and
+declared stack commits), so unrelated manifest edits do not expire them.
 Projection never re-resolves a moving base. Recovery accepts only the expected
 parent or that exact candidate. It does not reset, rebase, force-update, delete a
 branch, or infer ownership from a similar commit.
@@ -213,12 +209,11 @@ the predecessor for the next phase, including recovery after the narrow windows
 before rename and between rename and journal persistence.
 
 The draft projection never uses a worktree or `cherry-pick`. Syncwheel applies
-the product delta with `merge-tree`, rejects conflicts and empty results, writes
-the deterministic projection commit, and creates the draft ref only with an
-absent-ref lease. The integration ref cannot advance until that exact projection
-ref exists. Conflict diagnostics name the conflicted paths and the exact base
-used. Candidate tree entries and blob SHA-256 values are rechecked before
-every ref compare-and-swap and at final verification.
+the product delta with `merge-tree` and routes only blob-reproducing results to
+the deterministic draft ref. A non-reproducing allowed lock-only result is a
+derived integration commit carrying `Syncwheel-Derived-Projection: <operation>`;
+it is deliberately dropped by rebuild and requires a new Agentwheel update.
+Conflict diagnostics use Git's name-only output and name both paths and base.
 
 The product commit contains only the declared product paths. Its full reason and
 `Agentwheel-Operation` trailer are preserved when the draft is replayed. The
@@ -234,8 +229,8 @@ records, atomic fsynced checkpoints, and directory fsync. Recovery may complete
 the missing newline of a valid final JSON object or truncate an invalid
 unterminated suffix; it never rewrites a newline-terminated record. A durable
 event remains authoritative when its derived checkpoint is absent or stale. A
-manifest-invalidated pending receipt records one terminal
-`revision_provider_expired` event before its journal becomes `expired`; it is
+manifest-invalidated pending receipt writes its journal terminal record before
+the matching `revision_provider_expired` event; it is
 not safe to retry that receipt after the manifest lease is gone.
 
 Before the first product ref update and before the control ref update,

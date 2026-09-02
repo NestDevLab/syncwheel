@@ -1705,6 +1705,44 @@ def is_manifest_only_commit(repo_root, commit):
     return bool(files) and set(files) == {'.syncwheel/manifest.json'}
 
 
+def integration_composition_digest(manifest):
+    """Digest only declared integration composition, not unrelated manifest metadata."""
+    integration = manifest['integration']
+    stacks = stack_map(manifest)
+    return canonical_json_digest({
+        'base': integration['base'],
+        'strategy': integration['strategy'],
+        'stacks': [
+            {
+                'id': stack_id,
+                'commits': list(stacks[stack_id].get('commits') or []),
+                'integration_commits': list(stacks[stack_id].get('integration_commits') or []),
+                'integration_only_commits': list(stacks[stack_id].get('integration_only_commits') or []),
+            }
+            for stack_id in integration.get('stacks') or []
+            if stack_id in stacks
+        ],
+    })
+
+
+def is_derived_projection_commit(repo_root, manifest, commit):
+    """Recognize a provider-owned lock projection without treating it as a stack."""
+    if commit_parent_count(repo_root, commit) != 1:
+        return False
+    prefixes = manifest.get('integration', {}).get('derived_paths') or []
+    files = commit_changed_files(repo_root, commit)
+    if not files or not prefixes or not all(
+        any(path.startswith(prefix) for prefix in prefixes) for path in files
+    ):
+        return False
+    message = git(repo_root, 'show', '-s', '--format=%B', commit).stdout
+    return bool(re.search(
+        r'^Syncwheel-Derived-Projection: [A-Za-z0-9][A-Za-z0-9_-]{0,62}$',
+        message,
+        re.M,
+    ))
+
+
 def branches_containing_commit(repo_root, commit, remotes=False):
     args = ['branch', '--format=%(refname:short)', '--contains', commit]
     if remotes:
@@ -2741,6 +2779,16 @@ def load_manifest(repo_root, manifest_path=None):
     integration.setdefault('base', defaults['base_ref'])
     integration.setdefault('strategy', 'cherry-pick')
     integration.setdefault('stacks', [])
+    if version == MANIFEST_VERSION_CHANNELS:
+        derived_paths = integration.setdefault('derived_paths', [])
+        if (
+            not isinstance(derived_paths, list)
+            or not all(isinstance(item, str) and item.endswith('/') and item for item in derived_paths)
+            or len(derived_paths) != len(set(derived_paths))
+        ):
+            raise SyncwheelError('integration.derived_paths must be a unique string array of path prefixes')
+    elif 'derived_paths' in integration:
+        raise SyncwheelError('integration.derived_paths requires manifest version 3')
 
     stacks = data.setdefault('stacks', [])
     if not isinstance(stacks, list):
@@ -7506,13 +7554,20 @@ def deterministic_stack_projection(repo_root, base, commits):
         )
         if merge.returncode != 0:
             detail = (merge.stderr.strip() or merge.stdout.strip())[:2000]
-            paths = []
-            for line in detail.splitlines():
-                if not line.startswith('CONFLICT ') or ': ' not in line:
-                    continue
-                candidate = line.rsplit(': ', 1)[-1].split(' ', 1)[0]
-                if candidate and candidate not in paths:
-                    paths.append(candidate)
+            named = git(
+                repo_root,
+                'merge-tree',
+                '--write-tree',
+                '--name-only',
+                f'--merge-base={commit}^',
+                head,
+                commit,
+                check=False,
+            )
+            paths = [
+                line.strip() for line in named.stdout.splitlines()
+                if line.strip() and not line.startswith(('CONFLICT ', 'Auto-merging '))
+            ]
             return {
                 'status': 'conflict',
                 'commit': commit,
@@ -9453,6 +9508,7 @@ def validate_manifest(repo_root, manifest):
     unmapped_commits = []
     absorbed_patch_commits = []
     control_commits = []
+    derived_commits = []
     integration_merge_commits = []
     if integration_exists and ref_exists(repo_root, integration['base']):
         integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
@@ -9464,6 +9520,9 @@ def validate_manifest(repo_root, manifest):
                 continue
             if is_manifest_only_commit(repo_root, commit):
                 control_commits.append(full_sha)
+                continue
+            if is_derived_projection_commit(repo_root, manifest, commit):
+                derived_commits.append(full_sha)
                 continue
             patch_id = commit_patch_id(repo_root, commit)
             if patch_id and patch_id in base_patch_ids:
@@ -9488,6 +9547,7 @@ def validate_manifest(repo_root, manifest):
         'unmapped_commits': unmapped_commits,
         'absorbed_patch_commits': absorbed_patch_commits,
         'control_commits': control_commits,
+        'derived_commits': derived_commits,
         'merge_commits': integration_merge_commits,
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
@@ -13715,6 +13775,16 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
     validation = validate_manifest(repo_root, manifest)
     if validation['errors']:
         raise SyncwheelError('stack land STOP: manifest validation failed: ' + '; '.join(validation['errors']))
+    derived_source = [
+        commit_full_sha(repo_root, commit)
+        for commit in rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+        if is_derived_projection_commit(repo_root, manifest, commit)
+    ]
+    if derived_source:
+        raise SyncwheelError(
+            'stack land STOP: source contains derived projection commit(s): '
+            + ', '.join(derived_source)
+        )
     worktrees = landing_require_clean_worktrees(repo_root)
     declared = landing_stack_projection_is_exact(repo_root, stack)
     integration = manifest['integration']
@@ -17052,6 +17122,19 @@ class SyncwheelRevisionBackend:
         validation = validate_manifest(repo_root, manifest)
         if validation['errors']:
             self._fail('Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        missing_declared = [
+            item for item in validation['details']['stacks']
+            if item['id'] in manifest['integration'].get('stacks', [])
+            and item.get('missing_from_integration')
+        ]
+        if missing_declared:
+            self._fail(
+                'integration declared stack(s) are missing from integration: '
+                + '; '.join(
+                    f"{item['id']}=" + ','.join(item['missing_from_integration'])
+                    for item in missing_declared
+                )
+            )
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
             self._fail(
@@ -17075,9 +17158,6 @@ class SyncwheelRevisionBackend:
         ref_transaction_refs = self._expand_symbolic_target_leases(
             repo_root, ref_transaction_refs
         )
-        integration_first = (
-            bool(manifest['integration'].get('stacks')) and head != base_ref_sha
-        )
         return {
             'repoRoot': repo_root,
             'manifest': manifest,
@@ -17094,10 +17174,9 @@ class SyncwheelRevisionBackend:
             'baseRefSha': base_ref_sha,
             'baseRefObjectSha': base_ref_object_sha,
             'baseRefObservation': base_ref_observation,
-            'projectionBaseSha': head if integration_first else base_ref_sha,
-            'projectionBaseKind': (
-                'integration-tip' if integration_first else 'manifest-base'
-            ),
+            'projectionBaseSha': base_ref_sha,
+            'projectionBaseKind': 'manifest-base',
+            'integrationCompositionDigest': integration_composition_digest(manifest),
             'indexSha256': self._index_sha256(repo_root),
             'unmappedIntegrationCommits': unmapped,
             'coordination': coordination,
@@ -17178,21 +17257,36 @@ class SyncwheelRevisionBackend:
         start a new Agentwheel update, which obtains a fresh manifest lease.
         """
         remedy = 'run a new Agentwheel update'
-        expiration = {
-            'reason': reason,
-            'remedy': remedy,
-            'observedManifestDigest': journal['observedManifestDigest'],
-        }
         repo_root = self._repo_root(request)
         manifest, manifest_path = self._manifest(repo_root)
-        expiration['currentManifestDigest'] = manifest_digest(manifest)
-        event_payload = {
-            'operation_id': request.operation_id,
+        expiration = journal.get('expiration') or {
             'reason': reason,
             'remedy': remedy,
-            'observed_manifest_digest': journal['observedManifestDigest'],
-            'current_manifest_digest': expiration['currentManifestDigest'],
+            'observedDigest': (
+                journal.get('integrationCompositionDigest')
+                if journal.get('projectionRoute') == 'derived'
+                else journal['observedManifestDigest']
+            ),
+            'currentDigest': (
+                integration_composition_digest(manifest)
+                if journal.get('projectionRoute') == 'derived'
+                else manifest_digest(manifest)
+            ),
+            'decidedAt': iso_utc_now(),
         }
+        event_payload = {
+            'operation_id': request.operation_id,
+            'reason': expiration['reason'],
+            'remedy': expiration['remedy'],
+            'observed_digest': expiration['observedDigest'],
+            'current_digest': expiration['currentDigest'],
+            'decided_at': expiration['decidedAt'],
+        }
+        if journal.get('phase') != 'expired':
+            journal['phase'] = 'expired'
+            journal['expiration'] = expiration
+            self.save_journal(request, journal)
+            self.checkpoint('receipt_expired')
         recover_ledger_tail(repo_root, manifest_path)
         matches = [
             event for event in load_ledger_events(repo_root, manifest_path)
@@ -17209,12 +17303,8 @@ class SyncwheelRevisionBackend:
                 repo_root, 'revision_provider_expired', event_payload, manifest_path
             )
             self.checkpoint('expiration_ledger_event_written')
-        journal['phase'] = 'expired'
-        journal['expiration'] = expiration
-        self.save_journal(request, journal)
-        self.checkpoint('receipt_expired')
         self._fail(
-            f'operation {request.operation_id} expired: {reason}; {remedy}'
+            f'operation {request.operation_id} expired: {expiration["reason"]}; {expiration["remedy"]}'
         )
 
     def check(self, request):
@@ -17356,22 +17446,48 @@ class SyncwheelRevisionBackend:
             )
         projection = deterministic_stack_projection(
             repo_root,
-            journal.get('projectionBaseSha', journal['baseRefSha']),
+            journal['baseRefSha'],
             [journal['candidateProductCommitSha']],
         )
-        if projection['status'] == 'conflict':
-            paths = ', '.join(projection.get('paths') or []) or 'unknown path(s)'
-            self._fail(
-                'product commit has a conflicting draft projection; conflicts: '
-                f'{paths}; base {projection["base"]}; no managed ref was moved'
-            )
+        reproduces_product = projection.get('status') == 'projected' and all(
+            self._tree_entry(repo_root, projection['tip'], path) == {
+                'mode': item['mode'], 'blob': item['blob'],
+            }
+            for path, item in journal['productPathObjects'].items()
+        )
+        if reproduces_product:
+            return {
+                'projectionRoute': 'manifest-base',
+                'candidateDraftCommitSha': projection['tip'],
+                'candidateDraftTreeSha': projection['tree'],
+            }
         if projection['status'] == 'empty':
             self._fail(
                 'product commit has an empty draft projection; no managed ref was moved'
             )
+        prefixes = manifest['integration'].get('derived_paths') or []
+        paths = sorted(journal['productPathObjects'])
+        if not prefixes or not all(any(path.startswith(prefix) for prefix in prefixes) for path in paths):
+            conflicts = ', '.join(projection.get('paths') or []) or 'unknown path(s)'
+            self._fail(
+                'product commit has a conflicting draft projection; conflicts: '
+                f'{conflicts}; base {projection.get("base", journal["baseRefSha"])}; '
+                'derived route refuses paths outside integration.derived_paths'
+            )
+        prepared = self._prepare_exact_commit(
+            repo_root,
+            request.expected_head,
+            journal['productPathObjects'],
+            self.provider.product_commit_message(request)
+            + f'Syncwheel-Derived-Projection: {request.operation_id}\n',
+        )
+        if prepared is None:
+            self._fail('derived projection unexpectedly has no product delta')
         return {
-            'candidateDraftCommitSha': projection['tip'],
-            'candidateDraftTreeSha': projection['tree'],
+            'projectionRoute': 'derived',
+            'candidateProductCommitSha': prepared['commit'],
+            'candidateProductTreeSha': prepared['tree'],
+            'integrationCompositionDigest': integration_composition_digest(manifest),
         }
 
     def current_head(self, request):
@@ -17463,7 +17579,17 @@ class SyncwheelRevisionBackend:
     def _assert_operation_worktree(self, repo_root, request, journal, kind):
         manifest, _ = self._manifest(repo_root)
         if kind == 'product':
-            if manifest_digest(manifest) != journal['observedManifestDigest']:
+            observed_digest = (
+                integration_composition_digest(manifest)
+                if journal.get('projectionRoute') == 'derived'
+                else manifest_digest(manifest)
+            )
+            expected_digest = (
+                journal.get('integrationCompositionDigest')
+                if journal.get('projectionRoute') == 'derived'
+                else journal['observedManifestDigest']
+            )
+            if observed_digest != expected_digest:
                 self._fail('manifest changed before product ref ownership')
             self._ensure_after_scope(repo_root, request)
             return
@@ -17643,6 +17769,16 @@ class SyncwheelRevisionBackend:
 
     def verify_recovery_gate(self, request, journal):
         repo_root = self._repo_root(request)
+        if (
+            journal.get('projectionRoute') == 'derived'
+            and journal.get('phase') not in {'verified', 'expired'}
+        ):
+            manifest, _ = self._manifest(repo_root)
+            if integration_composition_digest(manifest) != journal.get('integrationCompositionDigest'):
+                self.expire_manifest_invalidated(
+                    request, journal,
+                    'integration composition changed while derived projection was pending',
+                )
         expected = self._journal_ref_transaction_refs(request, journal)
         self._assert_no_ref_transaction_locks(repo_root, expected)
 
@@ -17942,7 +18078,7 @@ class SyncwheelRevisionBackend:
             repo_root, commit, tree, parent, path_objects
         )
         self._verify_worktree_objects(repo_root, path_objects)
-        if kind == 'product':
+        if kind == 'product' and journal.get('projectionRoute') != 'derived':
             self._verify_draft_candidate(repo_root, request, journal)
         expected_refs = self._expected_managed_refs(
             request, journal, integration_tip, draft_owned=draft_owned
@@ -17997,10 +18133,11 @@ class SyncwheelRevisionBackend:
         if get_current_branch(repo_root) != branch:
             self._fail('primary checkout left the integration branch')
         if expected_parent == request.expected_head:
+            derived = journal.get('projectionRoute') == 'derived'
             expected_index = journal['baselineIndexSha256']
             if not journal.get('productHooksValidated'):
                 self._fail('product hooks were not durably validated before draft ownership')
-            if ref_tip(repo_root, request.draft_branch) != journal.get(
+            if not derived and ref_tip(repo_root, request.draft_branch) != journal.get(
                 'candidateDraftCommitSha'
             ):
                 self._fail('draft ownership is missing before integration publication')
@@ -18013,9 +18150,10 @@ class SyncwheelRevisionBackend:
                 journal['productPathObjects'],
             )
             self._verify_worktree_objects(repo_root, journal['productPathObjects'])
-            self._verify_draft_candidate(repo_root, request, journal)
+            if not derived:
+                self._verify_draft_candidate(repo_root, request, journal)
             expected_refs = self._expected_managed_refs(
-                request, journal, expected_parent, draft_owned=True
+                request, journal, expected_parent, draft_owned=not derived
             )
         else:
             expected_index = journal.get('productIndexSha256')
@@ -18576,7 +18714,8 @@ class SyncwheelRevisionBackend:
             self._fail('operation changed a remote-tracking ref; publication is forbidden')
         if journal.get('productCommitSha'):
             expected_refs = self._expected_managed_refs(
-                request, journal, expected_head, draft_owned=True
+                request, journal, expected_head,
+                draft_owned=journal.get('projectionRoute') != 'derived',
             )
         else:
             expected_refs = self._expected_managed_refs(
@@ -18584,7 +18723,7 @@ class SyncwheelRevisionBackend:
             )
         self._assert_ref_leases(repo_root, expected_refs)
         expected_index = (
-            journal.get('controlIndexSha256')
+            (journal.get('controlIndexSha256') or journal.get('productIndexSha256'))
             if journal.get('productCommitSha')
             else journal['baselineIndexSha256']
         )
@@ -18613,6 +18752,35 @@ class SyncwheelRevisionBackend:
             self._fail('operation draft branch differs from its journaled object')
         return self._verify_invariants(
             repo_root, request, journal, journal['controlCommitSha']
+        )
+
+    def verify_derived_final(self, request, journal):
+        repo_root = self._repo_root(request)
+        manifest, manifest_path = self._manifest(repo_root)
+        if integration_composition_digest(manifest) != journal['integrationCompositionDigest']:
+            self.expire_manifest_invalidated(
+                request, journal, 'integration composition changed before derived projection verification'
+            )
+        if branch_exists(repo_root, request.draft_branch) or request.draft_stack_id in stack_map(manifest):
+            self._fail('derived projection must not create a draft ref or stack')
+        journal['manifestDigest'] = journal['observedManifestDigest']
+        payload = {
+            'operation_id': request.operation_id,
+            'commit': journal['productCommitSha'],
+            'paths': sorted(journal['productPathObjects']),
+            'integrationCompositionDigest': journal['integrationCompositionDigest'],
+        }
+        matching = [
+            event for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'revision_provider_derived_commit'
+            and (event.get('payload') or {}).get('operation_id') == request.operation_id
+        ]
+        if matching and (len(matching) != 1 or matching[0].get('payload') != payload):
+            self._fail(f'ledger collision for derived revision-provider operation {request.operation_id}')
+        if not matching:
+            append_ledger_event(repo_root, 'revision_provider_derived_commit', payload, manifest_path)
+        return self._verify_invariants(
+            repo_root, request, journal, journal['productCommitSha']
         )
 
     def verify_no_repository_delta(self, request, journal):

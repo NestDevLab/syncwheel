@@ -190,6 +190,10 @@ class RevisionBackend(Protocol):
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def verify_derived_final(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
     def verify_no_repository_delta(
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
@@ -535,6 +539,8 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "baseRefObservation": observation["baseRefObservation"],
         "projectionBaseSha": observation["projectionBaseSha"],
         "projectionBaseKind": observation["projectionBaseKind"],
+        "integrationCompositionDigest": observation.get("integrationCompositionDigest"),
+        "projectionRoute": None,
         "baselineIndexSha256": observation["indexSha256"],
         "productIndexSha256": None,
         "controlIndexSha256": None,
@@ -609,7 +615,11 @@ def _advance(
 ) -> dict[str, Any]:
     backend.verify_recovery_gate(request, journal)
     if journal["phase"] == "expired":
-        raise RevisionProviderError(_expired_message(request, journal))
+        backend.expire_manifest_invalidated(
+            request, journal,
+            (journal.get("expiration") or {}).get("reason")
+            or "the operation receipt was invalidated",
+        )
     if journal["phase"] == "verified":
         status = journal.get("terminalStatus") or "verified"
         return _mutation_response(request, journal, status=status)
@@ -661,8 +671,9 @@ def _advance(
         if journal.get("candidateDraftCommitSha") is None:
             projection = backend.prepare_draft_projection(request, journal)
             journal.update(projection)
+            candidate = journal["candidateProductCommitSha"]
             backend.save_journal(request, journal)
-            backend.checkpoint("draft_objects_prepared")
+            backend.checkpoint("route_decided")
 
         if not journal.get("productHooksValidated"):
             backend.validate_prepared_commit(request, journal, "product")
@@ -670,7 +681,7 @@ def _advance(
             backend.save_journal(request, journal)
             backend.checkpoint("product_hooks_validated")
 
-        if not journal.get("draftRefOwned"):
+        if journal.get("projectionRoute") != "derived" and not journal.get("draftRefOwned"):
             backend.ensure_draft_ref_owned(request, journal)
             journal["draftRefOwned"] = True
             journal["draftStackId"] = request.draft_stack_id
@@ -693,6 +704,13 @@ def _advance(
         _persist_phase(backend, request, journal, "product_committed")
 
     if journal["phase"] == "product_committed":
+        if journal.get("projectionRoute") == "derived":
+            verified = backend.verify_derived_final(request, journal)
+            journal.update(verified)
+            journal["terminalStatus"] = "verified"
+            journal["publicationState"] = "derived-unpublished"
+            _persist_phase(backend, request, journal, "verified")
+            return _mutation_response(request, journal, status="verified")
         ownership = backend.ensure_stack_owned(request, journal)
         journal.update(ownership)
         journal["draftStackId"] = request.draft_stack_id
@@ -772,6 +790,8 @@ def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[s
         if request.action in MUTATING_ACTIONS:
             return _advance(backend, request, journal)
         if request.action == "release":
+            if journal["phase"] == "expired":
+                return _base_response(request.action, request.operation_id, True, "expired")
             if journal["phase"] != "prepared":
                 raise RevisionProviderError(
                     f"cannot release operation in phase {journal['phase']}; recover it instead"
