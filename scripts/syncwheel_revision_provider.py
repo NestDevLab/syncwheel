@@ -26,6 +26,7 @@ PHASES = (
     "control_committed",
     "verified",
 )
+TERMINAL_PHASES = frozenset({*PHASES, "expired"})
 REQUEST_FIELDS = frozenset(
     {
         "protocolVersion",
@@ -202,6 +203,13 @@ class RevisionBackend(Protocol):
     ) -> None: ...
 
     def verify_release(self, request: RevisionRequest, journal: dict[str, Any]) -> None: ...
+
+    def expire_manifest_invalidated(
+        self,
+        request: RevisionRequest,
+        journal: dict[str, Any],
+        reason: str,
+    ) -> None: ...
 
     def checkpoint(self, phase: str) -> None: ...
 
@@ -525,6 +533,8 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "baseRefSha": observation["baseRefSha"],
         "baseRefObjectSha": observation["baseRefObjectSha"],
         "baseRefObservation": observation["baseRefObservation"],
+        "projectionBaseSha": observation["projectionBaseSha"],
+        "projectionBaseKind": observation["projectionBaseKind"],
         "baselineIndexSha256": observation["indexSha256"],
         "productIndexSha256": None,
         "controlIndexSha256": None,
@@ -549,6 +559,7 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "controlCommitSha": None,
         "unmappedIntegrationCommits": list(observation["unmappedIntegrationCommits"]),
         "published": False,
+        "expiration": None,
     }
 
 
@@ -566,11 +577,18 @@ def _assert_matching_journal(
             f"operationId collision for {request.operation_id}: intent digest differs"
         )
     phase = journal.get("phase")
-    if phase not in PHASES:
+    if phase not in TERMINAL_PHASES:
         raise RevisionProviderError(
             f"operation {request.operation_id} has an unknown journal phase: {phase!r}"
         )
     return journal
+
+
+def _expired_message(request: RevisionRequest, journal: dict[str, Any]) -> str:
+    expiration = journal.get("expiration") or {}
+    reason = expiration.get("reason") or "the operation receipt was invalidated"
+    remedy = expiration.get("remedy") or "run a new Agentwheel update"
+    return f"operation {request.operation_id} expired: {reason}; {remedy}"
 
 
 def _persist_phase(
@@ -590,6 +608,8 @@ def _advance(
     journal: dict[str, Any],
 ) -> dict[str, Any]:
     backend.verify_recovery_gate(request, journal)
+    if journal["phase"] == "expired":
+        raise RevisionProviderError(_expired_message(request, journal))
     if journal["phase"] == "verified":
         status = journal.get("terminalStatus") or "verified"
         return _mutation_response(request, journal, status=status)
@@ -736,6 +756,8 @@ def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[s
         if request.action == "preflight":
             if existing is not None:
                 existing = _assert_matching_journal(request, existing)
+                if existing["phase"] == "expired":
+                    raise RevisionProviderError(_expired_message(request, existing))
                 backend.verify_recovery_gate(request, existing)
                 return _base_response(
                     request.action, request.operation_id, True, "prepared"

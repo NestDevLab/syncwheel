@@ -7505,10 +7505,20 @@ def deterministic_stack_projection(repo_root, base, commits):
             check=False,
         )
         if merge.returncode != 0:
+            detail = (merge.stderr.strip() or merge.stdout.strip())[:2000]
+            paths = []
+            for line in detail.splitlines():
+                if not line.startswith('CONFLICT ') or ': ' not in line:
+                    continue
+                candidate = line.rsplit(': ', 1)[-1].split(' ', 1)[0]
+                if candidate and candidate not in paths:
+                    paths.append(candidate)
             return {
                 'status': 'conflict',
                 'commit': commit,
-                'detail': (merge.stderr.strip() or merge.stdout.strip())[:2000],
+                'base': head,
+                'paths': paths,
+                'detail': detail,
             }
         tree = merge.stdout.strip()
         if not tree or tree == ref_tree(repo_root, head):
@@ -17065,6 +17075,9 @@ class SyncwheelRevisionBackend:
         ref_transaction_refs = self._expand_symbolic_target_leases(
             repo_root, ref_transaction_refs
         )
+        integration_first = (
+            bool(manifest['integration'].get('stacks')) and head != base_ref_sha
+        )
         return {
             'repoRoot': repo_root,
             'manifest': manifest,
@@ -17081,6 +17094,10 @@ class SyncwheelRevisionBackend:
             'baseRefSha': base_ref_sha,
             'baseRefObjectSha': base_ref_object_sha,
             'baseRefObservation': base_ref_observation,
+            'projectionBaseSha': head if integration_first else base_ref_sha,
+            'projectionBaseKind': (
+                'integration-tip' if integration_first else 'manifest-base'
+            ),
             'indexSha256': self._index_sha256(repo_root),
             'unmappedIntegrationCommits': unmapped,
             'coordination': coordination,
@@ -17153,6 +17170,52 @@ class SyncwheelRevisionBackend:
         path.unlink(missing_ok=True)
         if path.parent.exists():
             self._fsync_directory(path.parent)
+
+    def expire_manifest_invalidated(self, request, journal, reason):
+        """Terminally expire a receipt whose manifest lease can no longer recover.
+
+        This deliberately changes only local provider state.  The caller must
+        start a new Agentwheel update, which obtains a fresh manifest lease.
+        """
+        remedy = 'run a new Agentwheel update'
+        expiration = {
+            'reason': reason,
+            'remedy': remedy,
+            'observedManifestDigest': journal['observedManifestDigest'],
+        }
+        repo_root = self._repo_root(request)
+        manifest, manifest_path = self._manifest(repo_root)
+        expiration['currentManifestDigest'] = manifest_digest(manifest)
+        event_payload = {
+            'operation_id': request.operation_id,
+            'reason': reason,
+            'remedy': remedy,
+            'observed_manifest_digest': journal['observedManifestDigest'],
+            'current_manifest_digest': expiration['currentManifestDigest'],
+        }
+        recover_ledger_tail(repo_root, manifest_path)
+        matches = [
+            event for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'revision_provider_expired'
+            and (event.get('payload') or {}).get('operation_id') == request.operation_id
+        ]
+        if matches and (len(matches) != 1 or matches[0].get('payload') != event_payload):
+            self._fail(
+                f'ledger collision while expiring revision-provider operation '
+                f'{request.operation_id}'
+            )
+        if not matches:
+            append_ledger_event(
+                repo_root, 'revision_provider_expired', event_payload, manifest_path
+            )
+            self.checkpoint('expiration_ledger_event_written')
+        journal['phase'] = 'expired'
+        journal['expiration'] = expiration
+        self.save_journal(request, journal)
+        self.checkpoint('receipt_expired')
+        self._fail(
+            f'operation {request.operation_id} expired: {reason}; {remedy}'
+        )
 
     def check(self, request):
         observation = self._validate_repository(
@@ -17286,15 +17349,21 @@ class SyncwheelRevisionBackend:
         repo_root = self._repo_root(request)
         manifest, _ = self._manifest(repo_root)
         if manifest_digest(manifest) != journal['observedManifestDigest']:
-            self._fail('manifest changed before draft object preparation')
+            self.expire_manifest_invalidated(
+                request,
+                journal,
+                'manifest changed before draft object preparation',
+            )
         projection = deterministic_stack_projection(
             repo_root,
-            journal['baseRefSha'],
+            journal.get('projectionBaseSha', journal['baseRefSha']),
             [journal['candidateProductCommitSha']],
         )
         if projection['status'] == 'conflict':
+            paths = ', '.join(projection.get('paths') or []) or 'unknown path(s)'
             self._fail(
-                'product commit has a conflicting draft projection; no managed ref was moved'
+                'product commit has a conflicting draft projection; conflicts: '
+                f'{paths}; base {projection["base"]}; no managed ref was moved'
             )
         if projection['status'] == 'empty':
             self._fail(
@@ -17709,7 +17778,7 @@ class SyncwheelRevisionBackend:
     def _verify_draft_candidate(self, repo_root, request, journal):
         projection = deterministic_stack_projection(
             repo_root,
-            journal['baseRefSha'],
+            journal.get('projectionBaseSha', journal['baseRefSha']),
             [journal['candidateProductCommitSha']],
         )
         if projection.get('status') != 'projected':
@@ -18282,10 +18351,10 @@ class SyncwheelRevisionBackend:
         return desired_sha
 
     def _desired_stack(self, request, journal, manifest):
-        return {
+        desired = {
             'id': request.draft_stack_id,
             'branch': request.draft_branch,
-            'base': journal['baseRefSha'],
+            'base': journal.get('projectionBaseSha', journal['baseRefSha']),
             'target_remote': manifest['defaults']['canonical_remote'],
             'target_branch': manifest['defaults']['base_branch'],
             'integration_branch': manifest['integration']['branch'],
@@ -18298,6 +18367,12 @@ class SyncwheelRevisionBackend:
                 'agentwheel_plan_digest': request.plan_digest,
             },
         }
+        if journal.get('projectionBaseKind') == 'integration-tip':
+            desired['meta']['revision_provider_projection_base'] = {
+                'kind': 'integration-tip',
+                'sha': journal['projectionBaseSha'],
+            }
+        return desired
 
     def _manifest_without_operation_stack(self, manifest, request):
         stripped = copy.deepcopy(manifest)
@@ -18314,7 +18389,9 @@ class SyncwheelRevisionBackend:
     def _assert_draft_branch(self, repo_root, desired, journal):
         journal_tip = ref_tip(repo_root, desired['branch'])
         expected_tip = deterministic_stack_replay_tip(
-            repo_root, journal['baseRefSha'], desired['commits']
+            repo_root,
+            journal.get('projectionBaseSha', journal['baseRefSha']),
+            desired['commits'],
         )
         if not expected_tip:
             self._fail('owned draft projection is no longer reproducible')

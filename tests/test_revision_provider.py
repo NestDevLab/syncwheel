@@ -1081,6 +1081,119 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         repeated, _ = self.fixture.protocol_request({**request, 'action': 'recover'})
         self.assertEqual(repeated, {**finalized, 'action': 'recover'})
 
+    def test_integration_first_product_projects_on_integration_tip_and_declares_it(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        request = self.fixture.request(
+            'preflight',
+            operation_id='integration-first-lock',
+            path='locks/codex.lock',
+            before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        integration_tip = request['expectedHead']
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        self.assertEqual(finalized['status'], 'verified')
+        manifest = json.loads(
+            (self.fixture.repo / '.syncwheel' / 'manifest.json').read_text()
+        )
+        owned = next(
+            stack for stack in manifest['stacks']
+            if stack['id'] == 'agentwheel-integration-first-lock'
+        )
+        self.assertEqual(owned['base'], integration_tip)
+        self.assertEqual(
+            owned['meta']['revision_provider_projection_base'],
+            {'kind': 'integration-tip', 'sha': integration_tip},
+        )
+        self.assertEqual(
+            self.fixture.git('rev-parse', f"{finalized['productCommitSha']}^"),
+            integration_tip,
+        )
+
+    def test_manifest_invalidated_pending_receipt_expires_with_ledger_remedy(self):
+        class ManifestChangedAfterProductObjects(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(inner_self, phase):
+                if phase == 'product_objects_prepared':
+                    manifest_path = inner_self._repo_root(request) / '.syncwheel' / 'manifest.json'
+                    manifest = json.loads(manifest_path.read_text())
+                    manifest['revision_provider_test_marker'] = 'manifest changed'
+                    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        payload = self.fixture.request('preflight', operation_id='manifest-expiry')
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation manifest-expiry expired: manifest changed before draft object preparation; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(
+                ManifestChangedAfterProductObjects(protocol),
+                replace(request, action='finalize'),
+            )
+
+        journal = backend.load_journal(request)
+        self.assertEqual(journal['phase'], 'expired')
+        self.assertEqual(journal['expiration']['remedy'], 'run a new Agentwheel update')
+        events = SYNCWHEEL.load_ledger_events(self.fixture.repo)
+        expired = [
+            event for event in events
+            if event['type'] == 'revision_provider_expired'
+            and event['payload']['operation_id'] == request.operation_id
+        ]
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0]['payload']['remedy'], 'run a new Agentwheel update')
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation manifest-expiry expired: manifest changed before draft object preparation; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(backend, replace(request, action='recover'))
+
+    def test_conflicting_projection_error_names_paths_and_projection_base(self):
+        self.fixture.install_existing_stack(path='locks/codex.lock', content='first\n')
+        payload = self.fixture.request(
+            'preflight',
+            operation_id='projection-conflict-detail',
+            path='locks/codex.lock',
+            before=self.fixture.sha256('first\n'),
+            after_content='second\n',
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second\n')
+        protocol.handle_request(backend, request)
+        journal = backend.load_journal(request)
+        journal.update(
+            backend.prepare_product_commit(request, protocol.product_commit_message(request))
+        )
+        journal['projectionBaseSha'] = self.fixture.git('rev-parse', 'origin/main')
+        backend.save_journal(request, journal)
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            rf'conflicting draft projection.*locks/codex[.]lock.*base {journal["projectionBaseSha"]}',
+        ):
+            backend.prepare_draft_projection(request, journal)
+
     def test_preflight_rejects_dirty_checkout_and_operation_id_collision(self):
         dirty = self.fixture.request('preflight', operation_id='dirty-op')
         (self.fixture.repo / 'unrelated.txt').write_text('dirty\n')
@@ -1207,29 +1320,42 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
                     path = 'existing-only.txt' if scenario == 'empty' else 'base.txt'
                     fixture.install_existing_stack(path=path)
                     before_head = fixture.git('rev-parse', 'HEAD')
-                    request = fixture.request(
+                    payload = fixture.request(
                         'preflight', operation_id=f'{scenario}-projection', path=path,
                         before=fixture.sha256('existing\n'),
                         after_content='agentwheel\n',
                     )
                     if scenario == 'empty':
-                        request['paths'][0]['afterSha256'] = None
-                    fixture.protocol_request(fixture.check_request(request))
+                        payload['paths'][0]['afterSha256'] = None
+                    request = protocol.parse_request(payload)
+                    backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+                    protocol.handle_request(
+                        backend, protocol.parse_request(fixture.check_request(payload))
+                    )
                     if scenario == 'empty':
                         (fixture.repo / path).unlink()
                     else:
                         (fixture.repo / path).write_text('agentwheel\n')
-                    fixture.protocol_request(request)
-                    rejected, _ = fixture.protocol_request(
-                        {**request, 'action': 'finalize'}, expected=2
+                    protocol.handle_request(backend, request)
+                    journal = backend.load_journal(request)
+                    journal.update(
+                        backend.prepare_product_commit(
+                            request, protocol.product_commit_message(request)
+                        )
                     )
+                    journal['projectionBaseSha'] = fixture.git('rev-parse', 'origin/main')
+                    backend.save_journal(request, journal)
                     projection_word = 'empty' if scenario == 'empty' else 'conflicting'
-                    self.assertIn(f'{projection_word} draft projection', rejected['error'])
+                    with self.assertRaisesRegex(
+                        protocol.RevisionProviderError,
+                        f'{projection_word} draft projection',
+                    ):
+                        backend.prepare_draft_projection(request, journal)
                     self.assertEqual(fixture.git('rev-parse', 'HEAD'), before_head)
                     self.assertEqual(
                         fixture.git(
                             'rev-parse', '--verify',
-                            f'refs/heads/syncwheel/draft/agentwheel-{scenario}-projection',
+                            f'refs/heads/{request.draft_branch}',
                             check=False,
                         ),
                         '',
