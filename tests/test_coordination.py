@@ -1187,6 +1187,34 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertNotIn('collision', [stack['id'] for stack in manifest['stacks']])
 
+    def test_active_draft_create_keeps_the_preflight_ref_lease(self):
+        origin = self.create_remote('draft-post-preflight-collision')
+        repo = self.clone(origin, 'draft-post-preflight-collision')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        foreign_tip = self.commit_on_branch(repo, 'scratch/foreign-after-preflight', 'foreign.txt')
+        local_tip = self.commit_on_branch(repo, 'scratch/local-after-preflight', 'local.txt')
+        module = self.load_module()
+        original_materialize = module.materialize_new_stack_branch
+        source_ref = 'refs/heads/syncwheel/draft/collision'
+
+        def materialize_then_publish_foreign(repo_root, stack):
+            original_materialize(repo_root, stack)
+            self.git(repo, 'push', '-q', 'origin', f'{foreign_tip}:{source_ref}')
+
+        with mock.patch.object(
+            module, 'materialize_new_stack_branch', side_effect=materialize_then_publish_foreign
+        ):
+            with self.assertRaisesRegex(module.SyncwheelError, 'managed refs changed after the reviewed plan'):
+                module.command_stack_create(self.draft_create_args(repo, 'collision', local_tip))
+
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', source_ref).stdout.split()[0],
+            foreign_tip,
+        )
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('collision', [stack['id'] for stack in manifest['stacks']])
+
     def test_draft_create_retry_adopts_an_equivalent_published_state_after_local_save_failure(self):
         origin = self.create_remote('draft-create-retry')
         repo = self.clone(origin, 'draft-create-retry')
@@ -1214,7 +1242,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             for event in events
         ))
 
-    def test_local_only_close_rechecks_a_concurrent_publication_before_saving(self):
+    def test_local_only_close_refuses_a_concurrent_publication_before_saving(self):
         origin = self.create_remote('local-close-cas')
         repo = self.clone(origin, 'local-close-cas')
         self.init_coordinated(repo)
@@ -1246,8 +1274,163 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             publish = patches.enter_context(mock.patch.object(
                 module, 'coordinated_publish', return_value={'status': 'published', 'state_tip': 'b' * 40}
             ))
-            module.command_stack_close(self.stack_close_args(repo, 'first'))
-        publish.assert_called_once()
+            with self.assertRaisesRegex(module.SyncwheelError, 'local-only close lost its remote CAS'):
+                module.command_stack_close(self.stack_close_args(repo, 'first'))
+        publish.assert_not_called()
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('first', [item['id'] for item in manifest['stacks']])
+
+    def test_local_only_close_rolls_back_when_publication_occurs_during_save(self):
+        origin = self.create_remote('local-close-save-cas')
+        repo = self.clone(origin, 'local-close-save-cas')
+        self.init_coordinated(repo)
+        commit = self.commit_on_branch(repo, 'scratch/first', 'first.txt')
+        self.add_legacy_unpublished_draft(repo, 'first', commit)
+        module = self.load_module()
+        original_manifest, manifest_path = module.load_manifest(repo)
+        stack = module.require_stack(original_manifest, 'first')
+        source_ref = f"refs/heads/{stack['branch']}"
+        source_tip = module.ref_tip(repo, stack['branch'])
+        published_snapshot = module.coordination_manifest_snapshot(original_manifest, repo)
+        publication_visible = False
+        real_save_manifest = module.save_manifest
+
+        def read_state(*_args, **_kwargs):
+            if not publication_visible:
+                return {'tip': None, 'state': None}
+            return {
+                'tip': 'a' * 40,
+                'state': {
+                    'manifest': published_snapshot,
+                    'managed_refs': {source_ref: source_tip},
+                },
+            }
+
+        def read_refs(_repo_root, _remote, refs):
+            return {
+                ref: source_tip if publication_visible and ref == source_ref else None
+                for ref in refs
+            }
+
+        def save_while_publication_appears(path, candidate):
+            nonlocal publication_visible
+            if 'first' not in [item['id'] for item in candidate['stacks']]:
+                publication_visible = True
+            return real_save_manifest(path, candidate)
+
+        with contextlib.ExitStack() as patches:
+            patches.enter_context(mock.patch.object(module, 'read_remote_coordination_state', side_effect=read_state))
+            patches.enter_context(mock.patch.object(module, 'remote_ref_tips', side_effect=read_refs))
+            patches.enter_context(mock.patch.object(module, 'save_manifest', side_effect=save_while_publication_appears))
+            with self.assertRaisesRegex(module.SyncwheelError, 'local-only close lost its remote CAS'):
+                module.command_stack_close(self.stack_close_args(repo, 'first'))
+
+        restored = json.loads(manifest_path.read_text())
+        self.assertIn('first', [item['id'] for item in restored['stacks']])
+        self.assertFalse(any(
+            event['type'] == 'stack_closed' and event['payload'].get('stack') == 'first'
+            for event in module.load_ledger_events(repo)
+        ))
+
+    def test_draft_create_recovery_uses_the_current_operation_token(self):
+        origin = self.create_remote('draft-create-operation-token')
+        repo = self.clone(origin, 'draft-create-operation-token')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        first_commit = self.commit_on_branch(repo, 'scratch/reused-first', 'first.txt')
+        self.run_cli(repo, 'stack', 'create', 'reused', first_commit, '--draft')
+        self.run_cli(repo, 'stack', 'close', 'reused', '--force')
+        self.git(repo, 'branch', '-D', 'syncwheel/draft/reused')
+        module = self.load_module()
+        args = self.draft_create_args(repo, 'reused', first_commit)
+        real_append = module.append_ledger_event
+
+        def fail_current_completion(repo_root, event_type, payload, manifest_path=None):
+            if (
+                event_type == 'manifest_saved'
+                and payload.get('reason') == 'stack_create'
+                and (payload.get('context') or {}).get('operation_token')
+            ):
+                raise OSError('injected ledger completion failure')
+            return real_append(repo_root, event_type, payload, manifest_path)
+
+        with mock.patch.object(module, 'append_ledger_event', side_effect=fail_current_completion):
+            with self.assertRaisesRegex(OSError, 'injected ledger completion failure'):
+                module.command_stack_create(args)
+
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('reused', [item['id'] for item in saved['stacks']])
+        module.command_stack_create(args)
+        events = module.load_ledger_events(repo)
+        intents = [
+            event for event in events
+            if event['type'] == 'stack_create_intent' and event['payload'].get('stack') == 'reused'
+        ]
+        completions = [
+            event for event in events
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('reason') == 'stack_create'
+            and (event['payload'].get('context') or {}).get('stack') == 'reused'
+        ]
+        self.assertGreaterEqual(len(intents), 2)
+        self.assertGreaterEqual(len(completions), 2)
+        self.assertEqual(
+            completions[-1]['payload']['context']['operation_token'],
+            intents[-1]['payload']['operation_token'],
+        )
+
+    def test_absorbed_close_rejects_a_historical_patch_reverted_at_delivery_tip(self):
+        origin = self.create_remote('absorbed-reverted-close')
+        repo = self.clone(origin, 'absorbed-reverted-close')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'historical.txt').write_text('present\n')
+        self.git(repo, 'add', 'historical.txt')
+        self.git(repo, 'commit', '-qm', 'feat: historical patch')
+        historical = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'revert', '--no-edit', historical)
+        self.git(repo, 'push', '-q', 'origin', 'main')
+        self.git(repo, 'switch', '-q', '-c', 'scratch/reintroduce', 'origin/main')
+        (repo / 'historical.txt').write_text('present\n')
+        self.git(repo, 'add', 'historical.txt')
+        self.git(repo, 'commit', '-qm', 'feat: reintroduce historical patch')
+        reintroduced = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', previous)
+        self.run_cli(repo, 'stack', 'create', 'reintroduced', reintroduced, '--draft')
+
+        failure = self.run_cli(
+            repo, 'stack', 'close', 'reintroduced', '--force', '--reason', 'absorbed', expected=2
+        )
+
+        self.assertIn('delivery base origin/main', failure.stderr)
+        self.assertIn('would drop it', failure.stderr)
+        _, state = self.remote_state(origin)
+        self.assertIn('reintroduced', [stack['id'] for stack in state['manifest']['stacks']])
+
+    def test_absorbed_close_accepts_an_equivalent_patch_present_at_delivery_tip(self):
+        origin = self.create_remote('absorbed-present-close')
+        repo = self.clone(origin, 'absorbed-present-close')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/equivalent-source', 'delivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'equivalent', source, '--draft')
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'unrelated.txt').write_text('unrelated\n')
+        self.git(repo, 'add', 'unrelated.txt')
+        self.git(repo, 'commit', '-qm', 'chore: unrelated delivery change')
+        self.git(repo, 'cherry-pick', source)
+        self.git(repo, 'push', '-q', 'origin', 'main')
+        self.git(repo, 'switch', '-q', previous)
+
+        self.run_cli(repo, 'stack', 'close', 'equivalent', '--force', '--reason', 'absorbed')
+
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('equivalent', [stack['id'] for stack in manifest['stacks']])
+        _, state = self.remote_state(origin)
+        self.assertNotIn('equivalent', [stack['id'] for stack in state['manifest']['stacks']])
 
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')
@@ -1281,6 +1464,33 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.git(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/syncwheel/draft/new', expected=1)
         manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertEqual([stack['id'] for stack in manifest['stacks']], ['old'])
+
+    def test_create_capability_probe_fails_before_branch_materialization(self):
+        origin = self.create_remote('draft-capability-preflight')
+        repo = self.clone(origin, 'draft-capability-preflight')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        commit = self.commit_on_branch(repo, 'scratch/capability', 'capability.txt')
+        module = self.load_module()
+
+        with mock.patch.object(
+            module,
+            'atomic_push_capability_probe',
+            side_effect=module.SyncwheelError('injected atomic capability failure'),
+        ):
+            with self.assertRaisesRegex(module.SyncwheelError, 'injected atomic capability failure'):
+                module.command_stack_create(self.draft_create_args(repo, 'capability', commit))
+
+        self.git(
+            repo,
+            'rev-parse',
+            '--verify',
+            '--quiet',
+            'refs/heads/syncwheel/draft/capability',
+            expected=1,
+        )
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('capability', [stack['id'] for stack in manifest['stacks']])
 
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
