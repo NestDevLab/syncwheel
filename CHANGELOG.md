@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.40.2 - 2026-09-02
+
+- Reap a registered lane with a missing path when its lease expired or its local
+  owner PID is dead, regardless of its old configured-root location; retain a
+  recovery ref for a distinct lane-branch tip before removing the registry
+  record.
+- Honour `syncwheel_worktree_root` when opening a governed worktree lane.
+- Add dry-run-first `worktree release <lane> --reason <why>` with explicit
+  `--apply`, recovery refs, registry removal, and ledger evidence; existing
+  dirty worktrees remain protected and name their recovery remedy.
+- Let `gc --apply` reap eligible expired governed lanes even when active-active
+  coordination is disabled.
+
 ## 0.40.1 - 2026-09-02
 
 - Pass the managed ref move handshake to shell replay steps, so plumbing
