@@ -800,6 +800,32 @@ class SyncwheelFixtureTest(unittest.TestCase):
         module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
 
+    def test_reaper_anchors_before_it_deletes_the_lane_branch(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'anchor-order', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        calls = []
+        original_git = module.git
+
+        def record_git(repo_root, *args, **kwargs):
+            calls.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = record_git
+        try:
+            module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.git = original_git
+
+        recovery_index = next(index for index, args in enumerate(calls)
+                              if args[0] == 'update-ref' and args[1].startswith('refs/syncwheel/recovery/'))
+        delete_index = next(index for index, args in enumerate(calls)
+                            if args[:2] == ('update-ref', '-d'))
+        self.assertLess(recovery_index, delete_index)
+
     def test_reaper_keeps_a_retryable_record_when_ledger_append_fails(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'ledger-retry', '--json').stdout)
         self.git('worktree', 'remove', opened['lane']['path'])
