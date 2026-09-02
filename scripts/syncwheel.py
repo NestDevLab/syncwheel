@@ -96,6 +96,18 @@ DEFAULT_INTEGRATION_BRANCH = 'main-integration'
 SYNCWHEEL_TRACKING_VALUES = {'git-tracked', 'local-only'}
 SYNCWHEEL_TRACKING_GIT_TRACKED = 'git-tracked'
 SYNCWHEEL_TRACKING_LOCAL_ONLY = 'local-only'
+AUTHORITY_MODE_HUMAN_GATED = 'human-gated'
+AUTHORITY_MODE_AI_MANAGED = 'ai-managed'
+AUTHORITY_MODES = {AUTHORITY_MODE_HUMAN_GATED, AUTHORITY_MODE_AI_MANAGED}
+AUTHORITY_CLASS_SOURCE_CHANGE = 'source_change'
+AUTHORITY_CLASS_RUNTIME_CHANGE = 'runtime_change'
+AUTHORITY_CLASS_DESTRUCTIVE_REWRITE = 'destructive_rewrite'
+AUTHORITY_CLASSES = (
+    AUTHORITY_CLASS_SOURCE_CHANGE,
+    AUTHORITY_CLASS_RUNTIME_CHANGE,
+    AUTHORITY_CLASS_DESTRUCTIVE_REWRITE,
+)
+AUTHORITY_GRANTABLE_CLASSES = (AUTHORITY_CLASS_SOURCE_CHANGE, AUTHORITY_CLASS_RUNTIME_CHANGE)
 DEFAULT_SYNCWHEEL_WORKTREE_ROOT = '.syncwheel/wt'
 LEGACY_SYNCWHEEL_WORKTREE_ROOTS = ('var/syncwheel',)
 UPDATE_MODES = {'off', 'notify', 'auto'}
@@ -1799,6 +1811,62 @@ def normalize_syncwheel_tracking(value, path='manifest'):
     return value
 
 
+def default_authority_policy():
+    return {
+        'mode': AUTHORITY_MODE_HUMAN_GATED,
+        'allow': [],
+        'deny': [AUTHORITY_CLASS_DESTRUCTIVE_REWRITE],
+    }
+
+
+def normalize_authority_policy(value, path='manifest'):
+    if value is None:
+        return default_authority_policy()
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} authority must be an object')
+    mode = value.get('mode')
+    if mode not in AUTHORITY_MODES:
+        allowed = ', '.join(sorted(AUTHORITY_MODES))
+        raise SyncwheelError(f'{path} authority.mode must be one of: {allowed}')
+    classes = {}
+    for field in ('allow', 'deny'):
+        raw = value.get(field, [])
+        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+            raise SyncwheelError(f'{path} authority.{field} must be a string array')
+        unknown = sorted(set(raw) - set(AUTHORITY_CLASSES))
+        if unknown:
+            raise SyncwheelError(
+                f'{path} authority.{field} contains unknown classes: ' + ', '.join(unknown)
+                + '; allowed: ' + ', '.join(AUTHORITY_CLASSES)
+            )
+        classes[field] = set(raw)
+    if AUTHORITY_CLASS_DESTRUCTIVE_REWRITE in classes['allow']:
+        raise SyncwheelError(f'{path} authority.allow may never contain {AUTHORITY_CLASS_DESTRUCTIVE_REWRITE}')
+    classes['deny'].add(AUTHORITY_CLASS_DESTRUCTIVE_REWRITE)
+    overlap = sorted(classes['allow'] & classes['deny'])
+    if overlap:
+        raise SyncwheelError(f'{path} authority classes cannot be both allowed and denied: ' + ', '.join(overlap))
+    if mode == AUTHORITY_MODE_HUMAN_GATED and classes['allow']:
+        raise SyncwheelError(f'{path} authority.mode={AUTHORITY_MODE_HUMAN_GATED} cannot allow any class')
+    if mode == AUTHORITY_MODE_AI_MANAGED and not classes['allow']:
+        raise SyncwheelError(f'{path} authority.mode={AUTHORITY_MODE_AI_MANAGED} requires at least one allowed class')
+    return {
+        'mode': mode,
+        'allow': [item for item in AUTHORITY_CLASSES if item in classes['allow']],
+        'deny': [item for item in AUTHORITY_CLASSES if item in classes['deny']],
+    }
+
+
+def manifest_authority(manifest):
+    if not manifest:
+        return default_authority_policy()
+    return normalize_authority_policy(manifest.get('authority'))
+
+
+def authority_allows(manifest, authority_class):
+    return authority_class in manifest_authority(manifest)['allow']
+
+
 def normalize_syncwheel_worktree_root(value, path='manifest'):
     if value is None:
         return DEFAULT_SYNCWHEEL_WORKTREE_ROOT
@@ -2600,6 +2668,8 @@ def load_manifest(repo_root, manifest_path=None):
         raise SyncwheelError(f'manifest version must be one of: {allowed}')
     if 'syncwheel_tracking' in data:
         normalize_syncwheel_tracking(data.get('syncwheel_tracking'))
+    if 'authority' in data:
+        data['authority'] = normalize_authority_policy(data.get('authority'))
     repository_mode = data.get('repository_mode', 'delivery')
     if repository_mode not in REPOSITORY_MODES:
         raise SyncwheelError(
@@ -9571,6 +9641,7 @@ def command_status(args):
         output['validation'] = validation
         output['plan'] = build_plan(repo_root, manifest, validation)
         output['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest)
+        output['authority'] = manifest_authority(manifest)
     if args.json:
         print(json.dumps(output, indent=2))
         return 1 if manifest and not output['validation']['details']['primary_checkout']['compliant'] else 0
@@ -9578,6 +9649,8 @@ def command_status(args):
     print(f"current_branch: {snapshot['current_branch']}")
     print(f"canonical_remote_head: {snapshot['canonical_remote_head'] or 'unknown'}")
     print(f"manifest: {manifest_path if manifest else 'missing'}")
+    if manifest:
+        print(f"authority: {format_authority_policy(output['authority'])}")
     print('\nremotes:')
     for line in snapshot['remotes']:
         print(f'  - {line}')
@@ -14627,6 +14700,8 @@ def syncwheel_tracking_report(repo_root, manifest_path):
         'manifest_tracked': manifest_tracked,
         'syncwheel_tracking': tracking,
         'syncwheel_tracking_present': tracking is not None,
+        'authority': manifest_authority(manifest) if manifest_present else None,
+        'authority_present': bool(manifest_present and 'authority' in manifest),
         'syncwheel_worktree_root': worktree_root,
         'effective_worktree_root': str(effective_root),
         'gitignore_path': str(gitignore),
@@ -14642,6 +14717,7 @@ def print_syncwheel_tracking_report(report):
     print(f"repo: {report['repo_root']}")
     print(f"manifest: {report['manifest_path'] if report['manifest_present'] else 'missing'}")
     print(f"syncwheel_tracking: {report['syncwheel_tracking'] or 'missing'}")
+    print(f"authority: {format_authority_policy(report['authority'])}")
     print(f"syncwheel_worktree_root: {report['syncwheel_worktree_root']}")
     print(f"effective_worktree_root: {report['effective_worktree_root']}")
     print(f"manifest_tracked: {'yes' if report['manifest_tracked'] else 'no'}")
@@ -14655,6 +14731,84 @@ def print_syncwheel_tracking_report(report):
             print(f'  - {action}')
     else:
         print('actions: none')
+
+
+def format_authority_policy(policy):
+    if not policy:
+        return 'missing'
+    allow = ','.join(policy['allow']) or '-'
+    deny = ','.join(policy['deny'])
+    return f"{policy['mode']} allow={allow} deny={deny}"
+
+
+def authority_report(repo_root, manifest_path):
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    present = bool(manifest and 'authority' in manifest)
+    policy = manifest_authority(manifest) if manifest else None
+    warnings = []
+    if manifest and not present:
+        warnings.append(
+            'authority is not declared; agents must treat this repository as '
+            f'{AUTHORITY_MODE_HUMAN_GATED} until a maintainer sets it'
+        )
+    return {
+        'repo_root': str(repo_root),
+        'manifest_path': str(manifest_path),
+        'manifest_present': manifest is not None,
+        'authority': policy,
+        'authority_present': present,
+        'warnings': warnings,
+    }
+
+
+def print_authority_report(report):
+    print(f"repo: {report['repo_root']}")
+    print(f"manifest: {report['manifest_path'] if report['manifest_present'] else 'missing'}")
+    print(f"authority: {format_authority_policy(report['authority'])}")
+    print(f"authority_declared: {'yes' if report['authority_present'] else 'no'}")
+    for warning in report['warnings']:
+        print(f'warning: {warning}')
+
+
+def command_repo_authority_status(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    report = authority_report(repo_root, manifest_path)
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 0
+    print_authority_report(report)
+    return 0
+
+
+def command_repo_authority_set(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    if not manifest:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    ensure_manifest_in_repo(repo_root, manifest_path)
+    current = manifest_authority(manifest)
+    proposed = normalize_authority_policy(
+        {'mode': args.mode, 'allow': list(args.allow or []), 'deny': []}, 'requested'
+    )
+    if not args.apply:
+        print(f"current_authority: {format_authority_policy(current)}")
+        print(f"proposed_authority: {format_authority_policy(proposed)}")
+        print('dry_run: pass --apply to write this policy')
+        return 0
+    manifest['authority'] = proposed
+    save_manifest_with_ledger(
+        repo_root, manifest_path, manifest, 'repo_authority_set', {'authority': proposed}
+    )
+    if manifest.get('syncwheel_tracking') == SYNCWHEEL_TRACKING_GIT_TRACKED:
+        git_add_paths(repo_root, [manifest_path], force_paths=[manifest_path])
+    report = authority_report(repo_root, manifest_path)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print_authority_report(report)
+    return 0
 
 
 def command_repo_tracking_status(args):
@@ -17074,6 +17228,22 @@ def build_parser():
     repo_tracking_set_p.add_argument('-a', '--apply', action='store_true')
     repo_tracking_set_p.add_argument('-j', '--json', action='store_true')
     repo_tracking_set_p.set_defaults(func=command_repo_tracking_set)
+    repo_authority_p = repo_sub.add_parser(
+        'authority', help='inspect or set the repo-local agent authority policy'
+    )
+    repo_authority_sub = repo_authority_p.add_subparsers(dest='repo_authority_command', required=True)
+    repo_authority_status_p = repo_authority_sub.add_parser('status', parents=[common])
+    repo_authority_status_p.add_argument('-j', '--json', action='store_true')
+    repo_authority_status_p.set_defaults(func=command_repo_authority_status)
+    repo_authority_set_p = repo_authority_sub.add_parser('set', parents=[common])
+    repo_authority_set_p.add_argument('mode', choices=sorted(AUTHORITY_MODES))
+    repo_authority_set_p.add_argument(
+        '--allow', action='append', choices=list(AUTHORITY_GRANTABLE_CLASSES),
+        help='authority class agents may exercise without a human gate (repeatable)',
+    )
+    repo_authority_set_p.add_argument('-a', '--apply', action='store_true')
+    repo_authority_set_p.add_argument('-j', '--json', action='store_true')
+    repo_authority_set_p.set_defaults(func=command_repo_authority_set)
 
     self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
     self_sub = self_p.add_subparsers(dest='self_command', required=True)

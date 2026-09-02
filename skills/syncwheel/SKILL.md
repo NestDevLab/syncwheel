@@ -389,6 +389,17 @@ syncwheel repo tracking set git-tracked --apply
 syncwheel repo tracking set local-only --apply
 ```
 
+Then read how far you may take a change without asking:
+
+```bash
+syncwheel repo authority status
+```
+
+`ai-managed` with `source_change` allowed means commit, push, PR, and merge of
+a scoped change proceed without a gate at each stage; `runtime_change` only if
+listed; `destructive_rewrite` never. Missing block means `human-gated`. Never
+set or widen this policy yourself.
+
 ### `git-tracked` → commit the manifest
 
 Commit `.syncwheel/manifest.json` (and `.syncwheel/manifests/README.md`). Keep

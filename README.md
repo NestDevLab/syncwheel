@@ -94,6 +94,13 @@ tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
 through `.git/info/exclude`. New managed worktrees default to repo-relative
 `.syncwheel/wt/`.
 
+`authority` declares how far agents may take a change on their own. A repo
+with `mode=ai-managed` and `source_change` allowed lets an agent edit, test,
+commit, push, open and merge the PR without asking at each step; `runtime_change`
+must be granted separately; `destructive_rewrite` can never be granted. An
+absent block means `human-gated`. Inspect and set it with
+`syncwheel repo authority status` and `syncwheel repo authority set`.
+
 ## Active-active coordination
 
 Manifest versions 2 and 3 can safely coordinate the same integration branch from
