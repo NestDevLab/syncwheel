@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.40.1 - 2026-09-02
+
+- Pass the managed ref move handshake to shell replay steps, so plumbing
+  rebuilds and `reconcile --apply` are no longer refused by the
+  `reference-transaction` guard that told the user to run exactly those
+  commands.
+
 ## 0.40.0 - 2026-09-02
 
 - Add an optional `authority` block to the manifest so a repository can declare
