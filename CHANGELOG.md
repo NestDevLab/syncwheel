@@ -1,5 +1,61 @@
 # Changelog
 
+## 0.40.2 - 2026-09-02
+
+- Reap a registered lane with a missing path when its lease expired or its local
+  owner PID is dead, regardless of its old configured-root location; retain a
+  recovery ref for every existing lane-branch tip before removing the registry
+  record, including a tip equal to the lane base.
+- Honour `syncwheel_worktree_root` when opening a governed worktree lane.
+- Add dry-run-first `worktree release <lane> --reason <why>` with explicit
+  `--apply`, recovery refs, registry removal, and ledger evidence; existing
+  dirty worktrees remain protected and name their recovery remedy.
+- Let `gc --apply` reap eligible expired governed lanes even when active-active
+  coordination is disabled.
+- Resolve a moved lane through Git's current branch worktree before expiry
+  cleanup, preserve dirty or locked worktrees, and report a clear dirty-race
+  remedy if state changes immediately before removal.
+- Restrict automatic lane cleanup to commands that are actually applying a
+  mutation, while keeping previews read-only; worktree-creating `stack git` and
+  `int git` forms are explicitly included.
+- Make recovery-ref creation, pending cleanup, and ledger append retries
+  idempotent, preserving release event type and reason after interruptions, and
+  make `gc` preview and apply enumerate the same pending categories.
+- Make governed-lane cleanup lock-first: acquire a tokenized Git worktree lock,
+  verify its exact admin-dir and `gitdir`, persist retry intent, then anchor and
+  delete refs through expected-old operations before touching the worktree.
+- Probe tracked and untracked state immediately before removing only the
+  verified registration, retain reappearing or changed paths, and never use a
+  global worktree prune; interrupted removal and ref conflicts remain
+  retryable through their recovery ref.
+- Verify that the ref transaction reports `commit: ok`, accept the documented
+  release retry for `branch_advanced`, and cover non-UTC lease expiry plus every
+  lock, ordering, persistence, and targeted-cleanup invariant with
+  mutation-sensitive tests.
+- Recover a clone-local governed-worktree registry lock after `SIGKILL` when its
+  owner is dead, reused, or zombie, and recover an empty or truncated lock after
+  a short initialization grace; retain the atomically renamed stale inode and a
+  durable recovery log.
+- Fsync a cleanup-intent ledger event before refs, save registry generations by
+  durable pre-image-digest CAS, and reconstruct an interrupted cleanup from the
+  ledger even if the registry rolls back.
+- Keep cleanup intents and terminal events selected by stack create, add, or
+  capture in the effective external or personal manifest ledger.
+- Make the real automatic `branch_advanced` state retryable through both `gc
+  --apply` and an explicit release that re-anchors the new tip, make completed
+  releases idempotent after a lost response, and select GC candidates under the
+  registry lock so a reused lane id cannot yield a null-code failure.
+- Answer `worktree release` with the terminal another concurrent Syncwheel
+  command already wrote for the lane, instead of an unknown lane, and record the
+  operator's `--reason` as a `governed_worktree_release_noted` ledger event
+  whenever the terminal carries a different one.
+- Let `worktree release` complete every pending reap state, not only
+  `branch_advanced`, keeping the terminal type and reason of the intent already
+  fsynced for it.
+- Report an uninitialized registry lock recovery as such rather than as a stale
+  owner, and prune retained stale lock inodes nobody holds during the next
+  cleanup, keeping the recovery log as the durable evidence.
+
 ## 0.40.1 - 2026-09-02
 
 - Pass the managed ref move handshake to shell replay steps, so plumbing

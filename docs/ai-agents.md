@@ -77,9 +77,13 @@ active-active channel must use the coordination remote.
 - treat a light lane as an operational boundary, not a sandbox: do not install
   dependencies there, and return to a clean checkout before stack ownership
   operations
-- review governed-worktree warnings on normal commands; clean expired lanes are
-  recovered to a local recovery ref before reaping, while dirty or unknown lanes
-  must remain visible until explicitly handled
+- review governed-worktree warnings on normal commands; a missing lane with an
+  expired lease or known dead local owner is recovered to a local recovery ref
+  before reaping even if its registry path is outside the current root, while an
+  existing dirty or unknown lane must remain visible until explicitly handled
+- preview `worktree release <lane> --reason <why>` before using `--apply` for a
+  dead or abandoned lane; apply records the reason in the ledger and refuses an
+  existing dirty worktree with its recovery remedy
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback
@@ -89,8 +93,9 @@ active-active channel must use the coordination remote.
   review the handoff and use `publish --accept-merge` only for that explicit
   disjoint-stack decision
 - keep local worktrees that need investigation with `worktree lock <stack>`;
-  `gc --apply` removes only eligible local, tombstoned, remotely recoverable
-  artifacts and never deletes a remote branch
+  `gc --apply` reaps eligible expired governed lanes whether or not active-active
+  coordination is enabled, removes only eligible local tombstoned artifacts, and
+  never deletes a remote branch
 - if manifest and Git disagree, fix the manifest or call out the conflict explicitly
 - do not claim a repo is aligned if integration and PR branches still disagree
 - stop on a stale channel plan, replay conflict, unknown required observation,

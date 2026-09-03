@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.40.1`
+Current version: `0.40.2`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -239,8 +239,86 @@ destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
 the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
-worktree and local lane branch. A dirty, unavailable, outside-root, or current
-directory lane is retained and reported; it is never removed automatically.
+worktree and local lane branch. A dirty, unavailable, or current-directory lane
+is retained and reported; it is never removed automatically. A missing lane
+whose lease expired, or whose local owner PID is known to be dead, is reaped on
+the next applicable mutation even when an old registry path is outside the
+current configured root. If Git reports that the branch's worktree moved,
+Syncwheel resolves and checks the current path before deciding whether the lane
+is eligible, and retains moved dirty or externally locked worktrees.
+
+The clone-local registry mutex records its PID, process start time, and a unique
+token. A successor first obtains the old inode's non-blocking `flock`, then
+atomically renames and logs it when the metadata proves owner death, PID reuse,
+or an unreaped zombie. An empty or truncated lock is recovered only after a
+brief initialization grace, so a plain retry can resume even when `SIGKILL`
+lands between exclusive creation and metadata fsync. The creator verifies that
+its inode still owns the lock path before entering the critical section, so a
+stolen uninitialized lock never puts two processes inside it. That recovery is
+reported as an uninitialized lock rather than a dead owner, because its creator
+may be alive and merely descheduled, and the renamed inode is pruned by the next
+cleanup once nobody holds it; the durable recovery log keeps the evidence. While
+holding that mutex, cleanup takes a Git worktree lock with a deterministic
+Syncwheel token before classifying the lane or changing a ref. A lock failure is
+reported as a lane in use and stops the operation.
+
+Under both locks, Syncwheel verifies the exact Git admin directory and its
+`gitdir`, fsyncs a ledger `governed_worktree_cleanup_intent`, and saves the
+pending registry state through a temp-file and parent-directory fsync guarded by
+the observed pre-image digest. Stack create, add, and capture keep that intent
+and its terminal event in the ledger selected by the effective shared,
+personal, or external manifest. Only then may cleanup create the recovery ref
+and commit one expected-old ref transaction that verifies the recovery ref
+while deleting the lane branch. A restart rebuilds missing or rolled-back
+registry state from the durable intent. A final tracked/untracked probe precedes
+removal of the exact verified registration; cleanup never uses a global `git
+worktree prune`.
+
+A reappearing path, changed registration, or moved recovery ref fails closed
+with a retryable record. If a clean lane branch advanced after its first anchor,
+the recorded `gc --apply` remedy anchors the new tip and completes while
+retaining the earlier recovery ref. The locks cover concurrent Syncwheel cleanup
+and ordinary non-forced Git worktree operations. Raw mutation of
+Syncwheel-owned refs, double-force worktree operations, and direct non-owner
+writes into a lane during cleanup are outside the supported concurrency model
+and fail closed when their effects are detectable.
+
+To retire a known dead or abandoned lane deliberately, preview the operation
+first and provide a durable reason:
+
+```bash
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example"
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --apply
+```
+
+`release` is dry-run by default. With `--apply`, it creates a recovery ref for
+an existing lane-branch tip, removes the registry record, and appends a ledger
+event. An explicitly abandoned record whose path is already missing can still
+be released; any remaining Git worktree registration is removed before the
+registry record. It refuses an existing dirty lane and names the recovery
+remedy instead of removing it. Pending cleanup, including a branch that advanced
+before its expected-old transaction, and ledger writes are retryable and
+idempotent. An explicit release may supersede the automatic `branch_advanced`
+intent, retain its earlier recovery ref, anchor the new tip, and close with the
+operator's release reason; a release-originated retry retains its original
+reason. A release also completes any other pending reap state, including one
+left by `SIGKILL`, terminalizing it under the intent already fsynced for it. If
+another Syncwheel command already terminalized the lane, or the first release
+completed but its response was lost, the release reports that terminal ledger
+event instead of an unknown lane. Whenever the recorded terminal is not this
+operator's own release reason, `--apply` records that reason as a
+`governed_worktree_release_noted` ledger event, once per terminal; the dry run
+records nothing. `gc` reselects eligible lanes while holding the registry lock,
+avoids stale lane-id reuse, and also works when active-active coordination is
+disabled.
+
+Automatic lane reaping runs only before an explicitly mutating lifecycle
+operation. Status, check, handoff, `gc` without `--apply`, `reconcile` or
+`resume` without `--apply`, and every other preview leave the registry,
+branches, recovery refs, and ledger unchanged. `stack git` and `int git` join
+that mutation allowlist only when `--auto-worktree` or `--worktree` explicitly
+authorizes worktree creation; passthrough Git commands in an existing worktree
+do not implicitly trigger lane reaping.
 
 `status`, `check`, `handoff`, and `gc` include structured governed-worktree
 diagnostics in JSON. Repo-aware terminal commands show actionable yellow
