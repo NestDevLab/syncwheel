@@ -323,6 +323,65 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'plan': plan,
         }
 
+    def legacy_state_manifest_digest(self, repo, state):
+        """Reproduce the 0.42.0 digest: the normalized public snapshot, not the file."""
+        module = self.load_module()
+        integration_ref = f"refs/heads/{state['manifest']['integration']['branch']}"
+        committed = json.loads(
+            self.git(
+                repo,
+                'show',
+                f"{state['managed_refs'][integration_ref]}:.syncwheel/manifest.json",
+            ).stdout
+        )
+        return module.canonical_json_digest(
+            module.coordination_manifest_snapshot(committed, repo, state)
+        )
+
+    def republish_state_manifest_digest(self, repo, digest, coordination_id='default'):
+        module = self.load_module()
+        origin_ref = f'refs/heads/syncwheel/state/{coordination_id}'
+        state_tip, state = self.remote_state(self.origin_of(repo), coordination_id)
+        state['manifest_digest'] = digest
+        rewritten = module.create_coordination_state_commit(
+            repo, state, state.get('parent_state')
+        )
+        self.git(repo, 'push', '-q', '--force', 'origin', f'{rewritten}:{origin_ref}')
+        return rewritten, state
+
+    def origin_of(self, repo):
+        return Path(
+            self.git(repo, 'remote', 'get-url', 'origin').stdout.strip()
+        )
+
+    def prepare_legacy_digest_state(self, name, integration_membership='legacy'):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        manifest = self.init_coordinated(
+            repo, integration_membership=integration_membership
+        )
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        _, published = self.remote_state(origin)
+        legacy_digest = self.legacy_state_manifest_digest(repo, published)
+        self.assertNotEqual(legacy_digest, published['manifest_digest'])
+        legacy_tip, legacy_state = self.republish_state_manifest_digest(
+            repo, legacy_digest
+        )
+        self.assertEqual(
+            legacy_digest, module.canonical_json_digest(legacy_state['manifest'])
+        )
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': manifest,
+            'legacy_tip': legacy_tip,
+            'legacy_state': legacy_state,
+            'legacy_digest': legacy_digest,
+            'control_digest': published['manifest_digest'],
+        }
+
     def prepare_additive_compose(self, name='additive-compose'):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
@@ -677,6 +736,226 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'refs/heads/integration/shared',
             check=False,
         )
+
+    def test_guard_accepts_both_recorded_digest_forms_and_reports_which(self):
+        fixture = self.prepare_legacy_digest_state('legacy-digest-forms')
+        module = fixture['module']
+        repo = fixture['repo']
+
+        legacy = module.verify_coordination_state_manifest_digest(
+            repo, fixture['legacy_state'], 'origin'
+        )
+        self.assertEqual(
+            legacy['form'], module.COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+        )
+        self.assertEqual(legacy['recorded_digest'], fixture['legacy_digest'])
+        self.assertEqual(legacy['control_manifest_digest'], fixture['control_digest'])
+
+        control = dict(
+            fixture['legacy_state'], manifest_digest=fixture['control_digest']
+        )
+        self.assertEqual(
+            module.verify_coordination_state_manifest_digest(
+                repo, control, 'origin'
+            )['form'],
+            module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+        )
+
+        unrelated = dict(fixture['legacy_state'], manifest_digest='0' * 64)
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'does not match the control manifest'
+        ):
+            module.verify_coordination_state_manifest_digest(
+                repo, unrelated, 'origin'
+            )
+
+    def test_publish_over_a_legacy_state_migrates_the_recorded_digest(self):
+        fixture = self.prepare_legacy_digest_state('legacy-digest-publish')
+        module = fixture['module']
+        repo = fixture['repo']
+        _, manifest_path = module.load_manifest(repo)
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        (repo / 'after-legacy.txt').write_text('after legacy\n')
+        self.git(repo, 'add', 'after-legacy.txt')
+        self.git(repo, 'commit', '-qm', 'test: integration commit above a legacy state')
+
+        published = self.run_cli(repo, 'int', 'push')
+        self.assertIn('migrated the legacy coordination state', published.stdout)
+
+        child_tip, child = self.remote_state(fixture['origin'])
+        self.assertEqual(child['parent_state'], fixture['legacy_tip'])
+        committed = json.loads(
+            self.git(
+                repo,
+                'show',
+                f"{child['managed_refs']['refs/heads/integration/shared']}"
+                ':.syncwheel/manifest.json',
+            ).stdout
+        )
+        self.assertEqual(child['manifest_digest'], module.manifest_digest(committed))
+        self.assertNotEqual(child['manifest_digest'], fixture['legacy_digest'])
+        self.assertEqual(
+            module.verify_coordination_state_manifest_digest(
+                repo, child, 'origin'
+            )['form'],
+            module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+        )
+
+        migrations = [
+            event for event in module.load_ledger_events(repo, manifest_path)
+            if event['type'] == 'coordination_state_digest_migrated'
+        ]
+        self.assertEqual(len(migrations), 1)
+        self.assertEqual(
+            migrations[0]['payload'],
+            {
+                'coordination_id': 'default',
+                'parent_state': fixture['legacy_tip'],
+                'state_tip': child_tip,
+                'from_form': module.COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT,
+                'from_digest': fixture['legacy_digest'],
+                'to_form': module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+                'to_digest': child['manifest_digest'],
+            },
+        )
+
+        (repo / 'after-migration.txt').write_text('after migration\n')
+        self.git(repo, 'add', 'after-migration.txt')
+        self.git(repo, 'commit', '-qm', 'test: integration commit above a migrated state')
+        again = self.run_cli(repo, 'int', 'push')
+        self.assertNotIn('migrated the legacy coordination state', again.stdout)
+        self.assertEqual(
+            len([
+                event for event in module.load_ledger_events(repo, manifest_path)
+                if event['type'] == 'coordination_state_digest_migrated'
+            ]),
+            1,
+        )
+
+    def test_stack_push_over_a_legacy_state_migrates_the_recorded_digest(self):
+        fixture = self.prepare_legacy_digest_state('legacy-digest-stack')
+        module = fixture['module']
+        repo = fixture['repo']
+
+        stack_tip = self.commit_on_branch(repo, 'pr/legacy', 'legacy-stack.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'legacy', stack_tip, '--branch', 'pr/legacy'
+        )
+        pushed = self.run_cli(repo, 'stack', 'push', 'legacy')
+
+        self.assertIn('migrated the legacy coordination state', pushed.stdout)
+        _, state = self.remote_state(fixture['origin'])
+        self.assertEqual(state['parent_state'], fixture['legacy_tip'])
+        self.assertEqual(
+            state['managed_refs']['refs/heads/pr/legacy'], stack_tip
+        )
+        self.assertNotEqual(state['manifest_digest'], fixture['legacy_digest'])
+        self.assertEqual(
+            module.verify_coordination_state_manifest_digest(
+                repo, state, 'origin'
+            )['form'],
+            module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+        )
+
+    def test_compose_accepts_a_legacy_base_and_remote_state_digest(self):
+        fixture = self.prepare_legacy_digest_state(
+            'legacy-digest-compose', integration_membership='required'
+        )
+        module = fixture['module']
+        repo = fixture['repo']
+
+        compose_tip = self.commit_on_branch(repo, 'pr/composed', 'composed.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'composed', compose_tip, '--branch', 'pr/composed'
+        )
+        manifest, _ = module.load_manifest(repo)
+        plan, _, _ = module.coordination_compose_stack_plan(
+            repo,
+            manifest,
+            'composed',
+            fixture['legacy_tip'],
+            fixture['legacy_digest'],
+        )
+
+        self.assertEqual(plan['status'], 'publish-required')
+        self.assertEqual(plan['knownBaseStateTip'], fixture['legacy_tip'])
+        self.assertEqual(plan['expectedRemoteStateTip'], fixture['legacy_tip'])
+        self.assertEqual(plan['integrationManifestDigest'], fixture['control_digest'])
+
+    def test_repair_migrates_a_legacy_state_digest_instead_of_reporting_noop(self):
+        fixture = self.prepare_legacy_digest_state('legacy-digest-repair')
+        module = fixture['module']
+        repo = fixture['repo']
+        manifest, _ = module.load_manifest(repo)
+        ref = 'refs/heads/integration/shared'
+
+        plan, _ = module.coordination_repair_plan(
+            repo, manifest, ref, module.COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
+        )
+        self.assertEqual(plan['status'], 'digest-migration-required')
+        self.assertEqual(plan['expectedRecordedTip'], plan['expectedRemoteTip'])
+        self.assertEqual(
+            plan['stateDigestForm'],
+            module.COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT,
+        )
+        self.assertEqual(plan['recordedManifestDigest'], fixture['legacy_digest'])
+        self.assertEqual(plan['expectedManifestDigest'], fixture['control_digest'])
+
+        github_plan, _ = module.coordination_repair_plan(repo, manifest, ref)
+        self.assertEqual(github_plan['status'], 'digest-migration-required')
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'digest migration requires the'
+        ):
+            module.apply_coordination_repair_plan(repo, manifest, github_plan)
+
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(repo_root, command, remote, refs, check=True):
+            pushes.append({'command': command, 'refs': refs})
+            return original_push(repo_root, command, remote, refs, check=check)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_repair_plan(repo, manifest, plan)
+
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(
+            result['backend'], module.COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
+        )
+        self.assertEqual(result['manifest_digest'], fixture['control_digest'])
+        self.assertEqual(result['previous_manifest_digest'], fixture['legacy_digest'])
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(pushes[0]['refs'], [plan['stateRef']])
+        self.assertFalse(any(f':{ref}' in item for item in pushes[0]['command']))
+
+        child_tip, child = self.remote_state(fixture['origin'])
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], fixture['legacy_tip'])
+        self.assertEqual(child['changed_refs'], {})
+        self.assertEqual(child['manifest'], fixture['legacy_state']['manifest'])
+        self.assertEqual(child['manifest_digest'], fixture['control_digest'])
+        self.assertEqual(
+            child['managed_refs'], fixture['legacy_state']['managed_refs']
+        )
+        self.assertEqual(
+            child['repair_evidence']['proof'],
+            module.COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF,
+        )
+        self.assertEqual(
+            child['repair_evidence']['recordedManifestDigest'],
+            fixture['legacy_digest'],
+        )
+        self.assertEqual(
+            module.verify_coordination_state_manifest_digest(
+                repo, child, 'origin'
+            )['form'],
+            module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+        )
+
+        settled, _ = module.coordination_repair_plan(
+            repo, manifest, ref, module.COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
+        )
+        self.assertEqual(settled['status'], 'noop')
 
     def test_v2_manifest_and_snapshot_both_reject_derived_provenance(self):
         module = self.load_module()

@@ -91,6 +91,14 @@ COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
 COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF = 'exact-tree-equality'
 COORDINATION_REPAIR_FAST_FORWARD_BACKEND = 'fast-forward-state-cas'
 COORDINATION_REPAIR_FAST_FORWARD_PROOF = 'exact-fast-forward-ancestry'
+COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND = 'state-digest-migration'
+COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF = 'exact-control-manifest-digest'
+COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS = 'legacy-digest-migration'
+COORDINATION_REPAIR_DIGEST_MIGRATION_PRECONDITION = (
+    'exact-control-manifest-digest-and-state-only-cas'
+)
+COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST = 'control-manifest-file'
+COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT = 'legacy-normalized-snapshot'
 COORDINATION_REPAIR_MAX_ADVANCE_COMMITS = 1024
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
@@ -7751,7 +7759,7 @@ def coordination_manifest_digest(manifest, repo_root=None):
     return manifest_digest(committed)
 
 
-def coordination_state_manifest_digest(repo_root, state, remote=None):
+def coordination_state_control_manifest(repo_root, state, remote=None):
     snapshot = state.get('manifest') or {}
     integration = snapshot.get('integration') or {}
     branch = integration.get('branch')
@@ -7776,17 +7784,75 @@ def coordination_state_manifest_digest(repo_root, state, remote=None):
         raise SyncwheelError(
             'coordination state integration tip has no control manifest'
         )
-    return manifest_digest(committed)
+    return committed
 
 
-def verify_coordination_state_manifest_digest(repo_root, state, remote=None):
-    observed = coordination_state_manifest_digest(repo_root, state, remote)
-    if state.get('manifest_digest') != observed:
+def coordination_state_manifest_digest(repo_root, state, remote=None):
+    return manifest_digest(
+        coordination_state_control_manifest(repo_root, state, remote)
+    )
+
+
+def coordination_state_legacy_manifest_digest(repo_root, control_manifest, state):
+    """Return the digest form published before 0.42.2: the normalized snapshot."""
+    try:
+        snapshot = coordination_manifest_snapshot(control_manifest, repo_root, state)
+    except SyncwheelError:
+        return None
+    return manifest_digest(snapshot)
+
+
+def classify_coordination_state_manifest_digest(repo_root, state, remote=None):
+    control_manifest = coordination_state_control_manifest(repo_root, state, remote)
+    control_digest = manifest_digest(control_manifest)
+    recorded = state.get('manifest_digest')
+    if recorded == control_digest:
+        form = COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST
+    elif recorded == coordination_state_legacy_manifest_digest(
+        repo_root, control_manifest, state
+    ):
+        form = COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+    else:
         raise SyncwheelError(
             'coordination state manifest_digest does not match the control manifest '
             'on its integration tip'
         )
-    return observed
+    return {
+        'form': form,
+        'recorded_digest': recorded,
+        'control_manifest_digest': control_digest,
+    }
+
+
+def coordination_state_manifest_digest_form(repo_root, state, remote=None):
+    """Classify without failing closed, for callers that only report the form."""
+    try:
+        return classify_coordination_state_manifest_digest(repo_root, state, remote)
+    except SyncwheelError:
+        return None
+
+
+def verify_coordination_state_manifest_digest(repo_root, state, remote=None):
+    return classify_coordination_state_manifest_digest(repo_root, state, remote)
+
+
+def record_coordination_state_digest_migration(
+    repo_root, manifest_path, config, digest_form, parent_state, state_tip, digest,
+):
+    return append_ledger_event(
+        repo_root,
+        'coordination_state_digest_migrated',
+        {
+            'coordination_id': config['id'],
+            'parent_state': parent_state,
+            'state_tip': state_tip,
+            'from_form': digest_form['form'],
+            'from_digest': digest_form['recorded_digest'],
+            'to_form': COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+            'to_digest': digest,
+        },
+        manifest_path,
+    )
 
 
 def managed_ref_names(manifest):
@@ -8257,6 +8323,37 @@ def build_fast_forward_coordination_repair_state(previous_state, previous_tip, p
     return validate_coordination_state(child, previous_state['coordination_id'])
 
 
+def build_digest_migration_coordination_repair_state(
+    previous_state, previous_tip, plan, installation
+):
+    """Republish an unchanged state under the control-manifest digest form.
+
+    This is the one repair that rewrites manifest_digest: the parent recorded the
+    pre-0.42.2 normalized-snapshot digest, which no publication guard can satisfy.
+    """
+    child = build_coordination_repair_state(
+        previous_state,
+        previous_tip,
+        plan['repairedRef'],
+        plan['expectedRemoteTip'],
+        installation,
+    )
+    child['changed_refs'] = {}
+    child['publication_scope'] = f"repair-digest:{plan['repairedRef']}"
+    child['manifest_digest'] = plan['expectedManifestDigest']
+    child['repair_evidence'] = {
+        'schemaVersion': 1,
+        'planDigest': plan['planDigest'],
+        'proof': COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF,
+        'ref': plan['repairedRef'],
+        'recordedTip': plan['expectedRecordedTip'],
+        'observedTip': plan['expectedRemoteTip'],
+        'recordedManifestDigest': plan['recordedManifestDigest'],
+        'manifestDigest': plan['expectedManifestDigest'],
+    }
+    return validate_coordination_state(child, previous_state['coordination_id'])
+
+
 def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='github-lock'):
     require_sha1_repository(repo_root, 'coordination repair')
     config = coordination_config(manifest)
@@ -8290,7 +8387,21 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     if not observed:
         raise SyncwheelError(f'coordination repair managed ref is absent: {repaired_ref}')
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
-    status = 'noop' if expected_recorded == observed else 'repair-required'
+    ref_repair_required = expected_recorded != observed
+    digest_form = coordination_state_manifest_digest_form(
+        repo_root, previous['state'], config['remote']
+    )
+    digest_migration_required = (
+        not ref_repair_required
+        and digest_form is not None
+        and digest_form['form'] == COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+    )
+    if ref_repair_required:
+        status = 'repair-required'
+    elif digest_migration_required:
+        status = 'digest-migration-required'
+    else:
+        status = 'noop'
     payload = {
         'schemaVersion': COORDINATION_REPAIR_PLAN_SCHEMA_VERSION,
         'operation': 'coordination-repair',
@@ -8307,7 +8418,16 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
         'precondition': 'externally-verified-write-freeze-or-server-transaction',
         'freezeBackend': freeze_backend,
     }
-    if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and status != 'noop':
+    if digest_migration_required:
+        payload.update({
+            'repairClass': COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS,
+            'stateDigestForm': digest_form['form'],
+            'recordedManifestDigest': digest_form['recorded_digest'],
+            'expectedManifestDigest': digest_form['control_manifest_digest'],
+            'proof': COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF,
+            'precondition': COORDINATION_REPAIR_DIGEST_MIGRATION_PRECONDITION,
+        })
+    if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and ref_repair_required:
         active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
         if repaired_ref not in active_refs:
             raise SyncwheelError(
@@ -8331,7 +8451,7 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
             'proof': COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF,
             'precondition': 'exact-tree-equivalence-and-state-only-cas',
         })
-    if freeze_backend == COORDINATION_REPAIR_FAST_FORWARD_BACKEND and status != 'noop':
+    if freeze_backend == COORDINATION_REPAIR_FAST_FORWARD_BACKEND and ref_repair_required:
         active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
         if repaired_ref not in active_refs:
             raise SyncwheelError(
@@ -8499,6 +8619,15 @@ class FastForwardStateCasCoordinationRepairBackend(
     proof = COORDINATION_REPAIR_FAST_FORWARD_PROOF
 
 
+class DigestMigrationStateCasCoordinationRepairBackend(
+    TreeEquivalentStateCasCoordinationRepairBackend
+):
+    """Rewrite only the recorded control digest of an otherwise unchanged state."""
+
+    name = COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
+    proof = COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF
+
+
 def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     if not isinstance(plan, dict):
         raise SyncwheelError('coordination repair plan must be a JSON object')
@@ -8518,6 +8647,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             backend = TreeEquivalentStateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_FAST_FORWARD_BACKEND:
             backend = FastForwardStateCasCoordinationRepairBackend()
+        elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND:
+            backend = DigestMigrationStateCasCoordinationRepairBackend()
         else:
             backend = CoordinationRepairBackend()
     supplied_digest = plan.get('planDigest')
@@ -8535,8 +8666,41 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         raise SyncwheelError('coordination repair backend does not match the reviewed plan')
     tree_equivalent_repair = backend.name == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
     fast_forward_repair = backend.name == COORDINATION_REPAIR_FAST_FORWARD_BACKEND
-    state_only_repair = tree_equivalent_repair or fast_forward_repair
-    if tree_equivalent_repair and plan.get('status') != 'noop':
+    digest_migration_repair = backend.name == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
+    state_only_repair = (
+        tree_equivalent_repair or fast_forward_repair or digest_migration_repair
+    )
+    if plan.get('status') == 'digest-migration-required' and not digest_migration_repair:
+        raise SyncwheelError(
+            'coordination repair digest migration requires the '
+            f'{COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND} backend'
+        )
+    if digest_migration_repair:
+        required_proof = {
+            'repairClass', 'stateDigestForm', 'recordedManifestDigest',
+            'expectedManifestDigest', 'proof',
+        }
+        missing_proof = sorted(required_proof - set(plan))
+        if missing_proof:
+            raise SyncwheelError(
+                'coordination repair digest-migration plan is missing: '
+                + ', '.join(missing_proof)
+            )
+        if (
+            plan.get('status') != 'digest-migration-required'
+            or plan.get('repairClass') != COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS
+            or plan.get('stateDigestForm')
+            != COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+            or plan.get('proof') != COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF
+            or plan.get('precondition')
+            != COORDINATION_REPAIR_DIGEST_MIGRATION_PRECONDITION
+            or plan.get('expectedRecordedTip') != plan.get('expectedRemoteTip')
+            or not isinstance(plan.get('expectedManifestDigest'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', plan['expectedManifestDigest'])
+            or plan.get('recordedManifestDigest') == plan['expectedManifestDigest']
+        ):
+            raise SyncwheelError('coordination repair digest-migration proof is invalid')
+    if tree_equivalent_repair and plan.get('status') == 'repair-required':
         required_proof = {
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
         }
@@ -8553,7 +8717,7 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             or plan.get('precondition') != 'exact-tree-equivalence-and-state-only-cas'
         ):
             raise SyncwheelError('coordination repair tree-equivalence proof is invalid')
-    if fast_forward_repair and plan.get('status') != 'noop':
+    if fast_forward_repair and plan.get('status') == 'repair-required':
         required_proof = {
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree',
             'expectedAdvanceCommits', 'expectedAdvanceCommitCount',
@@ -8598,11 +8762,16 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         'stateRef', 'expectedStateTip', 'expectedRecordedTip', 'expectedRemoteTip',
         'guardedRefs', 'localManifestDigest', 'precondition',
     ]
-    if tree_equivalent_repair and plan.get('status') != 'noop':
+    if digest_migration_repair:
+        comparison_keys.extend([
+            'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
+            'expectedManifestDigest', 'proof',
+        ])
+    if tree_equivalent_repair and plan.get('status') == 'repair-required':
         comparison_keys.extend([
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
         ])
-    if fast_forward_repair and plan.get('status') != 'noop':
+    if fast_forward_repair and plan.get('status') == 'repair-required':
         comparison_keys.extend([
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree',
             'expectedAdvanceCommits', 'expectedAdvanceCommitCount',
@@ -8628,6 +8797,10 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         )
     elif fast_forward_repair:
         child = build_fast_forward_coordination_repair_state(
+            previous['state'], previous['tip'], plan, installation
+        )
+    elif digest_migration_repair:
+        child = build_digest_migration_coordination_repair_state(
             previous['state'], previous['tip'], plan, installation
         )
     else:
@@ -8695,7 +8868,16 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             raise SyncwheelError(
                 'coordination repair post-verification failed: invalid fast-forward evidence'
             )
-    return {
+        if digest_migration_repair and (
+            verified.get('manifest_digest') != plan['expectedManifestDigest']
+            or verified.get('manifest') != previous['state']['manifest']
+            or evidence.get('recordedManifestDigest') != plan['recordedManifestDigest']
+            or evidence.get('manifestDigest') != plan['expectedManifestDigest']
+        ):
+            raise SyncwheelError(
+                'coordination repair post-verification failed: invalid digest-migration evidence'
+            )
+    repaired = {
         'status': 'repaired',
         'state_tip': child_tip,
         'parent_state': previous['tip'],
@@ -8704,6 +8886,11 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         'backend_result': result,
         'proof': plan.get('proof'),
     }
+    if digest_migration_repair:
+        repaired['state_digest_form'] = COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST
+        repaired['manifest_digest'] = plan['expectedManifestDigest']
+        repaired['previous_manifest_digest'] = plan['recordedManifestDigest']
+    return repaired
 
 
 def coordination_compose_stack_plan(
@@ -9508,16 +9695,18 @@ def validate_coordination_publication_base(
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
     if not state:
-        return
+        return None
     if not coordination_state_matches_remote(repo_root, config, state):
         raise SyncwheelError(
             'published coordination state no longer matches its managed remote refs; run handoff and resolve manually'
         )
-    verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
+    digest_form = verify_coordination_state_manifest_digest(
+        repo_root, state, config['remote']
+    )
     remote_snapshot = state['manifest']
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
     if remote_snapshot == local_snapshot:
-        return
+        return digest_form
 
     remote_stacks = stack_snapshot_map(remote_snapshot)
     local_stacks = stack_snapshot_map(local_snapshot)
@@ -9735,7 +9924,7 @@ def validate_coordination_publication_base(
             raise SyncwheelError(
                 'local integration configuration differs from published state without publishing integration'
             )
-        return
+        return digest_form
 
     remote_tip = state.get('managed_refs', {}).get(integration_ref)
     if integration_ref in changed_refs and remote_tip and not coordination_ref_is_safe_successor(
@@ -9749,6 +9938,7 @@ def validate_coordination_publication_base(
             'local integration branch is not a safe successor of the published integration ref; '
             'run handoff and resolve the overlap'
         )
+    return digest_form
 
 
 def coordinated_publish(
@@ -9865,7 +10055,7 @@ def coordinated_publish(
             raise SyncwheelError(
                 'coordinated publish STOP: managed refs changed after the reviewed plan'
             )
-    validate_coordination_publication_base(
+    base_digest_form = validate_coordination_publication_base(
         repo_root,
         manifest,
         config,
@@ -9964,7 +10154,29 @@ def coordinated_publish(
         clear_pending_coordination_merge(repo_root, config)
         record_coordination_state_seen(repo_root, config, state_commit)
         print(quoted(command))
-        return {'status': 'published', 'state_tip': state_commit}
+        published = {'status': 'published', 'state_tip': state_commit}
+        if base_digest_form:
+            published['base_state_digest_form'] = base_digest_form['form']
+        if (
+            base_digest_form
+            and base_digest_form['form']
+            == COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+        ):
+            record_coordination_state_digest_migration(
+                repo_root,
+                manifest_path,
+                config,
+                base_digest_form,
+                expected['tip'],
+                state_commit,
+                state['manifest_digest'],
+            )
+            published['migrated_manifest_digest'] = state['manifest_digest']
+            print(
+                'coordinated publish: migrated the legacy coordination state '
+                'manifest_digest to the control manifest form'
+            )
+        return published
     finally:
         release_local_coordination_lease(repo_root, token)
 
@@ -21607,13 +21819,16 @@ def build_parser():
             'github-lock',
             COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
             COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+            COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
         ],
         default='github-lock',
         help=(
             'reviewed repair backend: github-lock remains unsupported; '
             'tree-equivalent-state-cas requires exact tree equality; '
             'fast-forward-state-cas requires exact bounded ancestry; '
-            'both change only append-only coordination state'
+            'state-digest-migration republishes a pre-0.42.2 state under the '
+            'control-manifest digest; all three change only append-only '
+            'coordination state'
         ),
     )
     coordination_repair_p.add_argument(
