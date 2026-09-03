@@ -11,8 +11,11 @@ coordination state.
 `post-checkout`, `pre-commit`, and `reference-transaction` bundle. The command honors `core.hooksPath`.
 When a hook already exists, Syncwheel moves it to a stable chain path and runs it
 after its own check. The guard and user hook both run, and a failure from either
-rejects the operation. Per-hook ownership sidecars record the generated and chained
-digests. Removal is also plan-first, refuses modified/unowned hooks, and restores
+rejects the operation. On `reference-transaction`, git 2.54 added a pre-lock
+`preparing` phase and the guard only decides in `prepared`, so a chained hook that
+rejects during `preparing` aborts the transaction before the guard runs.
+Per-hook ownership sidecars record the generated and chained digests.
+Removal is also plan-first, refuses modified/unowned hooks, and restores
 every chained hook. A changed chained user hook is not treated as a modified
 Syncwheel wrapper: `hooks install --apply` rebaselines only its recorded digest,
 preserves its contents, and makes later removal restore that exact version.

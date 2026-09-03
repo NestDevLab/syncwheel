@@ -21,6 +21,14 @@ SPEC = importlib.util.spec_from_file_location('syncwheel_managed_ref_guard', MOD
 syncwheel = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(syncwheel)
 
+# git >= 2.54 also runs the hook in a pre-lock "preparing" phase. A chain that
+# rejects there aborts the transaction before the guard runs.
+CHAIN_LOG_PHASE = 'printf "user-%s\\n" "${1:-unknown}" >>"$SYNCWHEEL_TEST_CLI_LOG"\n'
+CHAIN_REJECTING_PREPARED = (
+    '#!/bin/sh\n' + CHAIN_LOG_PHASE + '[ "${1:-}" = prepared ] || exit 0\nexit 7\n'
+)
+CHAIN_REJECTING_EVERY_PHASE = '#!/bin/sh\n' + CHAIN_LOG_PHASE + 'exit 7\n'
+
 
 class ManagedRefGuardTests(unittest.TestCase):
     def setUp(self):
@@ -143,6 +151,13 @@ class ManagedRefGuardTests(unittest.TestCase):
             text=True,
         ).strip()
         return old, new
+
+    def hook_order(self, log_path):
+        """Recorded hook order without the pre-lock 'preparing' phase."""
+        return [
+            entry for entry in log_path.read_text().splitlines()
+            if entry != 'user-preparing'
+        ]
 
     def write_selected_manifest(self, path, branch):
         manifest = json.loads(json.dumps(self.manifest))
@@ -850,12 +865,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             self.repo, 'reference-transaction'
         )
         order_log = self.temp_root / 'hook-order.log'
-        self.write_executable(
-            hook,
-            '#!/bin/sh\n'
-            'printf "user-%s\\n" "${1:-unknown}" >>"$SYNCWHEEL_TEST_CLI_LOG"\n'
-            'exit 7\n',
-        )
+        self.write_executable(hook, CHAIN_REJECTING_PREPARED)
         syncwheel.install_managed_push_hook(self.repo, apply=True)
         old, new = self.descendant_commit()
         env = self._clean_env()
@@ -874,7 +884,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             subprocess.check_output(['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True).strip(),
             old,
         )
-        order = order_log.read_text().splitlines()
+        order = self.hook_order(order_log)
         self.assertEqual(order[:2], ['guard', 'user-prepared'])
         self.assertIn('user-aborted', order)
         self.assertIn('refusing unauthorized primary integration ref move', moved.stderr)
@@ -886,12 +896,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             self.repo, 'reference-transaction'
         )
         order_log = self.temp_root / 'authorized-hook-order.log'
-        self.write_executable(
-            hook,
-            '#!/bin/sh\n'
-            'printf "user-%s\\n" "${1:-unknown}" >>"$SYNCWHEEL_TEST_CLI_LOG"\n'
-            'exit 7\n',
-        )
+        self.write_executable(hook, CHAIN_REJECTING_PREPARED)
         syncwheel.install_managed_push_hook(self.repo, apply=True)
         old, new = self.descendant_commit('authorized descendant')
         env = self._syncwheel_authorized_env()
@@ -910,9 +915,36 @@ class ManagedRefGuardTests(unittest.TestCase):
             subprocess.check_output(['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True).strip(),
             old,
         )
-        order = order_log.read_text().splitlines()
+        order = self.hook_order(order_log)
         self.assertEqual(order[:2], ['guard', 'user-prepared'])
         self.assertIn('user-aborted', order)
+
+    def test_chain_rejecting_every_phase_holds_the_managed_ref(self):
+        subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)
+        _, hook, _, _, _ = syncwheel.managed_hook_paths(
+            self.repo, 'reference-transaction'
+        )
+        order_log = self.temp_root / 'rejected-hook-order.log'
+        self.write_executable(hook, CHAIN_REJECTING_EVERY_PHASE)
+        syncwheel.install_managed_push_hook(self.repo, apply=True)
+        old, new = self.descendant_commit('rejected descendant')
+        env = self._syncwheel_authorized_env()
+        env['SYNCWHEEL_TEST_CLI_LOG'] = str(order_log)
+
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo,
+            env=env,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True).strip(),
+            old,
+        )
+        self.assertIn('user-aborted', order_log.read_text().splitlines())
 
     def test_primary_guard_state_write_is_atomic(self):
         syncwheel.save_primary_guard(
