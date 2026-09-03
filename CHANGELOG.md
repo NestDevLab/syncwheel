@@ -20,6 +20,12 @@
   guard retarget reasons; keep partial bundles in degraded mode; rebaseline changed
   chained user hooks without overwriting them; and consolidate command and internal
   writer policy in one entrypoint registry with execute-time manifest classification.
+- Document that git 2.54 runs the `reference-transaction` hook in a pre-lock
+  `preparing` phase, where a chained user hook rejects before the guard decides
+  in `prepared`.
+- Stop counting repo-local Syncwheel state as primary-checkout dirt, so a
+  git-tracked manifest a Syncwheel command just wrote no longer refuses the next
+  mutation with capture and lane remedies that cannot move it.
 
 ## 0.42.0 - 2026-09-02
 
