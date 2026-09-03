@@ -1106,11 +1106,19 @@ It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes
 then names the corresponding Syncwheel publisher. Existing
 hooks are chained and restored on removal; `core.hooksPath` is honored.
 
-The same bundle installs `post-checkout` and `pre-commit` guards for the primary
-checkout. A switch away from the manifest integration branch returns a visible
-failure after Git completes the switch; the following commit is blocked. Dedicated
-feature worktrees remain valid. The checkout hook cannot undo Git's completed branch
-switch, so restore a mismatched checkout losslessly rather than resetting dirty work.
+The same bundle installs `post-checkout`, `pre-commit`, and `reference-transaction` guards
+for the primary checkout (0.42.4+). `post-checkout` compares the worktree with the declared
+branch and reports a visible failure if a checkout moved it elsewhere — Git has already
+completed the switch, so restore a mismatched checkout losslessly rather than resetting
+dirty work. `pre-commit` blocks both that mismatch and a manual commit while the primary is
+correctly on the integration branch. `reference-transaction` blocks every unauthorized
+update to the integration ref, including a fast-forward, rewind, creation, or deletion, that
+did not go through Syncwheel. Syncwheel's own control and in-place rebuild commits pass
+through a short-lived, single-use, per-process nonce; dedicated feature worktrees and
+plumbing-materialized branches are unaffected. A refusal names `syncwheel worktree open
+<lane> --into <stack>` for new work or `syncwheel stack capture-integration <stack> HEAD`
+for work already committed on the primary. Every built-in mutation also refuses to start
+while the primary has tracked changes, naming the same remedies.
 
 For `git-tracked` repositories the bundle is required by default. Every normal
 repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
@@ -1268,6 +1276,19 @@ Common aliases:
 ## AI agent usage
 
 Agents should not infer stack ownership from memory when the repository is meant to be maintained via `syncwheel`.
+
+Four ratified working rules (MGT-0206), in full in
+[the skill](skills/syncwheel/SKILL.md#ratified-working-rules-read-this-first) and
+[docs/ai-agents.md](docs/ai-agents.md#ratified-working-rules-read-this-first):
+
+1. never author or commit in the primary checkout — open a governed lane with
+   `syncwheel worktree open <lane> [--into <stack>] [--full]`
+2. never resolve a replay conflict with raw git — retry with `--replay-mode desk`, then
+   resolve through `stack absorb` / `stack resolve-integration`
+3. integration composition is declared and visible — check `syncwheel int show` before
+   testing there or blaming your own code
+4. every mutating command carries `--reason`, mandatory in `ai-managed` repositories,
+   surfaced in `syncwheel ledger show` with the actor and command
 
 Recommended sequence:
 1. `repo tracking status`
