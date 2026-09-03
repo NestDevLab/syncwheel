@@ -49,8 +49,10 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    ```
    A manual `git merge` or `git commit` on the integration branch during a conflict is
    outside Syncwheel's bookkeeping. The next `stack rebuild` / `int rebuild` reconstructs
-   the branch from the manifest's own commit projection, has no record that a manual
-   resolution ever happened, and silently drops it.
+   the branch from the manifest's own commit projection and never consults that resolution,
+   so the work is lost. `reconcile` refuses with the same conflict on every later run,
+   because its pre-check replays the declared stacks from scratch each time: the manual
+   resolution can never make it pass.
 
 3. **Integration composition is a declared, visible operation.** Before testing on
    integration, or before blaming your own code for something that looks broken there,

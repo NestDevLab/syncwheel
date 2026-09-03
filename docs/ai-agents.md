@@ -35,7 +35,8 @@ existed, it just was not prominent enough. Follow all four exactly.
    `syncwheel stack absorb <stack> [<path>...|--staged]` or `syncwheel stack
    resolve-integration <stack> <resolved-commit>...`. A manual `git merge`/`git commit` on
    integration is invisible to Syncwheel: the next rebuild reconstructs the branch from the
-   manifest's own commit projection and silently drops that resolution.
+   manifest's own commit projection and never consults that resolution, so the work is lost
+   and `reconcile` keeps refusing with the same conflict.
 3. Integration composition is declared and visible — inspect it with `syncwheel int show`
    before testing there or blaming your own code. Add a stack with `syncwheel stack create
    <id> [<commit-or-range>...] [--draft]` then `syncwheel int rebuild --reason "<why>"`;
