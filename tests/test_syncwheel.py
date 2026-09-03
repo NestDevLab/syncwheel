@@ -4185,29 +4185,32 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertTrue(report['snapshot']['working_tree_dirty'])
         self.assertIn('?? dirty.txt', report['snapshot']['working_tree_status'])
 
-    def test_stack_absorb_moves_integration_changes_to_stack(self):
+    def test_stack_absorb_refuses_a_dirty_primary_before_moving_changes(self):
         Path(self.repo / 'beta.txt').write_text('beta\nabsorbed\n')
+        before_stack = self.git('rev-parse', 'pr/feature-b')
 
-        result = self.run_cli('stack', 'absorb', 'feature-b', 'beta.txt', expected=0)
+        result = self.run_cli('stack', 'absorb', 'feature-b', 'beta.txt', expected=2)
 
-        self.assertIn('feature-b: absorbed changes into pr/feature-b', result.stdout)
-        self.assertEqual(self.tracked_status(), '')
-        self.assertEqual(self.git('show', 'pr/feature-b:beta.txt'), 'beta\nabsorbed')
-        manifest = self.read_manifest()
-        feature_b = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
-        self.assertEqual(feature_b['commits'], self.git('rev-list', 'main..pr/feature-b').splitlines())
+        self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
+        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), 'beta\nabsorbed\n')
 
-    def test_stack_absorb_can_absorb_staged_hunks_only(self):
+    def test_stack_absorb_refuses_staged_hunks_in_a_dirty_primary(self):
         original = Path(self.repo / 'beta.txt').read_text()
         Path(self.repo / 'beta.txt').write_text(original + 'staged\n')
         self.git('add', 'beta.txt')
         Path(self.repo / 'alpha.txt').write_text('alpha\nunstaged\n')
 
-        self.run_cli('stack', 'absorb', 'feature-b', '--staged', expected=0)
+        result = self.run_cli('stack', 'absorb', 'feature-b', '--staged', expected=2)
 
-        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), original)
+        self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertIn('syncwheel worktree open <lane> --into feature-b', result.stderr)
+        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), original + 'staged\n')
         self.assertEqual(Path(self.repo / 'alpha.txt').read_text(), 'alpha\nunstaged\n')
-        self.assertEqual(self.tracked_status(), 'M alpha.txt')
+        status = self.tracked_status()
+        self.assertIn('alpha.txt', status)
+        self.assertIn('beta.txt', status)
 
     def test_reconcile_apply_rebuilds_stack_updates_manifest_and_rebuilds_integration(self):
         beta = self.git('rev-parse', 'main')
@@ -4362,7 +4365,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
         self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'pr-feature-b').exists())
 
-    def test_reconcile_apply_preflights_dirty_integration_before_rebuilding_a_stack(self):
+    def test_reconcile_apply_preflights_a_dirty_primary_before_rebuilding_a_stack(self):
         self.prepare_reconcile_apply_worktree_scenario()
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         before_manifest = manifest.read_text()
@@ -4373,7 +4376,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         result = self.run_cli('reconcile', '--no-fetch', '--apply', expected=2)
 
-        self.assertIn(f'{self.repo} is not clean', result.stderr)
+        self.assertIn('primary checkout is dirty', result.stderr)
         self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
         self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
         self.assertEqual(manifest.read_text(), before_manifest)
