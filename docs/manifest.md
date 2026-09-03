@@ -20,13 +20,24 @@ alter it. Its identity and dates are inherited deterministically from the replay
 parent; the same parent and manifest produce the same SHA. Before moving the
 ref, Syncwheel fsyncs a local ledger intent containing a fresh operation ID,
 the source preimage digest, and the expected control-commit SHA. After the ref
-moves, the checked-out branch and manifest source are aligned before a keyed
-ledger receipt records the actual SHA, digest, actor, reason, command, and
-replay mode. A retry repairs an incomplete ledger tail under lock and completes
-only an operation proven by that local intent; a control commit learned from
-another clone never authorizes replacing a different local proposal. A receipt
-already durable at the crash boundary is not duplicated, while a later rebuild
-of the same deterministic SHA has a new operation ID and its own receipt.
+moves, Syncwheel first aligns the checked-out index and files with `read-tree`
+without moving the branch ref, then saves the manifest source, and only then
+writes the keyed ledger receipt with the actual SHA, digest, actor, reason,
+command, and replay mode. The whole sequence is serialized by one clone-local
+lock keyed by repository and integration branch, independent of an external
+manifest path. The ref tip is checked immediately before and after checkout
+alignment; a concurrent advance terminally abandons the intent and is never
+rewound with `reset --hard`.
+
+A retry repairs an incomplete ledger tail under lock and reads pending intents
+before inspecting the current ref subject or requiring the manifest file. It
+can therefore complete the CAS and restore a manifest removed by an in-place
+replay. Only the current intent's source and expected digests authorize that
+recovery; a digest appearing in older ledger history is not authority, and a
+control commit learned from another clone never authorizes replacing a
+different local proposal. A receipt already durable at the crash boundary is
+not duplicated, while a later rebuild of the same deterministic SHA has a new
+operation ID and its own receipt.
 External manifest files are written from the same desired in-memory manifest
 as the control commit. `int rebuild --reason TEXT` is required for an
 `ai-managed` repository and is the explicit path for adopting a reviewed local

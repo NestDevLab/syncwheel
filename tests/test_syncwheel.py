@@ -5641,7 +5641,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         control_commit = self.git('rev-parse', 'integration/control-checkout-retry')
         persisted, _ = module.load_manifest(self.repo, external)
-        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(desired))
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(stale))
         self.assertEqual(self.git('status', '--short'), '')
 
         with module.manifest_write_transaction(self.repo, external):
@@ -5650,12 +5650,74 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             )
 
         self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(desired))
         events = [
             event for event in module.load_ledger_events(self.repo, external)
             if event['type'] == 'manifest_saved'
             and (event.get('payload') or {}).get('control_commit') == control_commit
         ]
         self.assertEqual(len(events), 1)
+
+    def test_control_manifest_alignment_never_rewinds_a_concurrent_ref_advance(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/control-cas-race'
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-before-cas-race'
+        external = self.tmp / 'cas-race-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, desired, parent
+        )
+        control_tree = self.git('rev-parse', f'{control_commit}^{{tree}}')
+        concurrent_tip = self.git(
+            'commit-tree', control_tree, '-p', control_commit,
+            '-m', 'test: concurrent integration advance',
+        )
+        before = external.read_bytes()
+
+        def advance_before_alignment(stage):
+            if stage == 'before_checkout_alignment':
+                self.git(
+                    'update-ref', f'refs/heads/{branch}', concurrent_tip, control_commit
+                )
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module,
+                'control_manifest_io_checkpoint',
+                side_effect=advance_before_alignment,
+            ):
+                with self.assertRaisesRegex(
+                    module.ControlManifestAlignmentDrift,
+                    'advanced beyond.*without moving the ref',
+                ):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place'
+                    )
+
+        self.assertEqual(self.git('rev-parse', branch), concurrent_tip)
+        self.assertEqual(external.read_bytes(), before)
+        abandoned = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'control_manifest_persistence_abandoned'
+        ]
+        self.assertEqual(len(abandoned), 1)
+        self.assertEqual(
+            abandoned[0]['payload']['outcome'], 'checkout_alignment_ref_drift'
+        )
 
     def test_control_manifest_recovery_requires_local_intent_for_external_proposal(self):
         module = self.load_syncwheel_module()
@@ -5704,6 +5766,51 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(local_proposal))
         self.assertEqual(module.manifest_digest(committed), module.manifest_digest(local_proposal))
+
+    def test_historical_manifest_digest_does_not_authorize_control_divergence(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/historical-proposal'
+        local_proposal = json.loads(json.dumps(baseline))
+        local_proposal['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        local_proposal['stacks'] = []
+        local_proposal['defaults']['replay_mode'] = 'ephemeral'
+        foreign_control = json.loads(json.dumps(local_proposal))
+        foreign_control['defaults']['replay_mode'] = 'plumbing'
+        external = self.tmp / 'historical-proposal-manifest.json'
+        external.write_text(json.dumps(local_proposal, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        with module.manifest_write_transaction(self.repo, external):
+            module.save_manifest_with_ledger(
+                self.repo,
+                external,
+                local_proposal,
+                'record historical local proposal',
+            )
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, foreign_control, parent
+        )
+        self.git('update-ref', f'refs/heads/{branch}', control_commit, parent)
+        before = external.read_bytes()
+
+        with module.manifest_write_transaction(self.repo, external):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'no local persistence intent'
+            ):
+                module.recover_incomplete_control_manifest_persistence(
+                    self.repo, external, local_proposal
+                )
+
+        self.assertEqual(external.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', branch), control_commit)
 
     def test_control_manifest_retry_accepts_control_index_and_replay_worktree(self):
         module = self.load_syncwheel_module()

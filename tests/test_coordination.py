@@ -3,9 +3,11 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -72,9 +74,11 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             )
         return result
 
-    def run_cli(self, repo, *args, expected=0):
+    def run_cli(self, repo, *args, expected=0, extra_env=None):
         env = dict(os.environ)
         env.update(self.environment)
+        if extra_env:
+            env.update(extra_env)
         result = subprocess.run(
             ['python3', str(CLI), *args],
             cwd=repo,
@@ -88,6 +92,25 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
                 f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
         return result
+
+    def wait_for_path(self, path, process, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if Path(path).exists():
+                return
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                self.fail(
+                    f'process exited before checkpoint: {process.returncode}\n'
+                    f'STDOUT:\n{stdout}\nSTDERR:\n{stderr}'
+                )
+            time.sleep(0.01)
+        process.kill()
+        stdout, stderr = process.communicate()
+        self.fail(
+            f'timed out waiting for checkpoint {path}\n'
+            f'STDOUT:\n{stdout}\nSTDERR:\n{stderr}'
+        )
 
     def load_module(self):
         spec = importlib.util.spec_from_file_location('syncwheel_coordination_under_test', CLI)
@@ -142,6 +165,27 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             repo,
             'hooks', 'remove', '--disable',
             '--reason', 'coordination fixture uses raw primary branch setup', '--apply',
+        )
+
+    def track_fixture_ignore_in_replay_base(self, repo):
+        self.git(repo, 'add', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
+        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+
+    def adopt_initialized_control_manifest(self, repo, reason):
+        """Adopt an initialized cross-clone proposal through the explicit external path."""
+        internal = repo / '.syncwheel' / 'manifest.json'
+        external = self.tmp / f'{repo.name}-reviewed-manifest.json'
+        external.write_bytes(internal.read_bytes())
+        self.git(repo, 'restore', '--worktree', '--', '.syncwheel/manifest.json')
+        self.run_cli(
+            repo,
+            'int', 'rebuild', '--manifest', str(external), '--reason', reason,
+        )
+        self.run_cli(
+            repo,
+            'int', 'rebuild',
+            '--reason', f'{reason}; establish the internal-source receipt',
         )
 
     def set_integration_membership(self, repo, integration_membership):
@@ -343,7 +387,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'remote_state': remote_state,
             'orphan_tip': orphan_tip,
             'new_tip': new_tip,
-            'integration_tip': base_state['managed_refs'][
+            'integration_tip': remote_state['managed_refs'][
                 'refs/heads/integration/shared'
             ],
             'integration_commits': integration_commits,
@@ -419,6 +463,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         origin = self.create_remote()
         first = self.clone(origin, 'first')
         self.init_coordinated(first)
+        self.track_fixture_ignore_in_replay_base(first)
         self.run_cli(first, 'int', 'push')
         first_tip, first_state = self.remote_state(origin)
         module = self.load_module()
@@ -473,6 +518,10 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'integration/shared',
         )
         self.disable_fixture_hooks(second)
+        self.adopt_initialized_control_manifest(
+            second,
+            'adopt reviewed cross-clone control manifest',
+        )
         self.run_cli(second, 'int', 'push')
         second_tip, second_state = self.remote_state(origin)
 
@@ -1031,6 +1080,244 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(full['projection_status'], 'convergent')
         self.assertEqual(full['managed_refs']['refs/heads/pr/feature-a'], feature_sha)
 
+    def prepare_control_manifest_sigkill_recovery(self, name, stage):
+        origin = self.create_remote(name=f'{name}-origin')
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo)
+        # Keep the fixture's generated ignore policy in the replay base so a
+        # manifest-less checkout is still clean enough for the retry itself.
+        self.git(repo, 'add', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
+        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        feature_sha = self.commit_on_branch(
+            repo, 'pr/feature-a', f'{name}-feature.txt'
+        )
+        self.run_cli(
+            repo,
+            'stack', 'create', 'feature-a', feature_sha,
+            '--branch', 'pr/feature-a',
+        )
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        self.run_cli(repo, 'int', 'push')
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        self.assertTrue(manifest_path.exists())
+
+        killed = self.run_cli(
+            repo,
+            'int', 'rebuild', '--in-place',
+            '--reason', f'interrupt control persistence at {stage}',
+            expected=-signal.SIGKILL,
+            extra_env={'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
+        )
+        self.assertEqual(killed.returncode, -signal.SIGKILL)
+        self.assertFalse(manifest_path.exists())
+        module = self.load_module()
+        events = module.load_ledger_events(repo, manifest_path)
+        pending = module.pending_control_manifest_intents(events)
+        self.assertEqual(len(pending), 1)
+        intent = pending[0]['payload']
+        current_tip = self.git(
+            repo, 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+        expected_tip = (
+            intent['replay_tip'] if stage == 'intent_saved'
+            else intent['expected_control_commit']
+        )
+        self.assertEqual(current_tip, expected_tip)
+        return origin, repo, feature_sha, intent
+
+    def test_entrypoint_retries_recover_after_ref_sigkill_removed_manifest(self):
+        retries = {
+            'stack-push': ('stack', 'push', 'feature-a'),
+            'int-rebuild': (
+                'int', 'rebuild', '--in-place',
+                '--reason', 'retry interrupted integration rebuild',
+            ),
+            'int-push': ('int', 'push'),
+        }
+        for name, retry in retries.items():
+            with self.subTest(retry=name):
+                origin, repo, feature_sha, intent = (
+                    self.prepare_control_manifest_sigkill_recovery(
+                        f'ref-kill-{name}', 'ref_updated'
+                    )
+                )
+
+                self.run_cli(repo, *retry)
+
+                module = self.load_module()
+                recovered, manifest_path = module.load_manifest(repo)
+                self.assertIn('feature-a', module.stack_map(recovered))
+                self.assertEqual(
+                    module.pending_control_manifest_intents(
+                        module.load_ledger_events(repo, manifest_path)
+                    ),
+                    [],
+                )
+                receipts = [
+                    event for event in module.load_ledger_events(repo, manifest_path)
+                    if event['type'] == 'manifest_saved'
+                    and event['payload'].get('operation_id') == intent['operation_id']
+                ]
+                self.assertEqual(len(receipts), 1)
+                self.assertEqual(
+                    self.git(repo, 'status', '--porcelain', '--untracked-files=no').stdout,
+                    '',
+                )
+                if name == 'stack-push':
+                    _state_tip, state = self.remote_state(origin)
+                    self.assertEqual(
+                        state['managed_refs']['refs/heads/pr/feature-a'], feature_sha
+                    )
+                    self.assertEqual(
+                        state['managed_refs']['refs/heads/integration/shared'],
+                        intent['expected_control_commit'],
+                    )
+
+    def test_entrypoint_retries_discover_intent_before_replay_tip_subject(self):
+        retries = {
+            'stack-push': ('stack', 'push', 'feature-a'),
+            'int-rebuild': (
+                'int', 'rebuild', '--in-place',
+                '--reason', 'retry intent-first integration rebuild',
+            ),
+            'int-push': ('int', 'push'),
+        }
+        for name, retry in retries.items():
+            with self.subTest(retry=name):
+                origin, repo, feature_sha, intent = (
+                    self.prepare_control_manifest_sigkill_recovery(
+                        f'intent-kill-{name}', 'intent_saved'
+                    )
+                )
+                replay_subject = self.git(
+                    repo, 'show', '-s', '--format=%s', intent['replay_tip']
+                ).stdout.strip()
+                self.assertNotEqual(
+                    replay_subject, 'chore: restore Syncwheel control manifest'
+                )
+
+                self.run_cli(repo, *retry)
+
+                module = self.load_module()
+                recovered, manifest_path = module.load_manifest(repo)
+                self.assertIn('feature-a', module.stack_map(recovered))
+                events = module.load_ledger_events(repo, manifest_path)
+                self.assertEqual(module.pending_control_manifest_intents(events), [])
+                receipts = [
+                    event for event in events
+                    if event['type'] == 'manifest_saved'
+                    and event['payload'].get('operation_id') == intent['operation_id']
+                ]
+                self.assertEqual(len(receipts), 1)
+                if name == 'stack-push':
+                    _state_tip, state = self.remote_state(origin)
+                    self.assertEqual(
+                        state['managed_refs']['refs/heads/pr/feature-a'], feature_sha
+                    )
+                    self.assertEqual(
+                        state['managed_refs']['refs/heads/integration/shared'],
+                        intent['expected_control_commit'],
+                    )
+
+    def test_external_manifest_writers_share_branch_lock_and_never_rewind_cas(self):
+        origin = self.create_remote(name='control-lock-origin')
+        repo = self.clone(origin, 'control-lock-writers')
+        self.init_coordinated(repo)
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        module = self.load_module()
+        baseline, _ = module.load_manifest(repo)
+        first_manifest = json.loads(json.dumps(baseline))
+        first_manifest['defaults']['replay_mode'] = 'plumbing'
+        second_manifest = json.loads(json.dumps(baseline))
+        second_manifest['defaults']['replay_mode'] = 'ephemeral'
+        first_path = self.tmp / 'first-external-manifest.json'
+        second_path = self.tmp / 'second-external-manifest.json'
+        first_path.write_text(json.dumps(first_manifest, indent=2) + '\n')
+        second_path.write_text(json.dumps(second_manifest, indent=2) + '\n')
+        (repo / '.syncwheel' / 'manifest.json').unlink()
+        runner = self.tmp / 'control-manifest-writer.py'
+        runner.write_text(
+            'import importlib.util, sys\n'
+            'from pathlib import Path\n'
+            'cli, repo, manifest_path = map(Path, sys.argv[1:4])\n'
+            'spec = importlib.util.spec_from_file_location("syncwheel_writer", cli)\n'
+            'module = importlib.util.module_from_spec(spec)\n'
+            'spec.loader.exec_module(module)\n'
+            'manifest, _ = module.load_manifest(repo, manifest_path)\n'
+            'branch = manifest["integration"]["branch"]\n'
+            'replay_tip = module.ref_tip(repo, branch)\n'
+            'with module.manifest_write_transaction(repo, manifest_path, "test-writer"):\n'
+            '    module.restore_control_manifest_after_integration_rebuild(\n'
+            '        repo, manifest_path, manifest, replay_tip, "control",\n'
+            '        reason="concurrent external writer", command="test writer",\n'
+            '    )\n'
+        )
+        ready = self.tmp / 'first-ref-updated'
+        release = self.tmp / 'release-first-writer'
+        second_ready = self.tmp / 'second-ref-updated'
+        second_release = self.tmp / 'release-second-writer'
+        first_env = dict(os.environ)
+        first_env.update(self.environment)
+        first_env.update({
+            'SYNCWHEEL_TEST_CONTROL_MANIFEST_PAUSE': 'ref_updated',
+            'SYNCWHEEL_TEST_CONTROL_MANIFEST_READY': str(ready),
+            'SYNCWHEEL_TEST_CONTROL_MANIFEST_RELEASE': str(release),
+        })
+        argv = ['python3', str(runner), str(CLI), str(repo)]
+        first = subprocess.Popen(
+            [*argv, str(first_path)], cwd=repo, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=first_env,
+        )
+        try:
+            self.wait_for_path(ready, first)
+            first_control = self.git(
+                repo, 'rev-parse', 'integration/shared'
+            ).stdout.strip()
+            second = subprocess.Popen(
+                [*argv, str(second_path)], cwd=repo, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                env={
+                    **os.environ,
+                    **self.environment,
+                    'SYNCWHEEL_TEST_CONTROL_MANIFEST_PAUSE': 'ref_updated',
+                    'SYNCWHEEL_TEST_CONTROL_MANIFEST_READY': str(second_ready),
+                    'SYNCWHEEL_TEST_CONTROL_MANIFEST_RELEASE': str(second_release),
+                },
+            )
+            time.sleep(0.5)
+            self.assertIsNone(second.poll(), 'second writer bypassed repository+branch lock')
+            self.assertFalse(
+                second_ready.exists(),
+                'second writer reached its ref CAS while the first held the branch lock',
+            )
+            release.write_text('continue\n')
+            first_stdout, first_stderr = first.communicate(timeout=20)
+            self.wait_for_path(second_ready, second)
+            second_release.write_text('continue\n')
+            second_stdout, second_stderr = second.communicate(timeout=20)
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.communicate()
+            if 'second' in locals() and second.poll() is None:
+                second.kill()
+                second.communicate()
+
+        self.assertEqual(first.returncode, 0, (first_stdout, first_stderr))
+        self.assertEqual(second.returncode, 0, (second_stdout, second_stderr))
+        final_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
+        self.assertNotEqual(final_tip, first_control)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{final_tip}^').stdout.strip(), first_control
+        )
+        committed = module.manifest_from_tree(
+            repo, final_tip, module.integration_manifest_path(repo)
+        )
+        self.assertEqual(
+            module.manifest_digest(committed), module.manifest_digest(second_manifest)
+        )
+
     def test_stack_push_retry_completes_interrupted_control_manifest_before_publish(self):
         origin = self.create_remote()
         repo = self.clone(origin, 'stack-push-control-retry')
@@ -1539,6 +1826,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         origin = self.create_remote()
         first = self.clone(origin, 'owner-one')
         self.init_coordinated(first)
+        self.track_fixture_ignore_in_replay_base(first)
         self.run_cli(first, 'int', 'push')
 
         second = self.clone(origin, 'owner-two')
@@ -1556,6 +1844,10 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'second-domain',
         )
         self.disable_fixture_hooks(second)
+        self.adopt_initialized_control_manifest(
+            second,
+            'adopt reviewed cross-domain control manifest',
+        )
         failure = self.run_cli(second, 'int', 'push', expected=2)
         self.assertIn('already owned by another coordination domain', failure.stderr)
 
@@ -1563,22 +1855,15 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         origin = self.create_remote()
         stale = self.clone(origin, 'stale')
         self.init_coordinated(stale)
-        self.run_cli(stale, 'int', 'push')
+        self.track_fixture_ignore_in_replay_base(stale)
 
         current = self.clone(origin, 'current')
-        self.git(current, 'branch', 'integration/shared', 'origin/integration/shared')
-        self.run_cli(
-            current,
-            'init',
-            '--syncwheel-tracking',
-            'git-tracked',
-            '--publication-remote',
-            'origin',
-            '--integration-branch',
-            'integration/shared',
-        )
-        self.disable_fixture_hooks(current)
-        self.set_integration_membership(current, 'legacy')
+        self.init_coordinated(current)
+
+        # Both clones establish the same deterministic initial control object,
+        # so each ledger has a local receipt before either authors a successor.
+        self.run_cli(stale, 'int', 'push')
+        self.run_cli(current, 'int', 'push')
         remote_sha = self.commit_on_branch(current, 'pr/remote-change', 'remote.txt')
         self.run_cli(current, 'stack', 'create', 'remote-change', remote_sha, '--branch', 'pr/remote-change')
         self.run_cli(current, 'stack', 'push', 'remote-change')
