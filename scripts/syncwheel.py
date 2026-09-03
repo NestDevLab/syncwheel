@@ -106,8 +106,15 @@ COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS = 'legacy-digest-migration'
 COORDINATION_REPAIR_DIGEST_MIGRATION_PRECONDITION = (
     'exact-control-manifest-digest-and-state-only-cas'
 )
+COORDINATION_REPAIR_DIGEST_HEAL_BACKEND = 'state-digest-heal'
+COORDINATION_REPAIR_DIGEST_HEAL_PROOF = 'exact-recomputed-control-manifest-digest'
+COORDINATION_REPAIR_DIGEST_HEAL_CLASS = 'digest-heal'
+COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION = (
+    'exact-recomputed-control-manifest-digest-and-state-only-cas'
+)
 COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST = 'control-manifest-file'
 COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT = 'legacy-normalized-snapshot'
+COORDINATION_STATE_DIGEST_FORM_ORPHANED = 'orphaned'
 COORDINATION_REPAIR_MAX_ADVANCE_COMMITS = 1024
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
@@ -174,6 +181,8 @@ MANAGED_PUSH_SECRET_ENV = 'SYNCWHEEL_PUSH_AUTH_SECRET'
 MANAGED_PUSH_AUTH_TTL_SECONDS = 60
 MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'
 SYNCWHEEL_OWNS_REF_MOVES = False
+SYNCWHEEL_REF_AUTH_REPO = None
+SYNCWHEEL_REF_AUTH_TTL_SECONDS = 30
 FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel',
@@ -189,6 +198,13 @@ DEFAULT_JOURNAL_INTERVAL = '30m'
 CHANNEL_LIFECYCLES = {'shared', 'ephemeral'}
 CHANNEL_PLAN_SCHEMA_VERSION = 1
 STACK_LAND_PLAN_SCHEMA_VERSION = 1
+GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
+GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
+GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
+GITHUB_PR_MERGE_BYPASSES = {'required_reviews'}
+GITHUB_PR_MERGE_CHECKS = {'all'}
+GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
+GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
 GOVERNED_WORKTREE_REGISTRY_VERSION = 1
 GOVERNED_WORKTREE_DEFAULT_CAPACITY = 4
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
@@ -292,8 +308,8 @@ VERSION = resolve_runtime_version()
 
 def managed_process_env(extra=None):
     process_env = os.environ.copy()
-    if SYNCWHEEL_OWNS_REF_MOVES:
-        process_env[MANAGED_REF_MOVE_AUTH_ENV] = '1'
+    if SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
+        process_env[MANAGED_REF_MOVE_AUTH_ENV] = authorize_ref_move(SYNCWHEEL_REF_AUTH_REPO)
     if extra:
         process_env.update(extra)
     return process_env
@@ -749,6 +765,292 @@ def git_common_dir(repo_root):
     return (repo_root / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def primary_guard_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'guard.json'
+
+
+def manifest_for_guard(repo_root):
+    manifest, _ = require_manifest(repo_root, str(repo_root), None, None)
+    return manifest
+
+
+def primary_guard_validation_error(payload):
+    if not isinstance(payload, dict):
+        return 'primary guard configuration must be a JSON object'
+    if type(payload.get('version')) is not int or payload['version'] != 1:
+        return 'primary guard configuration has an unsupported or missing version'
+    branch = payload.get('integrationBranch')
+    if not isinstance(branch, str) or not branch.strip():
+        return 'primary guard configuration requires a non-empty integrationBranch'
+    enabled = payload.get('enabled')
+    if not isinstance(enabled, bool):
+        return 'primary guard configuration requires boolean enabled state'
+    reason = payload.get('reason')
+    if not enabled and (not isinstance(reason, str) or not reason.strip()):
+        return 'disabled primary guard configuration requires a non-empty reason'
+    return None
+
+
+def inspect_primary_guard(repo_root):
+    path = primary_guard_path(repo_root)
+    try:
+        payload = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None, 'primary guard configuration is missing'
+    except json.JSONDecodeError:
+        return None, 'primary guard configuration contains invalid JSON'
+    except ValueError:
+        return None, 'primary guard configuration is unreadable'
+    except OSError:
+        return None, 'primary guard configuration is unreadable'
+    error = primary_guard_validation_error(payload)
+    return (None, error) if error else (payload, None)
+
+
+def load_primary_guard(repo_root):
+    guard, _ = inspect_primary_guard(repo_root)
+    return guard
+
+
+def require_primary_guard(repo_root):
+    guard, error = inspect_primary_guard(repo_root)
+    if error:
+        raise SyncwheelError(
+            f'{error}; run syncwheel hooks install --apply with the intended '
+            '--personal/--manifest selection'
+        )
+    return guard
+
+
+def atomic_write_private_json(path, payload, *, indent=None):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    encoded = (json.dumps(payload, indent=indent, sort_keys=True) + '\n').encode('utf-8')
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.tmp-', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, 'wb') as handle:
+            descriptor = -1
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+    return path
+
+
+def primary_guard_payload(manifest, *, enabled=True, reason=None):
+    integration = manifest.get('integration') or {}
+    branch = integration.get('branch')
+    if not isinstance(branch, str) or not branch:
+        raise SyncwheelError('cannot persist primary guard without an integration branch')
+    payload = {
+        'version': 1,
+        'integrationBranch': branch.strip(),
+        'enabled': enabled,
+        'reason': reason.strip() if isinstance(reason, str) else reason,
+    }
+    error = primary_guard_validation_error(payload)
+    if error:
+        raise SyncwheelError(error)
+    return payload
+
+
+def save_primary_guard(repo_root, manifest, *, enabled=True, reason=None):
+    payload = primary_guard_payload(manifest, enabled=enabled, reason=reason)
+    path = primary_guard_path(repo_root)
+    atomic_write_private_json(path, payload, indent=2)
+    return payload
+
+
+def ref_auth_dir(repo_root):
+    result = subprocess.run(
+        ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root,
+        text=True, capture_output=True, check=False,
+    )
+    if result.returncode != 0:
+        raise SyncwheelError('cannot resolve git common directory for ref authorization')
+    path = Path(result.stdout.strip())
+    common = (Path(repo_root) / path).resolve() if not path.is_absolute() else path.resolve()
+    return common / 'syncwheel' / 'ref-auth'
+
+
+def ref_auth_events_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'ref-auth-events.jsonl'
+
+
+def process_start_identity(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        closing = stat.rfind(')')
+        fields = stat[closing + 2:].split()
+        if closing > 0 and len(fields) > 19:
+            return f'proc:{fields[19]}'
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ['ps', '-o', 'lstart=', '-p', str(pid)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    started = ' '.join(result.stdout.split()) if result.returncode == 0 else ''
+    return f'ps:{started}' if started else None
+
+
+def authorize_ref_move(repo_root):
+    directory = ref_auth_dir(repo_root)
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    nonce = uuid.uuid4().hex + uuid.uuid4().hex
+    pid = os.getpid()
+    pid_start = process_start_identity(pid)
+    if not pid_start:
+        raise SyncwheelError('cannot establish process identity for ref authorization')
+    payload = {
+        'nonce': nonce,
+        'pid': pid,
+        'pidStart': pid_start,
+        'expiresAt': time.time() + SYNCWHEEL_REF_AUTH_TTL_SECONDS,
+        'remaining': ['pre-commit', 'reference-transaction'],
+        'operation': 'syncwheel',
+    }
+    path = directory / nonce
+    atomic_write_private_json(path, payload)
+    return nonce
+
+
+def ref_move_authorized(repo_root, event):
+    nonce = os.environ.get(MANAGED_REF_MOVE_AUTH_ENV)
+    if not nonce or not re.fullmatch(r'[0-9a-f]{64}', nonce):
+        return False
+    path = ref_auth_dir(repo_root) / nonce
+    try:
+        payload = json.loads(path.read_text())
+        pid = int(payload['pid'])
+        pid_start = payload['pidStart']
+        if (
+            pid <= 0
+            or not isinstance(pid_start, str)
+            or not pid_start
+            or not process_is_alive(pid)
+            or process_start_identity(pid) != pid_start
+            or payload['nonce'] != nonce
+            or payload['expiresAt'] < time.time()
+            or event not in payload['remaining']
+        ):
+            return False
+        payload['remaining'].remove(event)
+        if payload['remaining']:
+            atomic_write_private_json(path, payload)
+        else:
+            path.unlink()
+        return True
+    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+        return False
+
+
+def process_is_alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def append_ref_auth_event(repo_root, event):
+    path = ref_auth_events_path(repo_root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    encoded = (json.dumps(event, sort_keys=True) + '\n').encode('utf-8')
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError('short ref authorization event write')
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    return event
+
+
+def discard_stale_ref_authorization(repo_root, path, now):
+    try:
+        stale = path.lstat().st_mtime + SYNCWHEEL_REF_AUTH_TTL_SECONDS < now
+    except OSError:
+        return False
+    if not stale:
+        return False
+    event = {
+        'version': 1,
+        'type': 'ref_authorization_discarded',
+        'file': path.name,
+        'reason': 'malformed_or_unreadable',
+        'recordedAt': iso_utc_now(),
+    }
+    try:
+        append_ref_auth_event(repo_root, event)
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
+def clear_ref_authorizations(repo_root):
+    owner_pid = os.getpid()
+    owner_start = process_start_identity(owner_pid)
+    now = time.time()
+    directory = ref_auth_dir(repo_root)
+    if directory.exists():
+        for path in directory.iterdir():
+            try:
+                payload = json.loads(path.read_text())
+                nonce_pid = int(payload['pid'])
+                nonce_start = payload['pidStart']
+                if (
+                    nonce_pid <= 0
+                    or not isinstance(nonce_start, str)
+                    or not nonce_start
+                ):
+                    raise ValueError('invalid ref authorization owner')
+            except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+                discard_stale_ref_authorization(repo_root, path, now)
+                continue
+            current_start = process_start_identity(nonce_pid)
+            owned = (
+                nonce_pid == owner_pid
+                and owner_start is not None
+                and nonce_start == owner_start
+            )
+            owner_is_gone = not process_is_alive(nonce_pid)
+            owner_was_recycled = (
+                current_start is not None and current_start != nonce_start
+            )
+            if owned or owner_is_gone or owner_was_recycled:
+                path.unlink(missing_ok=True)
+
+
 def active_hooks_dir(repo_root):
     configured = git(repo_root, 'config', '--get', 'core.hooksPath', check=False).stdout.strip()
     if configured:
@@ -772,37 +1074,114 @@ def managed_hook_paths(repo_root, hook_name):
     return hooks_dir, hook, backup, metadata, configured
 
 
-def managed_hook_syncwheel_command():
-    if not sys.executable or not __file__:
-        raise SyncwheelError('cannot resolve the current Syncwheel invocation for repository hooks')
-    executable = os.path.abspath(sys.executable)
-    source = os.path.abspath(__file__)
-    return f'{shlex.quote(executable)} {shlex.quote(source)}'
+def managed_hook_cli_resolution(repo_root):
+    """Resolve an executable CLI outside every checkout and configured lane root."""
+    executable = shutil.which('syncwheel')
+    if not executable:
+        return None, 'stable syncwheel CLI is not on PATH'
+    try:
+        path = Path(executable).resolve(strict=True)
+    except OSError:
+        return None, 'stable syncwheel CLI cannot be resolved'
+    if not path.is_file() or not os.access(path, os.X_OK):
+        return None, f'syncwheel CLI is not executable: {path}'
+    try:
+        with path.open('rb') as handle:
+            first_line = handle.readline(4096)
+    except OSError:
+        return None, f'syncwheel CLI cannot be read: {path}'
+    if first_line.startswith(b'#!'):
+        try:
+            interpreter_parts = shlex.split(
+                first_line[2:].decode('utf-8', errors='strict').strip()
+            )
+            interpreter = Path(interpreter_parts[0]).resolve(strict=True)
+        except (IndexError, OSError, UnicodeDecodeError, ValueError):
+            return None, f'syncwheel CLI has an unstable interpreter: {path}'
+        if not interpreter.is_file() or not os.access(interpreter, os.X_OK):
+            return None, f'syncwheel CLI interpreter is not executable: {interpreter}'
+        if interpreter.name == 'env':
+            return None, f'syncwheel CLI interpreter depends on PATH: {path}'
+
+    repo_root = Path(repo_root).resolve()
+    worktrees = get_worktrees(repo_root)
+    primary = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+    excluded_roots = [repo_root, primary, git_common_dir(repo_root)]
+    excluded_roots.extend(
+        Path(item['path']).resolve()
+        for item in worktrees
+        if item.get('path')
+    )
+    excluded_roots.append(primary / 'var')
+    for manifest_root in dict.fromkeys((primary, repo_root)):
+        manifest_path = manifest_root / '.syncwheel' / 'manifest.json'
+        try:
+            manifest = json.loads(manifest_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        try:
+            excluded_roots.append(
+                resolve_worktree_root_path(
+                    primary, syncwheel_worktree_root(manifest)
+                )
+            )
+        except SyncwheelError:
+            continue
+    for root in excluded_roots:
+        if path_is_relative_to(path, root):
+            return None, f'syncwheel CLI is inside repository or lane state: {path}'
+    return shlex.quote(str(path)), None
 
 
-def managed_push_hook_content(backup_exists):
-    syncwheel_command = managed_hook_syncwheel_command()
+def managed_hook_syncwheel_command(repo_root):
+    """Return only a stable installed CLI command suitable for persisted hooks."""
+    command, _ = managed_hook_cli_resolution(repo_root)
+    return command
+
+
+def missing_cli_hook_content(marker):
+    return '#!/bin/sh\n' + marker + '\nprintf "%s\\n" "syncwheel guard degraded: install a stable syncwheel CLI, then run syncwheel hooks install --apply" >&2\nexit 1\n'
+
+
+def managed_push_hook_content(repo_root, backup_exists):
+    syncwheel_command = managed_hook_syncwheel_command(repo_root)
+    if not syncwheel_command:
+        return missing_cli_hook_content(MANAGED_PUSH_HOOK_MARKER)
     chain = (
+        'chain_status=0\n'
         'if [ -x "$hook_dir/pre-push.syncwheel-chain" ]; then\n'
         '  "$hook_dir/pre-push.syncwheel-chain" "$@" <"$input"\n'
+        '  chain_status=$?\n'
         'fi\n'
         if backup_exists else ''
     )
     return (
         '#!/bin/sh\n'
         f'{MANAGED_PUSH_HOOK_MARKER}\n'
-        'set -eu\n'
+        'set -u\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
         'input=$(mktemp "${TMPDIR:-/tmp}/syncwheel-pre-push.XXXXXX")\n'
         'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
         'cat >"$input"\n'
-        + chain +
-        f'{syncwheel_command} hooks guard '
-        '--remote-name "${1:-}" --remote-url "${2:-}" <"$input"\n'
+        + 'guard_status=0\n'
+        + f'if [ ! -x {syncwheel_command} ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI is unavailable; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  guard_status=1\n'
+        + 'else\n'
+        + f'  {syncwheel_command} hooks guard --remote-name "${{1:-}}" '
+        + '--remote-url "${2:-}" <"$input"\n'
+        + '  guard_status=$?\n'
+        + '  if [ "$guard_status" -eq 126 ] || [ "$guard_status" -eq 127 ]; then\n'
+        + '    printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI failed to execute; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  fi\n'
+        + 'fi\n'
+        + chain
+        + 'if [ "$guard_status" -ne 0 ]; then exit "$guard_status"; fi\n'
+        + 'exit "${chain_status:-0}"\n'
     )
 
 
-def managed_worktree_hook_content(hook_name, backup_exists):
+def managed_worktree_hook_content(repo_root, hook_name, backup_exists):
     if hook_name not in {'pre-commit', 'post-checkout'}:
         raise SyncwheelError(f'unsupported primary-checkout hook: {hook_name}')
     marker = (
@@ -811,57 +1190,85 @@ def managed_worktree_hook_content(hook_name, backup_exists):
         else MANAGED_PRIMARY_POST_CHECKOUT_MARKER
     )
     chain = (
+        'chain_status=0\n'
         f'if [ -x "$hook_dir/{hook_name}.syncwheel-chain" ]; then\n'
         f'  "$hook_dir/{hook_name}.syncwheel-chain" "$@"\n'
+        '  chain_status=$?\n'
         'fi\n'
         if backup_exists else ''
     )
-    syncwheel_command = managed_hook_syncwheel_command()
+    syncwheel_command = managed_hook_syncwheel_command(repo_root)
+    if not syncwheel_command:
+        return missing_cli_hook_content(marker)
     return (
         '#!/bin/sh\n'
         f'{marker}\n'
-        'set -eu\n'
+        'set -u\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\n'
+        + 'guard_status=0\n'
+        + f'if [ ! -x {syncwheel_command} ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI is unavailable; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  guard_status=1\n'
+        + 'else\n'
+        + f'  {syncwheel_command} hooks worktree-guard --event {hook_name}\n'
+        + '  guard_status=$?\n'
+        + '  if [ "$guard_status" -eq 126 ] || [ "$guard_status" -eq 127 ]; then\n'
+        + '    printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI failed to execute; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '  fi\n'
+        + 'fi\n'
         + chain
-        + f'{syncwheel_command} hooks worktree-guard --event {hook_name}\n'
+        + 'if [ "$guard_status" -ne 0 ]; then exit "$guard_status"; fi\n'
+        + 'exit "${chain_status:-0}"\n'
     )
 
 
-def managed_ref_move_hook_content(backup_exists):
+def managed_ref_move_hook_content(repo_root, backup_exists):
     chain = (
+        'chain_status=0\n'
         'if [ -x "$hook_dir/reference-transaction.syncwheel-chain" ]; then\n'
-        '  printf \'%s\\n\' "$input" | '
-        '"$hook_dir/reference-transaction.syncwheel-chain" "$@" || exit 0\n'
+        '  "$hook_dir/reference-transaction.syncwheel-chain" "$@" <"$input"\n'
+        '  chain_status=$?\n'
         'fi\n'
         if backup_exists else ''
     )
-    syncwheel_command = managed_hook_syncwheel_command()
-    # Git runs this for every ref transaction, so it stays cheap and it fails
-    # open: only an explicit refusal (exit 2) aborts the update. A missing
-    # interpreter or PATH must never be able to block an ordinary commit, and
-    # the payload is a few ref lines, so no temporary file is needed.
+    syncwheel_command = managed_hook_syncwheel_command(repo_root)
+    if not syncwheel_command:
+        return missing_cli_hook_content(MANAGED_REF_MOVE_MARKER)
+    # Git runs this for every ref transaction. A missing guard is unsafe, so
+    # only an explicit successful guard result permits a primary ref move.
     return (
         '#!/bin/sh\n'
         f'{MANAGED_REF_MOVE_MARKER}\n'
-        '[ "${1:-}" = "prepared" ] || exit 0\n'
-        'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 0\n'
-        'input=$(cat) || exit 0\n'
-        '[ -n "$input" ] || exit 0\n'
-        + chain +
-        f'printf \'%s\\n\' "$input" | {syncwheel_command} '
-        'hooks ref-guard --phase "$1"\n'
-        'status=$?\n'
-        '[ "$status" -eq 2 ] && exit 1\n'
-        'exit 0\n'
+        'set -u\n'
+        'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1\n'
+        'input=$(mktemp "${TMPDIR:-/tmp}/syncwheel-reference-transaction.XXXXXX")\n'
+        'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
+        'cat >"$input" || exit 1\n'
+        'guard_status=0\n'
+        + 'if [ "${1:-}" = "prepared" ] && [ -s "$input" ]; then\n'
+        + f'  if [ ! -x {syncwheel_command} ]; then\n'
+        + '  printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI is unavailable; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '    guard_status=1\n'
+        + '  else\n'
+        + f'    {syncwheel_command} hooks ref-guard --phase "$1" <"$input"\n'
+        + '    guard_status=$?\n'
+        + '    if [ "$guard_status" -eq 126 ] || [ "$guard_status" -eq 127 ]; then\n'
+        + '      printf "%s\\n" "syncwheel guard degraded: stable syncwheel CLI failed to execute; repair the installation, then run syncwheel hooks install --apply" >&2\n'
+        + '    fi\n'
+        + '  fi\n'
+        + 'fi\n'
+        + chain
+        + 'if [ "$guard_status" -ne 0 ]; then exit "$guard_status"; fi\n'
+        + 'exit "${chain_status:-0}"\n'
     )
 
 
-def managed_hook_content(hook_name, backup_exists):
+def managed_hook_content(repo_root, hook_name, backup_exists):
     if hook_name == 'pre-push':
-        return managed_push_hook_content(backup_exists)
+        return managed_push_hook_content(repo_root, backup_exists)
     if hook_name == 'reference-transaction':
-        return managed_ref_move_hook_content(backup_exists)
-    return managed_worktree_hook_content(hook_name, backup_exists)
+        return managed_ref_move_hook_content(repo_root, backup_exists)
+    return managed_worktree_hook_content(repo_root, hook_name, backup_exists)
 
 
 def managed_hook_marker(hook_name):
@@ -885,17 +1292,39 @@ def managed_hook_status(repo_root, hook_name):
     digest = hashlib.sha256(existing.encode()).hexdigest() if existing is not None else None
     try:
         metadata = json.loads(metadata_path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         metadata = None
     chained_digest = hashlib.sha256(backup.read_bytes()).hexdigest() if backup.is_file() else None
+    managed_matches = bool(
+        marker and metadata and metadata.get('digest') == digest
+    )
     chain_matches = bool(
         metadata
         and metadata.get('chainedDigest') == chained_digest
         and (backup.exists() == (metadata.get('chainedDigest') is not None))
     )
-    owned = bool(marker and metadata and metadata.get('digest') == digest and chain_matches)
-    expected = hashlib.sha256(managed_hook_content(hook_name, backup.exists()).encode()).hexdigest()
-    ready = owned and digest == expected
+    chain_repairable = bool(
+        managed_matches
+        and metadata.get('chainedDigest') is not None
+        and backup.is_file()
+        and not chain_matches
+    )
+    owned = bool(managed_matches and chain_matches)
+    expected = hashlib.sha256(
+        managed_hook_content(repo_root, hook_name, backup.exists()).encode()
+    ).hexdigest()
+    _, cli_cause = managed_hook_cli_resolution(repo_root)
+    ready = owned and digest == expected and cli_cause is None
+    degraded = not ready
+    degraded_cause = None
+    if cli_cause:
+        degraded_cause = f'{hook_name}: {cli_cause}'
+    elif not hook.exists():
+        degraded_cause = f'{hook_name}: managed hook is missing'
+    elif not owned:
+        degraded_cause = f'{hook_name}: managed hook or chain differs from installed metadata'
+    elif digest != expected:
+        degraded_cause = f'{hook_name}: managed hook differs from expected content'
     return {
         'name': hook_name,
         'hooksPath': configured,
@@ -904,16 +1333,21 @@ def managed_hook_status(repo_root, hook_name):
         'exists': hook.exists(),
         'owned': owned,
         'ready': ready,
+        'degraded': degraded,
+        'degradedCause': degraded_cause,
         'marker': marker,
         'digest': digest,
         'expectedDigest': expected,
         'metadata': str(metadata_path),
+        'managedMatches': managed_matches,
         'chained': backup.exists(),
         'chainedDigest': chained_digest,
         'chainMatches': chain_matches,
+        'chainRepairable': chain_repairable,
         'status': (
-            'installed' if ready else
+            'degraded' if cli_cause else ('installed' if ready else
             ('stale' if owned else ('conflict' if hook.exists() or metadata_path.exists() else 'absent'))
+            )
         ),
     }
 def managed_push_hook_status(repo_root):
@@ -928,6 +1362,11 @@ def managed_hook_bundle_status(repo_root):
     }
     return {
         'ready': all(hook['ready'] for hook in hooks.values()),
+        'degraded': any(hook['degraded'] for hook in hooks.values()),
+        'degradedCauses': [
+            hook['degradedCause'] for hook in hooks.values()
+            if hook['degradedCause']
+        ],
         'expectedDigest': hashlib.sha256(
             json.dumps(expected, sort_keys=True, separators=(',', ':')).encode()
         ).hexdigest(),
@@ -936,15 +1375,14 @@ def managed_hook_bundle_status(repo_root):
 
 
 def managed_push_guard_policy(repo_root, manifest):
-    profile = load_repo_profile(repo_root)
-    hooks = profile.get('hooks') or {}
-    if not isinstance(hooks, dict):
-        raise SyncwheelError('syncwheel profile hooks state must be an object')
-    disabled = hooks.get('mode') == 'disabled'
-    enforced = hooks.get('mode') == 'required'
-    reason = hooks.get('reason')
-    if disabled and (not isinstance(reason, str) or not reason.strip()):
-        raise SyncwheelError('hooks.mode=disabled requires a non-empty persisted reason')
+    guard, guard_error = inspect_primary_guard(repo_root)
+    selected_branch = (manifest.get('integration') or {}).get('branch')
+    branch_matches = bool(
+        guard and guard['integrationBranch'] == selected_branch
+    )
+    disabled = bool(guard and not guard['enabled'])
+    enforced = bool(guard and branch_matches and guard['enabled'])
+    reason = guard.get('reason') if guard else None
     tracking = manifest.get('syncwheel_tracking')
     required = tracking == SYNCWHEEL_TRACKING_GIT_TRACKED and bool(
         managed_ref_names(manifest)
@@ -953,44 +1391,59 @@ def managed_push_guard_policy(repo_root, manifest):
     )
     bundle = managed_hook_bundle_status(repo_root)
     hook = bundle['hooks']['pre-push']
-    ready = bundle['ready']
+    degraded_causes = []
+    if guard_error:
+        degraded_causes.append(
+            f'{guard_error}; run syncwheel hooks install --apply with the intended '
+            '--personal/--manifest selection'
+        )
+    elif guard and not branch_matches:
+        degraded_causes.append(
+            f"primary guard targets {guard['integrationBranch']!r}, but the selected "
+            f"manifest declares {selected_branch!r}; run syncwheel hooks install "
+            '--apply with the same --personal/--manifest selection'
+        )
+    if guard and guard['enabled'] and branch_matches:
+        degraded_causes.extend(bundle['degradedCauses'])
+    degraded = bool(degraded_causes)
+    ready = enforced and bundle['ready'] and not degraded
+    migration_pending = required and guard_error == 'primary guard configuration is missing'
     return {
+        'status': (
+            'degraded' if degraded else
+            ('disabled' if disabled else ('ready' if ready else 'optional'))
+        ),
         'required': required,
         'disabled': disabled,
         'enforced': enforced,
-        'migrationPending': required and not disabled and not enforced,
+        'migrationPending': migration_pending,
         'disabledReason': reason if disabled else None,
         'ready': ready,
+        'degraded': degraded,
+        'degradedCauses': degraded_causes,
+        'guard': guard,
+        'guardError': guard_error,
+        'targetMatchesManifest': branch_matches,
         'expectedDigest': bundle['expectedDigest'],
         'hook': hook,
         'hooks': bundle['hooks'],
         'mode': (
-            'disabled' if disabled else
-            ('required' if enforced else ('required-pending-migration' if required else 'optional'))
+            'required-pending-migration' if migration_pending else
+            ('required-degraded' if required and degraded else
+             ('degraded' if degraded else
+              ('disabled' if disabled else
+               ('required' if enforced else 'optional'))))
         ),
     }
-
-
-def require_managed_push_guard(repo_root, manifest):
-    policy = managed_push_guard_policy(repo_root, manifest)
-    if policy['required'] and policy['enforced'] and not policy['ready']:
-        raise SyncwheelError(
-            'managed-ref guard is required but missing, stale, or tampered; '
-            'review `syncwheel hooks install`, then run `syncwheel hooks install --apply`'
-        )
-    return policy
 
 
 def ensure_managed_repository_hooks(repo_root, manifest):
     policy = managed_push_guard_policy(repo_root, manifest)
     if not policy['required'] or policy['disabled']:
         return policy
-    if policy['ready'] and policy['enforced']:
-        return policy
-    install_managed_push_hook(repo_root, apply=True)
-    policy = managed_push_guard_policy(repo_root, manifest)
-    if not policy['ready']:
-        raise SyncwheelError('managed repository hook bootstrap did not converge')
+    # An absent bundle is visible in status but does not turn ordinary repository
+    # commands into an installation gate. Only an installed hook decides Git
+    # mutations, where a missing CLI fails closed in the hook itself.
     return policy
 
 
@@ -998,6 +1451,25 @@ def install_one_managed_hook(repo_root, hook_name, apply=False):
     status = managed_hook_status(repo_root, hook_name)
     if status['ready']:
         return {'action': 'none', **status}
+    if status['chainRepairable']:
+        plan = {
+            'action': 'refresh-chain-metadata',
+            'name': hook_name,
+            'hook': status['hook'],
+            'chainExisting': True,
+            'digest': status['digest'],
+            'apply': apply,
+        }
+        if not apply:
+            return plan
+        metadata_path = Path(status['metadata'])
+        metadata = json.loads(metadata_path.read_text())
+        metadata['chainedDigest'] = status['chainedDigest']
+        atomic_write_private_json(metadata_path, metadata, indent=2)
+        return {
+            'action': 'chain-metadata-refreshed',
+            **managed_hook_status(repo_root, hook_name),
+        }
     if status['status'] == 'conflict' and (status['marker'] or Path(status['metadata']).exists()):
         raise SyncwheelError(
             f'managed hook is stale or tampered; refusing automatic replacement: {status["hook"]}'
@@ -1008,7 +1480,7 @@ def install_one_managed_hook(repo_root, hook_name, apply=False):
     if backup.exists() and not status['owned']:
         raise SyncwheelError(f'hook chaining conflict: retained backup already exists: {backup}')
     chain_existing = status['exists'] and not status['owned']
-    content = managed_hook_content(hook_name, backup.exists() or chain_existing)
+    content = managed_hook_content(repo_root, hook_name, backup.exists() or chain_existing)
     action = 'upgrade' if status['owned'] else 'install'
     plan = {
         'action': action,
@@ -1044,35 +1516,85 @@ def install_one_managed_hook(repo_root, hook_name, apply=False):
     return {'action': 'upgraded' if action == 'upgrade' else 'installed', **managed_hook_status(repo_root, hook_name)}
 
 
-def install_managed_push_hook(repo_root, apply=False):
+def install_managed_push_hook(
+    repo_root, apply=False, manifest=None, manifest_path=None, reason=None,
+):
+    if apply and managed_hook_syncwheel_command(repo_root) is None:
+        raise SyncwheelError('cannot install primary guard: stable syncwheel CLI is not resolvable; install it outside var/worktrees')
+    manifest_supplied = manifest is not None
+    selected_manifest = manifest or manifest_for_guard(repo_root)
+    desired_guard = primary_guard_payload(selected_manifest)
+    current_guard, current_guard_error = inspect_primary_guard(repo_root)
+    retarget = bool(
+        current_guard_error is None
+        and current_guard
+        and current_guard['integrationBranch'] != desired_guard['integrationBranch']
+    )
+    guard_action = (
+        'retarget' if retarget else
+        ('none' if current_guard_error is None and current_guard == desired_guard else
+         ('install' if current_guard_error == 'primary guard configuration is missing' else 'update'))
+    )
+    if apply and retarget and (not isinstance(reason, str) or not reason.strip()):
+        raise SyncwheelError('retargeting the primary guard requires --reason')
     plans = {
         name: install_one_managed_hook(repo_root, name, apply=False)
         for name in MANAGED_REPOSITORY_HOOKS
     }
     if apply:
+        if retarget:
+            if manifest_path is None:
+                if manifest_supplied:
+                    raise SyncwheelError(
+                        'retargeting the primary guard requires the selected manifest path'
+                    )
+                _, manifest_path = require_manifest(
+                    repo_root, str(repo_root), None, None
+                )
+            append_ledger_event(repo_root, 'primary_guard_retargeted', {
+                'actor': os.environ.get('USER', 'unknown'),
+                'previousIntegrationBranch': current_guard['integrationBranch'],
+                'integrationBranch': desired_guard['integrationBranch'],
+                'reason': reason.strip(),
+                'phase': 'intent',
+            }, manifest_path)
+        save_primary_guard(repo_root, selected_manifest)
         results = {
             name: install_one_managed_hook(repo_root, name, apply=True)
             for name in MANAGED_REPOSITORY_HOOKS
         }
-        profile = load_repo_profile(repo_root)
-        profile['hooks'] = {'mode': 'required'}
-        save_repo_profile(repo_root, profile)
     else:
         results = plans
     bundle = managed_hook_bundle_status(repo_root)
+    policy = managed_push_guard_policy(repo_root, selected_manifest)
     pre_push = bundle['hooks']['pre-push']
     changed = [item['action'] for item in results.values() if item['action'] != 'none']
     return {
         **pre_push,
-        'action': ('installed' if apply else 'install') if changed else 'none',
+        'action': (
+            ('installed' if apply else 'install')
+            if changed or guard_action != 'none'
+            else 'none'
+        ),
+        'guardAction': guard_action,
+        'guard': desired_guard,
+        'retargetReasonRequired': retarget,
+        'reason': reason.strip() if retarget and isinstance(reason, str) else None,
         'chainExisting': results['pre-push'].get('chainExisting', pre_push['chained']),
-        'ready': bundle['ready'],
+        'ready': policy['ready'],
+        'degraded': policy['degraded'],
+        'degradedCauses': policy['degradedCauses'],
         'expectedDigest': bundle['expectedDigest'],
         'hooks': bundle['hooks'] if apply else results,
     }
 
 
-def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None):
+def remove_managed_push_hook(
+    repo_root, apply=False, disable=False, reason=None,
+    manifest=None, manifest_path=None,
+):
+    if apply and not disable:
+        raise SyncwheelError('removing primary guard requires --disable --reason')
     if disable and (not isinstance(reason, str) or not reason.strip()):
         raise SyncwheelError('--disable requires --reason')
     statuses = {name: managed_hook_status(repo_root, name) for name in MANAGED_REPOSITORY_HOOKS}
@@ -1088,7 +1610,30 @@ def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None)
         'disable': disable, 'reason': reason if disable else None, 'apply': apply,
     }
     if not apply:
+        if disable and (manifest is None or manifest_path is None):
+            resolved_manifest, resolved_path = require_manifest(
+                repo_root, str(repo_root), None, None
+            )
+            manifest = manifest or resolved_manifest
+            manifest_path = manifest_path or resolved_path
+        if disable:
+            plan['guard'] = primary_guard_payload(
+                manifest, enabled=False, reason=reason
+            )
+            plan['ledgerRoot'] = str(ledger_root(repo_root, manifest_path))
         return plan
+    if disable:
+        if manifest is None or manifest_path is None:
+            resolved_manifest, resolved_path = require_manifest(
+                repo_root, str(repo_root), None, None
+            )
+            manifest = manifest or resolved_manifest
+            manifest_path = manifest_path or resolved_path
+        append_ledger_event(repo_root, 'primary_guard_disabled', {
+            'actor': os.environ.get('USER', 'unknown'),
+            'reason': reason.strip(),
+            'phase': 'intent',
+        }, manifest_path)
     for name, status in statuses.items():
         if not status['owned']:
             continue
@@ -1098,9 +1643,7 @@ def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None)
         if backup.exists():
             os.replace(backup, hook)
     if disable:
-        profile = load_repo_profile(repo_root)
-        profile['hooks'] = {'mode': 'disabled', 'reason': reason.strip()}
-        save_repo_profile(repo_root, profile)
+        save_primary_guard(repo_root, manifest, enabled=False, reason=reason.strip())
     return {
         'action': 'disable' if disable else 'removed',
         'reason': reason.strip() if disable else None,
@@ -2579,6 +3122,59 @@ def primary_checkout_state(repo_root, manifest):
 def format_remedy_suffix(commands):
     commands = list(dict.fromkeys(command for command in commands if command))
     return f'. Use: {"; ".join(commands)}' if commands else ''
+
+
+def primary_checkout_state_entry(entry):
+    """True for repo-local Syncwheel state, tracked or not."""
+    paths = status_line_paths(entry)
+    return bool(paths) and all(path.startswith('.syncwheel/') for path in paths)
+
+
+def primary_checkout_dirty_entries(repo_root):
+    worktrees = get_worktrees(repo_root)
+    primary_path = Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
+    entries = local_worktree_status(primary_path)
+    if entries is None:
+        raise SyncwheelError(f'cannot inspect primary checkout: {primary_path}')
+    # The primary authoring guard owns tracked product work. Repo-local Syncwheel
+    # state and untracked files have dedicated command preflights already, and the
+    # capture and lane remedies this guard names cannot move Syncwheel state
+    # anyway, so counting it would refuse a mutation nothing can repair.
+    return [
+        entry for entry in entries
+        if not entry.startswith('?? ') and not primary_checkout_state_entry(entry)
+    ]
+
+
+def primary_checkout_dirty_warning_lines(repo_root, manifest):
+    entries = primary_checkout_dirty_entries(repo_root)
+    if not entries:
+        return []
+    return [
+        'primary checkout is dirty: ' + str(len(entries)) + ' tracked file'
+        + ('' if len(entries) == 1 else 's')
+        + ' not owned by the current user'
+    ]
+
+
+def emit_primary_checkout_dirty_warnings(repo_root, manifest, json_mode=False):
+    lines = primary_checkout_dirty_warning_lines(repo_root, manifest)
+    if not lines or json_mode or not sys.stderr.isatty():
+        return lines
+    color = '' if os.environ.get('NO_COLOR') else YELLOW
+    reset = '' if not color else RESET
+    for line in lines:
+        print(f'{color}WARNING: {line}{reset}', file=sys.stderr)
+    return lines
+
+
+def require_clean_primary_checkout(repo_root, manifest):
+    lines = primary_checkout_dirty_warning_lines(repo_root, manifest)
+    if not lines:
+        return
+    raise SyncwheelError(
+        lines[0] + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
+    )
 
 
 def status_line_paths(line):
@@ -6140,6 +6736,8 @@ def manifest_remedy_stack_ids(manifest, stack_id=None):
 
 def primary_checkout_remedy_commands(manifest, stack_id=None):
     """Name capture and queue commands without guessing ownership of primary changes."""
+    if manifest.get('repository_mode') == 'journal':
+        return ['syncwheel journal snapshot --apply', 'syncwheel journal publish --apply']
     stack_ids = manifest_remedy_stack_ids(manifest, stack_id)
     if not stack_ids:
         return [
@@ -6219,6 +6817,770 @@ def save_repo_profile(repo_root, profile):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(profile, indent=2, sort_keys=True) + '\n')
     return path
+
+
+def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
+    """Validate the clone-local, deliberately narrow GitHub merge policy."""
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} must be an object')
+    allowed = {
+        'enabled', 'repository', 'base_branches', 'merge_method',
+        'allowed_bypasses', 'merge_actors', 'pr_authors', 'commit_authors',
+        'head_repositories', 'checks',
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise SyncwheelError(f'{path} contains unsupported keys: ' + ', '.join(unknown))
+
+    def string_list(field, *, required=False):
+        candidate = value.get(field)
+        if candidate is None and not required:
+            return None
+        if not isinstance(candidate, list) or not candidate:
+            raise SyncwheelError(f'{path}.{field} must be a non-empty string array')
+        normalized = []
+        for index, item in enumerate(candidate):
+            if not isinstance(item, str) or not item.strip() or '\x00' in item:
+                raise SyncwheelError(f'{path}.{field}[{index}] must be a non-empty string')
+            normalized.append(item.strip())
+        if len(set(item.casefold() for item in normalized)) != len(normalized):
+            raise SyncwheelError(f'{path}.{field} contains duplicate case-insensitive values')
+        return normalized
+
+    enabled = value.get('enabled')
+    if not isinstance(enabled, bool):
+        raise SyncwheelError(f'{path}.enabled must be a boolean')
+    repository = value.get('repository')
+    if not isinstance(repository, str) or not re.fullmatch(
+        r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository.strip()
+    ):
+        raise SyncwheelError(f'{path}.repository must be an OWNER/REPO identifier')
+    base_branches = string_list('base_branches', required=True)
+    method = value.get('merge_method')
+    if method not in GITHUB_PR_MERGE_METHODS:
+        raise SyncwheelError(
+            f'{path}.merge_method must be one of: ' + ', '.join(sorted(GITHUB_PR_MERGE_METHODS))
+        )
+    bypasses = string_list('allowed_bypasses', required=True)
+    if any(item not in GITHUB_PR_MERGE_BYPASSES for item in bypasses):
+        raise SyncwheelError(f'{path}.allowed_bypasses accepts only required_reviews')
+    checks = value.get('checks')
+    if checks not in GITHUB_PR_MERGE_CHECKS:
+        raise SyncwheelError(f'{path}.checks accepts only all')
+    merge_actors = string_list('merge_actors', required=True)
+    filters = {
+        field: string_list(field)
+        for field in ('pr_authors', 'commit_authors', 'head_repositories')
+    }
+    if not any(filters.values()):
+        raise SyncwheelError(
+            f'{path} requires at least one of pr_authors, commit_authors, or head_repositories'
+        )
+    normalized = {
+        'enabled': enabled,
+        'repository': repository.strip(),
+        'base_branches': base_branches,
+        'merge_method': method,
+        'allowed_bypasses': bypasses,
+        'merge_actors': merge_actors,
+        'checks': checks,
+    }
+    for field, candidate in filters.items():
+        if candidate is not None:
+            normalized[field] = candidate
+    return normalized
+
+
+def github_pr_merge_policy_from_profile(profile):
+    value = profile.get(GITHUB_PR_MERGE_POLICY_KEY)
+    if value is None:
+        return None
+    return normalize_github_pr_merge_policy(value)
+
+
+def github_pr_merge_policy_status(repo_root):
+    path = repo_profile_path(repo_root)
+    profile = load_repo_profile(repo_root)
+    policy = None
+    error = None
+    if GITHUB_PR_MERGE_POLICY_KEY in profile:
+        try:
+            policy = github_pr_merge_policy_from_profile(profile)
+        except SyncwheelError as exc:
+            error = str(exc)
+    ignored = git(
+        repo_root, 'check-ignore', '--quiet', '--no-index', '--',
+        '.syncwheel/profile.local.json', check=False,
+    ).returncode == 0
+    tracked = git_path_is_tracked(repo_root, path)
+    return {
+        'path': str(path),
+        'configured': policy is not None and error is None,
+        'enabled': bool(policy and policy.get('enabled')),
+        'policy': policy,
+        'error': error,
+        'ignored': ignored,
+        'tracked': tracked,
+        'failClosed': not (policy and policy.get('enabled')) or bool(error) or tracked or not ignored,
+    }
+
+
+def ensure_github_pr_merge_policy_is_private(repo_root):
+    path = repo_profile_path(repo_root)
+    if git_path_is_tracked(repo_root, path):
+        raise SyncwheelError(
+            f'{path} is tracked; refusing to write a private PR merge policy'
+        )
+    ignored = git(
+        repo_root, 'check-ignore', '--quiet', '--no-index', '--',
+        '.syncwheel/profile.local.json', check=False,
+    ).returncode == 0
+    if not ignored:
+        raise SyncwheelError(
+            '.syncwheel/profile.local.json is not ignored; refusing to write a private PR merge policy'
+        )
+
+
+def github_pr_merge_policy_edit(repo_root, proposed, *, apply, clear=False, json_mode=False):
+    ensure_github_pr_merge_policy_is_private(repo_root)
+    current_profile = load_repo_profile(repo_root)
+    next_profile = dict(current_profile)
+    if clear:
+        next_profile.pop(GITHUB_PR_MERGE_POLICY_KEY, None)
+    else:
+        next_profile[GITHUB_PR_MERGE_POLICY_KEY] = normalize_github_pr_merge_policy(proposed)
+    output = {
+        'path': str(repo_profile_path(repo_root)),
+        'current': current_profile.get(GITHUB_PR_MERGE_POLICY_KEY),
+        'proposed': next_profile.get(GITHUB_PR_MERGE_POLICY_KEY),
+        'preservedKeys': sorted(key for key in current_profile if key != GITHUB_PR_MERGE_POLICY_KEY),
+        'ignored': True,
+        'tracked': False,
+        'applied': bool(apply),
+        'dryRun': not apply,
+    }
+    if not apply:
+        print(json.dumps(output, indent=2, sort_keys=True) if json_mode else json.dumps(output, indent=2))
+        return 0
+    save_repo_profile(repo_root, next_profile)
+    append_ledger_event(
+        repo_root,
+        'github_pr_merge_policy_changed',
+        {
+            'operation': 'clear' if clear else 'set',
+            'enabled': bool(next_profile.get(GITHUB_PR_MERGE_POLICY_KEY, {}).get('enabled')),
+            'repository': next_profile.get(GITHUB_PR_MERGE_POLICY_KEY, {}).get('repository'),
+        },
+        repo_root / '.syncwheel' / 'manifest.json',
+    )
+    output['status'] = github_pr_merge_policy_status(repo_root)
+    print(json.dumps(output, indent=2, sort_keys=True) if json_mode else json.dumps(output, indent=2))
+    return 0
+
+
+def command_repo_pr_merge_policy_status(args):
+    repo_root = resolve_repo_root(args.repo)
+    report = github_pr_merge_policy_status(repo_root)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"policy: {'configured' if report['configured'] else 'missing/invalid'}")
+        print(f"enabled: {'yes' if report['enabled'] else 'no'}")
+        print(f"private: {'yes' if report['ignored'] and not report['tracked'] else 'no'}")
+        if report['error']:
+            print(f"error: {report['error']}")
+    return 0
+
+
+def command_repo_pr_merge_policy_set(args):
+    repo_root = resolve_repo_root(args.repo)
+    proposed = {
+        'enabled': True,
+        'repository': args.repository,
+        'base_branches': list(args.base),
+        'merge_method': args.method,
+        'allowed_bypasses': list(args.allow_bypass),
+        'merge_actors': list(args.merge_actor),
+        'checks': args.checks,
+    }
+    for option, field in (
+        (args.pr_author, 'pr_authors'),
+        (args.commit_author, 'commit_authors'),
+        (args.head_repository, 'head_repositories'),
+    ):
+        if option:
+            proposed[field] = list(option)
+    return github_pr_merge_policy_edit(
+        repo_root, proposed, apply=args.apply, json_mode=args.json,
+    )
+
+
+def command_repo_pr_merge_policy_clear(args):
+    repo_root = resolve_repo_root(args.repo)
+    return github_pr_merge_policy_edit(
+        repo_root, None, apply=args.apply, clear=True, json_mode=args.json,
+    )
+
+
+def github_adapter_request(repo_root, request):
+    """Call only the fixed Syncwheel GitHub adapter entrypoint."""
+    adapter = shutil.which('syncwheel-github')
+    command = [adapter] if adapter else [sys.executable, str(Path(__file__).with_name('syncwheel_github.py'))]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            input=json.dumps(request, sort_keys=True),
+            text=True,
+            capture_output=True,
+            timeout=GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS,
+            shell=False,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SyncwheelError(f'GitHub adapter failed: {exc}') from exc
+    output = (result.stdout or '')[-GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT:]
+    try:
+        response = json.loads(output)
+    except json.JSONDecodeError as exc:
+        detail = (result.stderr or result.stdout or 'adapter returned invalid JSON').strip()
+        raise SyncwheelError(f'GitHub adapter returned invalid JSON: {detail[:1000]}') from exc
+    if not isinstance(response, dict) or response.get('ok') is not True:
+        # A GitHub merge command can return a non-zero status after GitHub has
+        # accepted or rejected the request. Preserve that bounded command
+        # result so the caller can re-observe the PR and write a receipt
+        # instead of losing the operation at the adapter boundary.
+        if (
+            request.get('operation') == 'merge'
+            and isinstance(response, dict)
+            and isinstance(response.get('returncode'), int)
+            and isinstance(response.get('argv'), list)
+        ):
+            return response
+        detail = response.get('error') if isinstance(response, dict) else None
+        raise SyncwheelError(f'GitHub adapter error: {(detail or result.stderr or "unknown error")[:1000]}')
+    return response.get('observation', response)
+
+
+def github_blocker(blockers, code, detail, **evidence):
+    item = {'code': code, 'detail': detail}
+    if evidence:
+        item['evidence'] = evidence
+    blockers.append(item)
+
+
+def github_ci_check_result(check):
+    if not isinstance(check, dict):
+        return None
+    status = str(check.get('conclusion') or check.get('status') or '').upper()
+    return status if status in {'SUCCESS', 'SKIPPED'} else None
+
+
+def github_required_check_names(rules):
+    """Extract required check names from supported GitHub rule response shapes."""
+    names = []
+    protection = rules.get('branchProtection') if isinstance(rules, dict) else None
+    required = protection.get('required_status_checks') if isinstance(protection, dict) else None
+    if isinstance(required, dict):
+        candidates = [*(required.get('contexts') or []), *(required.get('checks') or [])]
+        for item in candidates:
+            if isinstance(item, str) and item:
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get('context') or item.get('name')
+                if isinstance(name, str) and name:
+                    names.append(name)
+    rulesets = rules.get('rulesets') if isinstance(rules, dict) else None
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        if rule_type != 'required_status_checks':
+            continue
+        parameters = rule.get('parameters') or {}
+        for item in parameters.get('required_status_checks') or []:
+            if isinstance(item, str) and item:
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get('context') or item.get('name')
+                if isinstance(name, str) and name:
+                    names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def github_rule_review_required(rules):
+    protection = rules.get('branchProtection') if isinstance(rules, dict) else None
+    if isinstance(protection, dict) and protection.get('required_pull_request_reviews'):
+        return True
+    rulesets = rules.get('rulesets') if isinstance(rules, dict) else None
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        parameters = rule.get('parameters') or {}
+        if rule_type in {'pull_request', 'required_pull_request_reviews'}:
+            count = parameters.get('required_approving_review_count', 1) if isinstance(parameters, dict) else 1
+            try:
+                requires_approval = int(count) > 0
+            except (TypeError, ValueError):
+                requires_approval = True
+            if not parameters or requires_approval:
+                return True
+    return False
+
+
+def github_rules_blockers(rules, blockers):
+    if not isinstance(rules, dict):
+        return
+    if rules.get('mergeQueue') is True or rules.get('merge_queue') is True:
+        github_blocker(blockers, 'merge_queue', 'merge queue is enabled and unsupported')
+    if rules.get('branchProtectionStatus') not in (None, 200, 404) and rules.get('branchProtectionError'):
+        github_blocker(blockers, 'rules_unavailable', 'GitHub branch protection could not be observed')
+    rulesets = rules.get('rulesets')
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    known = {
+        'pull_request', 'required_pull_request_reviews', 'required_status_checks',
+        'non_fast_forward', 'deletion', 'required_linear_history', 'merge_queue',
+    }
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        if rule_type and rule_type not in known:
+            github_blocker(blockers, 'unknown_rule', f'unrecognized GitHub rule: {rule_type}')
+        if rule_type == 'merge_queue':
+            github_blocker(blockers, 'merge_queue', 'merge queue rule is unsupported')
+    if rules.get('rulesetsStatus') not in (None, 200, 404) and rules.get('rulesetsError'):
+        github_blocker(blockers, 'rules_unavailable', 'GitHub rules could not be observed')
+
+
+def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
+    source_revision = None
+    declared = []
+    try:
+        declared = [commit_full_sha(repo_root, item) for item in stack.get('commits', [])]
+    except SyncwheelError as exc:
+        github_blocker(blockers, 'stack_commit_missing', str(exc))
+    if stack.get('state', 'published') != 'published':
+        github_blocker(blockers, 'stack_not_published', 'stack must have state=published')
+    if not isinstance(stack.get('branch'), str) or not branch_exists(repo_root, stack['branch']):
+        github_blocker(blockers, 'source_branch_missing', 'stack source branch is missing')
+    else:
+        source_revision = ref_tip(repo_root, stack['branch'])
+        if declared:
+            try:
+                actual = rev_list(repo_root, f"{stack.get('base', '')}..{stack['branch']}")
+            except SyncwheelError as exc:
+                github_blocker(blockers, 'stack_base_missing', str(exc))
+            else:
+                if actual != declared:
+                    github_blocker(
+                        blockers, 'stack_projection_mismatch',
+                        'source branch does not exactly equal declared stack commits',
+                        declared=declared, actual=actual,
+                    )
+    remote = stack.get('target_remote') or manifest['defaults']['publication_remote']
+    if not remote_is_configured(repo_root, remote):
+        github_blocker(blockers, 'publication_remote_missing', f'publication remote is not configured: {remote}')
+    elif stack.get('branch'):
+        try:
+            remote_tip = remote_ref_tips(repo_root, remote, [f"refs/heads/{stack['branch']}"])[f"refs/heads/{stack['branch']}"]
+            if not remote_tip:
+                github_blocker(blockers, 'source_remote_missing', 'source branch is absent on the publication remote')
+            elif source_revision and remote_tip != source_revision:
+                github_blocker(blockers, 'source_remote_drift', 'remote source branch differs from stack revision', remote=remote_tip, expected=source_revision)
+        except SyncwheelError as exc:
+            github_blocker(blockers, 'source_remote_unavailable', str(exc))
+    integration = manifest.get('integration') or {}
+    integration_branch = integration.get('branch')
+    in_integration = stack.get('id') in integration.get('stacks', [])
+    if manifest['defaults'].get('integration_membership') == INTEGRATION_MEMBERSHIP_REQUIRED and not in_integration:
+        github_blocker(blockers, 'integration_membership', 'stack is not present in required integration')
+    elif in_integration and (not integration_branch or not branch_exists(repo_root, integration_branch)):
+        github_blocker(blockers, 'integration_missing', 'integration branch is missing')
+    elif in_integration:
+        for commit in stack_integration_commits(stack):
+            if not branch_contains(repo_root, integration_branch, commit):
+                github_blocker(blockers, 'integration_not_validated', f'stack commit is absent from integration: {commit}')
+    for dependency_id in stack.get('depends_on', []):
+        try:
+            dependency = require_stack(manifest, dependency_id)
+        except SyncwheelError as exc:
+            github_blocker(blockers, 'dependency_missing', str(exc), dependency=dependency_id)
+            continue
+        if not branch_contains(repo_root, stack.get('base'), dependency['branch']):
+            github_blocker(blockers, 'dependency_not_absorbed', f'dependency is not absorbed: {dependency_id}')
+    try:
+        diagnostics = governed_worktree_diagnostics(repo_root, manifest)
+        for lane in diagnostics.get('lanes', []):
+            if lane.get('target') == stack.get('id') and lane.get('code') in {'dirty', 'locked', 'lane_in_use', 'unavailable'}:
+                github_blocker(blockers, 'associated_lane_dirty', lane.get('remedy') or lane.get('code'))
+            elif lane.get('code') == 'dirty':
+                warnings.append({'code': 'unrelated_dirty_worktree', 'path': lane.get('path')})
+    except (OSError, SyncwheelError) as exc:
+        warnings.append({'code': 'worktree_diagnostics_unavailable', 'detail': str(exc)[:400]})
+    return source_revision, declared
+
+
+def github_pr_merge_plan_digest(plan):
+    unsigned = copy.deepcopy(plan)
+    unsigned.pop('planDigest', None)
+    unsigned.pop('operationId', None)
+    return canonical_json_digest(unsigned)
+
+
+def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, args):
+    require_delivery_manifest(manifest)
+    policy = github_pr_merge_policy_from_profile(load_repo_profile(repo_root))
+    if policy is None:
+        raise SyncwheelError('GitHub PR merge policy is missing or invalid; configure profile.local.json first')
+    if not policy['enabled']:
+        raise SyncwheelError('GitHub PR merge policy is disabled')
+    authority = manifest_authority(manifest)
+    if authority['mode'] != AUTHORITY_MODE_AI_MANAGED or AUTHORITY_CLASS_SOURCE_CHANGE not in authority['allow']:
+        raise SyncwheelError('GitHub PR merge requires authority.mode=ai-managed with source_change allowed')
+    stack = require_stack(manifest, stack_id)
+    blockers = []
+    warnings = []
+    validation = validate_manifest(repo_root, manifest)
+    for error in validation.get('errors', []):
+        github_blocker(blockers, 'manifest_invalid', error)
+    source_revision, declared = github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings)
+    base_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
+    if base_branch not in policy['base_branches']:
+        github_blocker(blockers, 'base_branch_not_allowed', f'base branch is not allowlisted: {base_branch}')
+    pr_number = None
+    github = stack.get('github')
+    if isinstance(github, dict):
+        pr_number = github.get('pr')
+    if pr_number is not None and (isinstance(pr_number, bool) or not re.fullmatch(r'\d+', str(pr_number))):
+        github_blocker(blockers, 'invalid_pr_number', 'stack github.pr must be a positive integer')
+        pr_number = None
+    request = {
+        'operation': 'observe',
+        'repository': policy['repository'],
+        'targetRemote': stack.get('target_remote') or manifest['defaults']['publication_remote'],
+        'baseBranch': base_branch,
+        'headBranch': stack.get('branch'),
+        'pullRequestNumber': int(pr_number) if pr_number is not None else None,
+    }
+    observation = None
+    adapter_error = None
+    try:
+        observation = github_adapter_request(repo_root, request)
+    except SyncwheelError as exc:
+        adapter_error = str(exc)
+        github_blocker(blockers, 'github_observation_failed', adapter_error)
+    pr = (observation or {}).get('pr') if isinstance(observation, dict) else None
+    selection = (observation or {}).get('selection') if isinstance(observation, dict) else None
+    if pr is None:
+        count = selection.get('count') if isinstance(selection, dict) else None
+        if count == 0:
+            github_blocker(blockers, 'pull_request_not_found', 'no open PR matched exact head and base')
+        elif count is not None:
+            github_blocker(blockers, 'pull_request_ambiguous', f'exact PR lookup returned {count} matches')
+        else:
+            github_blocker(blockers, 'pull_request_missing', 'adapter did not return a unique pull request')
+    identity = (observation or {}).get('identity') if isinstance(observation, dict) else {}
+    repository_info = (observation or {}).get('repositoryInfo') if isinstance(observation, dict) else {}
+    rules = (observation or {}).get('rules') if isinstance(observation, dict) else {}
+    if isinstance(observation, dict) and observation.get('repository', '').casefold() != policy['repository'].casefold():
+        github_blocker(blockers, 'repository_mismatch', 'observed repository differs from local policy')
+    actor = identity.get('login') if isinstance(identity, dict) else None
+    if not isinstance(actor, str) or actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
+        github_blocker(blockers, 'merge_actor_not_allowed', 'effective gh actor is not allowlisted', actor=actor)
+    permissions = repository_info.get('permissions') if isinstance(repository_info, dict) else {}
+    if not isinstance(permissions, dict) or permissions.get('admin') is not True:
+        github_blocker(blockers, 'merge_actor_not_admin', 'effective gh actor has no repository admin permission')
+    if isinstance(pr, dict):
+        if pr_number is not None and pr.get('number') != int(pr_number):
+            github_blocker(blockers, 'pull_request_number_mismatch', 'observed PR number differs from the stack declaration')
+        if pr.get('state') != 'OPEN':
+            github_blocker(blockers, 'pull_request_not_open', 'pull request is not open')
+        if pr.get('isDraft') is True:
+            github_blocker(blockers, 'pull_request_draft', 'pull request is draft')
+        if pr.get('headRefName') != stack.get('branch'):
+            github_blocker(blockers, 'head_branch_mismatch', 'PR head branch differs from stack branch')
+        if source_revision and pr.get('headRefOid') != source_revision:
+            github_blocker(blockers, 'head_sha_mismatch', 'PR head SHA differs from stack revision')
+        if pr.get('baseRefName') != base_branch:
+            github_blocker(blockers, 'base_branch_mismatch', 'PR base branch differs from stack target')
+        author = pr.get('author')
+        if policy.get('pr_authors') is not None and (
+            not isinstance(author, str) or author.casefold() not in {item.casefold() for item in policy['pr_authors']}
+        ):
+            github_blocker(blockers, 'pr_author_not_allowed', 'PR author is not allowlisted', author=author)
+        head_repo = pr.get('headRepository')
+        if policy.get('head_repositories') is not None and (
+            not isinstance(head_repo, str) or head_repo.casefold() not in {item.casefold() for item in policy['head_repositories']}
+        ):
+            github_blocker(blockers, 'head_repository_not_allowed', 'PR source repository is not allowlisted', headRepository=head_repo)
+        commit_authors = pr.get('commitAuthors') or []
+        if policy.get('commit_authors') is not None:
+            allowed = {item.casefold() for item in policy['commit_authors']}
+            if not commit_authors:
+                github_blocker(blockers, 'commit_authors_missing', 'commit author identities could not be resolved')
+            for commit in commit_authors:
+                login = commit.get('login') if isinstance(commit, dict) else None
+                if not isinstance(login, str) or login.casefold() not in allowed:
+                    github_blocker(blockers, 'commit_author_not_allowed', 'a commit author is not allowlisted', commit=commit.get('sha') if isinstance(commit, dict) else None, login=login)
+        review = pr.get('review') or {}
+        if review.get('changesRequested') or review.get('decision') == 'CHANGES_REQUESTED':
+            github_blocker(blockers, 'changes_requested', 'review changes requested')
+        if review.get('unresolvedThreads'):
+            github_blocker(blockers, 'unresolved_review_threads', 'review has active unresolved threads')
+        if pr.get('threadsTruncated') is True:
+            github_blocker(blockers, 'review_threads_truncated', 'not all review threads were observed')
+        decision = review.get('decision')
+        if decision == 'REVIEW_REQUIRED' and not github_rule_review_required(rules):
+            github_blocker(blockers, 'review_rule_unproven', 'review is required but the effective GitHub rule was not observed')
+        elif decision not in (None, '', 'APPROVED', 'REVIEW_REQUIRED'):
+            github_blocker(blockers, 'unknown_review_state', f'unrecognized review decision: {decision}')
+        if pr.get('mergeable') != 'MERGEABLE':
+            github_blocker(blockers, 'not_mergeable', f"mergeable={pr.get('mergeable')}")
+        if pr.get('mergeStateStatus') in {'BEHIND', 'DIRTY', 'UNKNOWN', 'UNSTABLE'}:
+            github_blocker(blockers, 'base_obsolete_or_dirty', f"mergeStateStatus={pr.get('mergeStateStatus')}")
+        checks = pr.get('checks') or []
+        if not checks:
+            github_blocker(blockers, 'checks_missing', 'at least one successful check is required')
+        else:
+            for check in checks:
+                if github_ci_check_result(check) is None:
+                    github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
+        required_names = github_required_check_names(rules)
+        if required_names:
+            observed_names = {item.get('name') for item in checks if isinstance(item, dict)}
+            for name in required_names:
+                if name not in observed_names:
+                    github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
+        if decision == 'REVIEW_REQUIRED':
+            path = 'admin-review-bypass'
+        else:
+            path = 'normal'
+        if pr.get('mergeStateStatus') == 'BLOCKED' and decision != 'REVIEW_REQUIRED':
+            github_blocker(blockers, 'blocked_for_unknown_reason', 'GitHub reports BLOCKED for a reason other than proven required review')
+    else:
+        path = 'normal'
+    allow_methods = repository_info.get('allowMergeMethods') if isinstance(repository_info, dict) else {}
+    if isinstance(allow_methods, dict) and allow_methods.get(policy['merge_method']) is not True:
+        github_blocker(blockers, 'merge_method_disabled', f"merge method is disabled: {policy['merge_method']}")
+    github_rules_blockers(rules, blockers)
+    try:
+        target_base_sha = remote_ref_tips(
+            repo_root,
+            stack.get('target_remote') or manifest['defaults']['publication_remote'],
+            [f'refs/heads/{base_branch}'],
+        )[f'refs/heads/{base_branch}']
+    except SyncwheelError as exc:
+        target_base_sha = None
+        github_blocker(blockers, 'base_observation_failed', str(exc))
+    if target_base_sha is None:
+        github_blocker(blockers, 'base_remote_missing', 'delivery base branch is absent on the target remote')
+    if pr and target_base_sha and pr.get('baseRefOid') and pr.get('baseRefOid') != target_base_sha:
+        github_blocker(blockers, 'base_changed', 'PR base SHA differs from the observed delivery base', pr=pr.get('baseRefOid'), observed=target_base_sha)
+    if not isinstance(pr, dict):
+        pr = {}
+    number = pr.get('number') or (int(pr_number) if pr_number is not None else None)
+    command = None
+    if number and source_revision:
+        command = ['gh', 'pr', 'merge', str(number), '--repo', policy['repository'], f"--{policy['merge_method']}"]
+        if path == 'admin-review-bypass':
+            command.append('--admin')
+        command.extend(['--match-head-commit', source_revision])
+    plan = {
+        'schemaVersion': GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION,
+        'kind': 'githubPrMergePlan',
+        'stack': stack_id,
+        'branch': stack.get('branch'),
+        'commit': source_revision,
+        'declaredCommits': declared,
+        'repository': policy['repository'],
+        'targetRemote': stack.get('target_remote') or manifest['defaults']['publication_remote'],
+        'baseBranch': base_branch,
+        'pullRequest': {
+            'number': number,
+            'url': pr.get('url'),
+            'headSha': pr.get('headRefOid'),
+            'baseSha': pr.get('baseRefOid'),
+        },
+        'headSha': pr.get('headRefOid'),
+        'baseSha': pr.get('baseRefOid') or target_base_sha,
+        'author': pr.get('author'),
+        'commitAuthors': pr.get('commitAuthors') or [],
+        'headRepository': pr.get('headRepository'),
+        'mergeActor': actor,
+        'checks': pr.get('checks') or [],
+        'review': pr.get('review') or {},
+        'threads': (pr.get('review') or {}).get('threads') or [],
+        'rules': rules,
+        'mergeMethod': policy['merge_method'],
+        'path': path,
+        'command': command,
+        'adapterRequest': request,
+        'policy': policy,
+        'authority': authority,
+        'source': {'branch': stack.get('branch'), 'revision': source_revision, 'base': stack.get('base'), 'commits': declared},
+        'integration': {'branch': (manifest.get('integration') or {}).get('branch'), 'revision': ref_tip(repo_root, (manifest.get('integration') or {}).get('branch'))},
+        'warnings': warnings,
+        'blockers': blockers,
+        'status': 'ready' if not blockers and command else 'blocked',
+        'next': 'apply with the exact operationId and planDigest' if not blockers and command else 'resolve blockers and preview again',
+    }
+    plan['planDigest'] = github_pr_merge_plan_digest(plan)
+    requested = normalize_channel_operation_id(getattr(args, 'operation_id', None))
+    plan['operationId'] = requested or 'github-pr-merge-' + plan['planDigest'][:24]
+    return plan
+
+
+def github_pr_merge_events(repo_root, manifest_path, operation_id):
+    return [
+        event for event in load_ledger_events(repo_root, manifest_path)
+        if event.get('type') in {'github_pr_merge_started', 'github_pr_merge_prepared', 'github_pr_merge_receipt'}
+        and (event.get('payload') or {}).get('operationId') == operation_id
+    ]
+
+
+def record_github_pr_merge_event(repo_root, manifest_path, event_type, plan, **extra):
+    payload = {
+        'operationId': plan['operationId'],
+        'planDigest': plan['planDigest'],
+        'stack': plan['stack'],
+        'plan': plan,
+        **extra,
+    }
+    append_ledger_event(repo_root, event_type, payload, manifest_path)
+    return payload
+
+
+def github_pr_merge_postverify(repo_root, plan):
+    remote = plan['source'].get('targetRemote') or plan['policy'].get('repository')
+    target_remote = None
+    stack = plan.get('source') or {}
+    # The Git remote alias is intentionally taken from the stack/manifest, not
+    # from the GitHub repository string. It is evidence only, never a command.
+    try:
+        target_remote = plan.get('targetRemote') or 'origin'
+        base_ref = f"{target_remote}/{plan['baseBranch']}"
+        fetched = git(
+            repo_root, 'fetch', '--quiet', target_remote,
+            f"refs/heads/{plan['baseBranch']}:refs/remotes/{target_remote}/{plan['baseBranch']}",
+            check=False,
+        )
+        if fetched.returncode != 0:
+            return {'status': 'unavailable', 'detail': 'could not fetch delivery base'}
+        if plan['mergeMethod'] in {'squash', 'rebase'}:
+            cherry = git(repo_root, 'cherry', base_ref, plan['branch'], check=False)
+            if cherry.returncode != 0:
+                return {'status': 'unavailable', 'detail': 'git cherry verification failed'}
+            return {'status': 'verified', 'gitCherry': cherry.stdout.splitlines(), 'unabsorbed': any(line.startswith('+') for line in cherry.stdout.splitlines())}
+        return {'status': 'verified', 'ancestry': branch_contains(repo_root, base_ref, plan['headSha'])}
+    except (OSError, SyncwheelError) as exc:
+        return {'status': 'unavailable', 'detail': str(exc)[:400]}
+
+
+def github_pr_merge_classify(plan, observation, command_ok):
+    pr = (observation or {}).get('pr') if isinstance(observation, dict) else None
+    if isinstance(pr, dict) and pr.get('state') == 'MERGED' and pr.get('headRefOid') == plan.get('headSha'):
+        return 'succeeded' if command_ok else 'succeeded-equivalent'
+    if isinstance(pr, dict) and pr.get('state') == 'OPEN' and (
+        pr.get('headRefOid') == plan.get('headSha') and pr.get('baseRefOid') == plan.get('baseSha')
+    ):
+        return 'failed'
+    return 'unknown'
+
+
+def github_pr_merge_receipt(repo_root, manifest_path, plan, status, observation, command_result=None, detail=None):
+    pr = (observation or {}).get('pr') if isinstance(observation, dict) else {}
+    receipt = {
+        'schemaVersion': GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION,
+        'kind': 'githubPrMergeReceipt',
+        'stack': plan['stack'],
+        'operationId': plan['operationId'],
+        'planDigest': plan['planDigest'],
+        'status': status,
+        'path': plan['path'],
+        'command': plan.get('command'),
+        'pullRequest': plan.get('pullRequest'),
+        'headSha': plan.get('headSha'),
+        'mergedAt': pr.get('mergedAt') if isinstance(pr, dict) else None,
+        'mergedBy': pr.get('mergedBy') if isinstance(pr, dict) else None,
+        'mergeCommit': pr.get('mergeCommit') if isinstance(pr, dict) else None,
+        'postVerification': github_pr_merge_postverify(repo_root, plan) if status.startswith('succeeded') else None,
+        'adapterResult': command_result,
+        'detail': detail,
+        'recordedAt': iso_utc_now(),
+    }
+    append_ledger_event(repo_root, 'github_pr_merge_receipt', receipt, manifest_path)
+    return receipt
+
+
+def reconcile_github_pr_merge_operation(repo_root, manifest_path, operation_id, plan_digest):
+    events = github_pr_merge_events(repo_root, manifest_path, operation_id)
+    if not events:
+        return None
+    if any((event.get('payload') or {}).get('planDigest') != plan_digest for event in events):
+        raise SyncwheelError(f'GitHub PR merge operation id collision: {operation_id} is bound to another plan')
+    terminal = next((event.get('payload') or {} for event in reversed(events) if event.get('type') == 'github_pr_merge_receipt'), None)
+    if terminal:
+        return terminal
+    prepared = next((event.get('payload') or {} for event in reversed(events) if event.get('type') == 'github_pr_merge_prepared'), None)
+    if not prepared:
+        raise SyncwheelError(f'GitHub PR merge operation {operation_id} is incomplete without prepared evidence')
+    plan = prepared.get('plan') or {}
+    observation = github_adapter_request(repo_root, {**(plan.get('adapterRequest') or {}), 'pullRequestNumber': (plan.get('pullRequest') or {}).get('number')})
+    status = github_pr_merge_classify(plan, observation, False)
+    return github_pr_merge_receipt(
+        repo_root, manifest_path, plan, status, observation,
+        detail='reconciled without retrying gh pr merge',
+    )
+
+
+def command_stack_merge_pr(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if args.apply:
+        if not args.operation_id or not args.plan_digest:
+            raise SyncwheelError('stack merge-pr --apply requires --operation-id and --plan-digest')
+        existing = reconcile_github_pr_merge_operation(
+            repo_root, manifest_path, args.operation_id, args.plan_digest,
+        )
+        if existing:
+            print(json.dumps(existing, indent=2, sort_keys=True))
+            return 0 if existing.get('status', '').startswith('succeeded') else 2
+    plan = build_github_pr_merge_plan(repo_root, manifest, manifest_path, args.stack, args)
+    if not args.apply:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    if args.plan_digest != plan['planDigest']:
+        raise SyncwheelError('GitHub PR merge plan is stale; generate a new preview and use its exact planDigest')
+    if plan['status'] != 'ready':
+        raise SyncwheelError('GitHub PR merge STOP: plan is blocked; resolve blockers and preview again')
+    record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
+    record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
+    merge_result = github_adapter_request(repo_root, {
+        'operation': 'merge',
+        'repository': plan['repository'],
+        'pullRequestNumber': plan['pullRequest']['number'],
+        'method': plan['mergeMethod'],
+        'admin': plan['path'] == 'admin-review-bypass',
+        'headSha': plan['headSha'],
+    })
+    observed = github_adapter_request(repo_root, {
+        **plan['adapterRequest'],
+        'pullRequestNumber': plan['pullRequest']['number'],
+    })
+    status = github_pr_merge_classify(plan, observed, bool(merge_result.get('ok')))
+    receipt = github_pr_merge_receipt(
+        repo_root, manifest_path, plan, status, observed, merge_result,
+        detail=(merge_result.get('stderr') or merge_result.get('stdout')) if status in {'failed', 'unknown'} else None,
+    )
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+    return 0 if status.startswith('succeeded') else 2
 
 
 def governed_worktree_registry_path(repo_root):
@@ -8019,7 +9381,13 @@ def coordination_state_legacy_manifest_digest(repo_root, control_manifest, state
     return manifest_digest(snapshot)
 
 
-def classify_coordination_state_manifest_digest(repo_root, state, remote=None):
+def coordination_state_manifest_digest_classification(repo_root, state, remote=None):
+    """Classify a state's manifest_digest, including the unrecognized (orphaned) case.
+
+    Unreadable control-manifest evidence (missing tip, missing manifest file)
+    is a distinct failure and is not caught here: it always propagates so a
+    caller can never mistake it for a healable, merely-unrecognized digest.
+    """
     control_manifest = coordination_state_control_manifest(repo_root, state, remote)
     control_digest = manifest_digest(control_manifest)
     recorded = state.get('manifest_digest')
@@ -8030,15 +9398,22 @@ def classify_coordination_state_manifest_digest(repo_root, state, remote=None):
     ):
         form = COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
     else:
-        raise SyncwheelError(
-            'coordination state manifest_digest does not match the control manifest '
-            'on its integration tip'
-        )
+        form = COORDINATION_STATE_DIGEST_FORM_ORPHANED
     return {
         'form': form,
         'recorded_digest': recorded,
         'control_manifest_digest': control_digest,
     }
+
+
+def classify_coordination_state_manifest_digest(repo_root, state, remote=None):
+    classification = coordination_state_manifest_digest_classification(repo_root, state, remote)
+    if classification['form'] == COORDINATION_STATE_DIGEST_FORM_ORPHANED:
+        raise SyncwheelError(
+            'coordination state manifest_digest does not match the control manifest '
+            'on its integration tip'
+        )
+    return classification
 
 
 def coordination_state_manifest_digest_form(repo_root, state, remote=None):
@@ -8067,6 +9442,22 @@ def record_coordination_state_digest_migration(
             'from_digest': digest_form['recorded_digest'],
             'to_form': COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
             'to_digest': digest,
+        },
+        manifest_path,
+    )
+
+
+def record_coordination_state_digest_heal(repo_root, manifest_path, config, plan, state_tip):
+    return append_ledger_event(
+        repo_root,
+        'coordination_state_digest_healed',
+        {
+            'coordination_id': config['id'],
+            'parent_state': plan['expectedStateTip'],
+            'state_tip': state_tip,
+            'repair_class': COORDINATION_REPAIR_DIGEST_HEAL_CLASS,
+            'from_digest': plan['recordedManifestDigest'],
+            'to_digest': plan['expectedManifestDigest'],
         },
         manifest_path,
     )
@@ -8666,6 +10057,40 @@ def build_digest_migration_coordination_repair_state(
     return validate_coordination_state(child, previous_state['coordination_id'])
 
 
+def build_digest_heal_coordination_repair_state(
+    previous_state, previous_tip, plan, installation
+):
+    """Recompute an orphaned manifest_digest from the manifest already committed at the tip.
+
+    Unlike the legacy-digest migration, the old recorded value is not required
+    to be any recognized prior form: any value is accepted as stale, because
+    the replacement is a deterministic function of content already committed
+    and verified at the registered integration tip, and needs no further
+    proof than reading that tree.
+    """
+    child = build_coordination_repair_state(
+        previous_state,
+        previous_tip,
+        plan['repairedRef'],
+        plan['expectedRemoteTip'],
+        installation,
+    )
+    child['changed_refs'] = {}
+    child['publication_scope'] = f"repair-digest-heal:{plan['repairedRef']}"
+    child['manifest_digest'] = plan['expectedManifestDigest']
+    child['repair_evidence'] = {
+        'schemaVersion': 1,
+        'planDigest': plan['planDigest'],
+        'proof': COORDINATION_REPAIR_DIGEST_HEAL_PROOF,
+        'ref': plan['repairedRef'],
+        'recordedTip': plan['expectedRecordedTip'],
+        'observedTip': plan['expectedRemoteTip'],
+        'recordedManifestDigest': plan['recordedManifestDigest'],
+        'manifestDigest': plan['expectedManifestDigest'],
+    }
+    return validate_coordination_state(child, previous_state['coordination_id'])
+
+
 def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='github-lock'):
     require_sha1_repository(repo_root, 'coordination repair')
     config = coordination_config(manifest)
@@ -8700,18 +10125,23 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
         raise SyncwheelError(f'coordination repair managed ref is absent: {repaired_ref}')
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
     ref_repair_required = expected_recorded != observed
-    digest_form = coordination_state_manifest_digest_form(
+    digest_classification = coordination_state_manifest_digest_classification(
         repo_root, previous['state'], config['remote']
     )
     digest_migration_required = (
         not ref_repair_required
-        and digest_form is not None
-        and digest_form['form'] == COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+        and digest_classification['form'] == COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+    )
+    digest_heal_required = (
+        not ref_repair_required
+        and digest_classification['form'] == COORDINATION_STATE_DIGEST_FORM_ORPHANED
     )
     if ref_repair_required:
         status = 'repair-required'
     elif digest_migration_required:
         status = 'digest-migration-required'
+    elif digest_heal_required:
+        status = 'digest-heal-required'
     else:
         status = 'noop'
     payload = {
@@ -8733,11 +10163,20 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     if digest_migration_required:
         payload.update({
             'repairClass': COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS,
-            'stateDigestForm': digest_form['form'],
-            'recordedManifestDigest': digest_form['recorded_digest'],
-            'expectedManifestDigest': digest_form['control_manifest_digest'],
+            'stateDigestForm': digest_classification['form'],
+            'recordedManifestDigest': digest_classification['recorded_digest'],
+            'expectedManifestDigest': digest_classification['control_manifest_digest'],
             'proof': COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF,
             'precondition': COORDINATION_REPAIR_DIGEST_MIGRATION_PRECONDITION,
+        })
+    if digest_heal_required:
+        payload.update({
+            'repairClass': COORDINATION_REPAIR_DIGEST_HEAL_CLASS,
+            'stateDigestForm': digest_classification['form'],
+            'recordedManifestDigest': digest_classification['recorded_digest'],
+            'expectedManifestDigest': digest_classification['control_manifest_digest'],
+            'proof': COORDINATION_REPAIR_DIGEST_HEAL_PROOF,
+            'precondition': COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION,
         })
     if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and ref_repair_required:
         active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
@@ -8940,7 +10379,16 @@ class DigestMigrationStateCasCoordinationRepairBackend(
     proof = COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF
 
 
-def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
+class DigestHealStateCasCoordinationRepairBackend(
+    TreeEquivalentStateCasCoordinationRepairBackend
+):
+    """Rewrite only an orphaned recorded control digest of an otherwise unchanged state."""
+
+    name = COORDINATION_REPAIR_DIGEST_HEAL_BACKEND
+    proof = COORDINATION_REPAIR_DIGEST_HEAL_PROOF
+
+
+def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, manifest_path=None):
     if not isinstance(plan, dict):
         raise SyncwheelError('coordination repair plan must be a JSON object')
     required_plan_keys = {
@@ -8961,6 +10409,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             backend = FastForwardStateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND:
             backend = DigestMigrationStateCasCoordinationRepairBackend()
+        elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_HEAL_BACKEND:
+            backend = DigestHealStateCasCoordinationRepairBackend()
         else:
             backend = CoordinationRepairBackend()
     supplied_digest = plan.get('planDigest')
@@ -8979,13 +10429,20 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
     tree_equivalent_repair = backend.name == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
     fast_forward_repair = backend.name == COORDINATION_REPAIR_FAST_FORWARD_BACKEND
     digest_migration_repair = backend.name == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
+    digest_heal_repair = backend.name == COORDINATION_REPAIR_DIGEST_HEAL_BACKEND
     state_only_repair = (
         tree_equivalent_repair or fast_forward_repair or digest_migration_repair
+        or digest_heal_repair
     )
     if plan.get('status') == 'digest-migration-required' and not digest_migration_repair:
         raise SyncwheelError(
             'coordination repair digest migration requires the '
             f'{COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND} backend'
+        )
+    if plan.get('status') == 'digest-heal-required' and not digest_heal_repair:
+        raise SyncwheelError(
+            'coordination repair digest heal requires the '
+            f'{COORDINATION_REPAIR_DIGEST_HEAL_BACKEND} backend'
         )
     if digest_migration_repair:
         required_proof = {
@@ -9012,6 +10469,29 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             or plan.get('recordedManifestDigest') == plan['expectedManifestDigest']
         ):
             raise SyncwheelError('coordination repair digest-migration proof is invalid')
+    if digest_heal_repair:
+        required_proof = {
+            'repairClass', 'stateDigestForm', 'recordedManifestDigest',
+            'expectedManifestDigest', 'proof',
+        }
+        missing_proof = sorted(required_proof - set(plan))
+        if missing_proof:
+            raise SyncwheelError(
+                'coordination repair digest-heal plan is missing: '
+                + ', '.join(missing_proof)
+            )
+        if (
+            plan.get('status') != 'digest-heal-required'
+            or plan.get('repairClass') != COORDINATION_REPAIR_DIGEST_HEAL_CLASS
+            or plan.get('stateDigestForm') != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+            or plan.get('proof') != COORDINATION_REPAIR_DIGEST_HEAL_PROOF
+            or plan.get('precondition') != COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION
+            or plan.get('expectedRecordedTip') != plan.get('expectedRemoteTip')
+            or not isinstance(plan.get('expectedManifestDigest'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', plan['expectedManifestDigest'])
+            or plan.get('recordedManifestDigest') == plan['expectedManifestDigest']
+        ):
+            raise SyncwheelError('coordination repair digest-heal proof is invalid')
     if tree_equivalent_repair and plan.get('status') == 'repair-required':
         required_proof = {
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
@@ -9079,6 +10559,11 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
             'expectedManifestDigest', 'proof',
         ])
+    if digest_heal_repair:
+        comparison_keys.extend([
+            'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
+            'expectedManifestDigest', 'proof',
+        ])
     if tree_equivalent_repair and plan.get('status') == 'repair-required':
         comparison_keys.extend([
             'repairClass', 'expectedRecordedTree', 'expectedRemoteTree', 'proof',
@@ -9113,6 +10598,10 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         )
     elif digest_migration_repair:
         child = build_digest_migration_coordination_repair_state(
+            previous['state'], previous['tip'], plan, installation
+        )
+    elif digest_heal_repair:
+        child = build_digest_heal_coordination_repair_state(
             previous['state'], previous['tip'], plan, installation
         )
     else:
@@ -9189,6 +10678,15 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
             raise SyncwheelError(
                 'coordination repair post-verification failed: invalid digest-migration evidence'
             )
+        if digest_heal_repair and (
+            verified.get('manifest_digest') != plan['expectedManifestDigest']
+            or verified.get('manifest') != previous['state']['manifest']
+            or evidence.get('recordedManifestDigest') != plan['recordedManifestDigest']
+            or evidence.get('manifestDigest') != plan['expectedManifestDigest']
+        ):
+            raise SyncwheelError(
+                'coordination repair post-verification failed: invalid digest-heal evidence'
+            )
     repaired = {
         'status': 'repaired',
         'state_tip': child_tip,
@@ -9202,6 +10700,16 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None):
         repaired['state_digest_form'] = COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST
         repaired['manifest_digest'] = plan['expectedManifestDigest']
         repaired['previous_manifest_digest'] = plan['recordedManifestDigest']
+    if digest_heal_repair:
+        repaired['state_digest_form'] = COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST
+        repaired['manifest_digest'] = plan['expectedManifestDigest']
+        repaired['previous_manifest_digest'] = plan['recordedManifestDigest']
+        resolved_manifest_path = (
+            Path(manifest_path) if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
+        )
+        record_coordination_state_digest_heal(
+            repo_root, resolved_manifest_path, config, plan, child_tip
+        )
     return repaired
 
 
@@ -12782,16 +14290,16 @@ def validate_manifest(repo_root, manifest):
     details['hooks'] = hooks
     if hooks['disabled']:
         warnings.append(f"managed repository guards explicitly disabled: {hooks['disabledReason']}")
-    elif hooks['migrationPending']:
+    if hooks['migrationPending']:
         warnings.append(
             'managed repository guards required; this clone is pending migration. '
-            'The next mutating Syncwheel command will install them automatically; '
-            'use `syncwheel hooks install --apply` to install now'
+            'use `syncwheel hooks install --apply` to install them'
         )
-    elif hooks['required'] and not hooks['ready']:
+    elif hooks['required'] and hooks['degraded']:
         warnings.append(
             'managed repository guards are missing, stale, or tampered. '
-            'The next mutating Syncwheel command will repair them or stop on a chaining conflict'
+            'run `syncwheel hooks install --apply` to install or repair them. causes: '
+            + '; '.join(hooks['degradedCauses'])
         )
     if manifest.get('repository_mode') == 'journal':
         journal = manifest['journal']
@@ -14304,9 +15812,6 @@ def command_init(args):
     save_manifest(manifest_path, manifest)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
-    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
-        hook_result = install_managed_push_hook(repo_root, apply=True)
-        print('managed-ref guard: ' + json.dumps(hook_result, sort_keys=True))
     return 0
 
 
@@ -14342,13 +15847,9 @@ def command_coordination_init(args):
             'migration': 'active-active',
             'coordination': proposed['coordination'],
             'remote_state_created': False,
-            'managed_ref_guard': install_managed_push_hook(repo_root, apply=False),
             'dry_run': True,
         }, indent=2))
         return 0
-    hook_result = None
-    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
-        hook_result = install_managed_push_hook(repo_root, apply=True)
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
@@ -14357,8 +15858,6 @@ def command_coordination_init(args):
         {'coordination_id': proposed['coordination']['id'], 'remote': remote},
     )
     print(f"coordination enabled: {proposed['coordination']['id']}")
-    if hook_result:
-        print('managed-ref guard: ' + json.dumps(hook_result, sort_keys=True))
     print('remote state will be created by the first successful coordinated publish')
     return 0
 
@@ -14621,7 +16120,7 @@ def command_coordination_claims_backfill(args):
 
 def command_coordination_repair(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     if not args.apply:
         if not args.ref:
             raise SyncwheelError('coordination repair planning requires --ref')
@@ -14644,7 +16143,7 @@ def command_coordination_repair(args):
         raise SyncwheelError('--ref does not match the reviewed repair plan')
     if args.freeze_backend != plan.get('freezeBackend'):
         raise SyncwheelError('--freeze-backend does not match the reviewed repair plan')
-    result = apply_coordination_repair_plan(repo_root, manifest, plan)
+    result = apply_coordination_repair_plan(repo_root, manifest, plan, manifest_path=manifest_path)
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -24611,6 +26110,34 @@ def build_parser():
     repo_authority_set_p.add_argument('-j', '--json', action='store_true')
     repo_authority_set_p.set_defaults(func=command_repo_authority_set)
 
+    repo_pr_merge_p = repo_sub.add_parser(
+        'pr-merge-policy', help='inspect or set the private GitHub PR merge policy'
+    )
+    repo_pr_merge_sub = repo_pr_merge_p.add_subparsers(
+        dest='pr_merge_policy_command', required=True
+    )
+    repo_pr_merge_status_p = repo_pr_merge_sub.add_parser('status', parents=[common])
+    repo_pr_merge_status_p.add_argument('-j', '--json', action='store_true')
+    repo_pr_merge_status_p.set_defaults(func=command_repo_pr_merge_policy_status)
+    repo_pr_merge_set_p = repo_pr_merge_sub.add_parser('set', parents=[common])
+    repo_pr_merge_set_p.add_argument('provider', choices=('github',))
+    repo_pr_merge_set_p.add_argument('--repository', required=True)
+    repo_pr_merge_set_p.add_argument('--base', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--method', choices=sorted(GITHUB_PR_MERGE_METHODS), required=True)
+    repo_pr_merge_set_p.add_argument('--allow-bypass', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--merge-actor', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--pr-author', action='append')
+    repo_pr_merge_set_p.add_argument('--commit-author', action='append')
+    repo_pr_merge_set_p.add_argument('--head-repository', action='append')
+    repo_pr_merge_set_p.add_argument('--checks', choices=sorted(GITHUB_PR_MERGE_CHECKS), default='all')
+    repo_pr_merge_set_p.add_argument('-a', '--apply', action='store_true')
+    repo_pr_merge_set_p.add_argument('-j', '--json', action='store_true')
+    repo_pr_merge_set_p.set_defaults(func=command_repo_pr_merge_policy_set)
+    repo_pr_merge_clear_p = repo_pr_merge_sub.add_parser('clear', parents=[common])
+    repo_pr_merge_clear_p.add_argument('-a', '--apply', action='store_true')
+    repo_pr_merge_clear_p.add_argument('-j', '--json', action='store_true')
+    repo_pr_merge_clear_p.set_defaults(func=command_repo_pr_merge_policy_clear)
+
     self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
     self_sub = self_p.add_subparsers(dest='self_command', required=True)
 
@@ -24643,6 +26170,10 @@ def build_parser():
     hooks_status_p.set_defaults(func=command_hooks_status)
     hooks_install_p = hooks_sub.add_parser('install', parents=[common])
     hooks_install_p.add_argument('-a', '--apply', action='store_true')
+    hooks_install_p.add_argument(
+        '--reason',
+        help='required explanation when changing the guarded integration branch',
+    )
     hooks_install_p.set_defaults(func=command_hooks_install)
     hooks_remove_p = hooks_sub.add_parser('remove', parents=[common])
     hooks_remove_p.add_argument('-a', '--apply', action='store_true')
@@ -24769,6 +26300,7 @@ def build_parser():
             COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
             COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
             COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
+            COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
         ],
         default='github-lock',
         help=(
@@ -24776,8 +26308,10 @@ def build_parser():
             'tree-equivalent-state-cas requires exact tree equality; '
             'fast-forward-state-cas requires exact bounded ancestry; '
             'state-digest-migration republishes a pre-0.42.2 state under the '
-            'control-manifest digest; all three change only append-only '
-            'coordination state'
+            'control-manifest digest; state-digest-heal recomputes an '
+            'unrecognized (neither raw nor legacy) manifest_digest from the '
+            'manifest already committed at the aligned integration tip; all '
+            'four change only append-only coordination state'
         ),
     )
     coordination_repair_p.add_argument(
@@ -25259,6 +26793,17 @@ def build_parser():
     stack_land_p.add_argument('-j', '--json', action='store_true')
     stack_land_p.set_defaults(func=command_stack_land)
 
+    stack_merge_pr_p = stack_sub.add_parser(
+        'merge-pr', parents=[common],
+        help='plan or apply a policy-bound GitHub PR merge',
+    )
+    stack_merge_pr_p.add_argument('stack')
+    stack_merge_pr_p.add_argument('--operation-id')
+    stack_merge_pr_p.add_argument('--plan-digest')
+    stack_merge_pr_p.add_argument('-a', '--apply', action='store_true')
+    stack_merge_pr_p.add_argument('-j', '--json', action='store_true')
+    stack_merge_pr_p.set_defaults(func=command_stack_merge_pr)
+
     stack_close_p = stack_sub.add_parser(
         'close',
         aliases=['cl'],
@@ -25329,6 +26874,7 @@ def build_parser():
     add_git_args(int_git_p)
     int_git_p.set_defaults(func=command_int_git)
 
+    attach_command_behaviors(parser)
     return parser
 
 
@@ -25507,17 +27053,37 @@ def command_hooks_status(args):
 
 def command_hooks_install(args):
     repo_root = resolve_repo_root(args.repo)
-    require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    print(json.dumps(install_managed_push_hook(repo_root, apply=args.apply), indent=2, sort_keys=True))
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    print(json.dumps(
+        install_managed_push_hook(
+            repo_root,
+            apply=args.apply,
+            manifest=manifest,
+            manifest_path=manifest_path,
+            reason=args.reason,
+        ),
+        indent=2,
+        sort_keys=True,
+    ))
     return 0
 
 
 def command_hooks_remove(args):
     repo_root = resolve_repo_root(args.repo)
-    require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    print(json.dumps(remove_managed_push_hook(
-        repo_root, apply=args.apply, disable=args.disable, reason=args.reason
-    ), indent=2, sort_keys=True))
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    result = remove_managed_push_hook(
+        repo_root,
+        apply=args.apply,
+        disable=args.disable,
+        reason=args.reason,
+        manifest=manifest,
+        manifest_path=manifest_path,
+    )
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
@@ -25569,21 +27135,36 @@ def command_hooks_worktree_guard(args):
     repo_root = resolve_repo_root(args.repo)
     worktrees = get_worktrees(repo_root)
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-    manifest_path = resolve_manifest_path(
-        primary_root, str(primary_root), args.manifest, args.personal
-    )
-    manifest, _ = load_manifest(primary_root, manifest_path)
-    if manifest is None:
-        return 0
-    primary = primary_checkout_state(primary_root, manifest)
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
-    primary_path = Path(primary['path']).resolve() if primary.get('path') else None
-    if primary_path is None or current_path != primary_path or primary['compliant']:
+    if current_path != primary_root:
+        return 0
+    guard = require_primary_guard(repo_root)
+    if not guard['enabled']:
+        return 0
+    branch = get_current_branch(primary_root)
+    expected = guard.get('integrationBranch')
+    manifest_path = resolve_manifest_path(primary_root, str(primary_root), args.manifest, args.personal)
+    manifest, _ = load_manifest(primary_root, manifest_path)
+    remedies = primary_checkout_remedy_commands(manifest) if manifest else [
+        'syncwheel worktree open <lane> --into <stack>',
+        'syncwheel stack capture-integration <stack> HEAD',
+    ]
+    if args.event == 'pre-commit' and branch == expected:
+        if ref_move_authorized(repo_root, 'pre-commit'):
+            return 0
+        raise SyncwheelError(
+            f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
+            'Only a Syncwheel-authorized control commit may be created there'
+            + format_remedy_suffix(remedies)
+            + '. This local hook is a safety guard, not a security boundary; '
+            'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
+        )
+    if branch == expected:
         return 0
     action = 'commit blocked' if args.event == 'pre-commit' else 'branch mismatch detected after checkout'
     raise SyncwheelError(
-        f'primary checkout {action}: expected {primary["expected_branch"]!r}, '
-        f'found {primary["branch"]!r} at {primary["path"]}. '
+        f'primary checkout {action}: expected {expected!r}, '
+        f'found {branch!r} at {primary_root}. '
         'Keep the primary unchanged'
         + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
         + '. '
@@ -25594,8 +27175,8 @@ def command_hooks_worktree_guard(args):
 
 def command_hooks_ref_guard(args):
     # Git runs this for every ref transaction. Only the "prepared" phase can
-    # veto, and only a rewind of a managed branch is worth vetoing: everything
-    # else must stay out of the way of ordinary Git use.
+    # veto. The integration ref is guarded regardless of move direction;
+    # non-managed refs remain outside this hook's scope.
     if args.phase != 'prepared':
         return 0
     updates = []
@@ -25608,47 +27189,22 @@ def command_hooks_ref_guard(args):
     repo_root = resolve_repo_root(args.repo)
     worktrees = get_worktrees(repo_root)
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-    manifest_path = resolve_manifest_path(
-        primary_root, str(primary_root), args.manifest, args.personal
-    )
-    manifest, _ = load_manifest(primary_root, manifest_path)
-    if manifest is None:
+    guard = require_primary_guard(repo_root)
+    if not guard['enabled']:
         return 0
-    managed = set(managed_ref_names(manifest))
-    if not managed:
-        return 0
-    rewinds = []
+    integration_ref = f"refs/heads/{guard['integrationBranch']}"
+    protected = []
     for old, new, ref in updates:
-        if ref not in managed:
-            continue
-        if set(new) == {'0'}:
-            # Deletion is a lifecycle decision the branch commands already own.
-            continue
-        if set(old) == {'0'}:
-            # "git branch -f" reports a zero old value, so a rewind looks exactly
-            # like a creation. The prepared phase runs before the ref moves, so
-            # read what the ref still points at and trust that instead.
-            current = git(
-                repo_root, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}',
-                check=False,
-            )
-            old = current.stdout.strip()
-            if current.returncode != 0 or not old:
-                continue
-        ancestor = git(repo_root, 'merge-base', '--is-ancestor', old, new, check=False)
-        if ancestor.returncode != 0:
-            rewinds.append((ref, old, new))
-    if not rewinds:
+        if ref == integration_ref:
+            protected.append((ref, old, new))
+    if not protected:
         return 0
-    if os.environ.get(MANAGED_REF_MOVE_AUTH_ENV) == '1':
+    if ref_move_authorized(repo_root, 'reference-transaction'):
         return 0
-    detail = ', '.join(f'{ref} {old[:7]} -> {new[:7]}' for ref, old, new in rewinds)
+    detail = ', '.join(f'{ref} {old[:7]} -> {new[:7]}' for ref, old, new in protected)
     raise SyncwheelError(
-        f'refusing to rewind managed ref(s): {detail}. '
-        'The new tip does not contain the current one, so committed work would '
-        'stop being reachable from this branch. Use the Syncwheel command that '
-        'owns this branch (for example "reconcile --apply" or "stack rebuild"), '
-        'or move to the intended ref instead. '
+        f'refusing unauthorized primary integration ref move(s): {detail}. '
+        'Use a Syncwheel-owned rebuild or a governed worktree. '
         'This local hook is a safety guard, not a security boundary; '
         'core.hooksPath and --no-verify can bypass it.'
     )
@@ -25686,6 +27242,7 @@ def entrypoint_behavior_table():
         command_repo_ls,
         command_repo_tracking_status,
         command_repo_authority_status,
+        command_repo_pr_merge_policy_status,
         command_self_status,
         command_self_check_update,
         command_hooks_status,
@@ -25745,6 +27302,8 @@ def entrypoint_behavior_table():
     register((
         command_repo_tracking_set,
         command_repo_authority_set,
+        command_repo_pr_merge_policy_set,
+        command_repo_pr_merge_policy_clear,
         command_coordination_init,
         command_coordination_disable,
         command_coordination_compose,
@@ -25766,16 +27325,24 @@ def entrypoint_behavior_table():
         command_channel_reconcile_outcome,
         command_stack_classify_integration,
         command_stack_land,
+        command_stack_merge_pr,
         command_worktree_release,
         command_gc,
     ), mutates='apply', manifest_mutates='apply')
     register((command_coordination_claims_backfill,), mutates='apply', manifest_mutates='apply')
     register((
-        command_coordination_repair,
         command_journal_snapshot,
         command_journal_publish,
     ), mutates='apply')
-    register((command_hooks_install, command_hooks_remove), mutates='apply', remedy=True)
+    # digest-heal is the one repair class that appends a local ledger event
+    # alongside the remote state CAS.
+    register((command_coordination_repair,), mutates='apply', manifest_mutates='apply')
+    # Guard lifecycle writes the profile ledger under its own atomic writes, so it
+    # is registered without joining the global manifest transaction.
+    register(
+        (command_hooks_install, command_hooks_remove),
+        mutates='apply', manifest_mutates='internal', remedy=True,
+    )
     register((
         command_self_update,
         command_self_install_hooks,
@@ -25795,7 +27362,10 @@ def entrypoint_behavior_table():
     register((command_use,), mutates='profile-selection')
     register((command_replay_mode,), mutates='mode-or-clear')
     register((command_init,), mutates='init', manifest_mutates='init')
-    register((command_journal_schedule,), mutates='schedule-apply')
+    register(
+        (command_journal_schedule,),
+        mutates='schedule-apply', manifest_mutates='internal',
+    )
     register((command_stack_git, command_int_git), mutates='git-passthrough')
     register(
         (SyncwheelRevisionBackend.ensure_stack_owned,),
@@ -25835,19 +27405,49 @@ def command_parser_nodes(parser):
                 stack.extend(action.choices.values())
 
 
+def attach_command_behaviors(parser):
+    table = command_behavior_table()
+    registered = set()
+    for command_parser in command_parser_nodes(parser):
+        function = command_parser._defaults.get('func')
+        if function is None:
+            continue
+        behavior = table.get(function)
+        if behavior is None:
+            raise RuntimeError(f'missing command behavior: {function.__name__}')
+        registered.add(function)
+        command_parser.set_defaults(
+            mutates=behavior['mutates'],
+            manifest_mutates=behavior['manifestMutates'],
+            primary_guard_remedy=behavior['primaryGuardRemedy'],
+        )
+    unused = sorted(function.__name__ for function in set(table) - registered)
+    if unused:
+        raise RuntimeError('unregistered command behavior(s): ' + ', '.join(unused))
+
+
+def command_behavior(args):
+    try:
+        return command_behavior_table()[args.func]
+    except (AttributeError, KeyError) as exc:
+        raise SyncwheelError('command mutation behavior is not registered') from exc
+
+
 def mutation_rule_requested(rule, args):
-    if rule in {'never', 'internal'}:
+    if rule == 'never':
         return False
     if rule == 'always':
         return True
     if rule == 'apply':
         return bool(getattr(args, 'apply', False))
-    if rule in {'execute', 'not-dry-run'}:
+    if rule == 'execute':
         return not bool(getattr(args, 'dry_run', False))
-    if rule in {'init', 'unless-stdout'}:
-        return not bool(getattr(args, 'stdout', False))
     if rule == 'update-manifest':
         return bool(getattr(args, 'update_manifest', False))
+    if rule == 'init':
+        return not bool(getattr(args, 'stdout', False))
+    if rule == 'internal':
+        return False
     if rule == 'mode':
         return bool(getattr(args, 'mode', None))
     if rule == 'mode-or-clear':
@@ -25860,34 +27460,68 @@ def mutation_rule_requested(rule, args):
             and getattr(args, 'schedule_command', None) in {'install', 'remove'}
         )
     if rule == 'git-passthrough':
-        return True
+        return git_passthrough_mutation_requested(getattr(args, 'git_args', []))
     raise SyncwheelError(f'unknown command mutation rule: {rule}')
 
 
 def manifest_mutation_requested(args):
-    """Derive the global manifest transaction from the shared command registry."""
-    behavior = command_behavior_table().get(args.func)
-    if behavior is None:
-        raise SyncwheelError('command mutation behavior is not registered')
-    return mutation_rule_requested(behavior['manifestMutates'], args)
+    return mutation_rule_requested(command_behavior(args)['manifestMutates'], args)
 
 
-def default_hook_convergence_requested(args):
-    if not hasattr(args, 'repo'):
-        return False
-    if args.func in {
-        command_init,
-        command_hooks_status,
-        command_hooks_install,
-        command_hooks_remove,
+def syncwheel_mutation_requested(args):
+    """Classify repository mutations from the parser's exhaustive command table."""
+    return mutation_rule_requested(command_behavior(args)['mutates'], args)
+
+
+def primary_guard_remedy_requested(args):
+    return command_behavior(args)['primaryGuardRemedy']
+
+
+def git_passthrough_mutation_requested(git_args):
+    """Fail closed for Git passthroughs except its unambiguous read-only verbs."""
+    read_only = {
+        'blame', 'cat-file', 'describe', 'diff', 'for-each-ref', 'fsck', 'grep',
+        'log', 'ls-files', 'ls-remote', 'name-rev', 'rev-list', 'rev-parse',
+        'shortlog', 'show', 'show-ref', 'status', 'version',
+    }
+    command = next((value for value in git_args if not value.startswith('-')), None)
+    return command not in read_only
+
+
+def primary_checkout_preflight(args):
+    if not hasattr(args, 'repo') or args.func in {
         command_hooks_guard,
         command_hooks_worktree_guard,
         command_hooks_ref_guard,
     }:
-        return False
-    if args.func == command_repo_tracking_set and bool(getattr(args, 'apply', False)):
-        return False
-    return True
+        return
+    repo_root = resolve_repo_root(args.repo)
+    worktrees = get_worktrees(repo_root)
+    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+    manifest_path = resolve_manifest_path(
+        primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
+    manifest, _ = load_manifest(primary_root, manifest_path)
+    if manifest is None:
+        return
+    # Journal repositories deliberately turn tracked working-tree changes into
+    # snapshots. Their journal commands own that separate lifecycle, so the
+    # shared integration checkout guard does not apply there.
+    if manifest.get('repository_mode') == 'journal':
+        return
+    emit_primary_checkout_dirty_warnings(
+        primary_root, manifest, json_mode=bool(getattr(args, 'json', False))
+    )
+    if (
+        syncwheel_mutation_requested(args)
+        and not primary_guard_remedy_requested(args)
+        and not managed_push_guard_policy(primary_root, manifest)['disabled']
+    ):
+        require_clean_primary_checkout(primary_root, manifest)
+
+
+def default_hook_convergence_requested(args):
+    return False
 
 
 def converge_default_repository_hooks(args):
@@ -26120,9 +27754,13 @@ def main():
         command_hooks_worktree_guard,
         command_hooks_ref_guard,
     }:
-        global SYNCWHEEL_OWNS_REF_MOVES
+        global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
         SYNCWHEEL_OWNS_REF_MOVES = True
+        if hasattr(args, 'repo'):
+            SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
+        if args.command != 'revision-provider':
+            primary_checkout_preflight(args)
         if (
             args.command != 'revision-provider'
             and args.func not in {
@@ -26151,6 +27789,10 @@ def main():
     except SyncwheelError as exc:
         print(f'error: {exc}', file=sys.stderr)
         return 2
+    finally:
+        if SYNCWHEEL_REF_AUTH_REPO:
+            clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
+        SYNCWHEEL_REF_AUTH_REPO = None
 
 
 if __name__ == '__main__':

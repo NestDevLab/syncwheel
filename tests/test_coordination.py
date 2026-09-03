@@ -660,6 +660,65 @@ with module.coordination_publication_lock(Path(repo_path)):
             'control_digest': published['manifest_digest'],
         }
 
+    def prepare_orphaned_digest_state(self, name='orphaned-digest'):
+        """Reproduce a digest orphaned by a fast-forward repair over real manifest drift.
+
+        A fast-forward repair preserves the parent's manifest_digest byte for
+        byte (topology-only, by design). If the advance it repairs also
+        carries a real change to the committed control manifest, the
+        preserved digest stops matching either recognized form.
+        """
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        parent_tip, parent = self.remote_state(origin)
+        branch = 'integration/shared'
+        ref = f'refs/heads/{branch}'
+        recorded = parent['managed_refs'][ref]
+        self.git(repo, 'switch', '-q', branch)
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest_data = json.loads(manifest_path.read_text())
+        manifest_data['orphaned_digest_fixture'] = True
+        manifest_path.write_text(json.dumps(manifest_data, indent=2, sort_keys=True) + '\n')
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'test: real control manifest drift on the integration tip')
+        (repo / 'unreviewed-advance.txt').write_text('unreviewed advance\n')
+        self.git(repo, 'add', 'unreviewed-advance.txt')
+        self.git(repo, 'commit', '-qm', 'test: second advance commit')
+        observed = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'push', '--no-verify', 'origin', branch)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        ff_plan, _ = module.coordination_repair_plan(
+            repo, manifest, ref, module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+        )
+        self.assertEqual(ff_plan['status'], 'repair-required')
+        ff_result = module.apply_coordination_repair_plan(repo, manifest, ff_plan)
+        self.assertEqual(ff_result['status'], 'repaired')
+        orphaned_tip, orphaned_state = self.remote_state(origin)
+        self.assertEqual(orphaned_state['manifest_digest'], parent['manifest_digest'])
+        committed = json.loads(
+            self.git(repo, 'show', f'{observed}:.syncwheel/manifest.json').stdout
+        )
+        control_digest = module.manifest_digest(committed)
+        self.assertNotEqual(orphaned_state['manifest_digest'], control_digest)
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': manifest,
+            'ref': ref,
+            'parent_tip': parent_tip,
+            'parent': parent,
+            'recorded': recorded,
+            'observed': observed,
+            'orphaned_tip': orphaned_tip,
+            'orphaned_state': orphaned_state,
+            'orphaned_digest': orphaned_state['manifest_digest'],
+            'control_digest': control_digest,
+        }
+
     def prepare_additive_compose(self, name='additive-compose'):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
@@ -1280,6 +1339,136 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.coordination_operation_manifest_digest(manifest),
             'c96c05ff86ecd527db0ec077d8efbe457db0659f69bf108315dd28fecd10b38b',
         )
+
+    def test_repair_heals_an_orphaned_digest_instead_of_reporting_noop(self):
+        fixture = self.prepare_orphaned_digest_state('orphaned-digest-heal')
+        module = fixture['module']
+        repo = fixture['repo']
+        manifest = fixture['manifest']
+        ref = fixture['ref']
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'does not match the control manifest'
+        ):
+            module.verify_coordination_state_manifest_digest(
+                repo, fixture['orphaned_state'], 'origin'
+            )
+        stale_plan, _ = module.coordination_repair_plan(repo, manifest, ref)
+        self.assertEqual(stale_plan['status'], 'digest-heal-required')
+
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        (repo / 'after-orphan.txt').write_text('after orphan\n')
+        self.git(repo, 'add', 'after-orphan.txt')
+        self.git(repo, 'commit', '-qm', 'test: integration commit above an orphaned digest')
+        blocked = self.run_cli(repo, 'int', 'push', expected=2)
+        self.assertIn(
+            'coordination state manifest_digest does not match the control manifest',
+            blocked.stderr,
+        )
+        self.git(repo, 'reset', '-q', '--hard', 'HEAD~1')
+
+        plan, _ = module.coordination_repair_plan(
+            repo, manifest, ref, module.COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
+        )
+        self.assertEqual(plan['status'], 'digest-heal-required')
+        self.assertEqual(plan['repairClass'], module.COORDINATION_REPAIR_DIGEST_HEAL_CLASS)
+        self.assertEqual(plan['expectedRecordedTip'], plan['expectedRemoteTip'])
+        self.assertEqual(
+            plan['stateDigestForm'], module.COORDINATION_STATE_DIGEST_FORM_ORPHANED
+        )
+        self.assertEqual(plan['recordedManifestDigest'], fixture['orphaned_digest'])
+        self.assertEqual(plan['expectedManifestDigest'], fixture['control_digest'])
+
+        github_plan, _ = module.coordination_repair_plan(repo, manifest, ref)
+        self.assertEqual(github_plan['status'], 'digest-heal-required')
+        with self.assertRaisesRegex(module.SyncwheelError, 'digest heal requires the'):
+            module.apply_coordination_repair_plan(repo, manifest, github_plan)
+
+        result = module.apply_coordination_repair_plan(repo, manifest, plan)
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(result['backend'], module.COORDINATION_REPAIR_DIGEST_HEAL_BACKEND)
+        self.assertEqual(result['manifest_digest'], fixture['control_digest'])
+        self.assertEqual(result['previous_manifest_digest'], fixture['orphaned_digest'])
+
+        child_tip, child = self.remote_state(fixture['origin'])
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], fixture['orphaned_tip'])
+        self.assertEqual(child['changed_refs'], {})
+        self.assertEqual(child['manifest'], fixture['orphaned_state']['manifest'])
+        self.assertEqual(child['manifest_digest'], fixture['control_digest'])
+        self.assertEqual(child['managed_refs'], fixture['orphaned_state']['managed_refs'])
+        self.assertEqual(
+            child['repair_evidence']['proof'], module.COORDINATION_REPAIR_DIGEST_HEAL_PROOF
+        )
+        self.assertEqual(
+            child['repair_evidence']['recordedManifestDigest'], fixture['orphaned_digest']
+        )
+        self.assertEqual(
+            module.verify_coordination_state_manifest_digest(repo, child, 'origin')['form'],
+            module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+        )
+
+        settled, _ = module.coordination_repair_plan(
+            repo, manifest, ref, module.COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
+        )
+        self.assertEqual(settled['status'], 'noop')
+
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        healed = [
+            event for event in module.load_ledger_events(repo, manifest_path)
+            if event['type'] == 'coordination_state_digest_healed'
+        ]
+        self.assertEqual(len(healed), 1)
+        self.assertEqual(healed[0]['payload']['from_digest'], fixture['orphaned_digest'])
+        self.assertEqual(healed[0]['payload']['to_digest'], fixture['control_digest'])
+        self.assertEqual(
+            healed[0]['payload']['repair_class'], module.COORDINATION_REPAIR_DIGEST_HEAL_CLASS
+        )
+
+    def test_repair_prefers_topology_repair_over_digest_heal(self):
+        """A ref that also needs its own topology fixed must not be healed alone."""
+        fixture = self.prepare_orphaned_digest_state('orphaned-digest-ref-drift')
+        module = fixture['module']
+        repo = fixture['repo']
+        manifest = fixture['manifest']
+        ref = fixture['ref']
+
+        (repo / 'further-unreviewed-drift.txt').write_text('further drift\n')
+        self.git(repo, 'add', 'further-unreviewed-drift.txt')
+        self.git(repo, 'commit', '-qm', 'test: ref drifts again after the digest was orphaned')
+        self.git(repo, 'push', '--no-verify', 'origin', 'integration/shared')
+
+        plan, _ = module.coordination_repair_plan(
+            repo, manifest, ref, module.COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
+        )
+        self.assertEqual(plan['status'], 'repair-required')
+        self.assertNotIn('repairClass', plan)
+
+    def test_repair_stays_fatal_when_the_registered_tip_is_unreadable(self):
+        """An unreadable registered tip must never be silently offered as healable."""
+        fixture = self.prepare_orphaned_digest_state('orphaned-digest-unreadable')
+        module = fixture['module']
+        repo = fixture['repo']
+        manifest = fixture['manifest']
+        ref = fixture['ref']
+
+        origin = fixture['origin']
+        state_tip, state = self.remote_state(origin)
+        broken = dict(state)
+        broken['managed_refs'] = dict(state['managed_refs'])
+        broken['managed_refs'][ref] = '0' * 40
+        origin_ref = 'refs/heads/syncwheel/state/default'
+        rewritten = module.create_coordination_state_commit(
+            repo, broken, broken.get('parent_state')
+        )
+        self.git(repo, 'push', '-q', '--force', 'origin', f'{rewritten}:{origin_ref}')
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'coordination state integration tip object is unavailable'
+        ):
+            module.coordination_repair_plan(
+                repo, manifest, ref, module.COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
+            )
 
     def test_v2_manifest_and_snapshot_both_reject_derived_provenance(self):
         module = self.load_module()

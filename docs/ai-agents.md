@@ -11,7 +11,7 @@ The script owns:
 
 The AI agent owns:
 - deciding when to update the manifest
-- deciding whether a temporary integration-only commit is acceptable
+- keeping authoring commits out of the shared primary checkout
 - running project-specific validation after branch rebuilds
 - communicating risks and blockers clearly
 - deciding which exact stack revisions belong in a deployment channel and
@@ -27,7 +27,7 @@ A human should be able to write:
 - `show how channel test differs, plan it, and stop before applying`
 
 An AI agent should then:
-1. run `python3 scripts/syncwheel.py reconcile`
+1. run `syncwheel reconcile`
 2. if the manifest is missing or stale, update it first with `init` and
    `stack create`/`stack set`/`stack add`
 3. run `reconcile --apply --worktree-root <path>` only when the dry-run plan is
@@ -37,7 +37,7 @@ An AI agent should then:
 5. rerun `check` or `reconcile`
 6. summarize what changed and what still needs a human
 
-For an active-active version 2 or 3 manifest, insert `python3 scripts/syncwheel.py
+For an active-active version 2 or 3 manifest, insert `syncwheel
 handoff` before planning or publication. It is a read-only diagnostic of the
 published state, ownership boundary, local locks, pending merge decision, and
 eligible cleanup. Use `publish` rather than a raw Git push so all managed refs
@@ -128,13 +128,16 @@ active-active channel must use the coordination remote.
 
 ## Safety rules
 
-- do not mutate branches from a dirty worktree
-- begin routine implementation, dependency installation, builds, and tests on integration;
-  request `--replay-mode desk` only for conflict resolution or validation of a
-  non-empty materialized stack when integration cannot safely run it
-- when the primary checkout is explicitly owned, use `worktree open <lane>` as
-  the only authoring fallback; choose `--full` only when that lane genuinely
-  needs dependencies, builds, tests, or debugging
+- do not author or commit in the shared primary checkout, even when it is clean;
+  open a governed lane first with `syncwheel worktree open <lane> --into <stack>`
+- do not run a built-in mutation while the primary is dirty: it stops before side
+  effects and names `worktree open` or `stack capture-integration` for the work
+- read-only diagnostics remain usable when the primary is dirty; treat their yellow
+  dirty-primary warning as foreign work, not permission to repair it
+- use `syncwheel stack capture-integration <stack> HEAD` only for already committed
+  primary work named by a refusal; do not create a new primary commit to use it
+- use `syncwheel hooks remove --disable --reason "..." --apply` only as a deliberate,
+  visible clone-local recovery opt-out; re-enable the bundle afterwards
 - when a primary-checkout stop names a manifest-derived remedy, use the named
   `stack capture-integration <stack> HEAD` command for your committed primary
   work, or `worktree open <lane> --into <stack>` without changing work owned by
@@ -217,6 +220,21 @@ syncwheel repo authority status
 
 Only a maintainer sets this policy (`syncwheel repo authority set ... --apply`).
 Never set it, widen it, or infer it for yourself.
+
+## GitHub PR merge policy
+
+An `ai-managed` delivery repository may opt into the deterministic GitHub PR
+merge path with a private clone-local policy. Configure it with
+`repo pr-merge-policy set github`, inspect the dry-run, and apply only after
+reviewing the exact local diff. Then use `stack merge-pr <stack>` to produce a
+digest-bound JSON plan. See [`github-pr-merge.md`](github-pr-merge.md) for the
+full contract.
+
+The policy is fail-closed: it requires an allowlisted actor with repository
+admin permission, an allowlisted PR/commit/source repository, an exact stack
+head, green CI, no unresolved review work, and recognized GitHub rules. The
+admin bypass is limited to required reviews and always includes
+`--match-head-commit`; no branch deletion is performed.
 
 ## Agentwheel installable skill
 
