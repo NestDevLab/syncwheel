@@ -910,6 +910,7 @@ Inspect or explicitly manage the repository-local, composable hook bundle:
 syncwheel hooks status
 syncwheel hooks install
 syncwheel hooks install --apply
+syncwheel hooks install --personal laptop --reason "retarget this clone" --apply
 syncwheel hooks remove
 syncwheel hooks remove --disable --reason "external contribution clone"
 syncwheel hooks remove --disable --reason "external contribution clone" --apply
@@ -950,20 +951,28 @@ append fails, the guard and hooks remain intact.
 
 There is one effective guard target per clone. `hooks install --apply` records the
 integration branch from the selected shared, `--personal`, or `--manifest` profile;
-`hooks remove` audits to that profile's ledger. `hooks status` compares the same
-selected manifest with the recorded target. Inspecting a different profile, or
-renaming its integration branch, reports `degraded` and names
-`hooks install --apply` with the same selector as the repair. A missing, malformed,
-incomplete, or unaudited-disabled `guard.json` is never accepted: installed hooks fail closed
-and status reports the schema cause instead of claiming readiness.
+changing an existing target requires `--reason` and appends a
+`primary_guard_retargeted` intent with actor, old target, new target, and reason to
+that profile's ledger before changing the guard. `hooks remove` audits to the same
+ledger. `hooks status` compares the selected manifest with the recorded target.
+Inspecting a different profile, or renaming its integration branch, reports
+`degraded` and names `hooks install --apply` with the same selector and a reason as
+the repair. A missing, malformed, non-UTF-8, incomplete, or unaudited-disabled
+`guard.json` is never accepted: installed hooks fail closed and status reports the
+schema or readability cause instead of claiming readiness. Explicit installation
+repairs unreadable guard state.
 
 Before a built-in mutation, Syncwheel refuses a dirty primary before side effects (except
 the explicit recovery remedies `worktree open`, `stack capture-integration`, and reasoned
 hook lifecycle commands) and
 names those same remedies. Read-only commands continue and show a yellow TTY warning
 with the dirty-file count; the primary is shared and its changes are treated as not
-owned by the invoking user. Mutation behavior comes from the command table, including
-`--apply` gating, so previews such as `stack classify-integration` remain read-only.
+owned by the invoking user. Mutation behavior comes from the authoritative entrypoint
+registry, including `--apply` gating, so previews such as `stack classify-integration`
+remain read-only. Its command-only projection drives CLI preflight, while internal
+state writers stay in the same registry. `stack push`, `int rebuild`, and `int push`
+use the stricter execute-time manifest classification so future control-manifest
+persistence remains inside the same transaction boundary.
 Generated hooks use an executable installed CLI outside the repository, Git common
 directory, configured/default lane roots, and every registered worktree. They never
 pin a transient worktree shim and fail closed if the stable executable is unavailable.

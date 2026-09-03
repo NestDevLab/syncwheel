@@ -13,7 +13,9 @@ When a hook already exists, Syncwheel moves it to a stable chain path and runs i
 after its own check. The guard and user hook both run, and a failure from either
 rejects the operation. Per-hook ownership sidecars record the generated and chained
 digests. Removal is also plan-first, refuses modified/unowned hooks, and restores
-every chained hook.
+every chained hook. A changed chained user hook is not treated as a modified
+Syncwheel wrapper: `hooks install --apply` rebaselines only its recorded digest,
+preserves its contents, and makes later removal restore that exact version.
 
 The policy is required-by-default for `git-tracked` clones with managed refs,
 active-active coordination, or an owned journal branch. Required means status and
@@ -30,9 +32,12 @@ reason remains visible in status and validation.
 The clone has one effective guard target, not one hook bundle per profile.
 `hooks install|remove|status` resolve the selected shared, `--personal`, or
 `--manifest` manifest consistently. Installation records that manifest's integration
-branch; disable intent is appended to that manifest's ledger. Status against another
-profile, or after an integration-branch rename, is `degraded` and directs the operator
-to rerun `hooks install --apply` with the same profile selector.
+branch; changing an already recorded target requires `--reason` and appends a
+`primary_guard_retargeted` intent with actor, previous target, new target, and reason
+to that manifest's ledger before the guard changes. Disable intent is appended to
+the same selected ledger. Status against another profile, or after an
+integration-branch rename, is `degraded` and directs the operator to rerun
+`hooks install --apply` with the same profile selector and a reason.
 
 Generated hooks invoke a stable installed `syncwheel` CLI resolved at installation,
 never a path inside the repository, Git common directory, `var/`, the configured or
@@ -46,12 +51,15 @@ or incomplete state makes installed hooks fail closed and makes status report
 `degraded` with the exact repair cause; it never becomes an implicit opt-out.
 
 `guard.json` is written through a same-directory temporary file and atomic rename.
-Re-enabling writes it before installing the hook bundle. A partial install therefore
-leaves enabled state with `degraded` status and an exact missing/stale/tampered-hook
-cause. A manual hook edit is degraded even while its structural status remains
-`conflict`. Disabling appends the `primary_guard_disabled` ledger intent, including
-actor and reason, before removing hooks and persists disabled state only after removal.
-An audit failure leaves the enabled state and hook bundle untouched.
+The file is flushed before replacement, but the containing directory is not fsynced;
+a machine crash can therefore lose the final rename. The next read fails closed and
+explicit installation repairs the state. Re-enabling writes it before installing the
+hook bundle. A partial install therefore leaves enabled state with `degraded` status
+and an exact missing/stale/tampered-hook cause. A manual hook edit is degraded even
+while its structural status remains `conflict`. Disabling appends the
+`primary_guard_disabled` ledger intent, including actor and reason, before removing
+hooks and persists disabled state only after removal. An audit failure leaves the
+enabled state and hook bundle untouched.
 
 ## Primary checkout
 
@@ -67,7 +75,12 @@ so a recycled PID cannot inherit the capability. Cleanup removes only nonces own
 by the current process, a process that is no longer alive, or a provably recycled
 PID, so concurrent Syncwheel processes keep their capabilities. A malformed or
 unreadable nonce is retained for the TTL to avoid racing a writer, then removed only
-after a durable event is appended under the Git common directory. The
+after a durable event is appended under the Git common directory. The Linux `/proc`
+identity uses kernel start-time ticks (normally 10 ms); its `ps` fallback has
+one-second granularity. A mismatch between sources refuses the authorization, so
+reduced precision fails closed. The append-only `ref-auth-events.jsonl` has no
+rotation and may record abandoned atomic-write temporary files as malformed noise
+after process death; those entries do not grant authorization. The
 reference-transaction hook blocks every unauthorized
 integration-ref move, including fast-forward moves. Both guards allow commits in dedicated feature worktrees
 and plumbing-materialized branches.
@@ -83,12 +96,16 @@ Tracked changes stop the operation before side effects and name the same remedie
 Those remedy commands themselves bypass this preflight so recovery remains possible.
 Read-only commands continue; on a TTY they show a yellow warning with the dirty-file
 count and state that the shared primary changes are not owned by the invoking user.
-The parser's exhaustive command behavior table is the single mutation classifier.
-It declares flag-sensitive mutations such as `--apply`; previews and read-only
-commands are not blocked. A source-scanning test covers both the CLI and revision
-provider, including method-based journal savers, and requires every command that can
-reach a manifest, ledger, guard-state, or provider-journal saver to have mutation
-metadata. The recovery-remedy set is asserted exactly rather than only positively.
+The exhaustive entrypoint behavior registry is the single mutation classifier. Its
+command-only projection declares flag-sensitive mutations such as `--apply`, while
+internal state-writer entries remain in the same registry. Previews and read-only
+commands are not blocked. Execute-mode `stack push`, `int rebuild`, and `int push`
+are classified as manifest writers so control-manifest persistence can be added
+without a second table. A source-scanning test covers both the CLI and revision
+provider, including direct atomic JSON writes and method-based journal savers, and
+requires every command that can reach a manifest, ledger, guard-state, or
+provider-journal saver to have mutation metadata. The recovery-remedy set is asserted
+exactly rather than only positively.
 
 Git has no pre-checkout hook, so preventing the ref move itself is not portable.
 The combination of immediate post-checkout failure, commit blocking, validation,

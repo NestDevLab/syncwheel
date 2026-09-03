@@ -16,6 +16,10 @@
   validate every guard-state read and expose branch drift as degraded; bind nonces to
   process-start identity, audit stale malformed cleanup, and extend mutation coverage
   through revision-provider method savers and the exact recovery-remedy set.
+- Treat non-UTF-8 guard state as degraded and explicitly repairable; require and ledger
+  guard retarget reasons; keep partial bundles in degraded mode; rebaseline changed
+  chained user hooks without overwriting them; and consolidate command and internal
+  writer policy in one entrypoint registry with execute-time manifest classification.
 
 ## 0.40.1 - 2026-09-02
 

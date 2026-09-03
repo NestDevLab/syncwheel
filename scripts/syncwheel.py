@@ -713,6 +713,8 @@ def inspect_primary_guard(repo_root):
         return None, 'primary guard configuration is missing'
     except json.JSONDecodeError:
         return None, 'primary guard configuration contains invalid JSON'
+    except ValueError:
+        return None, 'primary guard configuration is unreadable'
     except OSError:
         return None, 'primary guard configuration is unreadable'
     error = primary_guard_validation_error(payload)
@@ -1204,15 +1206,24 @@ def managed_hook_status(repo_root, hook_name):
     digest = hashlib.sha256(existing.encode()).hexdigest() if existing is not None else None
     try:
         metadata = json.loads(metadata_path.read_text())
-    except (OSError, json.JSONDecodeError):
+    except (OSError, ValueError):
         metadata = None
     chained_digest = hashlib.sha256(backup.read_bytes()).hexdigest() if backup.is_file() else None
+    managed_matches = bool(
+        marker and metadata and metadata.get('digest') == digest
+    )
     chain_matches = bool(
         metadata
         and metadata.get('chainedDigest') == chained_digest
         and (backup.exists() == (metadata.get('chainedDigest') is not None))
     )
-    owned = bool(marker and metadata and metadata.get('digest') == digest and chain_matches)
+    chain_repairable = bool(
+        managed_matches
+        and metadata.get('chainedDigest') is not None
+        and backup.is_file()
+        and not chain_matches
+    )
+    owned = bool(managed_matches and chain_matches)
     expected = hashlib.sha256(
         managed_hook_content(repo_root, hook_name, backup.exists()).encode()
     ).hexdigest()
@@ -1242,9 +1253,11 @@ def managed_hook_status(repo_root, hook_name):
         'digest': digest,
         'expectedDigest': expected,
         'metadata': str(metadata_path),
+        'managedMatches': managed_matches,
         'chained': backup.exists(),
         'chainedDigest': chained_digest,
         'chainMatches': chain_matches,
+        'chainRepairable': chain_repairable,
         'status': (
             'degraded' if cli_cause else ('installed' if ready else
             ('stale' if owned else ('conflict' if hook.exists() or metadata_path.exists() else 'absent'))
@@ -1281,7 +1294,7 @@ def managed_push_guard_policy(repo_root, manifest):
     branch_matches = bool(
         guard and guard['integrationBranch'] == selected_branch
     )
-    disabled = bool(guard and branch_matches and not guard['enabled'])
+    disabled = bool(guard and not guard['enabled'])
     enforced = bool(guard and branch_matches and guard['enabled'])
     reason = guard.get('reason') if guard else None
     tracking = manifest.get('syncwheel_tracking')
@@ -1311,8 +1324,8 @@ def managed_push_guard_policy(repo_root, manifest):
     migration_pending = required and guard_error == 'primary guard configuration is missing'
     return {
         'status': (
-            'disabled' if disabled else
-            ('degraded' if degraded else ('ready' if ready else 'optional'))
+            'degraded' if degraded else
+            ('disabled' if disabled else ('ready' if ready else 'optional'))
         ),
         'required': required,
         'disabled': disabled,
@@ -1329,28 +1342,13 @@ def managed_push_guard_policy(repo_root, manifest):
         'hook': hook,
         'hooks': bundle['hooks'],
         'mode': (
-            'disabled' if disabled else
-            ('required' if enforced else
-             ('required-pending-migration' if migration_pending else
-              ('required-degraded' if required and degraded else
-               ('degraded' if degraded else 'optional'))))
+            'required-pending-migration' if migration_pending else
+            ('required-degraded' if required and degraded else
+             ('degraded' if degraded else
+              ('disabled' if disabled else
+               ('required' if enforced else 'optional'))))
         ),
     }
-
-
-def require_managed_push_guard(repo_root, manifest):
-    policy = managed_push_guard_policy(repo_root, manifest)
-    if (
-        policy['required']
-        and not policy['disabled']
-        and not policy['migrationPending']
-        and not policy['ready']
-    ):
-        raise SyncwheelError(
-            'managed-ref guard is required but missing, stale, or tampered; '
-            'review `syncwheel hooks install`, then run `syncwheel hooks install --apply`'
-        )
-    return policy
 
 
 def ensure_managed_repository_hooks(repo_root, manifest):
@@ -1367,6 +1365,25 @@ def install_one_managed_hook(repo_root, hook_name, apply=False):
     status = managed_hook_status(repo_root, hook_name)
     if status['ready']:
         return {'action': 'none', **status}
+    if status['chainRepairable']:
+        plan = {
+            'action': 'refresh-chain-metadata',
+            'name': hook_name,
+            'hook': status['hook'],
+            'chainExisting': True,
+            'digest': status['digest'],
+            'apply': apply,
+        }
+        if not apply:
+            return plan
+        metadata_path = Path(status['metadata'])
+        metadata = json.loads(metadata_path.read_text())
+        metadata['chainedDigest'] = status['chainedDigest']
+        atomic_write_private_json(metadata_path, metadata, indent=2)
+        return {
+            'action': 'chain-metadata-refreshed',
+            **managed_hook_status(repo_root, hook_name),
+        }
     if status['status'] == 'conflict' and (status['marker'] or Path(status['metadata']).exists()):
         raise SyncwheelError(
             f'managed hook is stale or tampered; refusing automatic replacement: {status["hook"]}'
@@ -1413,22 +1430,48 @@ def install_one_managed_hook(repo_root, hook_name, apply=False):
     return {'action': 'upgraded' if action == 'upgrade' else 'installed', **managed_hook_status(repo_root, hook_name)}
 
 
-def install_managed_push_hook(repo_root, apply=False, manifest=None):
+def install_managed_push_hook(
+    repo_root, apply=False, manifest=None, manifest_path=None, reason=None,
+):
     if apply and managed_hook_syncwheel_command(repo_root) is None:
         raise SyncwheelError('cannot install primary guard: stable syncwheel CLI is not resolvable; install it outside var/worktrees')
+    manifest_supplied = manifest is not None
     selected_manifest = manifest or manifest_for_guard(repo_root)
     desired_guard = primary_guard_payload(selected_manifest)
     current_guard, current_guard_error = inspect_primary_guard(repo_root)
-    guard_action = (
-        'none'
-        if current_guard_error is None and current_guard == desired_guard
-        else ('install' if current_guard_error == 'primary guard configuration is missing' else 'update')
+    retarget = bool(
+        current_guard_error is None
+        and current_guard
+        and current_guard['integrationBranch'] != desired_guard['integrationBranch']
     )
+    guard_action = (
+        'retarget' if retarget else
+        ('none' if current_guard_error is None and current_guard == desired_guard else
+         ('install' if current_guard_error == 'primary guard configuration is missing' else 'update'))
+    )
+    if apply and retarget and (not isinstance(reason, str) or not reason.strip()):
+        raise SyncwheelError('retargeting the primary guard requires --reason')
     plans = {
         name: install_one_managed_hook(repo_root, name, apply=False)
         for name in MANAGED_REPOSITORY_HOOKS
     }
     if apply:
+        if retarget:
+            if manifest_path is None:
+                if manifest_supplied:
+                    raise SyncwheelError(
+                        'retargeting the primary guard requires the selected manifest path'
+                    )
+                _, manifest_path = require_manifest(
+                    repo_root, str(repo_root), None, None
+                )
+            append_ledger_event(repo_root, 'primary_guard_retargeted', {
+                'actor': os.environ.get('USER', 'unknown'),
+                'previousIntegrationBranch': current_guard['integrationBranch'],
+                'integrationBranch': desired_guard['integrationBranch'],
+                'reason': reason.strip(),
+                'phase': 'intent',
+            }, manifest_path)
         save_primary_guard(repo_root, selected_manifest)
         results = {
             name: install_one_managed_hook(repo_root, name, apply=True)
@@ -1449,6 +1492,8 @@ def install_managed_push_hook(repo_root, apply=False, manifest=None):
         ),
         'guardAction': guard_action,
         'guard': desired_guard,
+        'retargetReasonRequired': retarget,
+        'reason': reason.strip() if retarget and isinstance(reason, str) else None,
         'chainExisting': results['pre-push'].get('chainExisting', pre_push['chained']),
         'ready': policy['ready'],
         'degraded': policy['degraded'],
@@ -8401,12 +8446,12 @@ def validate_manifest(repo_root, manifest):
     details['hooks'] = hooks
     if hooks['disabled']:
         warnings.append(f"managed repository guards explicitly disabled: {hooks['disabledReason']}")
-    elif hooks['migrationPending']:
+    if hooks['migrationPending']:
         warnings.append(
             'managed repository guards required; this clone is pending migration. '
             'use `syncwheel hooks install --apply` to install them'
         )
-    elif hooks['required'] and not hooks['ready']:
+    elif hooks['required'] and hooks['degraded']:
         warnings.append(
             'managed repository guards are missing, stale, or tampered. '
             'run `syncwheel hooks install --apply` to install or repair them. causes: '
@@ -17800,6 +17845,10 @@ def build_parser():
     hooks_status_p.set_defaults(func=command_hooks_status)
     hooks_install_p = hooks_sub.add_parser('install', parents=[common])
     hooks_install_p.add_argument('-a', '--apply', action='store_true')
+    hooks_install_p.add_argument(
+        '--reason',
+        help='required explanation when changing the guarded integration branch',
+    )
     hooks_install_p.set_defaults(func=command_hooks_install)
     hooks_remove_p = hooks_sub.add_parser('remove', parents=[common])
     hooks_remove_p.add_argument('-a', '--apply', action='store_true')
@@ -18605,9 +18654,17 @@ def command_hooks_status(args):
 
 def command_hooks_install(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
     print(json.dumps(
-        install_managed_push_hook(repo_root, apply=args.apply, manifest=manifest),
+        install_managed_push_hook(
+            repo_root,
+            apply=args.apply,
+            manifest=manifest,
+            manifest_path=manifest_path,
+            reason=args.reason,
+        ),
         indent=2,
         sort_keys=True,
     ))
@@ -18764,15 +18821,19 @@ def command_self_mode(args):
     return 0
 
 
-def command_behavior_table():
-    """Single command table for mutation, manifest-lock, and guard-remedy behavior."""
+def entrypoint_behavior_table():
+    """Single registry for command and internal state-writer behavior."""
     table = {}
 
-    def register(functions, *, mutates='never', manifest_mutates='never', remedy=False):
+    def register(
+        functions, *, mutates='never', manifest_mutates='never', remedy=False,
+        command=True,
+    ):
         for function in functions:
             if function in table:
                 raise RuntimeError(f'duplicate command behavior: {function.__name__}')
             table[function] = {
+                'command': command,
                 'mutates': mutates,
                 'manifestMutates': manifest_mutates,
                 'primaryGuardRemedy': remedy,
@@ -18809,8 +18870,8 @@ def command_behavior_table():
         command_int_show,
         command_int_sync_status,
     ))
+    register((command_revision_provider,), mutates='always', manifest_mutates='internal')
     register((
-        command_revision_provider,
         command_repo_add,
         command_repo_set_manifest,
         command_repo_rm,
@@ -18870,23 +18931,39 @@ def command_behavior_table():
     register((
         command_self_update,
         command_self_install_hooks,
-        command_stack_push,
         command_int_align_remote,
+    ), mutates='execute')
+    register((
+        command_stack_push,
         command_int_rebuild,
         command_int_push,
-    ), mutates='not-dry-run')
+    ), mutates='execute', manifest_mutates='execute')
     register(
         (command_stack_rebuild,),
-        mutates='not-dry-run',
+        mutates='execute',
         manifest_mutates='update-manifest',
     )
     register((command_self_mode,), mutates='mode')
     register((command_use,), mutates='profile-selection')
     register((command_replay_mode,), mutates='mode-or-clear')
-    register((command_init,), mutates='unless-stdout', manifest_mutates='unless-stdout')
+    register((command_init,), mutates='init', manifest_mutates='init')
     register((command_journal_schedule,), mutates='schedule-apply')
     register((command_stack_git, command_int_git), mutates='git-passthrough')
+    register(
+        (SyncwheelRevisionBackend.ensure_stack_owned,),
+        manifest_mutates='internal',
+        command=False,
+    )
     return table
+
+
+def command_behavior_table():
+    """Command-only projection of the authoritative entrypoint registry."""
+    return {
+        function: behavior
+        for function, behavior in entrypoint_behavior_table().items()
+        if behavior['command']
+    }
 
 
 def command_parser_nodes(parser):
@@ -18938,12 +19015,14 @@ def mutation_rule_requested(rule, args):
         return True
     if rule == 'apply':
         return bool(getattr(args, 'apply', False))
-    if rule == 'not-dry-run':
+    if rule == 'execute':
         return not bool(getattr(args, 'dry_run', False))
     if rule == 'update-manifest':
         return bool(getattr(args, 'update_manifest', False))
-    if rule == 'unless-stdout':
+    if rule == 'init':
         return not bool(getattr(args, 'stdout', False))
+    if rule == 'internal':
+        return False
     if rule == 'mode':
         return bool(getattr(args, 'mode', None))
     if rule == 'mode-or-clear':

@@ -153,7 +153,10 @@ and `hooks status` reports `degraded` with the cause. Syncwheel's guard runs bef
 every chained user hook, both execute, and either failure rejects the operation.
 Use the same `--personal` or `--manifest` selector for `hooks install`, `status`, and
 reasoned removal. The clone has one effective guard target; another selected profile
-or a renamed integration branch is degraded until `hooks install --apply` retargets it.
+or a renamed integration branch is degraded until an installation with the same
+selector and `--reason "..."` retargets it. Retargeting appends an intent with actor,
+old target, new target, and reason to the selected ledger before changing
+`guard.json`.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.
@@ -225,10 +228,13 @@ reports a degraded bundle and `hooks install --apply` repairs it explicitly. Gua
 state comes only from atomic `guard.json` under the Git common directory. Re-enable
 state precedes hook installation; reasoned disable is ledgered before hook removal.
 Every state read validates the branch, boolean enable flag, and required disable
-reason; missing or invalid state fails closed and reports degraded. Nonces bind PID
+reason; missing, non-UTF-8, or invalid state fails closed, reports degraded, and is
+repairable by explicit installation. Nonces bind PID
 plus process-start identity, cleanup preserves other live processes, and stale
 malformed files are audit-recorded before removal. Mutation/read-only/remedy behavior
-is declared once in the command table, so `--apply` previews remain read-only.
+is declared once in the entrypoint registry, including internal writers, so `--apply`
+previews remain read-only. Execute-mode stack push, integration rebuild, and
+integration push retain manifest-write classification for control-state persistence.
 
 ## Replay modes
 

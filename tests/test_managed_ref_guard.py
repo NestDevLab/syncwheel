@@ -593,7 +593,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertFalse((hooks / 'pre-push').exists())
         self.assertEqual(pre_commit.read_text(), '#!/bin/sh\necho foreign\n')
 
-    def test_chained_hook_tamper_is_reported_and_refuses_lifecycle(self):
+    def test_changed_chained_hook_is_rebaselined_without_overwrite(self):
         _, hook, backup, _ = syncwheel.managed_push_hook_paths(self.repo)
         hook.parent.mkdir(parents=True, exist_ok=True)
         hook.write_text('#!/bin/sh\necho existing\n')
@@ -604,34 +604,50 @@ class ManagedRefGuardTests(unittest.TestCase):
         status = syncwheel.managed_push_hook_status(self.repo)
         self.assertFalse(status['owned'])
         self.assertFalse(status['chainMatches'])
+        self.assertTrue(status['chainRepairable'])
         self.assertEqual(status['status'], 'conflict')
+
         with self.assertRaisesRegex(syncwheel.SyncwheelError, 'not owned'):
             syncwheel.remove_managed_push_hook(self.repo, apply=True, disable=True, reason='test')
-        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'stale or tampered'):
-            syncwheel.install_managed_push_hook(self.repo, apply=True)
 
-    def test_required_policy_migrates_then_fails_closed_on_tamper(self):
+        plan = syncwheel.install_managed_push_hook(self.repo)
+        self.assertEqual(
+            plan['hooks']['pre-push']['action'], 'refresh-chain-metadata'
+        )
+        self.assertEqual(backup.read_text(), '#!/bin/sh\necho replaced\n')
+
+        repaired = syncwheel.install_managed_push_hook(self.repo, apply=True)
+        self.assertTrue(repaired['ready'])
+        self.assertTrue(syncwheel.managed_push_hook_status(self.repo)['chainMatches'])
+        syncwheel.remove_managed_push_hook(
+            self.repo, apply=True, disable=True, reason='test cleanup'
+        )
+        self.assertEqual(hook.read_text(), '#!/bin/sh\necho replaced\n')
+
+    def test_required_policy_migrates_then_reports_degraded_on_tamper(self):
         pending = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
         self.assertTrue(pending['required'])
         self.assertTrue(pending['migrationPending'])
         self.assertFalse(pending['enforced'])
 
         syncwheel.install_managed_push_hook(self.repo, apply=True)
-        active = syncwheel.require_managed_push_guard(self.repo, self.manifest)
+        active = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
         self.assertTrue(active['enforced'])
         self.assertTrue(active['ready'])
 
         _, hook, _, _ = syncwheel.managed_push_hook_paths(self.repo)
         hook.write_text(hook.read_text() + '# tampered\n')
-        with self.assertRaisesRegex(syncwheel.SyncwheelError, 'missing, stale, or tampered'):
-            syncwheel.require_managed_push_guard(self.repo, self.manifest)
+        degraded = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
+        self.assertEqual(degraded['status'], 'degraded')
+        self.assertEqual(degraded['mode'], 'required-degraded')
+        self.assertFalse(degraded['ready'])
 
     def test_reasoned_disable_is_persisted_and_visible(self):
         disabled = syncwheel.remove_managed_push_hook(
             self.repo, apply=True, disable=True, reason='external contribution clone'
         )
         self.assertEqual(disabled['action'], 'disable')
-        policy = syncwheel.require_managed_push_guard(self.repo, self.manifest)
+        policy = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
         self.assertTrue(policy['disabled'])
         self.assertEqual(policy['disabledReason'], 'external contribution clone')
 
@@ -998,7 +1014,53 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(shared_status.returncode, 0, shared_status.stderr)
         shared_report = json.loads(shared_status.stdout)
         self.assertEqual(shared_report['status'], 'degraded')
+        self.assertTrue(shared_report['disabled'])
+        self.assertEqual(shared_report['disabledReason'], 'personal recovery')
         self.assertIn('hooks install --apply', ' '.join(shared_report['degradedCauses']))
+
+    def test_guard_retarget_requires_reason_and_audits_selected_ledger(self):
+        self._install_and_branch('main-integration')
+        profile = 'alt'
+        branch = syncwheel.personal_integration_branch(profile)
+        manifest_path = syncwheel.personal_manifest_path(self.repo, profile)
+        self.write_selected_manifest(manifest_path, branch)
+
+        refused = self.run_syncwheel(
+            'hooks', 'install', '--apply', '--personal', profile,
+            '--repo', str(self.repo),
+        )
+
+        self.assertEqual(refused.returncode, 2)
+        self.assertIn('retarget', refused.stderr)
+        self.assertIn('--reason', refused.stderr)
+        self.assertEqual(
+            syncwheel.load_primary_guard(self.repo)['integrationBranch'],
+            'main-integration',
+        )
+        self.assertEqual(syncwheel.load_ledger_events(self.repo, manifest_path), [])
+
+        installed = self.run_syncwheel(
+            'hooks', 'install', '--apply', '--personal', profile,
+            '--reason', 'switch this clone to the alt profile',
+            '--repo', str(self.repo),
+        )
+
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        report = json.loads(installed.stdout)
+        self.assertEqual(report['guardAction'], 'retarget')
+        self.assertEqual(
+            syncwheel.load_primary_guard(self.repo)['integrationBranch'], branch
+        )
+        events = syncwheel.load_ledger_events(self.repo, manifest_path)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]['type'], 'primary_guard_retargeted')
+        self.assertEqual(events[0]['payload'], {
+            'actor': os.environ.get('USER', 'unknown'),
+            'integrationBranch': branch,
+            'phase': 'intent',
+            'previousIntegrationBranch': 'main-integration',
+            'reason': 'switch this clone to the alt profile',
+        })
 
     def test_explicit_manifest_hook_lifecycle_uses_selected_branch_and_ledger(self):
         branch = 'integration/explicit/main'
@@ -1116,6 +1178,62 @@ class ManagedRefGuardTests(unittest.TestCase):
                     expected_cause, ' '.join(report['degradedCauses'])
                 )
 
+    def test_non_utf8_guard_state_is_degraded_and_install_repairs_it(self):
+        self._install_and_branch('main-integration')
+        syncwheel.primary_guard_path(self.repo).write_bytes(b'\xff\xfe\x00binary')
+
+        hooks_status = self.run_syncwheel(
+            'hooks', 'status', '--repo', str(self.repo)
+        )
+        self.assertEqual(hooks_status.returncode, 0, hooks_status.stderr)
+        self.assertNotIn('Traceback', hooks_status.stderr)
+        hooks_report = json.loads(hooks_status.stdout)
+        self.assertEqual(hooks_report['status'], 'degraded')
+        self.assertIn('unreadable', ' '.join(hooks_report['degradedCauses']))
+
+        status = self.run_syncwheel(
+            'status', '--json', '--repo', str(self.repo)
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        status_hooks = json.loads(status.stdout)['validation']['details']['hooks']
+        self.assertEqual(status_hooks['status'], 'degraded')
+        self.assertIn('unreadable', ' '.join(status_hooks['degradedCauses']))
+
+        validate = self.run_syncwheel(
+            'validate', '--json', '--repo', str(self.repo)
+        )
+        self.assertNotIn('Traceback', validate.stderr)
+        validate_hooks = json.loads(validate.stdout)['details']['hooks']
+        self.assertEqual(validate_hooks['status'], 'degraded')
+        self.assertIn('unreadable', ' '.join(validate_hooks['degradedCauses']))
+
+        old, new = self.descendant_commit('blocked by non-UTF-8 guard state')
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo,
+            env=self._clean_env(),
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True
+            ).strip(),
+            old,
+        )
+
+        repaired = self.run_syncwheel(
+            'hooks', 'install', '--apply', '--repo', str(self.repo)
+        )
+        self.assertEqual(repaired.returncode, 0, repaired.stderr)
+        self.assertNotIn('Traceback', repaired.stderr)
+        self.assertEqual(json.loads(repaired.stdout)['status'], 'installed')
+        self.assertEqual(
+            syncwheel.managed_push_guard_policy(self.repo, self.manifest)['status'],
+            'ready',
+        )
+
     def test_disabled_guard_without_reason_fails_closed_and_reports_degraded(self):
         self._install_and_branch('main-integration')
         syncwheel.atomic_write_private_json(
@@ -1199,6 +1317,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         policy = syncwheel.managed_push_guard_policy(self.repo, self.manifest)
         self.assertTrue(policy['enforced'])
         self.assertTrue(policy['degraded'])
+        self.assertEqual(policy['mode'], 'required-degraded')
         self.assertTrue(
             any('post-checkout' in cause for cause in policy['degradedCauses']),
             policy,
@@ -1431,6 +1550,39 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout)['kind'], 'stackIntegrationClassificationPlan')
 
+    def test_command_registry_prepares_control_manifest_convergence(self):
+        entrypoints = syncwheel.entrypoint_behavior_table()
+        commands = syncwheel.command_behavior_table()
+        self.assertEqual(
+            commands,
+            {
+                function: behavior
+                for function, behavior in entrypoints.items()
+                if behavior['command']
+            },
+        )
+        for function in (
+            syncwheel.command_stack_push,
+            syncwheel.command_int_rebuild,
+            syncwheel.command_int_push,
+        ):
+            with self.subTest(function=function.__name__):
+                self.assertEqual(
+                    commands[function]['manifestMutates'], 'execute'
+                )
+                self.assertTrue(syncwheel.manifest_mutation_requested(
+                    types.SimpleNamespace(func=function, dry_run=False)
+                ))
+                self.assertFalse(syncwheel.manifest_mutation_requested(
+                    types.SimpleNamespace(func=function, dry_run=True)
+                ))
+        self.assertEqual(
+            entrypoints[syncwheel.SyncwheelRevisionBackend.ensure_stack_owned][
+                'manifestMutates'
+            ],
+            'internal',
+        )
+
     def test_every_manifest_or_ledger_writer_command_has_mutation_metadata(self):
         module_paths = (MODULE_PATH, PROVIDER_MODULE_PATH)
         functions = {}
@@ -1446,7 +1598,8 @@ class ManagedRefGuardTests(unittest.TestCase):
                 definitions_by_name.setdefault(node.name, set()).add(key)
 
         calls = {}
-        direct_path_writers = set()
+        direct_command_writers = set()
+        direct_private_savers = {'atomic_write_private_json'}
         for key, node in functions.items():
             called = set()
             for child in ast.walk(node):
@@ -1454,13 +1607,20 @@ class ManagedRefGuardTests(unittest.TestCase):
                     continue
                 if isinstance(child.func, ast.Name):
                     called.add(child.func.id)
+                    if (
+                        key[1].startswith('command_')
+                        and child.func.id in direct_private_savers
+                    ):
+                        direct_command_writers.add(key)
                 elif isinstance(child.func, ast.Attribute):
                     called.add(child.func.attr)
                     if (
                         key[1].startswith('command_')
-                        and child.func.attr in {'write_text', 'write_bytes'}
+                        and child.func.attr in {
+                            'atomic_write_private_json', 'write_text', 'write_bytes'
+                        }
                     ):
-                        direct_path_writers.add(key)
+                        direct_command_writers.add(key)
             calls[key] = called
 
         saver_names = {
@@ -1474,7 +1634,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             key for key in functions if key[1] in saver_names
         } | {
             key for key, called in calls.items() if called.intersection(method_savers)
-        } | direct_path_writers
+        } | direct_command_writers
         changed = True
         while changed:
             changed = False
@@ -1494,6 +1654,12 @@ class ManagedRefGuardTests(unittest.TestCase):
             and hasattr(syncwheel, name)
         }
         self.assertIn(syncwheel.command_revision_provider, writer_commands)
+        self.assertEqual(
+            syncwheel.entrypoint_behavior_table()[
+                syncwheel.SyncwheelRevisionBackend.ensure_stack_owned
+            ]['manifestMutates'],
+            'internal',
+        )
         behaviors = syncwheel.command_behavior_table()
         missing = sorted(
             func.__name__
