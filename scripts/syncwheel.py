@@ -688,12 +688,50 @@ def manifest_for_guard(repo_root):
     return manifest
 
 
-def load_primary_guard(repo_root):
+def primary_guard_validation_error(payload):
+    if not isinstance(payload, dict):
+        return 'primary guard configuration must be a JSON object'
+    if type(payload.get('version')) is not int or payload['version'] != 1:
+        return 'primary guard configuration has an unsupported or missing version'
+    branch = payload.get('integrationBranch')
+    if not isinstance(branch, str) or not branch.strip():
+        return 'primary guard configuration requires a non-empty integrationBranch'
+    enabled = payload.get('enabled')
+    if not isinstance(enabled, bool):
+        return 'primary guard configuration requires boolean enabled state'
+    reason = payload.get('reason')
+    if not enabled and (not isinstance(reason, str) or not reason.strip()):
+        return 'disabled primary guard configuration requires a non-empty reason'
+    return None
+
+
+def inspect_primary_guard(repo_root):
+    path = primary_guard_path(repo_root)
     try:
-        payload = json.loads(primary_guard_path(repo_root).read_text())
-    except (OSError, json.JSONDecodeError):
-        return None
-    return payload if isinstance(payload, dict) else None
+        payload = json.loads(path.read_text())
+    except FileNotFoundError:
+        return None, 'primary guard configuration is missing'
+    except json.JSONDecodeError:
+        return None, 'primary guard configuration contains invalid JSON'
+    except OSError:
+        return None, 'primary guard configuration is unreadable'
+    error = primary_guard_validation_error(payload)
+    return (None, error) if error else (payload, None)
+
+
+def load_primary_guard(repo_root):
+    guard, _ = inspect_primary_guard(repo_root)
+    return guard
+
+
+def require_primary_guard(repo_root):
+    guard, error = inspect_primary_guard(repo_root)
+    if error:
+        raise SyncwheelError(
+            f'{error}; run syncwheel hooks install --apply with the intended '
+            '--personal/--manifest selection'
+        )
+    return guard
 
 
 def atomic_write_private_json(path, payload, *, indent=None):
@@ -718,12 +756,25 @@ def atomic_write_private_json(path, payload, *, indent=None):
     return path
 
 
-def save_primary_guard(repo_root, manifest, *, enabled=True, reason=None):
+def primary_guard_payload(manifest, *, enabled=True, reason=None):
     integration = manifest.get('integration') or {}
     branch = integration.get('branch')
     if not isinstance(branch, str) or not branch:
         raise SyncwheelError('cannot persist primary guard without an integration branch')
-    payload = {'version': 1, 'integrationBranch': branch, 'enabled': enabled, 'reason': reason}
+    payload = {
+        'version': 1,
+        'integrationBranch': branch.strip(),
+        'enabled': enabled,
+        'reason': reason.strip() if isinstance(reason, str) else reason,
+    }
+    error = primary_guard_validation_error(payload)
+    if error:
+        raise SyncwheelError(error)
+    return payload
+
+
+def save_primary_guard(repo_root, manifest, *, enabled=True, reason=None):
+    payload = primary_guard_payload(manifest, enabled=enabled, reason=reason)
     path = primary_guard_path(repo_root)
     atomic_write_private_json(path, payload, indent=2)
     return payload
@@ -741,12 +792,54 @@ def ref_auth_dir(repo_root):
     return common / 'syncwheel' / 'ref-auth'
 
 
+def ref_auth_events_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'ref-auth-events.jsonl'
+
+
+def process_start_identity(pid):
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+        closing = stat.rfind(')')
+        fields = stat[closing + 2:].split()
+        if closing > 0 and len(fields) > 19:
+            return f'proc:{fields[19]}'
+    except OSError:
+        pass
+    try:
+        result = subprocess.run(
+            ['ps', '-o', 'lstart=', '-p', str(pid)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    started = ' '.join(result.stdout.split()) if result.returncode == 0 else ''
+    return f'ps:{started}' if started else None
+
+
 def authorize_ref_move(repo_root):
     directory = ref_auth_dir(repo_root)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     nonce = uuid.uuid4().hex + uuid.uuid4().hex
-    payload = {'nonce': nonce, 'pid': os.getpid(), 'expiresAt': time.time() + SYNCWHEEL_REF_AUTH_TTL_SECONDS,
-               'remaining': ['pre-commit', 'reference-transaction'], 'operation': 'syncwheel'}
+    pid = os.getpid()
+    pid_start = process_start_identity(pid)
+    if not pid_start:
+        raise SyncwheelError('cannot establish process identity for ref authorization')
+    payload = {
+        'nonce': nonce,
+        'pid': pid,
+        'pidStart': pid_start,
+        'expiresAt': time.time() + SYNCWHEEL_REF_AUTH_TTL_SECONDS,
+        'remaining': ['pre-commit', 'reference-transaction'],
+        'operation': 'syncwheel',
+    }
     path = directory / nonce
     atomic_write_private_json(path, payload)
     return nonce
@@ -760,8 +853,17 @@ def ref_move_authorized(repo_root, event):
     try:
         payload = json.loads(path.read_text())
         pid = int(payload['pid'])
-        os.kill(pid, 0)
-        if payload['nonce'] != nonce or payload['expiresAt'] < time.time() or event not in payload['remaining']:
+        pid_start = payload['pidStart']
+        if (
+            pid <= 0
+            or not isinstance(pid_start, str)
+            or not pid_start
+            or not process_is_alive(pid)
+            or process_start_identity(pid) != pid_start
+            or payload['nonce'] != nonce
+            or payload['expiresAt'] < time.time()
+            or event not in payload['remaining']
+        ):
             return False
         payload['remaining'].remove(event)
         if payload['remaining']:
@@ -783,21 +885,81 @@ def process_is_alive(pid):
         return False
 
 
+def append_ref_auth_event(repo_root, event):
+    path = ref_auth_events_path(repo_root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    encoded = (json.dumps(event, sort_keys=True) + '\n').encode('utf-8')
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        offset = 0
+        while offset < len(encoded):
+            written = os.write(descriptor, encoded[offset:])
+            if written <= 0:
+                raise OSError('short ref authorization event write')
+            offset += written
+        os.fsync(descriptor)
+    finally:
+        if fcntl is not None:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        os.close(descriptor)
+    return event
+
+
+def discard_stale_ref_authorization(repo_root, path, now):
+    try:
+        stale = path.lstat().st_mtime + SYNCWHEEL_REF_AUTH_TTL_SECONDS < now
+    except OSError:
+        return False
+    if not stale:
+        return False
+    event = {
+        'version': 1,
+        'type': 'ref_authorization_discarded',
+        'file': path.name,
+        'reason': 'malformed_or_unreadable',
+        'recordedAt': iso_utc_now(),
+    }
+    try:
+        append_ref_auth_event(repo_root, event)
+        path.unlink(missing_ok=True)
+    except OSError:
+        return False
+    return True
+
+
 def clear_ref_authorizations(repo_root):
     owner_pid = os.getpid()
+    owner_start = process_start_identity(owner_pid)
+    now = time.time()
     directory = ref_auth_dir(repo_root)
     if directory.exists():
         for path in directory.iterdir():
             try:
                 payload = json.loads(path.read_text())
                 nonce_pid = int(payload['pid'])
-                if nonce_pid <= 0:
-                    nonce_pid = None
+                nonce_start = payload['pidStart']
+                if (
+                    nonce_pid <= 0
+                    or not isinstance(nonce_start, str)
+                    or not nonce_start
+                ):
+                    raise ValueError('invalid ref authorization owner')
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                nonce_pid = None
-            if nonce_pid == owner_pid or (
-                nonce_pid is not None and not process_is_alive(nonce_pid)
-            ):
+                discard_stale_ref_authorization(repo_root, path, now)
+                continue
+            current_start = process_start_identity(nonce_pid)
+            owned = (
+                nonce_pid == owner_pid
+                and owner_start is not None
+                and nonce_start == owner_start
+            )
+            owner_is_gone = not process_is_alive(nonce_pid)
+            owner_was_recycled = (
+                current_start is not None and current_start != nonce_start
+            )
+            if owned or owner_is_gone or owner_was_recycled:
                 path.unlink(missing_ok=True)
 
 
@@ -862,7 +1024,7 @@ def managed_hook_cli_resolution(repo_root):
         for item in worktrees
         if item.get('path')
     )
-    excluded_roots.extend((primary / 'var', primary / DEFAULT_SYNCWHEEL_WORKTREE_ROOT))
+    excluded_roots.append(primary / 'var')
     for manifest_root in dict.fromkeys((primary, repo_root)):
         manifest_path = manifest_root / '.syncwheel' / 'manifest.json'
         try:
@@ -989,6 +1151,7 @@ def managed_ref_move_hook_content(repo_root, backup_exists):
     return (
         '#!/bin/sh\n'
         f'{MANAGED_REF_MOVE_MARKER}\n'
+        'set -u\n'
         'hook_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1\n'
         'input=$(mktemp "${TMPDIR:-/tmp}/syncwheel-reference-transaction.XXXXXX")\n'
         'trap \'rm -f "$input"\' EXIT HUP INT TERM\n'
@@ -1113,12 +1276,14 @@ def managed_hook_bundle_status(repo_root):
 
 
 def managed_push_guard_policy(repo_root, manifest):
-    guard = load_primary_guard(repo_root)
-    disabled = bool(guard and not guard.get('enabled', True))
-    enforced = bool(guard and guard.get('enabled', True))
+    guard, guard_error = inspect_primary_guard(repo_root)
+    selected_branch = (manifest.get('integration') or {}).get('branch')
+    branch_matches = bool(
+        guard and guard['integrationBranch'] == selected_branch
+    )
+    disabled = bool(guard and branch_matches and not guard['enabled'])
+    enforced = bool(guard and branch_matches and guard['enabled'])
     reason = guard.get('reason') if guard else None
-    if disabled and (not isinstance(reason, str) or not reason.strip()):
-        raise SyncwheelError('disabled primary guard state requires a non-empty persisted reason')
     tracking = manifest.get('syncwheel_tracking')
     required = tracking == SYNCWHEEL_TRACKING_GIT_TRACKED and bool(
         managed_ref_names(manifest)
@@ -1127,13 +1292,23 @@ def managed_push_guard_policy(repo_root, manifest):
     )
     bundle = managed_hook_bundle_status(repo_root)
     hook = bundle['hooks']['pre-push']
-    ready = enforced and bundle['ready']
     degraded_causes = []
-    if required and guard is None:
-        degraded_causes.append('primary guard configuration is missing')
-    elif enforced:
+    if guard_error:
+        degraded_causes.append(
+            f'{guard_error}; run syncwheel hooks install --apply with the intended '
+            '--personal/--manifest selection'
+        )
+    elif guard and not branch_matches:
+        degraded_causes.append(
+            f"primary guard targets {guard['integrationBranch']!r}, but the selected "
+            f"manifest declares {selected_branch!r}; run syncwheel hooks install "
+            '--apply with the same --personal/--manifest selection'
+        )
+    if guard and guard['enabled'] and branch_matches:
         degraded_causes.extend(bundle['degradedCauses'])
     degraded = bool(degraded_causes)
+    ready = enforced and bundle['ready'] and not degraded
+    migration_pending = required and guard_error == 'primary guard configuration is missing'
     return {
         'status': (
             'disabled' if disabled else
@@ -1142,25 +1317,35 @@ def managed_push_guard_policy(repo_root, manifest):
         'required': required,
         'disabled': disabled,
         'enforced': enforced,
-        'migrationPending': required and guard is None,
+        'migrationPending': migration_pending,
         'disabledReason': reason if disabled else None,
         'ready': ready,
         'degraded': degraded,
         'degradedCauses': degraded_causes,
         'guard': guard,
+        'guardError': guard_error,
+        'targetMatchesManifest': branch_matches,
         'expectedDigest': bundle['expectedDigest'],
         'hook': hook,
         'hooks': bundle['hooks'],
         'mode': (
             'disabled' if disabled else
-            ('required' if enforced else ('required-pending-migration' if required else 'optional'))
+            ('required' if enforced else
+             ('required-pending-migration' if migration_pending else
+              ('required-degraded' if required and degraded else
+               ('degraded' if degraded else 'optional'))))
         ),
     }
 
 
 def require_managed_push_guard(repo_root, manifest):
     policy = managed_push_guard_policy(repo_root, manifest)
-    if policy['required'] and policy['enforced'] and not policy['ready']:
+    if (
+        policy['required']
+        and not policy['disabled']
+        and not policy['migrationPending']
+        and not policy['ready']
+    ):
         raise SyncwheelError(
             'managed-ref guard is required but missing, stale, or tampered; '
             'review `syncwheel hooks install`, then run `syncwheel hooks install --apply`'
@@ -1228,15 +1413,23 @@ def install_one_managed_hook(repo_root, hook_name, apply=False):
     return {'action': 'upgraded' if action == 'upgrade' else 'installed', **managed_hook_status(repo_root, hook_name)}
 
 
-def install_managed_push_hook(repo_root, apply=False):
+def install_managed_push_hook(repo_root, apply=False, manifest=None):
     if apply and managed_hook_syncwheel_command(repo_root) is None:
         raise SyncwheelError('cannot install primary guard: stable syncwheel CLI is not resolvable; install it outside var/worktrees')
+    selected_manifest = manifest or manifest_for_guard(repo_root)
+    desired_guard = primary_guard_payload(selected_manifest)
+    current_guard, current_guard_error = inspect_primary_guard(repo_root)
+    guard_action = (
+        'none'
+        if current_guard_error is None and current_guard == desired_guard
+        else ('install' if current_guard_error == 'primary guard configuration is missing' else 'update')
+    )
     plans = {
         name: install_one_managed_hook(repo_root, name, apply=False)
         for name in MANAGED_REPOSITORY_HOOKS
     }
     if apply:
-        save_primary_guard(repo_root, manifest_for_guard(repo_root))
+        save_primary_guard(repo_root, selected_manifest)
         results = {
             name: install_one_managed_hook(repo_root, name, apply=True)
             for name in MANAGED_REPOSITORY_HOOKS
@@ -1244,19 +1437,31 @@ def install_managed_push_hook(repo_root, apply=False):
     else:
         results = plans
     bundle = managed_hook_bundle_status(repo_root)
+    policy = managed_push_guard_policy(repo_root, selected_manifest)
     pre_push = bundle['hooks']['pre-push']
     changed = [item['action'] for item in results.values() if item['action'] != 'none']
     return {
         **pre_push,
-        'action': ('installed' if apply else 'install') if changed else 'none',
+        'action': (
+            ('installed' if apply else 'install')
+            if changed or guard_action != 'none'
+            else 'none'
+        ),
+        'guardAction': guard_action,
+        'guard': desired_guard,
         'chainExisting': results['pre-push'].get('chainExisting', pre_push['chained']),
-        'ready': bundle['ready'],
+        'ready': policy['ready'],
+        'degraded': policy['degraded'],
+        'degradedCauses': policy['degradedCauses'],
         'expectedDigest': bundle['expectedDigest'],
         'hooks': bundle['hooks'] if apply else results,
     }
 
 
-def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None):
+def remove_managed_push_hook(
+    repo_root, apply=False, disable=False, reason=None,
+    manifest=None, manifest_path=None,
+):
     if apply and not disable:
         raise SyncwheelError('removing primary guard requires --disable --reason')
     if disable and (not isinstance(reason, str) or not reason.strip()):
@@ -1274,13 +1479,25 @@ def remove_managed_push_hook(repo_root, apply=False, disable=False, reason=None)
         'disable': disable, 'reason': reason if disable else None, 'apply': apply,
     }
     if not apply:
+        if disable and (manifest is None or manifest_path is None):
+            resolved_manifest, resolved_path = require_manifest(
+                repo_root, str(repo_root), None, None
+            )
+            manifest = manifest or resolved_manifest
+            manifest_path = manifest_path or resolved_path
+        if disable:
+            plan['guard'] = primary_guard_payload(
+                manifest, enabled=False, reason=reason
+            )
+            plan['ledgerRoot'] = str(ledger_root(repo_root, manifest_path))
         return plan
-    manifest = None
-    manifest_path = None
     if disable:
-        manifest, manifest_path = require_manifest(
-            repo_root, str(repo_root), None, None
-        )
+        if manifest is None or manifest_path is None:
+            resolved_manifest, resolved_path = require_manifest(
+                repo_root, str(repo_root), None, None
+            )
+            manifest = manifest or resolved_manifest
+            manifest_path = manifest_path or resolved_path
         append_ledger_event(repo_root, 'primary_guard_disabled', {
             'actor': os.environ.get('USER', 'unknown'),
             'reason': reason.strip(),
@@ -18388,16 +18605,27 @@ def command_hooks_status(args):
 
 def command_hooks_install(args):
     repo_root = resolve_repo_root(args.repo)
-    require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    print(json.dumps(install_managed_push_hook(repo_root, apply=args.apply), indent=2, sort_keys=True))
+    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    print(json.dumps(
+        install_managed_push_hook(repo_root, apply=args.apply, manifest=manifest),
+        indent=2,
+        sort_keys=True,
+    ))
     return 0
 
 
 def command_hooks_remove(args):
     repo_root = resolve_repo_root(args.repo)
-    require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
     result = remove_managed_push_hook(
-        repo_root, apply=args.apply, disable=args.disable, reason=args.reason
+        repo_root,
+        apply=args.apply,
+        disable=args.disable,
+        reason=args.reason,
+        manifest=manifest,
+        manifest_path=manifest_path,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
@@ -18454,10 +18682,8 @@ def command_hooks_worktree_guard(args):
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
     if current_path != primary_root:
         return 0
-    guard = load_primary_guard(repo_root)
-    if not guard:
-        raise SyncwheelError('primary guard configuration is missing; run syncwheel hooks install --apply')
-    if not guard.get('enabled', True):
+    guard = require_primary_guard(repo_root)
+    if not guard['enabled']:
         return 0
     branch = get_current_branch(primary_root)
     expected = guard.get('integrationBranch')
@@ -18472,7 +18698,7 @@ def command_hooks_worktree_guard(args):
             return 0
         raise SyncwheelError(
             f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
-            'Only a Syncwheel-authorized control commit may be created there.'
+            'Only a Syncwheel-authorized control commit may be created there'
             + format_remedy_suffix(remedies)
             + '. This local hook is a safety guard, not a security boundary; '
             'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
@@ -18507,12 +18733,10 @@ def command_hooks_ref_guard(args):
     repo_root = resolve_repo_root(args.repo)
     worktrees = get_worktrees(repo_root)
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-    guard = load_primary_guard(repo_root)
-    if not guard:
-        raise SyncwheelError('primary guard configuration is missing; run syncwheel hooks install --apply')
-    if not guard.get('enabled', True):
+    guard = require_primary_guard(repo_root)
+    if not guard['enabled']:
         return 0
-    integration_ref = f"refs/heads/{guard.get('integrationBranch')}"
+    integration_ref = f"refs/heads/{guard['integrationBranch']}"
     protected = []
     for old, new, ref in updates:
         if ref == integration_ref:

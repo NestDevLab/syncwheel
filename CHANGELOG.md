@@ -12,6 +12,10 @@
   chained hook while propagating either failure, preserve live concurrent-process
   nonces, reject CLI paths from repository/lane/worktree state, audit disable intent
   before removal, and derive mutation preflight from one exhaustive command table.
+- Honor shared, personal, and explicit manifest selection throughout guard lifecycle;
+  validate every guard-state read and expose branch drift as degraded; bind nonces to
+  process-start identity, audit stale malformed cleanup, and extend mutation coverage
+  through revision-provider method savers and the exact recovery-remedy set.
 
 ## 0.40.1 - 2026-09-02
 

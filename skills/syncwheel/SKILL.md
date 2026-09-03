@@ -151,6 +151,9 @@ normal Syncwheel commands do not install it implicitly. Once installed, an
 unresolvable stable CLI or an altered/partial hook bundle makes the guard fail closed
 and `hooks status` reports `degraded` with the cause. Syncwheel's guard runs before
 every chained user hook, both execute, and either failure rejects the operation.
+Use the same `--personal` or `--manifest` selector for `hooks install`, `status`, and
+reasoned removal. The clone has one effective guard target; another selected profile
+or a renamed integration branch is degraded until `hooks install --apply` retargets it.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.
@@ -221,8 +224,11 @@ primary guard is fail-closed and uses a single-use internal nonce; `hooks status
 reports a degraded bundle and `hooks install --apply` repairs it explicitly. Guard
 state comes only from atomic `guard.json` under the Git common directory. Re-enable
 state precedes hook installation; reasoned disable is ledgered before hook removal.
-Nonce cleanup preserves other live processes. Mutation/read-only/remedy behavior is
-declared once in the command table, so `--apply` previews remain read-only.
+Every state read validates the branch, boolean enable flag, and required disable
+reason; missing or invalid state fails closed and reports degraded. Nonces bind PID
+plus process-start identity, cleanup preserves other live processes, and stale
+malformed files are audit-recorded before removal. Mutation/read-only/remedy behavior
+is declared once in the command table, so `--apply` previews remain read-only.
 
 ## Replay modes
 

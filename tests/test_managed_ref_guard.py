@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
 import types
 import unittest
 from pathlib import Path
@@ -15,6 +16,7 @@ from unittest import mock
 
 
 MODULE_PATH = Path(__file__).parents[1] / 'scripts' / 'syncwheel.py'
+PROVIDER_MODULE_PATH = Path(__file__).parents[1] / 'scripts' / 'syncwheel_revision_provider.py'
 SPEC = importlib.util.spec_from_file_location('syncwheel_managed_ref_guard', MODULE_PATH)
 syncwheel = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(syncwheel)
@@ -142,6 +144,15 @@ class ManagedRefGuardTests(unittest.TestCase):
         ).strip()
         return old, new
 
+    def write_selected_manifest(self, path, branch):
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest['integration']['branch'] = branch
+        for stack in manifest['stacks']:
+            stack['integration_branch'] = branch
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(manifest, indent=2) + '\n')
+        return manifest
+
     def test_bundle_installs_primary_checkout_guards_and_reports_ready(self):
         result = syncwheel.install_managed_push_hook(self.repo, apply=True)
         self.assertTrue(result['ready'])
@@ -152,6 +163,10 @@ class ManagedRefGuardTests(unittest.TestCase):
         for hook in result['hooks'].values():
             self.assertTrue(hook['ready'])
             self.assertEqual(hook['status'], 'installed')
+        reference_hook = syncwheel.managed_hook_paths(
+            self.repo, 'reference-transaction'
+        )[1]
+        self.assertIn('\nset -u\n', reference_hook.read_text())
 
     def _install_and_branch(self, branch):
         syncwheel.install_managed_push_hook(self.repo, apply=True)
@@ -221,6 +236,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertIn('primary checkout commit blocked', result.stderr)
         self.assertIn('syncwheel worktree open <lane> --into feature', result.stderr)
         self.assertIn('syncwheel stack capture-integration feature HEAD', result.stderr)
+        self.assertNotIn('.. Use:', result.stderr)
 
     def test_syncwheel_authorization_permits_primary_control_commit(self):
         self._install_and_branch('main-integration')
@@ -418,6 +434,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
         self.assertNotEqual(switched.returncode, 0)
         self.assertIn('branch mismatch detected after checkout', switched.stderr)
+        self.assertNotIn('.. Use:', switched.stderr)
         self.assertEqual(
             subprocess.check_output(['git', 'branch', '--show-current'], cwd=self.repo, text=True).strip(),
             'feature',
@@ -920,6 +937,242 @@ class ManagedRefGuardTests(unittest.TestCase):
             0,
         )
 
+    def test_personal_hook_lifecycle_uses_selected_branch_and_ledger(self):
+        profile = 'alt'
+        branch = syncwheel.personal_integration_branch(profile)
+        manifest_path = syncwheel.personal_manifest_path(self.repo, profile)
+        self.write_selected_manifest(manifest_path, branch)
+        subprocess.run(['git', 'branch', '-m', branch], cwd=self.repo, check=True)
+
+        installed = self.run_syncwheel(
+            'hooks', 'install', '--apply', '--personal', profile,
+            '--repo', str(self.repo),
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(
+            syncwheel.load_primary_guard(self.repo)['integrationBranch'], branch
+        )
+        status = self.run_syncwheel(
+            'hooks', 'status', '--personal', profile, '--repo', str(self.repo)
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)['status'], 'ready')
+
+        old, new = self.descendant_commit('personal integration descendant')
+        moved = subprocess.run(
+            ['git', 'update-ref', f'refs/heads/{branch}', new, old],
+            cwd=self.repo,
+            env=self._clean_env(),
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', branch], cwd=self.repo, text=True
+            ).strip(),
+            old,
+        )
+
+        removed = self.run_syncwheel(
+            'hooks', 'remove', '--disable', '--reason', 'personal recovery',
+            '--apply', '--personal', profile, '--repo', str(self.repo),
+        )
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        guard = syncwheel.load_primary_guard(self.repo)
+        self.assertEqual(guard['integrationBranch'], branch)
+        self.assertFalse(guard['enabled'])
+        personal_events = syncwheel.load_ledger_events(self.repo, manifest_path)
+        self.assertEqual(personal_events[-1]['type'], 'primary_guard_disabled')
+        self.assertEqual(personal_events[-1]['payload']['reason'], 'personal recovery')
+        self.assertEqual(
+            syncwheel.load_ledger_events(
+                self.repo, self.repo / '.syncwheel' / 'manifest.json'
+            ),
+            [],
+        )
+
+        shared_status = self.run_syncwheel(
+            'hooks', 'status', '--repo', str(self.repo)
+        )
+        self.assertEqual(shared_status.returncode, 0, shared_status.stderr)
+        shared_report = json.loads(shared_status.stdout)
+        self.assertEqual(shared_report['status'], 'degraded')
+        self.assertIn('hooks install --apply', ' '.join(shared_report['degradedCauses']))
+
+    def test_explicit_manifest_hook_lifecycle_uses_selected_branch_and_ledger(self):
+        branch = 'integration/explicit/main'
+        manifest_path = self.temp_root / 'explicit-manifest.json'
+        self.write_selected_manifest(manifest_path, branch)
+
+        installed = self.run_syncwheel(
+            'hooks', 'install', '--apply', '--manifest', str(manifest_path),
+            '--repo', str(self.repo),
+        )
+        self.assertEqual(installed.returncode, 0, installed.stderr)
+        self.assertEqual(
+            syncwheel.load_primary_guard(self.repo)['integrationBranch'], branch
+        )
+        status = self.run_syncwheel(
+            'hooks', 'status', '--manifest', str(manifest_path),
+            '--repo', str(self.repo),
+        )
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertEqual(json.loads(status.stdout)['status'], 'ready')
+
+        removed = self.run_syncwheel(
+            'hooks', 'remove', '--disable', '--reason', 'explicit recovery',
+            '--apply', '--manifest', str(manifest_path), '--repo', str(self.repo),
+        )
+        self.assertEqual(removed.returncode, 0, removed.stderr)
+        events = syncwheel.load_ledger_events(self.repo, manifest_path)
+        self.assertEqual(events[-1]['type'], 'primary_guard_disabled')
+        self.assertEqual(events[-1]['payload']['reason'], 'explicit recovery')
+
+    def test_incomplete_guard_state_blocks_ref_move_and_reports_degraded(self):
+        self._install_and_branch('main-integration')
+        syncwheel.atomic_write_private_json(
+            syncwheel.primary_guard_path(self.repo),
+            {'version': 1, 'enabled': True, 'reason': None},
+            indent=2,
+        )
+        old, new = self.descendant_commit('blocked by incomplete guard')
+
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo,
+            env=self._clean_env(),
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True
+            ).strip(),
+            old,
+        )
+        status = self.run_syncwheel('hooks', 'status', '--repo', str(self.repo))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertEqual(report['status'], 'degraded')
+        self.assertFalse(report['ready'])
+        self.assertIn('integrationBranch', ' '.join(report['degradedCauses']))
+
+        full_status = self.run_syncwheel(
+            'status', '--json', '--repo', str(self.repo)
+        )
+        self.assertEqual(full_status.returncode, 0, full_status.stderr)
+        hooks = json.loads(full_status.stdout)['validation']['details']['hooks']
+        self.assertEqual(hooks['status'], 'degraded')
+
+    def test_corrupt_and_nonboolean_guard_state_fail_closed_and_report_degraded(self):
+        self._install_and_branch('main-integration')
+        cases = (
+            ('{not-json\n', 'invalid JSON'),
+            (json.dumps({
+                'version': 1,
+                'integrationBranch': 'main-integration',
+                'enabled': 'false',
+                'reason': None,
+            }) + '\n', 'boolean enabled'),
+            (json.dumps({
+                'version': True,
+                'integrationBranch': 'main-integration',
+                'enabled': True,
+                'reason': None,
+            }) + '\n', 'version'),
+        )
+        for content, expected_cause in cases:
+            with self.subTest(expected_cause=expected_cause):
+                syncwheel.primary_guard_path(self.repo).write_text(content)
+                old, new = self.descendant_commit(f'blocked by {expected_cause}')
+
+                moved = subprocess.run(
+                    ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+                    cwd=self.repo,
+                    env=self._clean_env(),
+                    capture_output=True,
+                    text=True,
+                )
+
+                self.assertNotEqual(moved.returncode, 0)
+                self.assertEqual(
+                    subprocess.check_output(
+                        ['git', 'rev-parse', 'main-integration'],
+                        cwd=self.repo,
+                        text=True,
+                    ).strip(),
+                    old,
+                )
+                status = self.run_syncwheel(
+                    'hooks', 'status', '--repo', str(self.repo)
+                )
+                self.assertEqual(status.returncode, 0, status.stderr)
+                report = json.loads(status.stdout)
+                self.assertEqual(report['status'], 'degraded')
+                self.assertFalse(report['ready'])
+                self.assertIn(
+                    expected_cause, ' '.join(report['degradedCauses'])
+                )
+
+    def test_disabled_guard_without_reason_fails_closed_and_reports_degraded(self):
+        self._install_and_branch('main-integration')
+        syncwheel.atomic_write_private_json(
+            syncwheel.primary_guard_path(self.repo),
+            {
+                'version': 1,
+                'integrationBranch': 'main-integration',
+                'enabled': False,
+            },
+            indent=2,
+        )
+        old, new = self.descendant_commit('blocked by unaudited disable')
+
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo,
+            env=self._clean_env(),
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True
+            ).strip(),
+            old,
+        )
+        status = self.run_syncwheel('hooks', 'status', '--repo', str(self.repo))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertEqual(report['status'], 'degraded')
+        self.assertFalse(report['disabled'])
+        self.assertIn('reason', ' '.join(report['degradedCauses']))
+        self.assertEqual(
+            syncwheel.load_ledger_events(
+                self.repo, self.repo / '.syncwheel' / 'manifest.json'
+            ),
+            [],
+        )
+
+    def test_guard_branch_mismatch_is_degraded_with_reinstall_remedy(self):
+        self._install_and_branch('main-integration')
+        stale_manifest = json.loads(json.dumps(self.manifest))
+        stale_manifest['integration']['branch'] = 'stale-integration'
+        syncwheel.save_primary_guard(self.repo, stale_manifest)
+
+        status = self.run_syncwheel('hooks', 'status', '--repo', str(self.repo))
+
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertEqual(report['status'], 'degraded')
+        self.assertFalse(report['ready'])
+        causes = ' '.join(report['degradedCauses'])
+        self.assertIn('stale-integration', causes)
+        self.assertIn('main-integration', causes)
+        self.assertIn('hooks install --apply', causes)
+
     def test_reenable_writes_guard_before_hooks_and_partial_failure_is_degraded(self):
         syncwheel.install_managed_push_hook(self.repo, apply=True)
         syncwheel.remove_managed_push_hook(
@@ -995,6 +1248,45 @@ class ManagedRefGuardTests(unittest.TestCase):
             owner.communicate(timeout=5)
         syncwheel.clear_ref_authorizations(self.repo)
         self.assertFalse(nonce_path.exists())
+
+    def test_ref_authorization_rejects_recycled_pid_identity(self):
+        nonce = syncwheel.authorize_ref_move(self.repo)
+        nonce_path = syncwheel.ref_auth_dir(self.repo) / nonce
+        payload = json.loads(nonce_path.read_text())
+        self.assertIsInstance(payload.get('pidStart'), str)
+        payload['pidStart'] = 'recycled-process-start'
+        syncwheel.atomic_write_private_json(nonce_path, payload)
+
+        with mock.patch.dict(
+            os.environ, {syncwheel.MANAGED_REF_MOVE_AUTH_ENV: nonce}, clear=False
+        ):
+            self.assertFalse(
+                syncwheel.ref_move_authorized(self.repo, 'reference-transaction')
+            )
+
+    def test_stale_malformed_nonce_is_removed_with_audit_event(self):
+        directory = syncwheel.ref_auth_dir(self.repo)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        malformed = directory / 'malformed-nonce'
+        malformed.write_text('{not-json')
+
+        syncwheel.clear_ref_authorizations(self.repo)
+
+        self.assertTrue(malformed.exists())
+        self.assertFalse(syncwheel.ref_auth_events_path(self.repo).exists())
+        stale = time.time() - syncwheel.SYNCWHEEL_REF_AUTH_TTL_SECONDS - 5
+        os.utime(malformed, (stale, stale))
+
+        syncwheel.clear_ref_authorizations(self.repo)
+
+        self.assertFalse(malformed.exists())
+        events = [
+            json.loads(line)
+            for line in syncwheel.ref_auth_events_path(self.repo).read_text().splitlines()
+        ]
+        self.assertEqual(events[-1]['type'], 'ref_authorization_discarded')
+        self.assertEqual(events[-1]['file'], malformed.name)
+        self.assertEqual(events[-1]['reason'], 'malformed_or_unreadable')
 
     def test_cli_resolver_rejects_repository_lane_and_registered_worktree_shims(self):
         inside = self.write_executable(self.repo / 'bin' / 'syncwheel')
@@ -1098,6 +1390,23 @@ class ManagedRefGuardTests(unittest.TestCase):
             args = parser.parse_args(argv)
             args.git_args = []
             self.assertTrue(syncwheel.primary_guard_remedy_requested(args))
+        remedy_names = {
+            function.__name__
+            for function, behavior in syncwheel.command_behavior_table().items()
+            if behavior['primaryGuardRemedy']
+        }
+        self.assertEqual(remedy_names, {
+            'command_hooks_install',
+            'command_hooks_remove',
+            'command_stack_capture_integration',
+            'command_worktree_open',
+        })
+        non_remedy = parser.parse_args([
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo)
+        ])
+        non_remedy.git_args = []
+        self.assertTrue(syncwheel.syncwheel_mutation_requested(non_remedy))
+        self.assertFalse(syncwheel.primary_guard_remedy_requested(non_remedy))
 
     def test_classify_integration_preview_is_read_only_and_apply_is_mutating(self):
         parser = syncwheel.build_parser()
@@ -1123,37 +1432,68 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)['kind'], 'stackIntegrationClassificationPlan')
 
     def test_every_manifest_or_ledger_writer_command_has_mutation_metadata(self):
-        tree = ast.parse(MODULE_PATH.read_text())
-        functions = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
+        module_paths = (MODULE_PATH, PROVIDER_MODULE_PATH)
+        functions = {}
+        definitions_by_name = {}
+        for path in module_paths:
+            module = path.stem
+            tree = ast.parse(path.read_text())
+            for node in tree.body:
+                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                key = (module, node.name)
+                functions[key] = node
+                definitions_by_name.setdefault(node.name, set()).add(key)
+
         calls = {}
-        writers = set()
-        saver_names = {'save_manifest', 'save_manifest_with_ledger', 'append_ledger_event'}
-        for name, node in functions.items():
-            called = {
-                child.func.id
-                for child in ast.walk(node)
-                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
-            }
-            calls[name] = called
-            if called.intersection(saver_names):
-                writers.add(name)
+        direct_path_writers = set()
+        for key, node in functions.items():
+            called = set()
+            for child in ast.walk(node):
+                if not isinstance(child, ast.Call):
+                    continue
+                if isinstance(child.func, ast.Name):
+                    called.add(child.func.id)
+                elif isinstance(child.func, ast.Attribute):
+                    called.add(child.func.attr)
+                    if (
+                        key[1].startswith('command_')
+                        and child.func.attr in {'write_text', 'write_bytes'}
+                    ):
+                        direct_path_writers.add(key)
+            calls[key] = called
+
+        saver_names = {
+            'append_ledger_event',
+            'save_manifest',
+            'save_manifest_with_ledger',
+            'save_primary_guard',
+        }
+        method_savers = {'delete_journal', 'save_journal'}
+        writers = {
+            key for key in functions if key[1] in saver_names
+        } | {
+            key for key, called in calls.items() if called.intersection(method_savers)
+        } | direct_path_writers
         changed = True
         while changed:
             changed = False
-            for name, called in calls.items():
-                if name not in writers and called.intersection(writers):
-                    writers.add(name)
+            for key, called in calls.items():
+                callees = set().union(*(
+                    definitions_by_name.get(name, set()) for name in called
+                )) if called else set()
+                if key not in writers and callees.intersection(writers):
+                    writers.add(key)
                     changed = True
 
         writer_commands = {
             getattr(syncwheel, name)
-            for name in writers
-            if name.startswith('command_') and hasattr(syncwheel, name)
+            for module, name in writers
+            if module == MODULE_PATH.stem
+            and name.startswith('command_')
+            and hasattr(syncwheel, name)
         }
+        self.assertIn(syncwheel.command_revision_provider, writer_commands)
         behaviors = syncwheel.command_behavior_table()
         missing = sorted(
             func.__name__

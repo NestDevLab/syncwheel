@@ -948,6 +948,15 @@ appends a `primary_guard_disabled` intent with actor and reason to the ledger,
 then removes the managed hooks, and writes disabled state last. If the audit
 append fails, the guard and hooks remain intact.
 
+There is one effective guard target per clone. `hooks install --apply` records the
+integration branch from the selected shared, `--personal`, or `--manifest` profile;
+`hooks remove` audits to that profile's ledger. `hooks status` compares the same
+selected manifest with the recorded target. Inspecting a different profile, or
+renaming its integration branch, reports `degraded` and names
+`hooks install --apply` with the same selector as the repair. A missing, malformed,
+incomplete, or unaudited-disabled `guard.json` is never accepted: installed hooks fail closed
+and status reports the schema cause instead of claiming readiness.
+
 Before a built-in mutation, Syncwheel refuses a dirty primary before side effects (except
 the explicit recovery remedies `worktree open`, `stack capture-integration`, and reasoned
 hook lifecycle commands) and
@@ -968,7 +977,10 @@ absent bundle; generated hook callbacks are excluded to prevent recursion.
 anything is removed, and the audited disabled state remains visible in validation.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
-remote and allowed destination refset.
+remote and allowed destination refset. Each authorization binds both the PID and
+its process-start identity, preventing PID reuse from reviving it. Cleanup preserves
+other live owners; stale malformed authorization files are removed only after a
+durable common-Git audit event is written.
 
 These hooks are local safety rails, not a security boundary. `--no-verify`, deleting
 the hooks, or operating from a clone before its first normal Syncwheel command can

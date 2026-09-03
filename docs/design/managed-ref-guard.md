@@ -27,12 +27,23 @@ contribution clones are optional. A clone can
 persist a disabled guard only through `hooks remove --disable --reason ...`; the
 reason remains visible in status and validation.
 
+The clone has one effective guard target, not one hook bundle per profile.
+`hooks install|remove|status` resolve the selected shared, `--personal`, or
+`--manifest` manifest consistently. Installation records that manifest's integration
+branch; disable intent is appended to that manifest's ledger. Status against another
+profile, or after an integration-branch rename, is `degraded` and directs the operator
+to rerun `hooks install --apply` with the same profile selector.
+
 Generated hooks invoke a stable installed `syncwheel` CLI resolved at installation,
 never a path inside the repository, Git common directory, `var/`, the configured or
 default lane root, or any registered worktree. Non-executable shims are rejected.
 Hooks fail closed if the stable CLI is unavailable. Their common Git directory stores
 the integration branch and opt-out state in one authoritative `guard.json`, so a
 missing or older working-tree manifest and stale profile data cannot disable the guard.
+Every read validates schema version 1, a non-empty `integrationBranch`, boolean
+`enabled`, and a non-empty `reason` when disabled. Missing, unreadable, malformed,
+or incomplete state makes installed hooks fail closed and makes status report
+`degraded` with the exact repair cause; it never becomes an implicit opt-out.
 
 `guard.json` is written through a same-directory temporary file and atomic rename.
 Re-enabling writes it before installing the hook bundle. A partial install therefore
@@ -51,9 +62,13 @@ switch when this hook runs, so the guard deliberately does not reset, clean, sta
 or switch anything automatically. The `pre-commit` guard blocks both a mismatch
 and a manual commit while the primary is correctly on integration. Syncwheel's own
 control and in-place rebuild commits pass through a short-lived, single-use nonce
-used for managed ref moves. Cleanup removes only nonces owned by the current process
-or a process that is no longer alive, so concurrent Syncwheel processes keep their
-capabilities. The reference-transaction hook blocks every unauthorized
+used for managed ref moves. The nonce binds the PID and its process-start identity,
+so a recycled PID cannot inherit the capability. Cleanup removes only nonces owned
+by the current process, a process that is no longer alive, or a provably recycled
+PID, so concurrent Syncwheel processes keep their capabilities. A malformed or
+unreadable nonce is retained for the TTL to avoid racing a writer, then removed only
+after a durable event is appended under the Git common directory. The
+reference-transaction hook blocks every unauthorized
 integration-ref move, including fast-forward moves. Both guards allow commits in dedicated feature worktrees
 and plumbing-materialized branches.
 
@@ -70,8 +85,10 @@ Read-only commands continue; on a TTY they show a yellow warning with the dirty-
 count and state that the shared primary changes are not owned by the invoking user.
 The parser's exhaustive command behavior table is the single mutation classifier.
 It declares flag-sensitive mutations such as `--apply`; previews and read-only
-commands are not blocked. A source-scanning test requires every command that can
-reach a manifest or ledger saver to have mutation metadata.
+commands are not blocked. A source-scanning test covers both the CLI and revision
+provider, including method-based journal savers, and requires every command that can
+reach a manifest, ledger, guard-state, or provider-journal saver to have mutation
+metadata. The recovery-remedy set is asserted exactly rather than only positively.
 
 Git has no pre-checkout hook, so preventing the ref move itself is not portable.
 The combination of immediate post-checkout failure, commit blocking, validation,
