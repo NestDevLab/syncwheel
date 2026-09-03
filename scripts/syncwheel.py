@@ -4234,11 +4234,8 @@ def apply_ledger_event(state, event):
                 token, {'operation_token': token}
             )
             if record.get('terminal'):
-                raise SyncwheelError(
-                    'coordinated publication ledger refuses a second terminal event for '
-                    f'operation token {token}: {record["terminal"]} at seq '
-                    f'{record.get("terminal_seq")} already stands'
-                )
+                record.setdefault('duplicate_terminals', []).append(event['type'])
+                return state
             record.update({
                 'terminal': event['type'],
                 'terminal_seq': event['seq'],
@@ -4345,6 +4342,29 @@ def next_ledger_segment_path(repo_root, manifest_path=None):
     return directory / f'{next_index:06d}.jsonl'
 
 
+def refuse_duplicate_terminal_publication_event(state, event_type, payload):
+    """Keep exactly one terminal event per operation token.
+
+    The refusal belongs to the write: a ledger that already carries two must
+    stay readable, or the command an operator would inspect it with is the one
+    that fails.
+    """
+    if event_type not in COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES:
+        return
+    token = (payload or {}).get('operation_token')
+    if not token:
+        return
+    record = (state.get('coordination_publications') or {}).get(token) or {}
+    if not record.get('terminal'):
+        return
+    raise SyncwheelError(
+        'coordinated publication ledger refuses a second terminal event for '
+        f'operation token {token}: {record["terminal"]} at seq '
+        f'{record.get("terminal_seq")} already stands\n'
+        'inspect the recorded terminal with:\n  syncwheel ledger show'
+    )
+
+
 def append_ledger_event(repo_root, event_type, payload, manifest_path=None, idempotency_key=None):
     if not is_external_manifest_path(repo_root, manifest_path):
         tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
@@ -4362,6 +4382,7 @@ def append_ledger_event(repo_root, event_type, payload, manifest_path=None, idem
                 ):
                     return existing
         current = reduce_ledger_state(events)
+        refuse_duplicate_terminal_publication_event(current, event_type, payload)
         event = {
             'schema_version': LEDGER_SCHEMA_VERSION,
             'seq': current['last_seq'] + 1,
@@ -5424,8 +5445,11 @@ def prune_governed_worktree_stale_locks(repo_root, manifest_path=None):
         return []
     lock_path = governed_worktree_lock_path(repo_root)
     directory = lock_path.parent
+    candidates = []
+    for owner in (lock_path, coordination_publication_lock_path(repo_root)):
+        candidates.extend(owner.parent.glob(f'{owner.name}.stale-*'))
     pruned = []
-    for candidate in sorted(directory.glob(f'{lock_path.name}.stale-*')):
+    for candidate in sorted(set(candidates)):
         try:
             descriptor = os.open(str(candidate), os.O_RDWR)
         except OSError:
@@ -6821,6 +6845,35 @@ def coordination_manifest_digest(manifest, repo_root=None):
     return canonical_json_digest(coordination_manifest_snapshot(manifest, repo_root))
 
 
+def coordination_identity_snapshot(snapshot):
+    """Strip the projection both sides of a publication resolve differently.
+
+    ``integration.derived_provenance`` comes from this clone's last-seen state on
+    the intent side and from the state just read from the remote on the
+    publication side, so it cannot belong to an operation's identity.
+    """
+    identity = copy.deepcopy(snapshot)
+    integration = identity.get('integration')
+    if isinstance(integration, dict):
+        integration.pop('derived_provenance', None)
+    return identity
+
+
+def coordination_operation_manifest_digest(manifest, repo_root=None):
+    return canonical_json_digest(
+        coordination_identity_snapshot(
+            coordination_manifest_snapshot(manifest, repo_root)
+        )
+    )
+
+
+def coordination_state_operation_manifest_digest(state):
+    snapshot = (state or {}).get('manifest')
+    if not isinstance(snapshot, dict):
+        return None
+    return canonical_json_digest(coordination_identity_snapshot(snapshot))
+
+
 def managed_ref_names(manifest):
     names = []
     for stack in manifest['stacks']:
@@ -8096,6 +8149,13 @@ def coordination_claim_from_commit(repo_root, commit):
     ):
         raise SyncwheelError(f'invalid coordination claim payload at {commit}')
     coordination_claim_ref(claim['source_ref'])
+    if 'publication_scope' in claim and not isinstance(claim['publication_scope'], str):
+        raise SyncwheelError(f'invalid coordination claim publication scope at {commit}')
+    if 'changed_refs' in claim and (
+        not isinstance(claim['changed_refs'], list)
+        or any(not isinstance(value, str) for value in claim['changed_refs'])
+    ):
+        raise SyncwheelError(f'invalid coordination claim changed refs at {commit}')
     if 'closed' in claim and not isinstance(claim['closed'], bool):
         raise SyncwheelError(f'invalid coordination claim closed flag at {commit}')
     return claim
@@ -8110,6 +8170,8 @@ def create_coordination_claim_commit(
     *,
     closed=False,
     reason=None,
+    publication_scope=None,
+    changed_refs=(),
 ):
     claim = {
         'coordination_id': normalize_coordination_id(coordination_id),
@@ -8117,6 +8179,8 @@ def create_coordination_claim_commit(
         'operation_token': operation_token,
         'claimed_at': iso_utc_now(),
         'syncwheel_version': VERSION,
+        'publication_scope': publication_scope or '',
+        'changed_refs': sorted(changed_refs),
     }
     if closed:
         claim['closed'] = True
@@ -9108,8 +9172,8 @@ def coordination_publication_identity(
         'coordination_id': coordination_config(manifest)['id'],
         'scope': scope,
         'projection_status': projection_status,
-        'manifest_digest': canonical_json_digest(
-            coordination_manifest_snapshot(published_manifest, repo_root)
+        'manifest_digest': coordination_operation_manifest_digest(
+            published_manifest, repo_root
         ),
         'changed_refs': dict(sorted(changed_refs.items())),
         'tombstone': stable_tombstone,
@@ -9203,6 +9267,13 @@ def coordination_remote_is_reachable(repo_root, remote):
     ).returncode == 0
 
 
+def coordinated_publish_retry_hint(scope):
+    remedy = coordination_scope_remedy(scope)
+    if not remedy:
+        return '; nothing was published, rerun the interrupted command'
+    return f'\nNothing was published. Retry:\n  syncwheel {remedy}'
+
+
 def coordinated_publish_remote_failure(remedy):
     return SyncwheelError(
         'coordinated publish could not inspect the coordination remote; '
@@ -9268,15 +9339,16 @@ def coordination_operation_touched_refs(operation):
     return list(dict.fromkeys(refs))
 
 
-def coordination_claim_history_carries_token(
-    repo_root, config, claim_tip, source_ref, operation_token
+def coordination_claim_history_matches(
+    repo_root, config, claim_tip, source_ref, predicate
 ):
-    """Whether this operation's claim is anywhere in the ancestry of a claim tip.
+    """Whether any claim in the ancestry of a claim tip satisfies ``predicate``.
 
     A later publication of the same source ref parents its claim on this one, so
-    the token stays reachable even when the claim tip has moved on.
+    an older claim stays reachable even when the claim tip has moved on. Only
+    the most recent COORDINATION_CLAIM_HISTORY_SCAN_LIMIT claims are read.
     """
-    if not claim_tip or not operation_token:
+    if not claim_tip:
         return False
     if not commit_exists(repo_root, claim_tip):
         git(
@@ -9297,13 +9369,42 @@ def coordination_claim_history_carries_token(
             claim = coordination_claim_from_commit(repo_root, commit)
         except SyncwheelError:
             continue
-        if (
+        if predicate(claim):
+            return True
+    return False
+
+
+def coordination_claim_history_carries_token(
+    repo_root, config, claim_tip, source_ref, operation_token
+):
+    if not operation_token:
+        return False
+    return coordination_claim_history_matches(
+        repo_root,
+        config,
+        claim_tip,
+        source_ref,
+        lambda claim: (
             claim.get('coordination_id') == config['id']
             and claim.get('source_ref') == source_ref
             and claim.get('operation_token') == operation_token
-        ):
-            return True
-    return False
+        ),
+    )
+
+
+def coordination_claim_proves_operation(claim, config, source_ref, operation):
+    """One claim's share of the claim proof: identity, scope, and the ref set.
+
+    A claim written before 0.43 records neither scope nor ref set, so it can
+    never prove an operation on its own.
+    """
+    return (
+        claim.get('coordination_id') == config['id']
+        and claim.get('source_ref') == source_ref
+        and claim.get('operation_token') == operation.get('operation_token')
+        and claim.get('publication_scope') == operation.get('scope')
+        and claim.get('changed_refs') == sorted(operation.get('changed_refs') or {})
+    )
 
 
 def coordination_state_document_matches_operation(state, operation):
@@ -9317,7 +9418,8 @@ def coordination_state_document_matches_operation(state, operation):
         state.get('operation_token') == token
         and state.get('publication_scope') == operation.get('scope')
         and state.get('projection_status') == operation.get('projection_status')
-        and state.get('manifest_digest') == operation.get('manifest_digest')
+        and coordination_state_operation_manifest_digest(state)
+        == operation.get('manifest_digest')
         and state.get('changed_refs') == dict(
             sorted((operation.get('changed_refs') or {}).items())
         )
@@ -9339,20 +9441,28 @@ def coordination_state_claims_carry_operation(repo_root, config, state, operatio
     return True
 
 
-def coordination_remote_claims_carry_operation(repo_root, config, operation):
-    """Claim-side landing evidence for a state chain that no longer carries it."""
-    touched = coordination_operation_touched_refs(operation)
-    if not touched:
+def coordination_remote_claims_prove_operation(repo_root, config, operation):
+    """Claim-side landing evidence for a state chain that no longer carries it.
+
+    Every changed ref, and no other, must carry a claim declaring this exact
+    operation: its token, its scope and its whole ref set. A claim that carries
+    the token under another scope or another ref set proves a different
+    operation, so it proves nothing about this one.
+    """
+    changed = sorted(operation.get('changed_refs') or {})
+    if not changed or not operation.get('operation_token'):
         return False
-    claim_refs = {ref: coordination_claim_ref(ref) for ref in touched}
+    claim_refs = {ref: coordination_claim_ref(ref) for ref in changed}
     observed = remote_ref_tips(repo_root, config['remote'], claim_refs.values())
     for source_ref, claim_ref in claim_refs.items():
-        if not coordination_claim_history_carries_token(
+        if not coordination_claim_history_matches(
             repo_root,
             config,
             observed.get(claim_ref),
             source_ref,
-            operation.get('operation_token'),
+            lambda claim, source_ref=source_ref: coordination_claim_proves_operation(
+                claim, config, source_ref, operation
+            ),
         ):
             return False
     return True
@@ -9361,16 +9471,20 @@ def coordination_remote_claims_carry_operation(repo_root, config, operation):
 def coordinated_operation_landing_evidence(
     repo_root, config, observed, operation, *, claims_fallback=False
 ):
-    """Prove that this exact operation reached the remote.
+    """Prove that this exact operation reached the remote, and say how.
 
-    A state commit inside the recorded window must declare this operation's
-    token, scope, changed refs, projection status and manifest digest, and the
-    claim of every touched source ref must carry the same token. Ref tips are
-    not proof: another clone can legitimately move a published ref, or push the
-    same tip without this operation ever landing. An operation with no recorded
-    expected state tip has no window and is never proved by the chain; the
-    atomic push wrote its claims and its state commit together, so the claims
-    are the remaining evidence when the chain no longer carries it.
+    The state proof, the only form a fresh publication may use, needs a state
+    commit inside the recorded window declaring this operation's token, scope,
+    changed refs, projection status and manifest digest, with the claim of every
+    touched source ref carrying the same token. Ref tips are not proof: another
+    clone can legitimately move a published ref, or push the same tip without
+    this operation ever landing.
+
+    The claim proof, available to the recovery paths only, needs every changed
+    ref to carry a claim declaring this operation's token, scope and whole ref
+    set. It has no window, which is why it survives a state ref rewritten
+    backwards, and it excludes the manifest digest, which is not recomputable
+    from a claim.
     """
     if not operation.get('operation_token'):
         return None
@@ -9385,7 +9499,7 @@ def coordinated_operation_landing_evidence(
                 repo_root, config, document, operation
             ):
                 return 'state'
-    if claims_fallback and coordination_remote_claims_carry_operation(
+    if claims_fallback and coordination_remote_claims_prove_operation(
         repo_root, config, operation
     ):
         return 'claims'
@@ -9759,8 +9873,8 @@ def coordinated_publish_cycle(
     expected = read_remote_coordination_state(
         repo_root, config, fetch=True, local_manifest_version=manifest['version']
     )
-    desired_manifest_digest = canonical_json_digest(
-        coordination_manifest_snapshot(publication_manifest, repo_root)
+    desired_manifest_digest = coordination_operation_manifest_digest(
+        publication_manifest, repo_root
     )
     if (
         operation_token
@@ -9818,6 +9932,7 @@ def coordinated_publish_cycle(
     ):
         raise SyncwheelError(
             'coordinated publish STOP: remote state changed after the reviewed plan'
+            + coordinated_publish_retry_hint(scope)
         )
     require_exclusive_coordination_ownership(
         repo_root,
@@ -9902,6 +10017,8 @@ def coordinated_publish_cycle(
             observed_claims[source_ref],
             closed=bool(tombstone and source_ref == coordination_tombstone_ref(tombstone)),
             reason=(tombstone or {}).get('reason'),
+            publication_scope=scope,
+            changed_refs=changed_refs,
         )
     state = build_coordination_state(
         repo_root,
@@ -12849,7 +12966,7 @@ def begin_coordination_claims_backfill(
         'coordination_id': coordination_config(manifest)['id'],
         'scope': 'claims-backfill',
         'projection_status': state.get('projection_status'),
-        'manifest_digest': state.get('manifest_digest'),
+        'manifest_digest': coordination_state_operation_manifest_digest(state),
         'changed_refs': {},
         'claimed_refs': list(claimed_refs),
         'tombstone': None,
@@ -12954,7 +13071,8 @@ def command_coordination_claims_backfill(args):
         operation_token = operation['operation_token']
         for source_ref in sorted(create):
             create[source_ref] = create_coordination_claim_commit(
-                repo_root, source_ref, config['id'], operation_token, None
+                repo_root, source_ref, config['id'], operation_token, None,
+                publication_scope='claims-backfill',
             )
             claims[source_ref] = create[source_ref]
         child = copy.deepcopy(state)
@@ -17493,7 +17611,8 @@ def complete_pending_promote_intents(
 
     Only the manifest is behind the published state, and any command that
     rebuilds managed branches from it would resurrect the draft the promotion
-    already replaced.
+    already replaced. Reporting the remedy mutates nothing, so it must not take
+    the publication lock and must not be refused by a live publication.
     """
     if not coordination_is_active(manifest):
         return
@@ -17502,13 +17621,16 @@ def complete_pending_promote_intents(
         for intent in pending_coordination_publications(repo_root, manifest_path)
     ):
         return
-    with coordination_publication_lock(repo_root):
-        complete_pending_promote_intents_locked(
+    guard = (
+        coordination_publication_lock(repo_root) if apply else contextlib.nullcontext()
+    )
+    with guard:
+        resolve_pending_promote_intents(
             repo_root, manifest, manifest_path, apply=apply, skip_stacks=skip_stacks
         )
 
 
-def complete_pending_promote_intents_locked(
+def resolve_pending_promote_intents(
     repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
 ):
     pending = [
@@ -18284,7 +18406,9 @@ def command_stack_rebuild(args):
 def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    complete_pending_promote_intents(repo_root, manifest, manifest_path)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, apply=not args.dry_run
+    )
     stack = require_stack(manifest, args.stack)
     refusal = draft_push_refusal(manifest, stack, stack_push_remote(manifest, stack, args.remote))
     if refusal:
@@ -19626,7 +19750,9 @@ def command_int_rebuild(args):
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    complete_pending_promote_intents(repo_root, manifest, manifest_path)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, apply=not args.dry_run
+    )
     integration = manifest['integration']
     if coordination_is_active(manifest):
         config = coordination_config(manifest)

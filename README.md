@@ -158,14 +158,22 @@ dead owner's intent is recovered by the next command. Dry runs and `handoff`
 take no lock and are never refused.
 
 A publication intent is always terminal, and a token has exactly one terminal
-record. Landing is proved by a state commit inside the intent's own window that
+record; a second terminal is refused when it is written, never when the ledger
+is read. Landing is proved by a state commit inside the intent's own window that
 declares this operation's token, scope, changed refs, projection status and
 manifest digest, together with a claim carrying that token for every touched
 source ref; never by current ref tips, so another clone legitimately advancing
 the same ref cannot turn a landed operation into an abandoned one, and a token
 reused for another operation cannot prove this one. An intent with no recorded
-expected state tip is never proved landed by the chain. An intent absent from
-that evidence never reached the remote and is recorded as
+expected state tip is never proved landed by the chain. Recovery, and only
+recovery, accepts a second form after that one fails: every changed ref, and no
+other, carrying a claim that declares this operation's token, scope and whole
+ref set. That form has no window and no manifest digest, so it still holds when
+a state ref is rewritten backwards, and a claim carrying the token under another
+scope or another ref set proves a different operation, not this one. The digest
+in both forms ignores `integration.derived_provenance`, which the two sides
+resolve from different sources by design. An intent absent from that evidence
+never reached the remote and is recorded as
 `coordination_publish_abandoned` by the next publication, `reconcile`, or
 `resume`, with reason `not_landed` when nothing else published meanwhile and
 `superseded` when the reviewed state tip was overtaken; the local rename of an

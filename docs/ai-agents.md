@@ -64,18 +64,34 @@ nothing, and one that takes it knows no other cycle is running here, because
 process death releases the lock. The owner record in the intent names a dead
 owner in the abandonment event; it never authorizes a transition.
 
-Prove landing from a state commit inside the intent's recorded window carrying
-its token, scope, changed refs, projection status and manifest digest, plus a
-claim carrying that token for every touched source ref; never from current ref
-tips, and never from a token alone. In an active-active fleet another clone may
-legitimately move a published ref, push the same tip, or reuse a caller-supplied
-identifier. Without an expected state tip there is no window and the chain
-proves nothing; the claims are then the remaining evidence. When no evidence
-holds, record `coordination_publish_abandoned` with reason `not_landed` or
-`superseded` and continue rather than freezing on it, and undo the local rename
-only when the remote carries neither the promoted ref nor a claim bearing that
-token. Write exactly one terminal record per operation token. A landed promotion
-still owes only its manifest save; `stack promote`, `stack push`, `int push`,
+Landing has two proofs, and every caller declares which it accepts. The state
+proof is a state commit inside the intent's recorded window carrying its token,
+scope, changed refs, projection status and manifest digest, plus a claim
+carrying that token for every touched source ref; it is the only form a fresh
+publication may use to decide it needs no push. The claim proof belongs to the
+recovery paths alone and only after the state proof failed: every changed ref,
+and no other, carries a claim declaring this operation's token, scope and whole
+ref set. It has no window, which is why it survives a state ref rewritten
+backwards, and it excludes the manifest digest, which no claim records; a claim
+written before 0.43 records no scope or ref set and therefore proves nothing.
+Only the most recent 500 claims of a source ref are read. Neither proof reads
+current ref tips: in an active-active fleet another clone may legitimately move
+a published ref, push the same tip, or reuse a caller-supplied identifier. When
+no evidence holds, record `coordination_publish_abandoned` with reason
+`not_landed` or `superseded` and continue rather than freezing on it, and undo
+the local rename only when the remote carries neither the promoted ref nor a
+claim bearing that token.
+
+The manifest digest that identifies an operation is computed over the public
+manifest snapshot without `integration.derived_provenance`: the intent and the
+published state resolve that projection from different sources by design, so it
+cannot be part of an identity. An intent recorded before 0.43.0 carries the
+older digest, is therefore never proved landed by the state proof, and is
+terminalized under the same rule as any other intent whose evidence is absent.
+
+Write exactly one terminal record per operation token, refusing a second when it
+is written rather than when the ledger is read. A landed promotion still owes
+only its manifest save; `stack promote`, `stack push`, `int push`,
 `stack create`, `stack close`, `stack rebuild`, `stack sync`, `stack add`, and
 `reconcile --apply` complete it from the published state and rebuild the
 promoted branch instead of requiring a particular local branch layout, anchoring

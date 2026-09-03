@@ -83,6 +83,28 @@
   `refs/syncwheel/recovery/drafts/` before dropping it, so a promotion that
   landed before its manifest save can no longer block unrelated stacks or name a
   remedy that refuses itself.
+- Record the publication scope and the operation's whole ref set in every
+  coordination claim, and require both from the claim evidence a recovery
+  accepts. A claim that carries the operation token under another scope or
+  another ref set proves a different operation, so the pending intent is
+  abandoned instead of completed. Claim evidence stays confined to the recovery
+  paths: a publication still decides from the state chain alone.
+- Fingerprint a coordinated operation over the public manifest snapshot without
+  `integration.derived_provenance`, which the intent and the published state
+  resolve from different sources by design. On a manifest v3 clone whose
+  remote-tracking state is behind, a retry of the interrupted command now
+  completes from the published state instead of publishing it a second time.
+- Take no exclusive publication lock on the planning and dry-run paths, so
+  `reconcile`, `resume`, `stack push --dry-run`, `int push --dry-run` and
+  `stack rebuild --dry-run` report the state instead of being refused for the
+  duration of another command's network push.
+- Refuse a second terminal ledger record when it is written rather than when the
+  ledger is read, and name `ledger show` as the command that inspects one, so a
+  ledger that already carries two stays readable.
+- Prune the publication lock's retained stale inodes with the governed worktree
+  registry's, instead of leaving one behind for every recovered dead owner.
+- Name the retry command when a coordinated publish stops because the remote
+  state changed after the reviewed plan.
 
 ## 0.42.0 - 2026-09-02
 
