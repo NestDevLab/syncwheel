@@ -32,6 +32,16 @@
   release retry for `branch_advanced`, and cover non-UTC lease expiry plus every
   lock, ordering, persistence, and targeted-cleanup invariant with
   mutation-sensitive tests.
+- Recover a clone-local governed-worktree registry lock after `SIGKILL` only
+  when its PID and process start time prove owner death or PID reuse, retaining
+  the atomically renamed stale lock and a durable recovery log.
+- Fsync a cleanup-intent ledger event before refs, save registry generations by
+  durable pre-image-digest CAS, and reconstruct an interrupted cleanup from the
+  ledger even if the registry rolls back.
+- Make the real automatic `branch_advanced` state retryable through `gc
+  --apply`, make completed releases idempotent after a lost response, and select
+  GC candidates under the registry lock so a reused lane id cannot yield a
+  null-code failure.
 
 ## 0.40.1 - 2026-09-02
 

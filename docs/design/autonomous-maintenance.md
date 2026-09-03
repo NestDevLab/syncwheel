@@ -786,15 +786,24 @@ Preconditions and execution must reuse `coordination_gc_plan` and
 - a missing inactive tombstoned ref is a valid remote observation. Its historic
   tip remains required only for the independent local recoverability proof.
 
-Governed lane cleanup uses a narrower lock-first protocol. The first cleanup
-mutation is a tokenized `git worktree lock`; failure means the lane is in use
-and no ref or path is changed. While holding that lock, Syncwheel verifies the
-registration's exact admin-dir and `gitdir`, persists retry intent, anchors the
-tip with expected-old protection, and commits an expected-old transaction that
-verifies the recovery ref while deleting the lane branch. A final
-tracked/untracked probe precedes removal of that registration only; global
-worktree prune is forbidden. Ref conflict, path reappearance, registration
-drift, or process death leaves a retryable record and an immutable recovery ref.
+Governed lane cleanup uses a narrower lock-first protocol. The clone-local
+registry mutex records PID, process start time, and token; a successor may
+atomically rename and log it only after proving owner death or PID reuse. The
+first lane mutation is then a tokenized `git worktree lock`; failure means the
+lane is in use and no ref or path is changed. While holding both locks,
+Syncwheel verifies the registration's exact admin-dir and `gitdir`, fsyncs a
+ledger cleanup intent, and saves registry state by durable pre-image-digest CAS
+before anchoring the tip or changing a ref. A restart reconstructs pending state
+from that intent even if the registry rolled back.
+
+The ref phase anchors the tip with expected-old protection and commits an
+expected-old transaction that verifies the recovery ref while deleting the lane
+branch. A final tracked/untracked probe precedes removal of that registration
+only; global worktree prune is forbidden. Ref conflict, path reappearance,
+registration drift, or process death leaves state a plain retry can resume. A
+real automatic `branch_advanced` retry retains the old recovery ref and anchors
+the new tip. A completed release whose response was lost returns its matching
+terminal ledger event, and GC chooses its candidates under the registry lock.
 
 This guarantee covers concurrent Syncwheel commands and ordinary non-forced Git
 operations. Raw changes to Syncwheel-owned refs, double-force operations that

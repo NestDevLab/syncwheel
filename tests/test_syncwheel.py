@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -63,6 +64,48 @@ class SyncwheelFixtureTest(unittest.TestCase):
                 f"STDOUT:\n{result.stdout}\n"
                 f"STDERR:\n{result.stderr}"
             )
+        return result
+
+    def run_cli_until_cleanup_sigkill(self, stage, *args):
+        script = r'''
+import importlib.util
+import json
+import os
+import signal
+import sys
+
+cli_path, repo_path, checkpoint, raw_args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_sigkill_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def kill_at(stage):
+    if stage == checkpoint:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+module.governed_worktree_cleanup_checkpoint = kill_at
+os.chdir(repo_path)
+sys.argv = [cli_path, *json.loads(raw_args)]
+raise SystemExit(module.main())
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        result = subprocess.run(
+            [
+                'python3', '-c', script, str(CLI), str(self.repo), stage,
+                json.dumps(list(args)),
+            ],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(
+            result.returncode,
+            -signal.SIGKILL,
+            f'checkpoint {stage!r} was not reached\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}',
+        )
         return result
 
     def run_script(self, script_path, *args, expected=0, cwd=None):
@@ -536,7 +579,10 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertFalse(any(lane['id'] == 'before-stack-git' for lane in registry['lanes']))
         self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
         events = self.read_ledger_state()['recent_events']
-        self.assertEqual([event['type'] for event in events], ['governed_worktree_reaped'])
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
+        )
 
     def test_reaping_gate_uses_apply_and_explicit_worktree_creation(self):
         module = self.load_syncwheel_module()
@@ -699,8 +745,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
         self.assertNotIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
         events = self.read_ledger_state()['recent_events']
-        self.assertEqual([event['type'] for event in events], ['governed_worktree_released'])
-        self.assertEqual(events[0]['payload']['reason'], 'worktree removed outside Syncwheel')
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'worktree removed outside Syncwheel')
 
     def test_worktree_release_is_a_dry_run_until_apply(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'release-preview', '--json').stdout)
@@ -715,6 +764,60 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['state'], 'active')
         self.assertEqual(self.read_ledger_state()['recent_events'], [])
+
+    def test_worktree_release_retry_returns_the_terminal_after_lost_response_sigkill(self):
+        self.run_cli('worktree', 'open', 'lost-response', '--json')
+        reason = 'lost response'
+
+        self.run_cli_until_cleanup_sigkill(
+            'after_cleanup_record_removed',
+            'worktree', 'release', 'lost-response',
+            '--reason', reason, '--apply', '--json',
+        )
+
+        module = self.load_syncwheel_module()
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+        terminal = next(
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_released'
+        )
+        retried = self.run_cli(
+            'worktree', 'release', 'lost-response',
+            '--reason', reason, '--apply', '--json',
+        )
+        output = json.loads(retried.stdout)
+
+        self.assertTrue(output['applied'])
+        self.assertTrue(output['idempotent'])
+        self.assertEqual(output['terminal'], terminal)
+        self.assertEqual(output['lane']['id'], 'lost-response')
+        self.assertIn('recovered stale governed worktree registry lock', retried.stderr)
+
+    def test_two_identical_worktree_releases_return_the_same_terminal(self):
+        self.run_cli('worktree', 'open', 'release-twice', '--json')
+        reason = 'same completed release'
+
+        first = json.loads(self.run_cli(
+            'worktree', 'release', 'release-twice',
+            '--reason', reason, '--apply', '--json',
+        ).stdout)
+        terminal = next(
+            event for event in self.load_syncwheel_module().load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_released'
+        )
+        second = json.loads(self.run_cli(
+            'worktree', 'release', 'release-twice',
+            '--reason', reason, '--apply', '--json',
+        ).stdout)
+
+        self.assertTrue(first['applied'])
+        self.assertTrue(second['applied'])
+        self.assertTrue(second['idempotent'])
+        self.assertEqual(second['terminal'], terminal)
+        self.assertEqual(
+            second['terminal']['payload']['idempotency_key'],
+            terminal['payload']['idempotency_key'],
+        )
 
     def test_worktree_release_refuses_a_dirty_lane(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'dirty-release', '--json').stdout)
@@ -959,6 +1062,40 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertEqual(result, 1)
 
+    def test_gc_apply_reselects_candidates_under_the_registry_lock(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'reused-generation', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        original_candidates = module.governed_worktree_cleanup_candidates
+        calls = []
+
+        def stale_then_current(repo_root, manifest, registry=None):
+            calls.append(registry is not None)
+            if len(calls) == 1:
+                return [{
+                    'id': 'reused-generation',
+                    'code': 'expired',
+                    'path': opened['lane']['path'],
+                }]
+            return original_candidates(repo_root, manifest, registry)
+
+        module.governed_worktree_cleanup_candidates = stale_then_current
+        try:
+            with mock.patch('builtins.print'):
+                result = module.command_gc(SimpleNamespace(
+                    repo=str(self.repo), manifest=None, personal=None,
+                    apply=True, fetch=False, json=True,
+                ))
+        finally:
+            module.governed_worktree_cleanup_candidates = original_candidates
+
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(result, 0)
+        self.assertTrue(Path(opened['lane']['path']).exists())
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['generation_token'], opened['lane']['generation_token'])
+
     def test_missing_expired_directory_prunes_git_metadata_before_followup_rebuild(self):
         self.prepare_replay_stack()
         opened = json.loads(self.run_cli('worktree', 'open', 'missing-directory', '--json').stdout)
@@ -1034,6 +1171,74 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(result['reaped'], [{'id': 'lock-crash'}])
         self.assertEqual(result['failures'], [])
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_sigkill_at_all_nine_cleanup_boundaries_is_resumed_by_plain_gc_retry(self):
+        stages = (
+            'after_git_worktree_lock',
+            'before_cleanup_intent',
+            'after_cleanup_intent',
+            'after_recovery_anchor',
+            'after_ref_transaction',
+            'before_worktree_remove',
+            'after_worktree_remove',
+            'before_terminal_ledger',
+            'after_terminal_ledger',
+        )
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+
+        for index, stage in enumerate(stages):
+            with self.subTest(stage=stage):
+                lane_id = f'sigkill-{index}'
+                opened = json.loads(self.run_cli(
+                    'worktree', 'open', lane_id, '--json'
+                ).stdout)
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                self.run_cli_until_cleanup_sigkill(
+                    stage,
+                    'gc', '--apply', '--no-fetch', '--json',
+                )
+
+                metadata = json.loads(lock_path.read_text())
+                self.assertGreater(metadata['pid'], 0)
+                self.assertTrue(metadata['process_start_time'])
+                self.assertTrue(metadata['token'])
+                retry = self.run_cli('gc', '--apply', '--no-fetch', '--json')
+                self.assertIn('recovered stale governed worktree registry lock', retry.stderr)
+                self.assertFalse(Path(opened['lane']['path']).exists())
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+
+        stale_locks = list(lock_path.parent.glob(f'{lock_path.name}.stale-*'))
+        self.assertEqual(len(stale_locks), len(stages))
+        recoveries = [json.loads(line) for line in recovery_log.read_text().splitlines()]
+        self.assertEqual(len(recoveries), len(stages))
+        self.assertTrue(all(item['reason'] == 'pid_not_alive' for item in recoveries))
+
+    def test_registry_lock_recovers_a_reused_pid_with_a_different_start_time(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            'pid': os.getpid(),
+            'process_start_time': 'definitely-not-this-process',
+            'token': 'stale-token',
+            'acquired_at': '2000-01-01T00:00:00+00:00',
+        }) + '\n')
+
+        with module.governed_worktree_registry_lock(self.repo):
+            acquired = json.loads(lock_path.read_text())
+            self.assertEqual(acquired['pid'], os.getpid())
+            self.assertNotEqual(acquired['token'], 'stale-token')
+
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+        recovery = json.loads(recovery_log.read_text().splitlines()[-1])
+        self.assertEqual(recovery['reason'], 'process_start_time_mismatch')
 
     def test_reaper_refuses_when_the_lane_path_reappears(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'path-reappeared', '--json').stdout)
@@ -1189,6 +1394,141 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(result['failures'], [])
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
 
+    def test_cleanup_intent_is_fsynced_before_the_first_ref_effect(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'durable-intent', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_fsync = module._LEDGER_FSYNC
+        original_git = module.git
+        ledger_fsyncs = []
+        observed_refs = []
+
+        def record_ledger_fsync(descriptor):
+            ledger_fsyncs.append(descriptor)
+            return original_fsync(descriptor)
+
+        def inspect_first_ref_effect(repo_root, *args, **kwargs):
+            if args[:1] == ('update-ref',):
+                intents = [
+                    event for event in module.load_ledger_events(self.repo)
+                    if event['type'] == 'governed_worktree_cleanup_intent'
+                ]
+                self.assertTrue(ledger_fsyncs)
+                self.assertEqual(len(intents), 1)
+                payload = intents[0]['payload']
+                self.assertEqual(payload['lane'], 'durable-intent')
+                self.assertEqual(payload['cleanup_tip'], module.ref_tip(
+                    self.repo, opened['lane']['branch']
+                ))
+                self.assertTrue(payload['operation_token'])
+                self.assertTrue(payload['recovery_ref'].startswith(
+                    'refs/syncwheel/recovery/lanes/durable-intent-'
+                ))
+                self.assertEqual(
+                    payload['idempotency_key'],
+                    payload['lane_record']['cleanup_idempotency_key'],
+                )
+                observed_refs.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        module._LEDGER_FSYNC = record_ledger_fsync
+        module.git = inspect_first_ref_effect
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module._LEDGER_FSYNC = original_fsync
+            module.git = original_git
+
+        self.assertTrue(observed_refs)
+        self.assertEqual(result['reaped'], [{'id': 'durable-intent'}])
+
+    def test_registry_save_fsyncs_temp_and_directory_and_refuses_a_stale_preimage(self):
+        self.run_cli('worktree', 'open', 'registry-cas', '--json')
+        module = self.load_syncwheel_module()
+        registry, registry_path = module.load_governed_worktree_registry(self.repo)
+        expected_digest = module.governed_worktree_registry_file_digest(registry_path)
+        intended = json.loads(json.dumps(registry))
+        intended['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        original_fsync = module.os.fsync
+        fsynced_modes = []
+
+        def record_fsync(descriptor):
+            fsynced_modes.append(module.os.fstat(descriptor).st_mode)
+            return original_fsync(descriptor)
+
+        module.os.fsync = record_fsync
+        try:
+            module.save_governed_worktree_registry(
+                self.repo,
+                intended,
+                expected_digest=expected_digest,
+            )
+        finally:
+            module.os.fsync = original_fsync
+
+        self.assertTrue(any(module.stat.S_ISREG(mode) for mode in fsynced_modes))
+        self.assertTrue(any(module.stat.S_ISDIR(mode) for mode in fsynced_modes))
+        stale_digest = expected_digest
+        competing = json.loads(registry_path.read_text())
+        competing['competing_writer'] = True
+        registry_path.write_text(json.dumps(competing, indent=2, sort_keys=True) + '\n')
+        before = registry_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'registry changed after its decision snapshot',
+        ):
+            module.save_governed_worktree_registry(
+                self.repo,
+                registry,
+                expected_digest=stale_digest,
+            )
+
+        self.assertEqual(registry_path.read_bytes(), before)
+
+    def test_restart_recovers_cleanup_from_fsynced_intent_after_registry_rollback(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'registry-rollback', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        registry, registry_path = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        previous_registry = registry_path.read_bytes()
+        tip = module.ref_tip(self.repo, lane['branch'])
+
+        self.run_cli_until_cleanup_sigkill(
+            'after_ref_transaction',
+            'gc', '--apply', '--no-fetch', '--json',
+        )
+        intent = next(
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_cleanup_intent'
+        )
+        registry_path.write_bytes(previous_registry)
+
+        retried = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json'
+        ).stdout)
+
+        self.assertEqual(retried['governed_worktree_failures'], [])
+        self.assertFalse(Path(opened['lane']['path']).exists())
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        terminal = next(
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_reaped'
+        )
+        self.assertEqual(
+            terminal['payload']['idempotency_key'],
+            intent['payload']['idempotency_key'],
+        )
+        self.assertEqual(terminal['payload']['recovery_ref'], intent['payload']['recovery_ref'])
+        self.assertEqual(module.ref_tip(self.repo, terminal['payload']['recovery_ref']), tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
     def test_recovery_ref_conflict_fails_before_the_worktree_is_touched(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'anchor-moved', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
@@ -1227,9 +1567,12 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['pending_reason'], 'recovery_ref_moved')
         self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), opened['lane']['base'])
-        self.assertEqual(self.read_ledger_state()['recent_events'], [])
+        self.assertEqual(
+            [event['type'] for event in self.read_ledger_state()['recent_events']],
+            ['governed_worktree_cleanup_intent'],
+        )
 
-    def test_reaper_refuses_a_branch_advanced_after_anchor(self):
+    def test_automatic_branch_advanced_remedy_reanchors_and_completes_with_gc(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'post-anchor-advance', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
         anchored_tip = self.git('rev-parse', opened['lane']['branch'])
@@ -1264,9 +1607,37 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(result['failures'], [{'id': 'post-anchor-advance', 'code': 'branch_advanced'}])
         self.assertTrue(lane_path.is_dir())
         registry, _ = module.load_governed_worktree_registry(self.repo)
-        self.assertEqual(registry['lanes'][0]['pending_reason'], 'branch_advanced')
-        self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), anchored_tip)
-        self.assertEqual(self.read_ledger_state()['recent_events'], [])
+        pending = registry['lanes'][0]
+        self.assertEqual(pending['pending_reason'], 'branch_advanced')
+        old_recovery_ref = pending['recovery_ref']
+        old_key = pending['cleanup_idempotency_key']
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+        remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
+        self.assertIn('syncwheel gc --apply', remedy)
+
+        retried = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json'
+        ).stdout)
+
+        self.assertEqual(retried['governed_worktree_failures'], [])
+        self.assertEqual(retried['governed_worktree_reaped'], [{'id': 'post-anchor-advance'}])
+        self.assertFalse(lane_path.exists())
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+        events = module.load_ledger_events(self.repo)
+        intents = [
+            event for event in events
+            if event['type'] == 'governed_worktree_cleanup_intent'
+        ]
+        terminal = next(event for event in events if event['type'] == 'governed_worktree_reaped')
+        self.assertEqual(len(intents), 2)
+        self.assertEqual(intents[-1]['payload']['supersedes'], old_key)
+        self.assertEqual(
+            terminal['payload']['idempotency_key'],
+            intents[-1]['payload']['idempotency_key'],
+        )
+        self.assertEqual(module.ref_tip(self.repo, terminal['payload']['recovery_ref']), advanced_tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
 
     def test_branch_advanced_remedy_names_a_command_that_accepts_it(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'advanced-release', '--json').stdout)
@@ -1375,8 +1746,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertNotIn('pending_reason', released['lane'])
         events = self.read_ledger_state()['recent_events']
-        self.assertEqual([event['type'] for event in events], ['governed_worktree_released'])
-        self.assertEqual(events[0]['payload']['reason'], 'original release reason')
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'original release reason')
 
     def test_reaper_recovers_after_branch_delete_succeeds_before_state_persist(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'delete-crash', '--json').stdout)
@@ -1403,7 +1777,10 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(result['failures'], [])
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
         events = module.load_ledger_events(self.repo)
-        self.assertEqual([event['type'] for event in events], ['governed_worktree_reaped'])
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
+        )
         self.assertEqual(module.ref_tip(self.repo, recovery_ref), tip)
 
     def test_reaper_recovers_after_worktree_remove_succeeds_before_state_persist(self):
@@ -1547,7 +1924,13 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
         original_append = module.append_ledger_event
-        module.append_ledger_event = lambda *args, **kwargs: (_ for _ in ()).throw(OSError('injected'))
+
+        def fail_terminal(repo_root, event_type, *args, **kwargs):
+            if event_type == 'governed_worktree_reaped':
+                raise OSError('injected')
+            return original_append(repo_root, event_type, *args, **kwargs)
+
+        module.append_ledger_event = fail_terminal
         try:
             with self.assertRaises(OSError):
                 module.reconcile_governed_worktrees(self.repo, self.read_manifest())
@@ -1567,7 +1950,13 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
         original_append = module.append_ledger_event
-        module.append_ledger_event = lambda *args, **kwargs: (_ for _ in ()).throw(OSError('injected'))
+
+        def fail_terminal(repo_root, event_type, *args, **kwargs):
+            if event_type == 'governed_worktree_released':
+                raise OSError('injected')
+            return original_append(repo_root, event_type, *args, **kwargs)
+
+        module.append_ledger_event = fail_terminal
         try:
             with self.assertRaises(OSError):
                 module.command_worktree_release(SimpleNamespace(
@@ -1586,8 +1975,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
         events = module.load_ledger_events(self.repo)
-        self.assertEqual([event['type'] for event in events], ['governed_worktree_released'])
-        self.assertEqual(events[0]['payload']['reason'], 'original release reason')
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'original release reason')
 
     def test_release_command_accepts_its_ledger_pending_state(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'release-ledger-command', '--json').stdout)
@@ -1597,7 +1989,13 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
         original_append = module.append_ledger_event
-        module.append_ledger_event = lambda *args, **kwargs: (_ for _ in ()).throw(OSError('injected'))
+
+        def fail_terminal(repo_root, event_type, *args, **kwargs):
+            if event_type == 'governed_worktree_released':
+                raise OSError('injected')
+            return original_append(repo_root, event_type, *args, **kwargs)
+
+        module.append_ledger_event = fail_terminal
         try:
             with self.assertRaises(OSError):
                 module.command_worktree_release(SimpleNamespace(
@@ -1616,8 +2014,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertTrue(released['applied'])
         self.assertNotIn('pending_reason', released['lane'])
         events = self.read_ledger_state()['recent_events']
-        self.assertEqual([event['type'] for event in events], ['governed_worktree_released'])
-        self.assertEqual(events[0]['payload']['reason'], 'same release reason')
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'same release reason')
 
     def test_reaper_ledger_append_is_idempotent_after_fsync_failure(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'ledger-fsync-retry', '--json').stdout)
@@ -1627,20 +2028,27 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
         original_checkpoint = module.ledger_io_checkpoint
-        injected = {'raised': False}
+        original_cleanup_append = module.append_governed_worktree_cleanup_event
+        injected = {'raised': False, 'terminal': False}
 
         def fail_after_fsync(stage):
-            if stage == 'event_fsynced' and not injected['raised']:
+            if stage == 'event_fsynced' and injected['terminal'] and not injected['raised']:
                 injected['raised'] = True
                 raise OSError('injected after fsync')
             return original_checkpoint(stage)
 
+        def mark_terminal(*args, **kwargs):
+            injected['terminal'] = True
+            return original_cleanup_append(*args, **kwargs)
+
         module.ledger_io_checkpoint = fail_after_fsync
+        module.append_governed_worktree_cleanup_event = mark_terminal
         try:
             with self.assertRaises(OSError):
                 module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         finally:
             module.ledger_io_checkpoint = original_checkpoint
+            module.append_governed_worktree_cleanup_event = original_cleanup_append
 
         events = [
             event for event in module.load_ledger_events(self.repo)
