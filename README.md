@@ -564,6 +564,11 @@ Practical meaning:
 3. **AI-operated (recommended)**  
    Let an AI agent run the syncwheel flow through prompts, with a human supervising intent and approval boundaries. In practice this gives the best speed/consistency balance for ongoing maintenance.
 
+For repositories that explicitly use `ai-managed` source delivery, the
+optional digest-bound GitHub PR merge path is documented in
+[`docs/github-pr-merge.md`](docs/github-pr-merge.md). Its private policy stays
+clone-local and its admin bypass is limited to required reviews.
+
 ## Install Methods
 
 **CLI install**

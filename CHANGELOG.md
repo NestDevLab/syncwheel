@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.42.4 - 2026-09-03
+
+- Add a private, clone-local GitHub PR merge policy with strict provenance
+  filters, dry-run/apply/clear CLI commands, and preservation of unrelated
+  profile keys.
+- Add the fixed `syncwheel-github` adapter and digest-bound
+  `stack merge-pr` plans with exact head pinning, review-only admin bypass,
+  CI/rules/thread gates, post-merge verification, idempotent reconciliation,
+  and ledger receipts.
+- Document the fail-closed merge contract and add focused policy, adapter,
+  preflight, and transaction tests.
+
 ## 0.42.3 - 2026-09-03
 
 - Accept both recorded control-manifest digest forms in coordination state:

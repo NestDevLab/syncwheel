@@ -493,9 +493,45 @@ A shared, committed manifest plus the append-only ledger is what lets many agent
 coordinate deterministically. On a fresh machine or a new agent, recover shared
 state with `syncwheel resume` instead of improvising branch ownership.
 
+## GitHub PR merge policy
+
+For an explicitly `ai-managed` repository whose authority allows
+`source_change`, a maintainer may opt a clone into the private GitHub merge
+path:
+
+```bash
+syncwheel repo pr-merge-policy status --json
+syncwheel repo pr-merge-policy set github --repository OWNER/REPO --base main \
+  --method squash --allow-bypass required_reviews --merge-actor LOGIN \
+  --pr-author LOGIN --commit-author LOGIN --head-repository OWNER/REPO
+```
+
+`set` and `clear` are dry-run until `--apply`; `profile.local.json` must be
+ignored and untracked. At least one provenance filter is required and all
+configured filters pass together. The shared manifest never carries this
+private policy.
+
+Plan first, then apply with the exact values from the plan:
+
+```bash
+syncwheel stack merge-pr STACK --json
+syncwheel stack merge-pr STACK --operation-id ID --plan-digest DIGEST --apply
+```
+
+The fixed `syncwheel-github` adapter is the only component that calls `gh`.
+It observes the exact PR, actor permissions, commit identities, repository
+rules, review threads, and checks. The core fails closed on drift, conflicts,
+CI states other than `SUCCESS`/`SKIPPED`, changes requested, unresolved
+threads, merge queues, unknown rules, or an unproven review-only block. It
+uses `--admin` only for a proven required-review bypass and always includes
+`--match-head-commit`; it never deletes the remote branch. An interrupted
+operation is reconciled by observation with the same operation id and digest,
+never by automatically retrying the merge.
+
 ## More
 
 See `docs/deployment-channels.md` for the channel lifecycle,
+`docs/github-pr-merge.md` for the GitHub PR merge policy,
 `docs/manifest-tracking.md` for the full tracking policy, `docs/ai-agents.md`
 and `docs/agent-procedure.md` for the agent contract, and `docs/core-procedure.md`
 for the canonical recovery procedure. An automated post-merge cleanup path is
