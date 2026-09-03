@@ -43,7 +43,11 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    The provider persists `projectionRoute` and the selected object ids before
    any ref moves. Recovery follows that route, treats the candidate as
    immutable, and recomputes the route proof; any route or object mismatch
-   fails closed instead of replacing an already hook-validated commit.
+   fails closed instead of replacing an already hook-validated commit. A
+   prepared journal whose `productPathObjects` map is absent or malformed is
+   not indexable recovery evidence: recovery names the defect and directs the
+   operator to release the prepared operation, restore declared paths if
+   needed, and run a new Agentwheel update.
 5. `finalize` captures each changed file through descriptor-bound, no-follow
    reads, writes those exact bytes as Git blobs, and constructs both the product
    commit and its draft projection in the object database. A non-reproducing
@@ -246,18 +250,41 @@ record, which also retains the integration composition digest. Trailer-like
 body text, a syntactically valid unknown operation id, or path-only
 classification does not qualify.
 
+The authoritative unpublished provenance source is the mode-`0600`
+`<git-common-dir>/syncwheel/derived-provenance.json` store. Its temporary file,
+rename, file fsync, and parent-directory fsync make updates atomic and durable,
+and the Git-common-dir location makes every linked worktree observe the same
+classification, landing guard, stale check, and provider `check` result. The
+author ledger receives an audit projection after the common store; it is not a
+reader source and a per-worktree ledger cannot hide provenance from another
+lane. An unreadable or malformed common store fails closed and names restoration
+from a verified coordination snapshot or a new Agentwheel update.
+
 With active-active coordination, the published snapshot's
-`integration.derived_provenance` list is the shared source. The author ledger
-supplies unpublished local updates and is reduced over that shared base. A
-repository without coordination has one clone and uses only its local ledger;
-there is deliberately no Git-ignored `.syncwheel/derived-provenance.json`.
-Rebuild still drops derived commits. `validate` and maintenance planning through
-`plan` compare retained provenance with integration and report
-`derived-projection-stale`, affected paths, and the remedy to run a new
-Agentwheel update on every peer. A new update replaces provenance only for the
-same complete declared path set: a new derived route replaces the record, while
-a manifest-base route resolves it. Conflict diagnostics use Git's
-NUL-delimited name-only output and name both paths and base.
+`integration.derived_provenance` list remains the cross-clone shared base. The
+Git-common-dir store carries bounded unpublished overrides until coordinated
+publication absorbs them. Without coordination, the common store is the full
+clone-local source. A new update replaces provenance only for the same complete
+declared path set: a new derived route replaces the record, while a
+manifest-base route resolves it. Conflict diagnostics use Git's NUL-delimited
+name-only output and name both paths and base.
+
+An ordinary rebuild still drops derived commits while retaining their
+provenance, so `validate` and `plan` report `derived-projection-stale`, affected
+paths, and the remedy to run a new Agentwheel update. If
+`integration.derived_paths` is narrowed or emptied while retained records still
+cover excluded paths, manifest loading remains usable. `validate`, `status`,
+and `plan` report the named `derived-paths-narrowed` blocker with the exact
+commits and paths, while `int push` remains available instead of failing during
+manifest loading. The executable remedy is:
+
+```bash
+syncwheel int rebuild --reason 'reconcile narrowed derived paths'
+```
+
+That rebuild removes the no-longer-covered derived commits, atomically resolves
+their common provenance records, and records both the reason and reconciled
+records in the local ledger.
 
 The accepted cost of the derived route is that its lock never reaches
 `origin/main` through Syncwheel. It can reach `main` only through a later update

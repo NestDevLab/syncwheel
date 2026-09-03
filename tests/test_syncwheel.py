@@ -705,16 +705,18 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             f'Syncwheel-Derived-Paths: {paths_digest}',
         )
         derived = self.git('rev-parse', 'HEAD')
+        derived_record = {
+            'operation_id': 'classified-derived',
+            'commit': derived,
+            'paths': ['locks/codex.lock'],
+            'paths_digest': paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, derived_record
+        )
         module.append_ledger_event(
-            self.repo,
-            'revision_provider_derived_commit',
-            {
-                'operation_id': 'classified-derived',
-                'commit': derived,
-                'paths': ['locks/codex.lock'],
-                'paths_digest': paths_digest,
-                'composition_digest': module.integration_composition_digest(manifest),
-            },
+            self.repo, 'revision_provider_derived_commit', derived_record
         )
         (self.repo / 'locks' / 'path-only.lock').write_text('not derived\n')
         self.git('add', 'locks/path-only.lock')
@@ -734,16 +736,18 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             f"Syncwheel-Derived-Paths: {'0' * 64}",
         )
         digest_mismatch = self.git('rev-parse', 'HEAD')
+        mismatched_record = {
+            'operation_id': 'mismatched-derived',
+            'commit': digest_mismatch,
+            'paths': ['locks/digest-mismatch.lock'],
+            'paths_digest': digest_mismatch_paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, mismatched_record
+        )
         module.append_ledger_event(
-            self.repo,
-            'revision_provider_derived_commit',
-            {
-                'operation_id': 'mismatched-derived',
-                'commit': digest_mismatch,
-                'paths': ['locks/digest-mismatch.lock'],
-                'paths_digest': digest_mismatch_paths_digest,
-                'composition_digest': module.integration_composition_digest(manifest),
-            },
+            self.repo, 'revision_provider_derived_commit', mismatched_record
         )
         loaded, _ = module.load_manifest(self.repo)
 
@@ -831,16 +835,18 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             f'Syncwheel-Derived-Paths: {malicious_digest}',
         )
         commit = self.git('rev-parse', 'HEAD')
+        misleading_record = {
+            'operation_id': 'leading-space',
+            'commit': commit,
+            'paths': [transformed_path],
+            'paths_digest': malicious_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, misleading_record
+        )
         module.append_ledger_event(
-            self.repo,
-            'revision_provider_derived_commit',
-            {
-                'operation_id': 'leading-space',
-                'commit': commit,
-                'paths': [transformed_path],
-                'paths_digest': malicious_digest,
-                'composition_digest': module.integration_composition_digest(manifest),
-            },
+            self.repo, 'revision_provider_derived_commit', misleading_record
         )
         loaded, _ = module.load_manifest(self.repo)
 

@@ -33,8 +33,18 @@
 - Bind each derived commit to a second `Syncwheel-Derived-Paths` content trailer
   and durable operation/commit/path provenance. Active-active snapshots carry
   that provenance so fresh peers retain `derived-projection-stale` after a
-  rebuild; repositories without coordination continue to use their local
-  ledger as the sole provenance source.
+  rebuild; a mode-`0600`, atomically replaced and fsynced Git-common-dir store
+  carries unpublished provenance across linked worktrees, while the ledger is
+  an audit projection only.
+- Keep narrowed or empty `integration.derived_paths` loadable and report the
+  affected commits and paths as `derived-paths-narrowed`. Its named `int
+  rebuild --reason 'reconcile narrowed derived paths'` remedy drops excluded
+  derived commits and reconciles their provenance without disabling status,
+  planning, or integration push inspection.
+- Reject manifest-v2 coordination snapshots carrying derived provenance just
+  like local manifest loading, and turn a partial revision-provider journal
+  without valid `productPathObjects` into a named release-and-update recovery
+  error.
 
 ## 0.40.2 - 2026-09-02
 

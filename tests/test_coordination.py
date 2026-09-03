@@ -563,6 +563,35 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'c96c05ff86ecd527db0ec077d8efbe457db0659f69bf108315dd28fecd10b38b',
         )
 
+    def test_v2_manifest_and_snapshot_both_reject_derived_provenance(self):
+        module = self.load_module()
+        origin = self.create_remote('v2-derived-provenance')
+        repo = self.clone(origin, 'v2-derived-provenance')
+        manifest = self.init_coordinated(
+            repo, integration_membership='required'
+        )
+        manifest['integration']['derived_provenance'] = []
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        snapshot = module.coordination_manifest_snapshot(
+            {**manifest, 'integration': {
+                key: value for key, value in manifest['integration'].items()
+                if key != 'derived_provenance'
+            }}
+        )
+        snapshot['integration']['derived_provenance'] = []
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'integration.derived_provenance requires manifest version 3',
+        ):
+            module.load_manifest(repo, manifest_path)
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'integration.derived_provenance requires version 3',
+        ):
+            module.validate_coordination_snapshot_refs(snapshot)
+
     def test_derived_paths_survive_snapshot_and_compose_classifies_published_derived_tip(self):
         module = self.load_module()
         origin = self.create_remote('derived-paths-compose')
@@ -589,17 +618,16 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             f'Syncwheel-Derived-Paths: {paths_digest}',
         )
         derived_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        record = {
+            'operation_id': 'coordination-derived',
+            'commit': derived_tip,
+            'paths': ['locks/codex.lock'],
+            'paths_digest': paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(repo, manifest, record)
         module.append_ledger_event(
-            repo,
-            'revision_provider_derived_commit',
-            {
-                'operation_id': 'coordination-derived',
-                'commit': derived_tip,
-                'paths': ['locks/codex.lock'],
-                'paths_digest': paths_digest,
-                'composition_digest': module.integration_composition_digest(manifest),
-            },
-            manifest_path,
+            repo, 'revision_provider_derived_commit', record, manifest_path
         )
         self.run_cli(repo, 'int', 'push')
         base_tip, base_state = self.remote_state(origin)
