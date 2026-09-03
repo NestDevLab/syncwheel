@@ -3003,16 +3003,28 @@ def format_remedy_suffix(commands):
     return f'. Use: {"; ".join(commands)}' if commands else ''
 
 
+def primary_checkout_state_entry(entry):
+    """True for repo-local Syncwheel state, tracked or not."""
+    paths = entry[3:].split(' -> ') if len(entry) > 3 else []
+    return bool(paths) and all(
+        path.strip('"').startswith('.syncwheel/') for path in paths
+    )
+
+
 def primary_checkout_dirty_entries(repo_root):
     worktrees = get_worktrees(repo_root)
     primary_path = Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
     entries = local_worktree_status(primary_path)
     if entries is None:
         raise SyncwheelError(f'cannot inspect primary checkout: {primary_path}')
-    # The primary authoring guard owns tracked work. Repo-local Syncwheel state
-    # and other untracked files have dedicated command preflights already; treating
-    # them as shared product changes would block harmless diagnostics and setup.
-    return [entry for entry in entries if not entry.startswith('?? ')]
+    # The primary authoring guard owns tracked product work. Repo-local Syncwheel
+    # state and untracked files have dedicated command preflights already, and the
+    # capture and lane remedies this guard names cannot move Syncwheel state
+    # anyway, so counting it would refuse a mutation nothing can repair.
+    return [
+        entry for entry in entries
+        if not entry.startswith('?? ') and not primary_checkout_state_entry(entry)
+    ]
 
 
 def primary_checkout_dirty_warning_lines(repo_root, manifest):

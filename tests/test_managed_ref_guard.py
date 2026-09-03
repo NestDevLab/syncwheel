@@ -733,6 +733,28 @@ class ManagedRefGuardTests(unittest.TestCase):
             tty_stderr.getvalue(),
         )
 
+    def test_repo_local_syncwheel_state_is_not_primary_checkout_dirt(self):
+        subprocess.run(
+            ['git', 'add', '.syncwheel/manifest.json'], cwd=self.repo, check=True
+        )
+        subprocess.run(
+            ['git', 'commit', '-qm', 'track the manifest'], cwd=self.repo, check=True
+        )
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(manifest_path.read_text() + '\n')
+
+        self.assertEqual(syncwheel.primary_checkout_dirty_entries(self.repo), [])
+        self.assertEqual(
+            syncwheel.primary_checkout_dirty_warning_lines(self.repo, self.manifest), []
+        )
+
+        (self.repo / 'seed').write_text('changed\n')
+
+        self.assertEqual(
+            syncwheel.primary_checkout_dirty_warning_lines(self.repo, self.manifest),
+            ['primary checkout is dirty: 1 tracked file not owned by the current user'],
+        )
+
     def test_guard_blocks_all_push_forms_targeting_managed_ref(self):
         zero = '0' * 40
         head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True).strip()
