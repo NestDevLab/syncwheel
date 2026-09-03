@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.42.0`
+Current version: `0.42.2`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -40,6 +40,9 @@ Syncwheel adds that missing control plane:
 - one manifest declares commit ownership
 - each stack maps to one PR branch
 - integration is a disposable projection of the manifest
+- a rebuild restores and records a deterministic, manifest-only control commit
+  when its projected tree carries an older manifest; `int rebuild --reason` is
+  required for `ai-managed` repositories
 - deployment channels pin selected stack revisions into ordered, rebuildable
   branch compositions
 - `reconcile` compares local branches, remote tips, and manifest projections
@@ -159,7 +162,7 @@ compose the proposals explicitly instead of weakening `stack push`:
 syncwheel coordination compose \
   --stack new-stack \
   --known-base-state <state-sha> \
-  --known-base-snapshot-digest <snapshot-digest> > compose-plan.json
+  --known-base-manifest-digest <integration-control-manifest-digest> > compose-plan.json
 syncwheel coordination compose --apply --plan-file compose-plan.json
 ```
 
@@ -956,7 +959,7 @@ python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
 python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
 python3 scripts/syncwheel.py stack push feature-a
 python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
-python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
+python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration --reason "refresh integration projection"
 python3 scripts/syncwheel.py int push
 python3 scripts/syncwheel.py int git --auto-worktree -- status
 python3 scripts/syncwheel.py int sync-status --json

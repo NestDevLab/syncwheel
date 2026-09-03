@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.42.2 - 2026-09-03
+
+- Preserve the control manifest across integration rebuilds: reject an
+  unexplained pre-rebuild manifest divergence, then restore and commit the
+  manifest when the rebuild itself replaces it. The manifest-only control
+  commit is built deterministically with an isolated index, verified before
+  its integration ref CAS, and recorded with actor, command, and reason.
+- Finish control-manifest persistence idempotently after a crash: align a
+  checked-out integration branch after the ref CAS, rewrite external sources
+  from the same desired manifest, and deduplicate the durable ledger receipt.
+- Publish one manifest digest in coordination state: the canonical digest of
+  `.syncwheel/manifest.json` on the recorded integration tip. Additive compose
+  binds that digest and compares public topology snapshots structurally.
+- Derive the global manifest-write transaction from one statically checked
+  saver registry, including repository authority and coordination compose.
+  Every parser command declares its behavior in that registry, and the
+  command table is a projection of it.
+- Publish the updated control commit from `stack push` as well, so the
+  integration ref advances whenever a stack push changes the manifest.
+- Probe the integration checkout before the control ref CAS: unrelated
+  uncommitted work there now refuses the command, names the checkout, the
+  paths and the command to rerun, and leaves the ref where it was. When the
+  same work appears after the CAS, the operation still finishes, aligns the
+  control manifest alone, and warns instead of leaving a pending intent.
+- Settle a pending control-manifest intent from any manifest writer, not only
+  from `stack push`, `int rebuild` and `int push`, so a later `stack create`
+  can no longer strand the delivery commands. A source that already carries a
+  newer proposal is kept: the interrupted operation is receipted when its
+  control commit is already on the ref, and `int rebuild --reason` abandons it
+  otherwise.
+- Accept a modified `.syncwheel/manifest.json` as rebuild input, so the
+  reviewed-proposal remedy named by a cross-clone divergence refusal can
+  actually run in the checkout that carries the divergence.
+
 ## 0.42.0 - 2026-09-02
 
 - Project Agentwheel revision-provider commits authored on a declared

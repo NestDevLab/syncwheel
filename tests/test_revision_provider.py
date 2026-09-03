@@ -3097,7 +3097,8 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             self.assertIn('locks/codex.lock', stale.stdout)
             self.assertIn('run a new Agentwheel update', stale.stdout)
         finally:
-            self.fixture.git('worktree', 'remove', str(lane))
+            # int rebuild persists the control manifest into the lane source.
+            self.fixture.git('worktree', 'remove', '--force', str(lane))
 
     def test_narrowed_derived_paths_have_an_executable_rebuild_remedy(self):
         self.fixture.enable_derived_paths('locks/', on_base=True)
