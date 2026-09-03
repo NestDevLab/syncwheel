@@ -11,6 +11,37 @@
   and ledger receipts.
 - Document the fail-closed merge contract and add focused policy, adapter,
   preflight, and transaction tests.
+- Guard the shared primary checkout against manual integration commits and tracked
+  changes before built-in mutations, with manifest-derived capture or queue remedies,
+  a visible reasoned opt-out, persistent common-Git guard state, and fail-closed
+  stable installed hooks with single-use authorization nonces. Required hook status
+  is explicit: absent hooks do not block ordinary Syncwheel commands, while an
+  installed hook without its stable CLI fails closed and reports as degraded.
+- Make `guard.json` the atomic common-Git source of truth, run Syncwheel before every
+  chained hook while propagating either failure, preserve live concurrent-process
+  nonces, reject CLI paths from repository/lane/worktree state, audit disable intent
+  before removal, and derive mutation preflight from one exhaustive command table.
+- Honor shared, personal, and explicit manifest selection throughout guard lifecycle;
+  validate every guard-state read and expose branch drift as degraded; bind nonces to
+  process-start identity, audit stale malformed cleanup, and extend mutation coverage
+  through revision-provider method savers and the exact recovery-remedy set.
+- Treat non-UTF-8 guard state as degraded and explicitly repairable; require and ledger
+  guard retarget reasons; keep partial bundles in degraded mode; rebaseline changed
+  chained user hooks without overwriting them; and consolidate command and internal
+  writer policy in one entrypoint registry with execute-time manifest classification.
+- Document that git 2.54 runs the `reference-transaction` hook in a pre-lock
+  `preparing` phase, where a chained user hook rejects before the guard decides
+  in `prepared`.
+- Stop counting repo-local Syncwheel state as primary-checkout dirt, so a
+  git-tracked manifest a Syncwheel command just wrote no longer refuses the next
+  mutation with capture and lane remedies that cannot move it.
+- Let the reasoned guard opt-out lift the dirty-primary refusal too, so a clone
+  that deliberately keeps shared work in its primary checkout can still run
+  built-in mutations. An enabled guard still refuses, and the warning stays.
+- Register the guard install and remove lifecycle and `journal schedule` as
+  internal ledger writers, so every writer is classified in the single
+  entrypoint registry without pulling recovery commands into the global
+  manifest transaction.
 
 ## 0.42.3 - 2026-09-03
 
