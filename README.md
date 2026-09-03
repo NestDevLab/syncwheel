@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.40.2`
+Current version: `0.42.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1071,7 +1071,12 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/workflow.md`: concise workflow model
 - `docs/core-procedure.md`: deterministic recovery procedure
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
-- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract
+- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract,
+  including blob-exact manifest-base/derived routing, NUL-safe Git paths,
+  Git-common-dir and coordinated content-bound provenance, snapshot precedence
+  over the clone-local cache, stale/narrowed projection repair, the single-clone
+  limit of uncoordinated `derived_paths`, and the accepted derived-route
+  delivery cost
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol

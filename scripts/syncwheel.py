@@ -38,6 +38,10 @@ class ManifestDurabilityError(SyncwheelError):
     """The manifest was replaced, but durable directory sync could not be proven."""
 
 
+class DerivedProvenanceDurabilityError(SyncwheelError):
+    """The provenance store was replaced, but directory durability is unknown."""
+
+
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
@@ -175,6 +179,23 @@ GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
 })
 ZERO_OBJECT_ID = '0' * 40
 _REGISTRY_EXPECTED_DIGEST_UNSET = object()
+DERIVED_PROJECTION_TRAILER = 'syncwheel-derived-projection'
+DERIVED_PATHS_TRAILER = 'syncwheel-derived-paths'
+DERIVED_OPERATION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}')
+DERIVED_PROVENANCE_FIELDS = {
+    'operation_id',
+    'commit',
+    'paths',
+    'paths_digest',
+    'composition_digest',
+}
+DERIVED_PROVENANCE_STORE_VERSION = 1
+DERIVED_PROVENANCE_OVERRIDE_FIELDS = {'paths', 'base_commit', 'record'}
+DERIVED_PATHS_REBUILD_REASON = 'reconcile narrowed derived paths'
+DERIVED_PROVENANCE_DISCARD_REASON = (
+    'discard clone-local derived provenance superseded by the coordination snapshot'
+)
+DERIVED_PROVENANCE_RESET_REASON = 'discard an unreadable clone-local derived provenance store'
 JOURNAL_SENSITIVE_PARTS = {
     '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
     'id_rsa', 'id_ed25519', 'credentials', 'credentials.json',
@@ -1692,10 +1713,19 @@ def commit_subject(repo_root, commit):
 
 
 def commit_changed_files(repo_root, commit, limit=None):
-    result = git(repo_root, 'show', '--format=', '--name-only', '--no-renames', commit, check=False)
+    result = git(
+        repo_root,
+        'show',
+        '--format=',
+        '--name-only',
+        '--no-renames',
+        '-z',
+        commit,
+        check=False,
+    )
     if result.returncode != 0:
         return []
-    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    files = [path for path in result.stdout.split('\0') if path]
     return files[:limit] if limit else files
 
 
@@ -1703,6 +1733,646 @@ def is_manifest_only_commit(repo_root, commit):
     """Whether a commit changes only the tracked Syncwheel coordination manifest."""
     files = commit_changed_files(repo_root, commit)
     return bool(files) and set(files) == {'.syncwheel/manifest.json'}
+
+
+def integration_composition_digest(manifest):
+    """Digest only declared integration composition, not unrelated manifest metadata."""
+    integration = manifest['integration']
+    stacks = stack_map(manifest)
+    return canonical_json_digest({
+        'base': integration['base'],
+        'strategy': integration['strategy'],
+        'stacks': [
+            {
+                'id': stack_id,
+                'commits': list(stacks[stack_id].get('commits') or []),
+                'integration_commits': list(stacks[stack_id].get('integration_commits') or []),
+                'integration_only_commits': list(stacks[stack_id].get('integration_only_commits') or []),
+            }
+            for stack_id in integration.get('stacks') or []
+            if stack_id in stacks
+        ],
+    })
+
+
+def parsed_commit_trailers(repo_root, commit):
+    """Return Git's parsed trailer block without accepting trailer-like body text."""
+    message = git(repo_root, 'show', '-s', '--format=%B', commit).stdout
+    parsed = git(
+        repo_root,
+        'interpret-trailers',
+        '--parse',
+        input_text=message,
+    ).stdout
+    trailers = []
+    for line in parsed.splitlines():
+        key, separator, value = line.partition(':')
+        if separator:
+            trailers.append((key.strip(), value.strip()))
+    return trailers
+
+
+def commit_path_blob(repo_root, commit, path):
+    """Return the exact blob at path in commit, or None when the path is absent."""
+    listing = git(repo_root, 'ls-tree', '-z', commit, '--', path, check=False)
+    if listing.returncode != 0:
+        return None
+    entries = [entry for entry in listing.stdout.split('\0') if entry]
+    if not entries:
+        return None
+    if len(entries) != 1:
+        raise SyncwheelError(f'ambiguous tree entry for derived path: {path}')
+    metadata, separator, listed_path = entries[0].partition('\t')
+    if not separator or listed_path != path:
+        raise SyncwheelError(f'ambiguous tree entry for derived path: {path}')
+    _mode, object_type, object_id = metadata.split(' ', 2)
+    if object_type != 'blob' or not re.fullmatch(r'[0-9a-f]{40,64}', object_id):
+        raise SyncwheelError(f'derived path is not a blob: {path}')
+    return object_id
+
+
+def derived_projection_paths_digest(path_blobs):
+    """Hash sorted ``path NUL resulting-blob NUL`` records; absence is an empty blob id."""
+    digest = hashlib.sha256()
+    for path in sorted(path_blobs):
+        blob = path_blobs[path]
+        if not isinstance(path, str) or not path or '\0' in path:
+            raise SyncwheelError('derived projection digest requires non-empty NUL-free paths')
+        if blob is not None and (
+            not isinstance(blob, str) or not re.fullmatch(r'[0-9a-f]{40,64}', blob)
+        ):
+            raise SyncwheelError(f'derived projection digest has an invalid blob for {path}')
+        digest.update(path.encode('utf-8'))
+        digest.update(b'\0')
+        digest.update((blob or '').encode('ascii'))
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
+def derived_projection_commit_paths_digest(repo_root, commit, paths):
+    return derived_projection_paths_digest({
+        path: commit_path_blob(repo_root, commit, path)
+        for path in paths
+    })
+
+
+def normalize_derived_provenance(records, prefixes=None, label='derived provenance'):
+    if records is None:
+        records = []
+    if not isinstance(records, list):
+        raise SyncwheelError(f'{label} must be an array')
+    normalized = []
+    operation_ids = set()
+    path_sets = set()
+    for index, raw in enumerate(records):
+        if not isinstance(raw, dict) or set(raw) != DERIVED_PROVENANCE_FIELDS:
+            raise SyncwheelError(
+                f'{label}[{index}] must contain exactly: '
+                + ', '.join(sorted(DERIVED_PROVENANCE_FIELDS))
+            )
+        operation_id = raw.get('operation_id')
+        commit = raw.get('commit')
+        paths = raw.get('paths')
+        paths_digest = raw.get('paths_digest')
+        composition_digest = raw.get('composition_digest')
+        if not isinstance(operation_id, str) or not DERIVED_OPERATION_ID.fullmatch(operation_id):
+            raise SyncwheelError(f'{label}[{index}].operation_id is invalid')
+        if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
+            raise SyncwheelError(f'{label}[{index}].commit must be a full SHA-1')
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
+            or paths != sorted(paths)
+            or len(paths) != len(set(paths))
+        ):
+            raise SyncwheelError(
+                f'{label}[{index}].paths must be a non-empty sorted unique NUL-free string array'
+            )
+        if prefixes is not None and not all(
+            any(path.startswith(prefix) for prefix in prefixes) for path in paths
+        ):
+            raise SyncwheelError(f'{label}[{index}] contains a path outside integration.derived_paths')
+        if not isinstance(paths_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', paths_digest):
+            raise SyncwheelError(f'{label}[{index}].paths_digest must be a SHA-256')
+        if not isinstance(composition_digest, str) or not re.fullmatch(
+            r'[0-9a-f]{64}', composition_digest
+        ):
+            raise SyncwheelError(f'{label}[{index}].composition_digest must be a SHA-256')
+        path_key = tuple(paths)
+        if operation_id in operation_ids:
+            raise SyncwheelError(f'{label} contains duplicate operation_id {operation_id!r}')
+        if path_key in path_sets:
+            raise SyncwheelError(f'{label} contains duplicate declared path sets')
+        operation_ids.add(operation_id)
+        path_sets.add(path_key)
+        normalized.append({
+            'operation_id': operation_id,
+            'commit': commit,
+            'paths': list(paths),
+            'paths_digest': paths_digest,
+            'composition_digest': composition_digest,
+        })
+    return sorted(normalized, key=lambda item: (item['paths'], item['operation_id']))
+
+
+def derived_provenance_store_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.json'
+
+
+def derived_provenance_store_lock_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.lock'
+
+
+def default_derived_provenance_store():
+    return {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': [],
+    }
+
+
+def normalize_derived_provenance_store(data, label='derived provenance store'):
+    if not isinstance(data, dict) or set(data) != {'version', 'overrides'}:
+        raise SyncwheelError(f'{label} must contain exactly: overrides, version')
+    if data.get('version') != DERIVED_PROVENANCE_STORE_VERSION:
+        raise SyncwheelError(f'{label} has an unsupported version')
+    overrides = data.get('overrides')
+    if not isinstance(overrides, list):
+        raise SyncwheelError(f'{label}.overrides must be an array')
+    normalized = []
+    path_sets = set()
+    for index, raw in enumerate(overrides):
+        item_label = f'{label}.overrides[{index}]'
+        if not isinstance(raw, dict) or set(raw) != DERIVED_PROVENANCE_OVERRIDE_FIELDS:
+            raise SyncwheelError(
+                f'{item_label} must contain exactly: '
+                + ', '.join(sorted(DERIVED_PROVENANCE_OVERRIDE_FIELDS))
+            )
+        paths = raw.get('paths')
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
+            or paths != sorted(paths)
+            or len(paths) != len(set(paths))
+        ):
+            raise SyncwheelError(
+                f'{item_label}.paths must be a non-empty sorted unique NUL-free string array'
+            )
+        path_key = tuple(paths)
+        if path_key in path_sets:
+            raise SyncwheelError(f'{label} contains duplicate declared path sets')
+        path_sets.add(path_key)
+        base_commit = raw.get('base_commit')
+        if base_commit is not None and (
+            not isinstance(base_commit, str)
+            or not re.fullmatch(r'[0-9a-f]{40}', base_commit)
+        ):
+            raise SyncwheelError(f'{item_label}.base_commit must be null or a full SHA-1')
+        record = raw.get('record')
+        if record is not None:
+            record = normalize_derived_provenance(
+                [record], label=f'{item_label}.record'
+            )[0]
+            if record['paths'] != paths:
+                raise SyncwheelError(f'{item_label}.record paths do not match its override key')
+        normalized.append({
+            'paths': list(paths),
+            'base_commit': base_commit,
+            'record': record,
+        })
+    return {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': sorted(normalized, key=lambda item: item['paths']),
+    }
+
+
+def load_derived_provenance_store(repo_root):
+    path = derived_provenance_store_path(repo_root)
+    if not path.exists():
+        return default_derived_provenance_store()
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(
+            f'invalid derived provenance store {path}: {exc}; discard it with '
+            + derived_provenance_reset_remedy(whole_store=True)
+        ) from exc
+    try:
+        return normalize_derived_provenance_store(data, str(path))
+    except SyncwheelError as exc:
+        raise SyncwheelError(
+            f'{exc}; discard the derived provenance store with '
+            + derived_provenance_reset_remedy(whole_store=True)
+        ) from exc
+
+
+def save_derived_provenance_store(repo_root, store):
+    store = normalize_derived_provenance_store(store)
+    path = derived_provenance_store_path(repo_root)
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        fsync_directory_path(path.parent.parent)
+    payload = (json.dumps(store, indent=2, sort_keys=True) + '\n').encode('utf-8')
+    temporary_prefix = f'.{path.name}.tmp-'
+    for orphan in path.parent.glob(f'{temporary_prefix}*'):
+        orphan.unlink(missing_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=temporary_prefix, dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    replaced = False
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, 'wb') as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        replaced = True
+        try:
+            fsync_directory_path(path.parent)
+        except OSError as exc:
+            raise DerivedProvenanceDurabilityError(
+                'derived provenance replace completed but parent directory '
+                f'durability check failed; outcome is unknown: {path}'
+            ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not replaced:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
+@contextlib.contextmanager
+def derived_provenance_store_lock(repo_root):
+    if fcntl is None:
+        raise SyncwheelError('derived provenance writes require POSIX file locking support')
+    lock_path = derived_provenance_store_lock_path(repo_root)
+    parent_existed = lock_path.parent.exists()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        fsync_directory_path(lock_path.parent.parent)
+    existed = lock_path.exists()
+    with lock_path.open('a+b') as handle:
+        if not existed:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.flush()
+            os.fsync(handle.fileno())
+            fsync_directory_path(lock_path.parent)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def local_coordination_provenance_state(repo_root, manifest):
+    """Return the newest locally available published coordination state."""
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    candidates = []
+    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
+    remote_tip = ref_tip(repo_root, remote_state_ref)
+    if remote_tip:
+        candidates.append(remote_tip)
+    _profile, local_coordination = coordination_profile(repo_root)
+    seen = local_coordination.get('last_seen_state') or {}
+    if seen.get('coordination_id') == config['id'] and isinstance(seen.get('state_tip'), str):
+        candidates.append(seen['state_tip'])
+    candidates = list(dict.fromkeys(candidates))
+    available = [tip for tip in candidates if commit_exists(repo_root, tip)]
+    if not available:
+        return None
+    newest = available[0]
+    for candidate in available[1:]:
+        if git(
+            repo_root,
+            'merge-base',
+            '--is-ancestor',
+            newest,
+            candidate,
+            check=False,
+        ).returncode == 0:
+            newest = candidate
+    return coordination_state_from_commit(repo_root, newest, config['id'])
+
+
+def shared_derived_provenance_records(repo_root, manifest, coordination_state=None):
+    """Return the active-active snapshot provenance, or an empty clone-local base."""
+    active = coordination_is_active(manifest)
+    state = coordination_state if active else None
+    if active and state is None:
+        state = local_coordination_provenance_state(repo_root, manifest)
+    if state:
+        shared = (state.get('manifest', {}).get('integration', {}).get(
+            'derived_provenance'
+        ) or [])
+    elif active:
+        shared = manifest.get('integration', {}).get('derived_provenance') or []
+    else:
+        shared = []
+    return normalize_derived_provenance(
+        shared, label='integration.derived_provenance'
+    )
+
+
+def resolve_derived_provenance_overrides(shared, store, *, coordinated=True):
+    """Return the effective records plus the clone-local entries the snapshot supersedes.
+
+    Under coordination the snapshot wins: a superseded cache entry is dropped, never raised.
+    """
+    records = normalize_derived_provenance(
+        shared, label='shared derived provenance'
+    )
+    by_paths = {tuple(item['paths']): item for item in records}
+    store = normalize_derived_provenance_store(store)
+    diverged = []
+    for override in store['overrides']:
+        key = tuple(override['paths'])
+        current = by_paths.get(key)
+        desired = override['record']
+        if current == desired:
+            continue
+        current_commit = current['commit'] if current else None
+        if coordinated and current_commit != override['base_commit']:
+            diverged.append({
+                'paths': list(override['paths']),
+                'base_commit': override['base_commit'],
+                'local_commit': desired['commit'] if desired else None,
+                'snapshot_commit': current_commit,
+            })
+            continue
+        if desired is None:
+            by_paths.pop(key, None)
+        else:
+            by_paths[key] = desired
+    return (
+        normalize_derived_provenance(
+            list(by_paths.values()), label='effective derived provenance'
+        ),
+        sorted(diverged, key=lambda item: item['paths']),
+    )
+
+
+def apply_derived_provenance_overrides(shared, store, *, coordinated=True):
+    return resolve_derived_provenance_overrides(
+        shared, store, coordinated=coordinated
+    )[0]
+
+
+def derived_provenance_snapshot(repo_root, manifest, coordination_state=None):
+    """Resolve provenance from the shared snapshot plus Git-common-dir state."""
+    shared = shared_derived_provenance_records(
+        repo_root, manifest, coordination_state
+    )
+    return resolve_derived_provenance_overrides(
+        shared,
+        load_derived_provenance_store(repo_root),
+        coordinated=coordination_is_active(manifest),
+    )
+
+
+def derived_provenance_records(repo_root, manifest, coordination_state=None):
+    return derived_provenance_snapshot(repo_root, manifest, coordination_state)[0]
+
+
+def update_common_derived_provenance(
+    repo_root,
+    manifest,
+    paths,
+    record,
+    *,
+    expected_commit=None,
+    coordination_state=None,
+):
+    """Atomically set or resolve one complete provenance path set."""
+    paths = list(paths)
+    if (
+        not paths
+        or paths != sorted(paths)
+        or len(paths) != len(set(paths))
+        or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
+    ):
+        raise SyncwheelError(
+            'derived provenance update paths must be a non-empty sorted unique '
+            'NUL-free string array'
+        )
+    if record is not None:
+        record = normalize_derived_provenance(
+            [record], label='derived provenance update'
+        )[0]
+        if record['paths'] != paths:
+            raise SyncwheelError('derived provenance update record paths do not match')
+    with derived_provenance_store_lock(repo_root):
+        shared = shared_derived_provenance_records(
+            repo_root, manifest, coordination_state
+        )
+        original_store = load_derived_provenance_store(repo_root)
+        shared_by_paths = {
+            tuple(item['paths']): item for item in shared
+        }
+        store = {
+            'version': DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [
+                item for item in original_store['overrides']
+                if item['record'] != shared_by_paths.get(tuple(item['paths']))
+            ],
+        }
+        store = normalize_derived_provenance_store(store)
+        effective = apply_derived_provenance_overrides(
+            shared, store, coordinated=coordination_is_active(manifest)
+        )
+        key = tuple(paths)
+        current = {tuple(item['paths']): item for item in effective}.get(key)
+        if expected_commit is not None and current is not None and (
+            current['commit'] != expected_commit
+        ):
+            raise SyncwheelError(
+                'derived provenance changed before reconciliation for '
+                + json.dumps(paths, ensure_ascii=True)
+            )
+        if expected_commit is not None and current is None:
+            return False
+        overrides = {
+            tuple(item['paths']): item for item in store['overrides']
+        }
+        shared_record = {
+            tuple(item['paths']): item for item in shared
+        }.get(key)
+        base_commit = shared_record['commit'] if shared_record else None
+        if record == shared_record:
+            overrides.pop(key, None)
+        else:
+            overrides[key] = {
+                'paths': paths,
+                'base_commit': base_commit,
+                'record': record,
+            }
+        updated = {
+            'version': DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': list(overrides.values()),
+        }
+        if normalize_derived_provenance_store(updated) == original_store:
+            return False
+        save_derived_provenance_store(repo_root, updated)
+        return True
+
+
+def record_common_derived_provenance(
+    repo_root, manifest, record, coordination_state=None
+):
+    normalized = normalize_derived_provenance(
+        [record], label='derived provenance record'
+    )[0]
+    return update_common_derived_provenance(
+        repo_root,
+        manifest,
+        normalized['paths'],
+        normalized,
+        coordination_state=coordination_state,
+    )
+
+
+def resolve_common_derived_provenance(
+    repo_root,
+    manifest,
+    paths,
+    *,
+    expected_commit=None,
+    coordination_state=None,
+):
+    return update_common_derived_provenance(
+        repo_root,
+        manifest,
+        sorted(paths),
+        None,
+        expected_commit=expected_commit,
+        coordination_state=coordination_state,
+    )
+
+
+def is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
+    """Verify trailers, content, and provenance independently of the current path policy."""
+    if commit_parent_count(repo_root, commit) != 1:
+        return False
+    full_commit = commit_full_sha(repo_root, commit)
+    files = commit_changed_files(repo_root, full_commit)
+    if not files:
+        return False
+    trailers = parsed_commit_trailers(repo_root, full_commit)
+    operation_values = [
+        value for key, value in trailers
+        if key.casefold() == DERIVED_PROJECTION_TRAILER
+    ]
+    digest_values = [
+        value for key, value in trailers
+        if key.casefold() == DERIVED_PATHS_TRAILER
+    ]
+    if (
+        len(operation_values) != 1
+        or not DERIVED_OPERATION_ID.fullmatch(operation_values[0])
+        or len(digest_values) != 1
+        or not re.fullmatch(r'[0-9a-f]{64}', digest_values[0])
+    ):
+        return False
+    paths = sorted(files)
+    content_digest = derived_projection_commit_paths_digest(
+        repo_root, full_commit, paths
+    )
+    if digest_values[0] != content_digest:
+        return False
+    records = normalize_derived_provenance(provenance)
+    return any(
+        record['operation_id'] == operation_values[0]
+        and record['commit'] == full_commit
+        and record['paths'] == paths
+        and record['paths_digest'] == content_digest
+        for record in records
+    )
+
+
+def is_derived_projection_commit(repo_root, manifest, commit, provenance=None):
+    """Recognize only a currently allowed, provenance-bound provider projection."""
+    full_commit = commit_full_sha(repo_root, commit)
+    prefixes = manifest.get('integration', {}).get('derived_paths') or []
+    files = commit_changed_files(repo_root, full_commit)
+    if not files or not prefixes or not all(
+        any(path.startswith(prefix) for prefix in prefixes) for path in files
+    ):
+        return False
+    records = (
+        normalize_derived_provenance(provenance)
+        if provenance is not None
+        else derived_provenance_records(repo_root, manifest)
+    )
+    return is_provenance_bound_derived_projection_commit(
+        repo_root, full_commit, records
+    )
+
+
+def narrowed_derived_provenance_records(repo_root, manifest, provenance=None):
+    """Return provenance paths excluded by the current derived-path policy."""
+    prefixes = manifest.get('integration', {}).get('derived_paths') or []
+    records = (
+        normalize_derived_provenance(provenance)
+        if provenance is not None
+        else derived_provenance_records(repo_root, manifest)
+    )
+    narrowed = []
+    for record in records:
+        outside = [
+            path for path in record['paths']
+            if not any(path.startswith(prefix) for prefix in prefixes)
+        ]
+        for path in outside:
+            narrowed.append({**record, 'path': path})
+    return sorted(
+        narrowed,
+        key=lambda item: (item['path'], item['commit'], item['operation_id']),
+    )
+
+
+def derived_provenance_reset_remedy(*, whole_store=False):
+    return (
+        'syncwheel coordination provenance reset'
+        + (' --all' if whole_store else '')
+        + ' --reason '
+        + shlex.quote(
+            DERIVED_PROVENANCE_RESET_REASON
+            if whole_store
+            else DERIVED_PROVENANCE_DISCARD_REASON
+        )
+    )
+
+
+def derived_paths_rebuild_remedy():
+    return (
+        'syncwheel int rebuild --reason '
+        + shlex.quote(DERIVED_PATHS_REBUILD_REASON)
+    )
+
+
+def stale_derived_projection_records(
+    repo_root, manifest, integration_branch, provenance=None
+):
+    """Return shared/local provider provenance no longer reachable from integration."""
+    stale = []
+    records = (
+        normalize_derived_provenance(provenance)
+        if provenance is not None
+        else derived_provenance_records(repo_root, manifest)
+    )
+    for record in records:
+        if branch_contains(repo_root, integration_branch, record['commit']):
+            continue
+        for path in record['paths']:
+            stale.append({**record, 'path': path})
+    return sorted(stale, key=lambda item: (item['path'], item['operation_id']))
 
 
 def branches_containing_commit(repo_root, commit, remotes=False):
@@ -2741,6 +3411,23 @@ def load_manifest(repo_root, manifest_path=None):
     integration.setdefault('base', defaults['base_ref'])
     integration.setdefault('strategy', 'cherry-pick')
     integration.setdefault('stacks', [])
+    if version == MANIFEST_VERSION_CHANNELS:
+        derived_paths = integration.setdefault('derived_paths', [])
+        if (
+            not isinstance(derived_paths, list)
+            or not all(isinstance(item, str) and item.endswith('/') and item for item in derived_paths)
+            or len(derived_paths) != len(set(derived_paths))
+        ):
+            raise SyncwheelError('integration.derived_paths must be a unique string array of path prefixes')
+        if 'derived_provenance' in integration:
+            integration['derived_provenance'] = normalize_derived_provenance(
+                integration['derived_provenance'],
+                label='integration.derived_provenance',
+            )
+    elif 'derived_paths' in integration:
+        raise SyncwheelError('integration.derived_paths requires manifest version 3')
+    elif 'derived_provenance' in integration:
+        raise SyncwheelError('integration.derived_provenance requires manifest version 3')
 
     stacks = data.setdefault('stacks', [])
     if not isinstance(stacks, list):
@@ -5873,7 +6560,7 @@ def local_coordination_ref(value, defaults):
     return value
 
 
-def coordination_manifest_snapshot(manifest, repo_root=None):
+def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=None):
     """Return the public, topology-only projection stored in remote coordination state."""
     defaults = manifest['defaults']
     remote_roles = coordination_manifest_remote_roles(manifest)
@@ -5895,6 +6582,18 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
         },
         'stacks': [],
     }
+    if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
+        snapshot['integration']['derived_paths'] = list(
+            manifest['integration'].get('derived_paths') or []
+        )
+        snapshot['integration']['derived_provenance'] = (
+            derived_provenance_records(repo_root, manifest, coordination_state)
+            if repo_root is not None
+            else normalize_derived_provenance(
+                manifest['integration'].get('derived_provenance') or [],
+                label='integration.derived_provenance',
+            )
+        )
     for stack in manifest['stacks']:
         snapshot_stack = {
             'id': stack['id'],
@@ -5996,6 +6695,33 @@ def validate_coordination_snapshot_refs(snapshot):
         raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
     if not isinstance(integration, dict) or 'base' not in integration:
         raise SyncwheelError('coordination state manifest is missing integration.base')
+    derived_paths = integration.get('derived_paths')
+    if snapshot.get('version') == MANIFEST_VERSION_CHANNELS:
+        if (
+            not isinstance(derived_paths, list)
+            or not all(
+                isinstance(item, str) and item and item.endswith('/')
+                for item in derived_paths
+            )
+            or len(derived_paths) != len(set(derived_paths))
+        ):
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_paths must be '
+                'a unique string array of path prefixes'
+            )
+        normalize_derived_provenance(
+            integration.get('derived_provenance') or [],
+            label='coordination state manifest integration.derived_provenance',
+        )
+    else:
+        if derived_paths is not None:
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_paths requires version 3'
+            )
+        if 'derived_provenance' in integration:
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_provenance requires version 3'
+            )
     if not isinstance(stacks, list):
         raise SyncwheelError('coordination state manifest stacks must be an array')
     if not isinstance(channels, list):
@@ -6268,7 +6994,11 @@ def build_coordination_state(repo_root, manifest, config, previous, observed_ref
         closed_ref = tombstone.get('ref') or f"refs/heads/{tombstone['branch']}"
         if closed_ref not in managed:
             managed[closed_ref] = tombstone.get('remote_tip')
-    snapshot = coordination_manifest_snapshot(manifest, repo_root)
+    snapshot = coordination_manifest_snapshot(
+        manifest,
+        repo_root,
+        previous_state,
+    )
     return {
         'schema_version': (
             COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
@@ -7505,10 +8235,29 @@ def deterministic_stack_projection(repo_root, base, commits):
             check=False,
         )
         if merge.returncode != 0:
+            detail = (merge.stderr.strip() or merge.stdout.strip())[:2000]
+            named = git(
+                repo_root,
+                'merge-tree',
+                '--write-tree',
+                '--name-only',
+                '-z',
+                '--no-messages',
+                f'--merge-base={commit}^',
+                head,
+                commit,
+                check=False,
+            )
+            paths = [
+                path for path in named.stdout.split('\0')
+                if path and not re.fullmatch(r'[0-9a-f]{40,64}', path)
+            ]
             return {
                 'status': 'conflict',
                 'commit': commit,
-                'detail': (merge.stderr.strip() or merge.stdout.strip())[:2000],
+                'base': head,
+                'paths': paths,
+                'detail': detail,
             }
         tree = merge.stdout.strip()
         if not tree or tree == ref_tree(repo_root, head):
@@ -9443,7 +10192,32 @@ def validate_manifest(repo_root, manifest):
     unmapped_commits = []
     absorbed_patch_commits = []
     control_commits = []
+    derived_commits = []
+    narrowed_derived_commits = []
     integration_merge_commits = []
+    provenance, diverged_provenance = (
+        derived_provenance_snapshot(repo_root, manifest)
+        if manifest.get('version') == MANIFEST_VERSION_CHANNELS
+        else ([], [])
+    )
+    if diverged_provenance:
+        diverged_detail = '; '.join(
+            json.dumps(item['paths'], ensure_ascii=True)
+            + f": clone-local {item['local_commit'] or 'none'}"
+            + f" vs snapshot {item['snapshot_commit'] or 'none'}"
+            for item in diverged_provenance
+        )
+        warnings.append(
+            'derived-provenance-diverged: the published coordination snapshot supersedes '
+            f'clone-local derived provenance and is used instead: {diverged_detail}; '
+            + derived_provenance_reset_remedy()
+        )
+    narrowed_derived = narrowed_derived_provenance_records(
+        repo_root, manifest, provenance
+    )
+    narrowed_record_keys = {
+        (item['operation_id'], item['commit']) for item in narrowed_derived
+    }
     if integration_exists and ref_exists(repo_root, integration['base']):
         integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
         base_patch_ids = patch_ids_reachable_from_ref(repo_root, integration['base'])
@@ -9454,6 +10228,19 @@ def validate_manifest(repo_root, manifest):
                 continue
             if is_manifest_only_commit(repo_root, commit):
                 control_commits.append(full_sha)
+                continue
+            if is_derived_projection_commit(
+                repo_root, manifest, commit, provenance=provenance
+            ):
+                derived_commits.append(full_sha)
+                continue
+            if (
+                any(full_sha == item['commit'] for item in narrowed_derived)
+                and is_provenance_bound_derived_projection_commit(
+                    repo_root, full_sha, provenance
+                )
+            ):
+                narrowed_derived_commits.append(full_sha)
                 continue
             patch_id = commit_patch_id(repo_root, commit)
             if patch_id and patch_id in base_patch_ids:
@@ -9467,6 +10254,36 @@ def validate_manifest(repo_root, manifest):
                 'not declared in any stack'
             )
 
+    if narrowed_derived:
+        narrowed_by_commit = {}
+        for item in narrowed_derived:
+            narrowed_by_commit.setdefault(item['commit'], []).append(item['path'])
+        narrowed_detail = '; '.join(
+            f'{commit}: '
+            + json.dumps(sorted(set(paths)), ensure_ascii=True)
+            for commit, paths in sorted(narrowed_by_commit.items())
+        )
+        errors.append(
+            'derived-paths-narrowed: retained derived provenance is outside '
+            f'integration.derived_paths: {narrowed_detail}; '
+            + derived_paths_rebuild_remedy()
+        )
+
+    retained_provenance = [
+        record for record in provenance
+        if (record['operation_id'], record['commit']) not in narrowed_record_keys
+    ]
+    stale_derived = stale_derived_projection_records(
+        repo_root, manifest, integration_branch, retained_provenance
+    )
+    if stale_derived:
+        stale_paths = ', '.join(item['path'] for item in stale_derived)
+        errors.append(
+            'derived-projection-stale: derived projection path(s) are no longer '
+            f'present on {integration_branch}: {stale_paths}; '
+            'run a new Agentwheel update'
+        )
+
     details['integration'] = {
         'branch': integration_branch,
         'exists': integration_exists,
@@ -9478,6 +10295,11 @@ def validate_manifest(repo_root, manifest):
         'unmapped_commits': unmapped_commits,
         'absorbed_patch_commits': absorbed_patch_commits,
         'control_commits': control_commits,
+        'derived_commits': derived_commits,
+        'narrowed_derived_commits': narrowed_derived_commits,
+        'derived_paths_narrowed': narrowed_derived,
+        'derived_provenance_diverged': diverged_provenance,
+        'derived_projection_stale': stale_derived,
         'merge_commits': integration_merge_commits,
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
@@ -9546,6 +10368,29 @@ def build_plan(repo_root, manifest, validation):
                 'replay_mode': integration_replay_mode,
                 'meta': item.get('meta', {}),
             })
+    if details['integration'].get('derived_paths_narrowed'):
+        narrowed = details['integration']['derived_paths_narrowed']
+        actions.append({
+            'type': 'derived-paths-narrowed',
+            'branch': integration['branch'],
+            'commits': sorted({item['commit'] for item in narrowed}),
+            'paths': sorted({item['path'] for item in narrowed}),
+            'remedy': derived_paths_rebuild_remedy(),
+        })
+    if details['integration'].get('derived_provenance_diverged'):
+        diverged = details['integration']['derived_provenance_diverged']
+        actions.append({
+            'type': 'derived-provenance-diverged',
+            'branch': integration['branch'],
+            'paths': sorted({path for item in diverged for path in item['paths']}),
+            'local_commits': sorted(
+                {item['local_commit'] for item in diverged if item['local_commit']}
+            ),
+            'snapshot_commits': sorted(
+                {item['snapshot_commit'] for item in diverged if item['snapshot_commit']}
+            ),
+            'remedy': derived_provenance_reset_remedy(),
+        })
     if details['integration'].get('unmapped_commits'):
         commits = details['integration']['unmapped_commits']
         actions.append({
@@ -9561,6 +10406,16 @@ def build_plan(repo_root, manifest, validation):
                     + ' '.join(commit_short_sha(repo_root, commit) for commit in commits),
                 ],
             },
+        })
+    if details['integration'].get('derived_projection_stale'):
+        actions.append({
+            'type': 'derived-projection-stale',
+            'branch': integration['branch'],
+            'paths': [
+                item['path']
+                for item in details['integration']['derived_projection_stale']
+            ],
+            'remedy': 'run a new Agentwheel update',
         })
     return actions
 
@@ -10641,6 +11496,65 @@ def command_coordination_disable(args):
         {'previous_mode': existing.get('mode', 'legacy')},
     )
     print('coordination disabled; no remote state branch was deleted')
+    return 0
+
+
+def command_coordination_provenance_reset(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    reason = (getattr(args, 'reason', None) or '').strip()
+    if not reason:
+        raise SyncwheelError(
+            'coordination provenance reset requires --reason; use: '
+            + derived_provenance_reset_remedy(whole_store=args.all)
+        )
+    with derived_provenance_store_lock(repo_root):
+        if args.all:
+            discarded = None
+            store = default_derived_provenance_store()
+        else:
+            store = load_derived_provenance_store(repo_root)
+            _effective, diverged = resolve_derived_provenance_overrides(
+                shared_derived_provenance_records(repo_root, manifest),
+                store,
+                coordinated=coordination_is_active(manifest),
+            )
+            keys = {tuple(item['paths']) for item in diverged}
+            if not keys:
+                print(
+                    'coordination provenance reset: no clone-local record is superseded '
+                    'by the coordination snapshot'
+                )
+                return 0
+            discarded = diverged
+            store = {
+                'version': DERIVED_PROVENANCE_STORE_VERSION,
+                'overrides': [
+                    item for item in store['overrides']
+                    if tuple(item['paths']) not in keys
+                ],
+            }
+        save_derived_provenance_store(repo_root, store)
+        append_ledger_event(
+            repo_root,
+            'derived_provenance_reset',
+            {
+                'reason': reason,
+                'scope': 'store' if args.all else 'diverged',
+                'discarded': discarded,
+            },
+            manifest_path,
+        )
+    if args.all:
+        print('coordination provenance reset: clone-local derived provenance store cleared')
+    else:
+        for item in discarded:
+            print(
+                'coordination provenance reset: discarded '
+                + json.dumps(item['paths'], ensure_ascii=True)
+            )
     return 0
 
 
@@ -13705,6 +14619,16 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
     validation = validate_manifest(repo_root, manifest)
     if validation['errors']:
         raise SyncwheelError('stack land STOP: manifest validation failed: ' + '; '.join(validation['errors']))
+    derived_source = [
+        commit_full_sha(repo_root, commit)
+        for commit in rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+        if is_derived_projection_commit(repo_root, manifest, commit)
+    ]
+    if derived_source:
+        raise SyncwheelError(
+            'stack land STOP: source contains derived projection commit(s): '
+            + ', '.join(derived_source)
+        )
     worktrees = landing_require_clean_worktrees(repo_root)
     declared = landing_stack_projection_is_exact(repo_root, stack)
     integration = manifest['integration']
@@ -13716,7 +14640,13 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
         if not branch_contains(repo_root, integration['branch'], commit):
             raise SyncwheelError('stack land STOP: stack is not validated on main-integration')
     expected_integration_tree = materialize_integration_projection(repo_root, manifest)
-    if ref_tree(repo_root, integration['branch']) != expected_integration_tree:
+    actual_integration_tree = ref_tree(repo_root, integration['branch'])
+    if (
+        actual_integration_tree != expected_integration_tree
+        and not trees_differ_only_by_manifest(
+            repo_root, actual_integration_tree, expected_integration_tree
+        )
+    ):
         raise SyncwheelError('stack land STOP: main-integration does not match the declared combined projection')
     remote, target_ref, delivery_revision = landing_target_observation(repo_root, manifest, stack)
     for dependency_id in stack.get('depends_on', []):
@@ -14889,9 +15819,11 @@ def trees_differ_only_by_manifest(repo_root, left_tree, right_tree):
         '--no-commit-id',
         '--name-only',
         '-r',
+        '-z',
         left_tree,
         right_tree,
-    ).stdout.splitlines()
+    ).stdout.split('\0')
+    changed = [path for path in changed if path]
     return bool(changed) and set(changed) == {'.syncwheel/manifest.json'}
 
 
@@ -15896,6 +16828,20 @@ def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
+    validation = validate_manifest(repo_root, manifest)
+    narrowed = validation['details']['integration'].get(
+        'derived_paths_narrowed'
+    ) or []
+    reason = getattr(args, 'reason', None)
+    if narrowed and (
+        not isinstance(reason, str) or not reason.strip()
+    ):
+        raise SyncwheelError(
+            'derived-paths-narrowed reconciliation requires --reason; use: '
+            + derived_paths_rebuild_remedy()
+        )
+    if isinstance(reason, str):
+        reason = reason.strip()
     mode, worktree = select_replay_mode(
         repo_root,
         manifest,
@@ -15926,6 +16872,23 @@ def command_int_rebuild(args):
     )
     require_replay_success(result)
     if not args.dry_run:
+        reconciled = []
+        unique_narrowed = {
+            (item['operation_id'], item['commit'], tuple(item['paths'])): item
+            for item in narrowed
+        }
+        for item in unique_narrowed.values():
+            if resolve_common_derived_provenance(
+                repo_root,
+                manifest,
+                item['paths'],
+                expected_commit=item['commit'],
+            ):
+                reconciled.append({
+                    'operation_id': item['operation_id'],
+                    'commit': item['commit'],
+                    'paths': list(item['paths']),
+                })
         append_ledger_event(
             repo_root,
             'integration_rebuilt',
@@ -15935,6 +16898,8 @@ def command_int_rebuild(args):
                 'after_tip': result['after_tip'],
                 'stacks': list(manifest['integration'].get('stacks', [])),
                 'replay_mode': result['mode'],
+                'reason': reason,
+                'derived_provenance_reconciled': reconciled,
             },
             manifest_path,
         )
@@ -16616,9 +17581,12 @@ class SyncwheelRevisionBackend:
         listing = git(repo_root, 'ls-tree', '-z', head, '--', relative, check=False)
         if listing.returncode != 0:
             self._fail(f'could not inspect {relative} at expectedHead {head}')
-        if not listing.stdout:
+        entries = [entry for entry in listing.stdout.split('\0') if entry]
+        if not entries:
             return None
-        entry = listing.stdout.rstrip('\0')
+        if len(entries) != 1:
+            self._fail(f'ambiguous tree entry for product path: {relative}')
+        entry = entries[0]
         metadata, separator, listed_path = entry.partition('\t')
         if not separator or listed_path != relative:
             self._fail(f'ambiguous tree entry for product path: {relative}')
@@ -16672,13 +17640,14 @@ class SyncwheelRevisionBackend:
         if status.strip():
             self._fail('revision provider preflight requires a completely clean worktree and index')
 
-    def _ensure_after_scope(self, repo_root, request):
+    def _ensure_after_scope(self, repo_root, request, *, allowed_outside=()):
         if self._index_conflicts(repo_root):
             self._fail('revision provider refuses an index with conflicts')
         if not self._index_is_clean(repo_root):
             self._fail('revision provider refuses pre-staged changes')
         self._validate_hashes(repo_root, request, 'after')
         allowed = {item.path for item in request.paths}
+        allowed.update(allowed_outside)
         outside = sorted(self._dirty_paths(repo_root) - allowed)
         if outside:
             self._fail('mutation changed paths outside the declared allowlist: ' + ', '.join(outside))
@@ -17040,8 +18009,38 @@ class SyncwheelRevisionBackend:
             manifest, base_ref, base_ref_full_name
         )
         validation = validate_manifest(repo_root, manifest)
-        if validation['errors']:
-            self._fail('Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        stale_paths = {
+            item['path']
+            for item in validation['details']['integration'].get(
+                'derived_projection_stale'
+            ) or []
+        }
+        declared_paths = {item.path for item in request.paths}
+        repairs_all_stale_paths = bool(stale_paths) and (
+            request.action == 'check' or stale_paths <= declared_paths
+        )
+        blocking_errors = [
+            error for error in validation['errors']
+            if not (
+                repairs_all_stale_paths
+                and error.startswith('derived-projection-stale:')
+            )
+        ]
+        if blocking_errors:
+            self._fail('Syncwheel validation failed: ' + '; '.join(blocking_errors))
+        missing_declared = [
+            item for item in validation['details']['stacks']
+            if item['id'] in manifest['integration'].get('stacks', [])
+            and item.get('missing_from_integration')
+        ]
+        if missing_declared:
+            self._fail(
+                'integration declared stack(s) are missing from integration: '
+                + '; '.join(
+                    f"{item['id']}=" + ','.join(item['missing_from_integration'])
+                    for item in missing_declared
+                )
+            )
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
             self._fail(
@@ -17081,6 +18080,9 @@ class SyncwheelRevisionBackend:
             'baseRefSha': base_ref_sha,
             'baseRefObjectSha': base_ref_object_sha,
             'baseRefObservation': base_ref_observation,
+            'projectionBaseSha': base_ref_sha,
+            'projectionBaseKind': 'manifest-base',
+            'integrationCompositionDigest': integration_composition_digest(manifest),
             'indexSha256': self._index_sha256(repo_root),
             'unmappedIntegrationCommits': unmapped,
             'coordination': coordination,
@@ -17097,9 +18099,9 @@ class SyncwheelRevisionBackend:
     def operation_lock(self, request):
         if fcntl is None:
             self._fail(f'revision-provider locking is unsupported on {sys.platform}')
-        directory = self._journal_directory(request)
+        directory = self._journal_directory(request).parent
         directory.mkdir(parents=True, exist_ok=True)
-        lock_path = directory / 'provider.lock'
+        lock_path = directory / 'revision-provider.lock'
         with lock_path.open('a+') as handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -17154,6 +18156,131 @@ class SyncwheelRevisionBackend:
         if path.parent.exists():
             self._fsync_directory(path.parent)
 
+    def _derived_paths_digest(self, paths):
+        return canonical_json_digest(list(paths or []))
+
+    def _manifest_lease_digest(self, journal):
+        if journal.get('manifestReplaced'):
+            return journal.get('manifestDigest')
+        return journal.get('observedManifestDigest')
+
+    def _pending_operation_manifest_matches(self, request, journal, manifest):
+        """Recognize the provider's own manifest write before its journal catches up."""
+        if (
+            journal.get('projectionRoute') != 'manifest-base'
+            or journal.get('phase') != 'product_committed'
+            or not journal.get('productCommitSha')
+        ):
+            return False
+        existing = stack_map(manifest).get(request.draft_stack_id)
+        if existing != self._desired_stack(request, journal, manifest):
+            return False
+        stripped = self._manifest_without_operation_stack(manifest, request)
+        return manifest_digest(stripped) == journal.get('observedManifestDigest')
+
+    def _expiration_digest_pair(self, request, journal, manifest):
+        if journal.get('projectionRoute') == 'derived':
+            observed_composition = journal.get('integrationCompositionDigest')
+            current_composition = integration_composition_digest(manifest)
+            if observed_composition != current_composition:
+                return observed_composition, current_composition
+            observed_paths = journal.get('derivedPathsDigest')
+            current_paths = self._derived_paths_digest(
+                manifest['integration'].get('derived_paths') or []
+            )
+            return observed_paths, current_paths
+        return self._manifest_lease_digest(journal), manifest_digest(manifest)
+
+    def _expire_if_operation_lease_changed(self, request, journal, manifest):
+        if journal.get('phase') in {'verified', 'expired'}:
+            return
+        route = journal.get('projectionRoute')
+        if route == 'derived':
+            current_composition = integration_composition_digest(manifest)
+            if current_composition != journal.get('integrationCompositionDigest'):
+                self.expire_manifest_invalidated(
+                    request,
+                    journal,
+                    'integration composition changed while derived projection was pending',
+                )
+            current_paths = list(manifest['integration'].get('derived_paths') or [])
+            if (
+                current_paths != list(journal.get('derivedPaths') or [])
+                or self._derived_paths_digest(current_paths)
+                != journal.get('derivedPathsDigest')
+            ):
+                self.expire_manifest_invalidated(
+                    request,
+                    journal,
+                    'integration.derived_paths changed while derived projection was pending',
+                )
+            return
+        current_digest = manifest_digest(manifest)
+        if current_digest == self._manifest_lease_digest(journal):
+            return
+        if self._pending_operation_manifest_matches(
+            request, journal, manifest
+        ):
+            return
+        reason = (
+            'manifest changed after preflight'
+            if route is None
+            else 'manifest changed while revision-provider operation was pending'
+        )
+        self.expire_manifest_invalidated(request, journal, reason)
+
+    def expire_manifest_invalidated(self, request, journal, reason):
+        """Terminally expire a receipt whose manifest lease can no longer recover.
+
+        This deliberately changes only local provider state.  The caller must
+        start a new Agentwheel update, which obtains a fresh manifest lease.
+        """
+        remedy = 'run a new Agentwheel update'
+        repo_root = self._repo_root(request)
+        manifest, manifest_path = self._manifest(repo_root)
+        observed_digest, current_digest = self._expiration_digest_pair(
+            request, journal, manifest
+        )
+        expiration = journal.get('expiration') or {
+            'reason': reason,
+            'remedy': remedy,
+            'observedDigest': observed_digest,
+            'currentDigest': current_digest,
+            'decidedAt': iso_utc_now(),
+        }
+        event_payload = {
+            'operation_id': request.operation_id,
+            'reason': expiration['reason'],
+            'remedy': expiration['remedy'],
+            'observed_digest': expiration['observedDigest'],
+            'current_digest': expiration['currentDigest'],
+            'decided_at': expiration['decidedAt'],
+        }
+        if journal.get('phase') != 'expired':
+            journal['phase'] = 'expired'
+            journal['expiration'] = expiration
+            self.save_journal(request, journal)
+            self.checkpoint('receipt_expired')
+        recover_ledger_tail(repo_root, manifest_path)
+        matches = [
+            event for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'revision_provider_expired'
+            and (event.get('payload') or {}).get('operation_id') == request.operation_id
+        ]
+        if matches and (len(matches) != 1 or matches[0].get('payload') != event_payload):
+            self._fail(
+                f'ledger collision while expiring revision-provider operation '
+                f'{request.operation_id}'
+            )
+        if not matches:
+            append_ledger_event(
+                repo_root, 'revision_provider_expired', event_payload, manifest_path
+            )
+            self.checkpoint('expiration_ledger_event_written')
+        self._fail(
+            f'operation {request.operation_id} expired: {expiration["reason"]}; {expiration["remedy"]}'
+        )
+
     def check(self, request):
         observation = self._validate_repository(
             self._repo_root(request), request, require_clean=True
@@ -17191,14 +18318,9 @@ class SyncwheelRevisionBackend:
             self._fail('integration branch changed after preflight')
         if ref_tip(repo_root, 'HEAD') != request.expected_head:
             self._fail('integration HEAD changed after preflight')
-        current_digest = manifest_digest(manifest)
         journal = self.load_journal(request)
-        expected_digest = (
-            journal.get('observedManifestDigest') if journal else request.expected_manifest_digest
-        )
-        if expected_digest and current_digest != expected_digest:
-            self._fail('manifest changed after preflight')
         if journal:
+            self._expire_if_operation_lease_changed(request, journal, manifest)
             expected_refs = dict(journal['managedLocalRefs'])
             expected_refs.update(journal['baselineRemoteRefs'])
             if journal.get('baseRefFullName'):
@@ -17282,28 +18404,164 @@ class SyncwheelRevisionBackend:
             'productPathObjects': prepared['pathObjects'],
         }
 
+    def _projection_reproduces_product_blobs(self, repo_root, projection, path_objects):
+        if projection.get('status') != 'projected':
+            return False
+        for path, expected in path_objects.items():
+            actual = self._tree_entry(repo_root, projection['tip'], path)
+            actual_blob = actual['blob'] if actual is not None else None
+            if actual_blob != expected['blob']:
+                return False
+        return True
+
+    def _journal_product_path_objects(self, request, journal):
+        path_objects = journal.get('productPathObjects')
+        expected_paths = sorted(item.path for item in request.paths)
+        valid = (
+            isinstance(path_objects, dict)
+            and sorted(path_objects) == expected_paths
+            and bool(path_objects)
+        )
+        if valid:
+            for value in path_objects.values():
+                if not isinstance(value, dict) or set(value) != {
+                    'sha256', 'blob', 'mode'
+                }:
+                    valid = False
+                    break
+                sha256 = value.get('sha256')
+                blob = value.get('blob')
+                mode = value.get('mode')
+                deletion = sha256 is None and blob is None and mode is None
+                regular = (
+                    isinstance(sha256, str)
+                    and re.fullmatch(r'[0-9a-f]{64}', sha256)
+                    and isinstance(blob, str)
+                    and re.fullmatch(r'[0-9a-f]{40,64}', blob)
+                    and mode in {'100644', '100755'}
+                )
+                if not deletion and not regular:
+                    valid = False
+                    break
+        if not valid:
+            self._fail(
+                'journaled productPathObjects is missing or invalid; release the '
+                'prepared operation, restore the declared paths if needed, then run '
+                'a new Agentwheel update'
+            )
+        return path_objects
+
     def prepare_draft_projection(self, request, journal):
         repo_root = self._repo_root(request)
         manifest, _ = self._manifest(repo_root)
         if manifest_digest(manifest) != journal['observedManifestDigest']:
-            self._fail('manifest changed before draft object preparation')
+            self.expire_manifest_invalidated(
+                request,
+                journal,
+                'manifest changed before draft object preparation',
+            )
         projection = deterministic_stack_projection(
             repo_root,
             journal['baseRefSha'],
             [journal['candidateProductCommitSha']],
         )
-        if projection['status'] == 'conflict':
+        reproduces_product = self._projection_reproduces_product_blobs(
+            repo_root,
+            projection,
+            journal['productPathObjects'],
+        )
+        if reproduces_product:
+            return {
+                'projectionRoute': 'manifest-base',
+                'candidateDraftCommitSha': projection['tip'],
+                'candidateDraftTreeSha': projection['tree'],
+            }
+        prefixes = manifest['integration'].get('derived_paths') or []
+        paths = sorted(journal['productPathObjects'])
+        if not prefixes or not all(any(path.startswith(prefix) for prefix in prefixes) for path in paths):
+            conflicts = ', '.join(projection.get('paths') or []) or 'unknown path(s)'
             self._fail(
-                'product commit has a conflicting draft projection; no managed ref was moved'
+                'product commit has a conflicting draft projection; conflicts: '
+                f'{conflicts}; base {projection.get("base", journal["baseRefSha"])}; '
+                'derived route refuses paths outside integration.derived_paths'
             )
-        if projection['status'] == 'empty':
-            self._fail(
-                'product commit has an empty draft projection; no managed ref was moved'
-            )
+        content_digest = derived_projection_paths_digest({
+            path: journal['productPathObjects'][path]['blob']
+            for path in paths
+        })
+        prepared = self._prepare_exact_commit(
+            repo_root,
+            request.expected_head,
+            journal['productPathObjects'],
+            self.provider.product_commit_message(request)
+            + f'Syncwheel-Derived-Projection: {request.operation_id}\n'
+            + f'Syncwheel-Derived-Paths: {content_digest}\n',
+        )
+        if prepared is None:
+            self._fail('derived projection unexpectedly has no product delta')
         return {
-            'candidateDraftCommitSha': projection['tip'],
-            'candidateDraftTreeSha': projection['tree'],
+            'projectionRoute': 'derived',
+            'candidateProductCommitSha': prepared['commit'],
+            'candidateProductTreeSha': prepared['tree'],
+            'integrationCompositionDigest': integration_composition_digest(manifest),
+            'derivedPaths': list(prefixes),
+            'derivedPathsDigest': self._derived_paths_digest(prefixes),
+            'derivedContentDigest': content_digest,
         }
+
+    def verify_projection_route(self, request, journal):
+        """Recompute the persisted route without replacing its candidate objects."""
+        repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
+        path_objects = self._journal_product_path_objects(request, journal)
+        projection = deterministic_stack_projection(
+            repo_root,
+            journal['baseRefSha'],
+            [journal['candidateProductCommitSha']],
+        )
+        reproduces_product = self._projection_reproduces_product_blobs(
+            repo_root,
+            projection,
+            path_objects,
+        )
+        recomputed_route = 'manifest-base' if reproduces_product else 'derived'
+        if recomputed_route != journal.get('projectionRoute'):
+            self._fail(
+                'journaled projection route no longer matches its immutable candidate'
+            )
+        if recomputed_route == 'manifest-base':
+            if (
+                projection.get('tip') != journal.get('candidateDraftCommitSha')
+                or projection.get('tree') != journal.get('candidateDraftTreeSha')
+            ):
+                self._fail('journaled draft projection object changed')
+            return
+        if journal.get('candidateDraftCommitSha') is not None:
+            self._fail('journaled derived route unexpectedly owns a draft candidate')
+        paths = sorted(path_objects)
+        content_digest = derived_projection_paths_digest({
+            path: path_objects[path]['blob']
+            for path in paths
+        })
+        if content_digest != journal.get('derivedContentDigest'):
+            self._fail('journaled derived path/content digest changed')
+        candidate_provenance = [{
+            'operation_id': request.operation_id,
+            'commit': journal['candidateProductCommitSha'],
+            'paths': paths,
+            'paths_digest': content_digest,
+            'composition_digest': journal['integrationCompositionDigest'],
+        }]
+        if not is_derived_projection_commit(
+            repo_root,
+            manifest,
+            journal['candidateProductCommitSha'],
+            provenance=candidate_provenance,
+        ):
+            self._fail(
+                'journaled derived candidate is missing its path or trailer ownership proof'
+            )
 
     def current_head(self, request):
         return ref_tip(self._repo_root(request), 'HEAD')
@@ -17312,9 +18570,12 @@ class SyncwheelRevisionBackend:
         listing = git(repo_root, 'ls-tree', '-z', commit, '--', relative, check=False)
         if listing.returncode != 0:
             self._fail(f'could not inspect candidate tree path: {relative}')
-        if not listing.stdout:
+        entries = [entry for entry in listing.stdout.split('\0') if entry]
+        if not entries:
             return None
-        entry = listing.stdout.rstrip('\0')
+        if len(entries) != 1:
+            self._fail(f'ambiguous candidate tree entry: {relative}')
+        entry = entries[0]
         metadata, separator, listed_path = entry.partition('\t')
         if not separator or listed_path != relative:
             self._fail(f'ambiguous candidate tree entry: {relative}')
@@ -17394,9 +18655,18 @@ class SyncwheelRevisionBackend:
     def _assert_operation_worktree(self, repo_root, request, journal, kind):
         manifest, _ = self._manifest(repo_root)
         if kind == 'product':
-            if manifest_digest(manifest) != journal['observedManifestDigest']:
-                self._fail('manifest changed before product ref ownership')
-            self._ensure_after_scope(repo_root, request)
+            self._expire_if_operation_lease_changed(
+                request, journal, manifest
+            )
+            self._ensure_after_scope(
+                repo_root,
+                request,
+                allowed_outside=(
+                    (self.MANIFEST_PRODUCT_PATH,)
+                    if journal.get('projectionRoute') == 'derived'
+                    else ()
+                ),
+            )
             return
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control ref update requires a clean, conflict-free index')
@@ -17406,8 +18676,7 @@ class SyncwheelRevisionBackend:
                 'control ref update requires only .syncwheel/manifest.json; found: '
                 + ', '.join(sorted(dirty))
             )
-        if manifest_digest(manifest) != journal['manifestDigest']:
-            self._fail('manifest changed before control ref update')
+        self._expire_if_operation_lease_changed(request, journal, manifest)
 
     def _assert_ref_leases(self, repo_root, expected):
         drift = []
@@ -17574,6 +18843,8 @@ class SyncwheelRevisionBackend:
 
     def verify_recovery_gate(self, request, journal):
         repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
         expected = self._journal_ref_transaction_refs(request, journal)
         self._assert_no_ref_transaction_locks(repo_root, expected)
 
@@ -17709,7 +18980,7 @@ class SyncwheelRevisionBackend:
     def _verify_draft_candidate(self, repo_root, request, journal):
         projection = deterministic_stack_projection(
             repo_root,
-            journal['baseRefSha'],
+            journal.get('projectionBaseSha', journal['baseRefSha']),
             [journal['candidateProductCommitSha']],
         )
         if projection.get('status') != 'projected':
@@ -17873,7 +19144,7 @@ class SyncwheelRevisionBackend:
             repo_root, commit, tree, parent, path_objects
         )
         self._verify_worktree_objects(repo_root, path_objects)
-        if kind == 'product':
+        if kind == 'product' and journal.get('projectionRoute') != 'derived':
             self._verify_draft_candidate(repo_root, request, journal)
         expected_refs = self._expected_managed_refs(
             request, journal, integration_tip, draft_owned=draft_owned
@@ -17928,10 +19199,11 @@ class SyncwheelRevisionBackend:
         if get_current_branch(repo_root) != branch:
             self._fail('primary checkout left the integration branch')
         if expected_parent == request.expected_head:
+            derived = journal.get('projectionRoute') == 'derived'
             expected_index = journal['baselineIndexSha256']
             if not journal.get('productHooksValidated'):
                 self._fail('product hooks were not durably validated before draft ownership')
-            if ref_tip(repo_root, request.draft_branch) != journal.get(
+            if not derived and ref_tip(repo_root, request.draft_branch) != journal.get(
                 'candidateDraftCommitSha'
             ):
                 self._fail('draft ownership is missing before integration publication')
@@ -17944,9 +19216,10 @@ class SyncwheelRevisionBackend:
                 journal['productPathObjects'],
             )
             self._verify_worktree_objects(repo_root, journal['productPathObjects'])
-            self._verify_draft_candidate(repo_root, request, journal)
+            if not derived:
+                self._verify_draft_candidate(repo_root, request, journal)
             expected_refs = self._expected_managed_refs(
-                request, journal, expected_parent, draft_owned=True
+                request, journal, expected_parent, draft_owned=not derived
             )
         else:
             expected_index = journal.get('productIndexSha256')
@@ -17985,7 +19258,7 @@ class SyncwheelRevisionBackend:
         )
         return commit
 
-    def _deterministic_index(self, repo_root, commit):
+    def _deterministic_index(self, repo_root, commit, *, allowed_worktree_paths=()):
         descriptor, temporary_name = tempfile.mkstemp(
             prefix='syncwheel-revision-aligned-index-'
         )
@@ -18003,10 +19276,22 @@ class SyncwheelRevisionBackend:
                 env=environment,
             )
             if refreshed.returncode != 0:
-                self._fail(
-                    'working tree does not match the commit during index preparation: '
-                    + (refreshed.stderr.strip() or refreshed.stdout.strip())
-                )
+                mismatched = {
+                    item
+                    for item in git(
+                        repo_root,
+                        'diff-files',
+                        '--name-only',
+                        '-z',
+                        env=environment,
+                    ).stdout.split('\0')
+                    if item
+                }
+                if mismatched - set(allowed_worktree_paths):
+                    self._fail(
+                        'working tree does not match the commit during index preparation: '
+                        + (refreshed.stderr.strip() or refreshed.stdout.strip())
+                    )
             tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
             expected_tree = ref_tree(repo_root, commit)
             if tree != expected_tree:
@@ -18199,7 +19484,15 @@ class SyncwheelRevisionBackend:
         if not expected_sha:
             self._fail(f'{kind} index alignment has no predecessor lease')
 
-        desired_payload, desired_sha = self._deterministic_index(repo_root, commit)
+        desired_payload, desired_sha = self._deterministic_index(
+            repo_root,
+            commit,
+            allowed_worktree_paths=(
+                (self.MANIFEST_PRODUCT_PATH,)
+                if kind == 'product' and journal.get('projectionRoute') == 'derived'
+                else ()
+            ),
+        )
         current_sha = self._index_sha256(repo_root)
         if current_sha not in {expected_sha, desired_sha}:
             self._fail(
@@ -18282,10 +19575,10 @@ class SyncwheelRevisionBackend:
         return desired_sha
 
     def _desired_stack(self, request, journal, manifest):
-        return {
+        desired = {
             'id': request.draft_stack_id,
             'branch': request.draft_branch,
-            'base': journal['baseRefSha'],
+            'base': journal.get('projectionBaseSha', journal['baseRefSha']),
             'target_remote': manifest['defaults']['canonical_remote'],
             'target_branch': manifest['defaults']['base_branch'],
             'integration_branch': manifest['integration']['branch'],
@@ -18298,6 +19591,12 @@ class SyncwheelRevisionBackend:
                 'agentwheel_plan_digest': request.plan_digest,
             },
         }
+        if journal.get('projectionBaseKind') == 'integration-tip':
+            desired['meta']['revision_provider_projection_base'] = {
+                'kind': 'integration-tip',
+                'sha': journal['projectionBaseSha'],
+            }
+        return desired
 
     def _manifest_without_operation_stack(self, manifest, request):
         stripped = copy.deepcopy(manifest)
@@ -18314,7 +19613,9 @@ class SyncwheelRevisionBackend:
     def _assert_draft_branch(self, repo_root, desired, journal):
         journal_tip = ref_tip(repo_root, desired['branch'])
         expected_tip = deterministic_stack_replay_tip(
-            repo_root, journal['baseRefSha'], desired['commits']
+            repo_root,
+            journal.get('projectionBaseSha', journal['baseRefSha']),
+            desired['commits'],
         )
         if not expected_tip:
             self._fail('owned draft projection is no longer reproducible')
@@ -18343,7 +19644,11 @@ class SyncwheelRevisionBackend:
                     self._fail(f'draft stack collision: {request.draft_stack_id}')
                 stripped = self._manifest_without_operation_stack(manifest, request)
                 if manifest_digest(stripped) != journal['observedManifestDigest']:
-                    self._fail('manifest contains changes beyond this operation draft stack')
+                    self.expire_manifest_invalidated(
+                        request,
+                        journal,
+                        'manifest contains changes beyond this operation draft stack',
+                    )
                 if not branch_exists(repo_root, request.draft_branch):
                     self._fail('owned draft stack branch is missing')
                 if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
@@ -18359,6 +19664,7 @@ class SyncwheelRevisionBackend:
                     'stack': request.draft_stack_id,
                     'branch': request.draft_branch,
                     'product_commit': journal['productCommitSha'],
+                    'paths': sorted(journal['productPathObjects']),
                 }
                 if not journal.get('manifestReplaced'):
                     journal['manifestDigest'] = manifest_digest(manifest)
@@ -18371,7 +19677,9 @@ class SyncwheelRevisionBackend:
                 return {'manifestDigest': manifest_digest(manifest)}
 
             if manifest_digest(manifest) != journal['observedManifestDigest']:
-                self._fail('manifest changed before draft ownership')
+                self.expire_manifest_invalidated(
+                    request, journal, 'manifest changed before draft ownership'
+                )
             self._ensure_clean(repo_root)
             if any(stack['branch'] == request.draft_branch for stack in manifest['stacks']):
                 self._fail(f'draft branch is owned by another stack: {request.draft_branch}')
@@ -18394,6 +19702,7 @@ class SyncwheelRevisionBackend:
                 'stack': request.draft_stack_id,
                 'branch': request.draft_branch,
                 'product_commit': journal['productCommitSha'],
+                'paths': sorted(journal['productPathObjects']),
             }
             require_manifest_transaction_current(manifest_path)
             save_manifest(manifest_path, manifest)
@@ -18428,7 +19737,10 @@ class SyncwheelRevisionBackend:
                 self._fail(
                     f'ledger collision for revision-provider operation {request.operation_id}'
                 )
-        else:
+        resolve_common_derived_provenance(
+            repo_root, manifest, sorted(context['paths'])
+        )
+        if not matching:
             append_ledger_event(
                 repo_root, 'manifest_saved', desired_payload, manifest_path
             )
@@ -18474,19 +19786,36 @@ class SyncwheelRevisionBackend:
         self.verify_recovery_gate(request, journal)
         if ref_tip(repo_root, 'HEAD') != expected_head:
             self._fail('integration HEAD does not match the operation receipt')
-        status = git(
-            repo_root,
-            'status',
-            '--porcelain',
-            '--untracked-files=all',
-            env={'GIT_OPTIONAL_LOCKS': '0'},
-        ).stdout
-        if status.strip():
-            self._fail('revision-provider operation left repository changes behind')
+        if journal.get('projectionRoute') == 'derived':
+            if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+                self._fail('derived revision-provider operation left index changes behind')
+            outside = self._dirty_paths(repo_root) - {self.MANIFEST_PRODUCT_PATH}
+            if outside:
+                self._fail(
+                    'derived revision-provider operation left product changes behind: '
+                    + ', '.join(sorted(outside))
+                )
+        else:
+            status = git(
+                repo_root,
+                'status',
+                '--porcelain',
+                '--untracked-files=all',
+                env={'GIT_OPTIONAL_LOCKS': '0'},
+            ).stdout
+            if status.strip():
+                self._fail('revision-provider operation left repository changes behind')
         manifest, _ = self._manifest(repo_root)
         digest = manifest_digest(manifest)
-        if digest != journal['manifestDigest']:
-            self._fail('manifest digest does not match the operation receipt')
+        if (
+            journal.get('projectionRoute') != 'derived'
+            and digest != journal['manifestDigest']
+        ):
+            self.expire_manifest_invalidated(
+                request,
+                journal,
+                'manifest digest changed before terminal verification',
+            )
         validation = validate_manifest(repo_root, manifest)
         if validation['errors']:
             self._fail('post-operation Syncwheel validation failed: ' + '; '.join(validation['errors']))
@@ -18499,7 +19828,8 @@ class SyncwheelRevisionBackend:
             self._fail('operation changed a remote-tracking ref; publication is forbidden')
         if journal.get('productCommitSha'):
             expected_refs = self._expected_managed_refs(
-                request, journal, expected_head, draft_owned=True
+                request, journal, expected_head,
+                draft_owned=journal.get('projectionRoute') != 'derived',
             )
         else:
             expected_refs = self._expected_managed_refs(
@@ -18507,7 +19837,7 @@ class SyncwheelRevisionBackend:
             )
         self._assert_ref_leases(repo_root, expected_refs)
         expected_index = (
-            journal.get('controlIndexSha256')
+            (journal.get('controlIndexSha256') or journal.get('productIndexSha256'))
             if journal.get('productCommitSha')
             else journal['baselineIndexSha256']
         )
@@ -18536,6 +19866,34 @@ class SyncwheelRevisionBackend:
             self._fail('operation draft branch differs from its journaled object')
         return self._verify_invariants(
             repo_root, request, journal, journal['controlCommitSha']
+        )
+
+    def verify_derived_final(self, request, journal):
+        repo_root = self._repo_root(request)
+        manifest, manifest_path = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
+        if branch_exists(repo_root, request.draft_branch) or request.draft_stack_id in stack_map(manifest):
+            self._fail('derived projection must not create a draft ref or stack')
+        journal['manifestDigest'] = manifest_digest(manifest)
+        payload = {
+            'operation_id': request.operation_id,
+            'commit': journal['productCommitSha'],
+            'paths': sorted(journal['productPathObjects']),
+            'paths_digest': journal['derivedContentDigest'],
+            'composition_digest': journal['integrationCompositionDigest'],
+        }
+        matching = [
+            event for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'revision_provider_derived_commit'
+            and (event.get('payload') or {}).get('operation_id') == request.operation_id
+        ]
+        if matching and (len(matching) != 1 or matching[0].get('payload') != payload):
+            self._fail(f'ledger collision for derived revision-provider operation {request.operation_id}')
+        record_common_derived_provenance(repo_root, manifest, payload)
+        if not matching:
+            append_ledger_event(repo_root, 'revision_provider_derived_commit', payload, manifest_path)
+        return self._verify_invariants(
+            repo_root, request, journal, journal['productCommitSha']
         )
 
     def verify_no_repository_delta(self, request, journal):
@@ -18863,6 +20221,30 @@ def build_parser():
     coordination_disable_p = coordination_sub.add_parser('disable', parents=[common])
     coordination_disable_p.add_argument('-a', '--apply', action='store_true')
     coordination_disable_p.set_defaults(func=command_coordination_disable)
+
+    coordination_provenance_p = coordination_sub.add_parser(
+        'provenance',
+        help='manage the clone-local derived provenance store under the git common dir',
+    )
+    coordination_provenance_sub = coordination_provenance_p.add_subparsers(
+        dest='coordination_provenance_command', required=True
+    )
+    coordination_provenance_reset_p = coordination_provenance_sub.add_parser(
+        'reset',
+        parents=[common],
+        help='discard clone-local derived provenance the coordination snapshot supersedes',
+    )
+    coordination_provenance_reset_p.add_argument(
+        '--reason', required=True, help='recorded reason for discarding clone-local records'
+    )
+    coordination_provenance_reset_p.add_argument(
+        '--all',
+        action='store_true',
+        help='clear the whole store, including an unreadable one',
+    )
+    coordination_provenance_reset_p.set_defaults(
+        func=command_coordination_provenance_reset
+    )
 
     coordination_repair_p = coordination_sub.add_parser(
         'repair',
@@ -19417,6 +20799,10 @@ def build_parser():
 
     int_rebuild_p = int_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     add_rebuild_args(int_rebuild_p)
+    int_rebuild_p.add_argument(
+        '--reason',
+        help='required explanation when reconciling derived_paths narrowing',
+    )
     int_rebuild_p.set_defaults(func=command_int_rebuild)
 
     int_push_p = int_sub.add_parser('push', parents=[common])

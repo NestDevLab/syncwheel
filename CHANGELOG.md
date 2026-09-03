@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.42.0 - 2026-09-02
+
+- Project Agentwheel revision-provider commits authored on a declared
+  integration projection onto that exact integration tip, recording the
+  integration-first base explicitly on the resulting draft stack instead of
+  replaying conflicting lock changes against `origin/main`.
+- Expire manifest-invalidated pending provider receipts with one local ledger
+  event and the named remedy to run a new Agentwheel update; projection
+  conflicts now name both their paths and the base used.
+- Add manifest v3 `integration.derived_paths` and a verified Agentwheel
+  revision-provider route decision. A candidate whose product blobs reproduce
+  from the manifest base remains a draft stack; an allowed lock-only delta that
+  does not reproduce is a trailer-marked derived integration commit, never a
+  stack, draft ref, manifest mutation, or publication.
+- Classify only trailer-marked derived commits, require every declared
+  integration stack to be present, bind derived receipt recovery to the ordered
+  integration composition, and make expiration journal-first and ledger
+  idempotent. Conflict diagnostics use Git's name-only merge-tree output.
+- Make the persisted route and hook-validated candidate immutable across
+  recovery, keep manifest-base provider stacks landable despite their
+  manifest-only control commit, and return one terminal expiry result from
+  `check`, `preflight`, `finalize`, `recover`, and `release` as applicable.
+- Report `derived-projection-stale` with affected paths after rebuild, preserve
+  `derived_paths` through active-active coordination, and parse ownership only
+  from Git's actual trailer block. Accepted cost: a derived lock does not reach
+  `main` through Syncwheel until a later update qualifies for the
+  `manifest-base` route.
+- Route add, edit, and deletion by resulting blob equality, including an empty
+  projection, and read every Git path list as NUL-delimited data without
+  stripping significant line feeds or spaces.
+- Bind each derived commit to a second `Syncwheel-Derived-Paths` content trailer
+  and durable operation/commit/path provenance. Active-active snapshots carry
+  that provenance so fresh peers retain `derived-projection-stale` after a
+  rebuild; a mode-`0600`, atomically replaced and fsynced Git-common-dir store
+  carries unpublished provenance across linked worktrees, while the ledger is
+  an audit projection only.
+- Keep narrowed or empty `integration.derived_paths` loadable and report the
+  affected commits and paths as `derived-paths-narrowed`. Its named `int
+  rebuild --reason 'reconcile narrowed derived paths'` remedy drops excluded
+  derived commits and reconciles their provenance without disabling status,
+  planning, or integration push inspection.
+- Reject manifest-v2 coordination snapshots carrying derived provenance just
+  like local manifest loading, and turn a partial revision-provider journal
+  without valid `productPathObjects` into a named release-and-update recovery
+  error.
+- Treat the published coordination snapshot as the derived-provenance source and
+  the Git-common-dir store as a local cache of unpublished records. A cache entry
+  the snapshot has moved past is reported as `derived-provenance-diverged` by
+  `validate`, `status`, and `plan` and then ignored, instead of failing every
+  command that loads the manifest; two peers publishing the same declared path
+  set no longer leave either of them without a usable command.
+- Add `syncwheel coordination provenance reset --reason`, which discards the
+  superseded clone-local records, and `--all`, which clears an unreadable store,
+  both recording a `derived_provenance_reset` ledger event. Every provenance
+  write now rebinds to the snapshot observed at that moment, and collects the
+  temporary files a crash between write and rename would leave behind.
+- Document that the common store is neither cloned nor pushed: without
+  coordination a second clone sees the derived commit as unmapped, the landing
+  guard does not fire there, and the provider refuses that clone.
+
 ## 0.40.2 - 2026-09-02
 
 - Reap a registered lane with a missing path when its lease expired or its local

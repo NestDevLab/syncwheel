@@ -663,6 +663,203 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('validate', expected=0)
         self.assertIn('OK', result.stdout)
 
+    def test_derived_commit_is_classified_not_unmapped(self):
+        base = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'derived-base', base)
+        self.git('switch', '-q', '-c', 'derived-integration', 'derived-base')
+        manifest = self.read_manifest()
+        manifest['version'] = 3
+        manifest['repository_mode'] = 'delivery'
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest['integration'].update(
+            {
+                'branch': 'derived-integration',
+                'base': 'derived-base',
+                'strategy': 'cherry-pick',
+                'derived_paths': ['locks/'],
+            }
+        )
+        manifest['coordination'] = {
+            'mode': 'disabled',
+            'id': 'derived-classification',
+            'remote': manifest['defaults']['publication_remote'],
+            'state_branch': 'syncwheel/state/derived-classification',
+        }
+        manifest.setdefault('channels', [])
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: configure derived projections')
+        (self.repo / 'locks').mkdir()
+        (self.repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.git('add', 'locks/codex.lock')
+        module = self.load_syncwheel_module()
+        blob = self.git('rev-parse', ':locks/codex.lock')
+        paths_digest = module.derived_projection_paths_digest(
+            {'locks/codex.lock': blob}
+        )
+        self.git(
+            'commit', '-q', '-m', 'test: derived projection', '-m',
+            'Syncwheel-Derived-Projection: classified-derived\n'
+            f'Syncwheel-Derived-Paths: {paths_digest}',
+        )
+        derived = self.git('rev-parse', 'HEAD')
+        derived_record = {
+            'operation_id': 'classified-derived',
+            'commit': derived,
+            'paths': ['locks/codex.lock'],
+            'paths_digest': paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, derived_record
+        )
+        module.append_ledger_event(
+            self.repo, 'revision_provider_derived_commit', derived_record
+        )
+        (self.repo / 'locks' / 'path-only.lock').write_text('not derived\n')
+        self.git('add', 'locks/path-only.lock')
+        self.git('commit', '-q', '-m', 'test: path-only lock commit')
+        path_only = self.git('rev-parse', 'HEAD')
+        (self.repo / 'locks' / 'digest-mismatch.lock').write_text('not derived\n')
+        self.git('add', 'locks/digest-mismatch.lock')
+        digest_mismatch_blob = self.git(
+            'rev-parse', ':locks/digest-mismatch.lock'
+        )
+        digest_mismatch_paths_digest = module.derived_projection_paths_digest(
+            {'locks/digest-mismatch.lock': digest_mismatch_blob}
+        )
+        self.git(
+            'commit', '-q', '-m', 'test: mismatched derived digest', '-m',
+            'Syncwheel-Derived-Projection: mismatched-derived\n'
+            f"Syncwheel-Derived-Paths: {'0' * 64}",
+        )
+        digest_mismatch = self.git('rev-parse', 'HEAD')
+        mismatched_record = {
+            'operation_id': 'mismatched-derived',
+            'commit': digest_mismatch,
+            'paths': ['locks/digest-mismatch.lock'],
+            'paths_digest': digest_mismatch_paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, mismatched_record
+        )
+        module.append_ledger_event(
+            self.repo, 'revision_provider_derived_commit', mismatched_record
+        )
+        loaded, _ = module.load_manifest(self.repo)
+
+        validation = module.validate_manifest(self.repo, loaded)
+
+        self.assertEqual(validation['errors'], [])
+        with self.subTest(classification='complete'):
+            self.assertTrue(
+                module.is_derived_projection_commit(self.repo, loaded, derived)
+            )
+        with self.subTest(classification='path-only'):
+            self.assertFalse(
+                module.is_derived_projection_commit(self.repo, loaded, path_only)
+            )
+        with self.subTest(classification='content-bound'):
+            self.assertFalse(
+                module.is_derived_projection_commit(
+                    self.repo, loaded, digest_mismatch
+                )
+            )
+        self.assertEqual(
+            validation['details']['integration']['derived_commits'], [derived]
+        )
+        self.assertEqual(
+            validation['details']['integration']['unmapped_commits'],
+            [path_only, digest_mismatch],
+        )
+
+    def test_commit_changed_files_preserves_newline_and_leading_space(self):
+        paths = ['odd/line\nbreak.txt', ' leading.txt']
+        (self.repo / 'odd').mkdir()
+        for path in paths:
+            (self.repo / path).write_text(path + '\n')
+        self.git('add', '--', *paths)
+        self.git('commit', '-q', '-m', 'test: exact Git path parsing')
+        commit = self.git('rev-parse', 'HEAD')
+        module = self.load_syncwheel_module()
+
+        self.assertEqual(
+            set(module.commit_changed_files(self.repo, commit)),
+            set(paths),
+        )
+
+    def test_leading_space_path_cannot_be_stripped_into_a_derived_prefix(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        manifest['version'] = 3
+        manifest['repository_mode'] = 'delivery'
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest['integration'].update(
+            {
+                'branch': 'main',
+                'base': 'main^',
+                'strategy': 'cherry-pick',
+                'derived_paths': ['locks/'],
+            }
+        )
+        manifest['coordination'] = {
+            'mode': 'disabled',
+            'id': 'leading-space-classification',
+            'remote': manifest['defaults']['publication_remote'],
+            'state_branch': 'syncwheel/state/leading-space-classification',
+        }
+        manifest.setdefault('channels', [])
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: configure derived prefix')
+        actual_path = ' locks/leading.lock'
+        transformed_path = 'locks/leading.lock'
+        (self.repo / ' locks').mkdir()
+        (self.repo / actual_path).write_text('derived\n')
+        self.git('add', '--', actual_path)
+        malicious_digest = module.derived_projection_paths_digest(
+            {transformed_path: None}
+        )
+        self.git(
+            'commit',
+            '-q',
+            '-m',
+            'test: leading-space path',
+            '-m',
+            'Syncwheel-Derived-Projection: leading-space\n'
+            f'Syncwheel-Derived-Paths: {malicious_digest}',
+        )
+        commit = self.git('rev-parse', 'HEAD')
+        misleading_record = {
+            'operation_id': 'leading-space',
+            'commit': commit,
+            'paths': [transformed_path],
+            'paths_digest': malicious_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, misleading_record
+        )
+        module.append_ledger_event(
+            self.repo, 'revision_provider_derived_commit', misleading_record
+        )
+        loaded, _ = module.load_manifest(self.repo)
+
+        self.assertFalse(
+            module.is_derived_projection_commit(self.repo, loaded, commit)
+        )
+        self.assertIn(
+            commit,
+            module.validate_manifest(self.repo, loaded)['details']['integration'][
+                'unmapped_commits'
+            ],
+        )
+
     def test_plan_reports_no_actions_when_fixture_is_aligned(self):
         result = self.run_cli('plan', '--json', expected=0)
         data = json.loads(result.stdout)
