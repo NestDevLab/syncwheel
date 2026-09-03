@@ -11680,6 +11680,7 @@ def validate_coordination_publication_base(
     state_transition=None,
     remedy_stack=None,
     creation_remedy=False,
+    scope=None,
 ):
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
@@ -11934,12 +11935,21 @@ def validate_coordination_publication_base(
         return digest_form
 
     remote_tip = state.get('managed_refs', {}).get(integration_ref)
-    if integration_ref in changed_refs and remote_tip and not coordination_ref_is_safe_successor(
-        repo_root,
-        config,
-        integration_ref,
-        remote_tip,
-        manifest['integration']['branch'],
+    # A14: only int push and reconcile own publishing the integration branch.
+    # Any other operation that carries the ref into changed_refs (bootstrap
+    # housekeeping, a foreign clone's A10 onboarding rebuild) is not asking to
+    # replace the published tip with its own, so ancestry is irrelevant to it.
+    if (
+        coordination_scope_remedy(scope) in {'int push', 'reconcile --apply --push'}
+        and integration_ref in changed_refs
+        and remote_tip
+        and not coordination_ref_is_safe_successor(
+            repo_root,
+            config,
+            integration_ref,
+            remote_tip,
+            manifest['integration']['branch'],
+        )
     ):
         raise SyncwheelError(
             'local integration branch is not a safe successor of the published integration ref; '
@@ -12781,9 +12791,21 @@ def coordinated_publish_cycle(
             repo_root, manifest['integration']['branch']
         )
     integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
+    # A13: the trigger consults the published state, not only the local tree.
+    # A clone whose integration branch is merely stale (never synced, not
+    # diverged) must not re-bootstrap over a control manifest another clone
+    # already published; that expands claim_refs/observation_refs after this
+    # plan was reviewed and trips the "managed refs changed" guard below.
+    expected = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    integration_ref_published = (
+        (expected.get('state') or {}).get('managed_refs') or {}
+    ).get(integration_ref) is not None
     if (
         not dry_run
         and integration_tip
+        and not integration_ref_published
         and manifest_from_tree(
             repo_root, integration_tip, integration_manifest_path(repo_root)
         ) is None
@@ -12822,9 +12844,6 @@ def coordinated_publish_cycle(
     invalid = sorted(set(changed_refs) - set(managed))
     if invalid:
         raise SyncwheelError('coordinated publish received unmanaged refs: ' + ', '.join(invalid))
-    expected = read_remote_coordination_state(
-        repo_root, config, fetch=True, local_manifest_version=manifest['version']
-    )
     desired_manifest_digest = coordination_operation_manifest_digest(
         publication_manifest, repo_root
     )
@@ -12963,6 +12982,7 @@ def coordinated_publish_cycle(
         state_transition=state_transition,
         remedy_stack=remedy_stack,
         creation_remedy=creation_remedy,
+        scope=scope,
     )
     for ref, sha in changed_refs.items():
         if not sha:
@@ -20077,6 +20097,7 @@ def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
         {source_ref: planned_tip},
         remedy_stack=stack['id'],
         creation_remedy=True,
+        scope=f"create:{stack['id']}",
     )
     atomic_push_capability_probe(repo_root, config['remote'])
     return {
