@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.42.4 - 2026-09-03
+## 0.42.7 - 2026-09-03
 
 - Add the `state-digest-heal` coordination repair class for a manifest_digest
   that matches neither the raw control-manifest digest nor the legacy
@@ -19,6 +19,24 @@
   that also needs its own topology repaired is never healed alone (topology
   repair keeps priority), and an unreadable or missing registered tip stays a
   fatal error rather than a healing candidate.
+## 0.42.6 - 2026-09-03
+
+- Fix the GitHub adapter to read commit identities from the `authors[]` shape
+  returned by `gh pr view`, while preserving fail-closed records for unresolved
+  commit authors and supporting the legacy author shape.
+- Add regression coverage for resolved and unresolved commit author identities.
+
+## 0.42.5 - 2026-09-03
+
+- Add a private, clone-local GitHub PR merge policy with strict provenance
+  filters, dry-run/apply/clear CLI commands, and preservation of unrelated
+  profile keys.
+- Add the fixed `syncwheel-github` adapter and digest-bound
+  `stack merge-pr` plans with exact head pinning, review-only admin bypass,
+  CI/rules/thread gates, post-merge verification, idempotent reconciliation,
+  and ledger receipts.
+- Document the fail-closed merge contract and add focused policy, adapter,
+  preflight, and transaction tests.
 - Guard the shared primary checkout against manual integration commits and tracked
   changes before built-in mutations, with manifest-derived capture or queue remedies,
   a visible reasoned opt-out, persistent common-Git guard state, and fail-closed
