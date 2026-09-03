@@ -17,6 +17,45 @@ The AI agent owns:
 - deciding which exact stack revisions belong in a deployment channel and
   obtaining separate evidence for any external deployment
 
+## Ratified working rules (read this first)
+
+Ratified operating rules (MGT-0206). Rule 2 is the one a real incident violated by
+resolving a rebuild conflict with raw git instead of the documented path — the mechanism
+existed, it just was not prominent enough. Follow all four exactly.
+
+1. Never author or commit in the primary checkout; it stays on
+   `manifest.integration.branch`. Open a governed lane: `syncwheel worktree open <lane>
+   [--into <stack>] [--full]`. As of 0.42.4, where hooks are installed
+   (`syncwheel hooks install --apply`), a manual commit or unauthorized integration-ref
+   move in the primary is refused, and mutating commands refuse while it is dirty. The only
+   opt-out is a reasoned, ledgered disable: `syncwheel hooks remove --disable --reason
+   "<why>" --apply`.
+2. Never resolve a replay conflict with raw git. Take the retry the conflict names:
+   `syncwheel stack rebuild <id> --replay-mode desk`, then resolve through the manifest with
+   `syncwheel stack absorb <stack> [<path>...|--staged]` or `syncwheel stack
+   resolve-integration <stack> <resolved-commit>...`. A manual `git merge`/`git commit` on
+   integration is invisible to Syncwheel: the next rebuild reconstructs the branch from the
+   manifest's own commit projection and never consults that resolution, so the work is lost
+   and `reconcile` keeps refusing with the same conflict.
+3. Integration composition is declared and visible — inspect it with `syncwheel int show`
+   before testing there or blaming your own code. Add a stack with `syncwheel stack create
+   <id> [<commit-or-range>...] [--draft]` then `syncwheel int rebuild --reason "<why>"`;
+   remove one with `syncwheel stack close <id> --reason "<why>"` then the same rebuild.
+4. Every mutating command carries `--reason`; it is mandatory in `ai-managed` repositories
+   and already enforced on several commands individually (`int rebuild` when ai-managed,
+   `hooks remove --disable`, `worktree release`, `coordination provenance reset`). Pass it
+   always. It lands in the ledger with the actor and the exact command:
+   `syncwheel ledger show`.
+
+**When something looks wrong:** do not force a push, do not hand-edit the manifest or the
+coordination state, do not fall back to raw git. Re-observe and use the exact remedy the
+failing command names. For a managed ref that disagrees with the coordination state, the
+named repair classes are all `syncwheel coordination repair` (plan-first, then `--apply
+--plan-file <plan>`): default for a wrong recorded tip on an otherwise-correct ref (ref
+repair), `--freeze-backend tree-equivalent-state-cas` for same-tree/different-shape,
+`--freeze-backend fast-forward-state-cas` for an exact reviewed fast-forward, and
+`--freeze-backend state-digest-migration` for a pre-0.42.2 legacy-digest state.
+
 ## Recommended prompt flow
 
 A human should be able to write:
