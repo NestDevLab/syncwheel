@@ -2487,17 +2487,32 @@ def format_remedy_suffix(commands):
     return f'. Use: {"; ".join(commands)}' if commands else ''
 
 
-def ensure_clean_worktree(path, allowed_status_prefixes=None, remedy_commands=None):
+def status_line_paths(line):
+    if len(line) < 4:
+        return set()
+    payload = line[3:]
+    if ' -> ' in payload:
+        return {part.strip('"') for part in payload.split(' -> ')}
+    return {payload.strip('"')}
+
+
+def ensure_clean_worktree(
+    path, allowed_status_prefixes=None, remedy_commands=None, allowed_paths=None,
+):
     result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
     if result.returncode != 0:
         raise SyncwheelError(f'{path} is not a git worktree')
     allowed_status_prefixes = tuple(allowed_status_prefixes or [])
+    allowed_paths = set(allowed_paths or ())
     remaining = []
     for line in result.stdout.splitlines():
         entry = line.strip()
         if not entry:
             continue
         if allowed_status_prefixes and any(entry.startswith(prefix) for prefix in allowed_status_prefixes):
+            continue
+        paths = status_line_paths(line)
+        if allowed_paths and paths and paths <= allowed_paths:
             continue
         remaining.append(entry)
     if remaining:
@@ -2908,7 +2923,9 @@ def backup_branch_command(repo_root, branch, timestamp):
     return ['git', 'branch', backup_branch_name(branch, timestamp), branch]
 
 
-def ensure_in_place_target(repo_root, target_branch, manifest, stack_id=None):
+def ensure_in_place_target(
+    repo_root, target_branch, manifest, stack_id=None, allowed_paths=None,
+):
     remedies = primary_checkout_remedy_commands(manifest, stack_id=stack_id)
     current_branch = get_current_branch(repo_root)
     if current_branch != target_branch:
@@ -2916,7 +2933,9 @@ def ensure_in_place_target(repo_root, target_branch, manifest, stack_id=None):
             f'in-place materialization requires current branch {target_branch!r}; '
             f'current branch is {current_branch!r}' + format_remedy_suffix(remedies)
         )
-    ensure_clean_worktree(repo_root, remedy_commands=remedies)
+    ensure_clean_worktree(
+        repo_root, remedy_commands=remedies, allowed_paths=allowed_paths,
+    )
 
 
 def normalize_channel_timestamp(value, field):
@@ -4724,8 +4743,120 @@ def control_manifest_io_checkpoint(stage):
     return None
 
 
+def control_manifest_relative_path(repo_root):
+    return integration_manifest_path(repo_root).relative_to(
+        Path(repo_root).resolve()
+    ).as_posix()
+
+
+def control_manifest_source_allowance(repo_root, manifest_path):
+    """The integration control manifest is a rebuild input, never blocking dirt."""
+    if manifest_path is None or is_external_manifest_path(repo_root, manifest_path):
+        return set()
+    relative = control_manifest_relative_path(repo_root)
+    try:
+        actual = Path(manifest_path).resolve(strict=False).relative_to(
+            Path(repo_root).resolve()
+        ).as_posix()
+    except ValueError:
+        return set()
+    if actual != relative:
+        return set()
+    return {relative, Path(relative).parent.as_posix() + '/'}
+
+
+def control_manifest_checkout_obstruction(
+    repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
+):
+    """Name the checkout content a control-manifest alignment must not overwrite."""
+    integration_worktree = Path(integration_worktree).resolve()
+    status = git(
+        repo_root, '-C', str(integration_worktree), 'status', '--porcelain',
+        '--untracked-files=all',
+    ).stdout.splitlines()
+    if not status:
+        return None
+    expected_path = control_manifest_relative_path(repo_root)
+    material_status = [
+        line for line in status
+        if not line.startswith('?? ') or line[3:] == expected_path
+    ]
+    changed_paths = {line[3:] for line in material_status if len(line) >= 4}
+    index_tree = git(
+        repo_root, '-C', str(integration_worktree), 'write-tree'
+    ).stdout.strip()
+    worktree_manifest_path = integration_worktree / expected_path
+    try:
+        worktree_raw_manifest = json.loads(worktree_manifest_path.read_text())
+        worktree_manifest, _ = load_manifest(
+            integration_worktree, worktree_manifest_path
+        )
+    except FileNotFoundError:
+        worktree_raw_manifest = None
+        worktree_manifest = None
+    except (OSError, json.JSONDecodeError, SyncwheelError) as exc:
+        raise SyncwheelError(
+            'interrupted control-manifest checkout contains an unreadable manifest'
+        ) from exc
+    worktree_digests = {
+        manifest_digest(candidate)
+        for candidate in (worktree_raw_manifest, worktree_manifest)
+        if candidate is not None
+    }
+    replayed_manifest = manifest_from_tree(
+        repo_root, replay_tip, integration_manifest_path(repo_root)
+    )
+    replayed_digest = (
+        manifest_digest(replayed_manifest) if replayed_manifest is not None else None
+    )
+    allowed_index_trees = {
+        ref_tree(repo_root, replay_tip),
+        ref_tree(repo_root, control_commit),
+    }
+    allowed_worktree_digests = {expected_digest}
+    if replayed_digest is not None:
+        allowed_worktree_digests.add(replayed_digest)
+    worktree_manifest_is_allowed = (
+        bool(worktree_digests & allowed_worktree_digests)
+        or (not worktree_digests and replayed_digest is None)
+    )
+    blocking = sorted(changed_paths - {expected_path})
+    index_diverged = index_tree not in allowed_index_trees
+    manifest_diverged = not worktree_manifest_is_allowed
+    if not blocking and not index_diverged and not manifest_diverged:
+        return None
+    return {
+        'worktree': str(integration_worktree),
+        'paths': blocking,
+        'display': blocking or [expected_path],
+        'index_diverged': index_diverged,
+        'manifest_diverged': manifest_diverged,
+    }
+
+
+def control_manifest_obstruction_refusal(obstruction, command):
+    return (
+        f"integration checkout {obstruction['worktree']} carries changes the "
+        'control-manifest alignment must not overwrite ('
+        + ', '.join(obstruction['display'])
+        + '); the integration ref was not moved. Commit, stash or discard them '
+        f'there, then rerun: {command}'
+    )
+
+
+def control_manifest_obstruction_warning(obstruction, command):
+    return (
+        'the control manifest was persisted, but integration checkout '
+        f"{obstruction['worktree']} still carries uncommitted changes ("
+        + ', '.join(obstruction['display'])
+        + '); only the control manifest was aligned there. Commit, stash or '
+        f'discard them, then rerun: {command}'
+    )
+
+
 def align_control_manifest_worktree(
     repo_root, manifest, replay_tip, control_commit, expected_digest,
+    obstruction_state=None,
 ):
     """Align index/worktree to the control tree without ever moving its branch ref."""
     branch = manifest['integration']['branch']
@@ -4751,74 +4882,29 @@ def align_control_manifest_worktree(
             f'(observed {observed_tip or "absent"})',
             observed_tip,
         )
-    status = git(
-        repo_root, '-C', str(integration_worktree), 'status', '--porcelain',
-        '--untracked-files=all',
-    ).stdout.splitlines()
-    if status:
-        expected_path = integration_manifest_path(repo_root).relative_to(
-            Path(repo_root).resolve()
-        ).as_posix()
-        material_status = [
-            line for line in status
-            if not line.startswith('?? ') or line[3:] == expected_path
-        ]
-        changed_paths = {
-            line[3:] for line in material_status if len(line) >= 4
-        }
-        index_tree = git(
-            repo_root, '-C', str(integration_worktree), 'write-tree'
-        ).stdout.strip()
-        worktree_manifest_path = integration_worktree / expected_path
-        try:
-            worktree_raw_manifest = json.loads(worktree_manifest_path.read_text())
-            worktree_manifest, _ = load_manifest(
-                integration_worktree, worktree_manifest_path
-            )
-        except FileNotFoundError:
-            worktree_raw_manifest = None
-            worktree_manifest = None
-        except (OSError, json.JSONDecodeError, SyncwheelError) as exc:
-            raise SyncwheelError(
-                'interrupted control-manifest checkout contains an unreadable manifest'
-            ) from exc
-        worktree_digests = {
-            manifest_digest(candidate)
-            for candidate in (worktree_raw_manifest, worktree_manifest)
-            if candidate is not None
-        }
-        replayed_manifest = manifest_from_tree(
-            repo_root, replay_tip, integration_manifest_path(repo_root)
-        )
-        replayed_digest = (
-            manifest_digest(replayed_manifest) if replayed_manifest is not None else None
-        )
-        allowed_index_trees = {
-            ref_tree(repo_root, replay_tip),
-            ref_tree(repo_root, control_commit),
-        }
-        allowed_worktree_digests = {expected_digest}
-        if replayed_digest is not None:
-            allowed_worktree_digests.add(replayed_digest)
-        worktree_manifest_is_allowed = (
-            bool(worktree_digests & allowed_worktree_digests)
-            or (not worktree_digests and replayed_digest is None)
-        )
-        if (
-            changed_paths - {expected_path}
-            or index_tree not in allowed_index_trees
-            or not worktree_manifest_is_allowed
-        ):
-            raise SyncwheelError(
-                'integration checkout contains changes beyond an interrupted '
-                'control-manifest alignment; refusing checkout alignment'
-            )
-    # read-tree updates only this worktree's index and files. Unlike reset it
-    # cannot move the checked-out branch ref and therefore cannot undo a CAS.
-    git(
-        repo_root, '-C', str(integration_worktree),
-        'read-tree', '--reset', '-u', control_commit,
+    obstruction = control_manifest_checkout_obstruction(
+        repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
     )
+    if obstruction is None:
+        # read-tree updates only this worktree's index and files. Unlike reset it
+        # cannot move the checked-out branch ref and therefore cannot undo a CAS.
+        git(
+            repo_root, '-C', str(integration_worktree),
+            'read-tree', '--reset', '-u', control_commit,
+        )
+    else:
+        # The ref already carries the control commit, so the operation must end
+        # rather than stall: align the control manifest alone and leave every
+        # other path in the checkout to its owner. A checkout carrying a
+        # different manifest proposal keeps that file too.
+        if not obstruction['manifest_diverged']:
+            git(
+                repo_root, '-C', str(integration_worktree),
+                'checkout', control_commit, '--',
+                control_manifest_relative_path(repo_root),
+            )
+        if obstruction_state is not None:
+            obstruction_state.update(obstruction)
     observed_after = ref_tip(repo_root, integration_ref)
     if observed_after != control_commit:
         raise ControlManifestAlignmentDrift(
@@ -4905,6 +4991,24 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         # control commit with no local intent belongs to some other operation
         # and must never be claimed as this clone's persistence receipt.
         return False
+    if current_tip != control_commit:
+        # FC3: probe the checkout the alignment will touch before the intent and
+        # the CAS, so unrelated work there can never leave an advanced ref behind.
+        integration_worktree = find_worktree_for_branch(
+            repo_root, manifest['integration']['branch']
+        )
+        obstruction = (
+            control_manifest_checkout_obstruction(
+                repo_root, integration_worktree, replay_tip, control_commit,
+                expected_digest,
+            )
+            if integration_worktree else None
+        )
+        if obstruction is not None and obstruction['paths']:
+            raise SyncwheelError(control_manifest_obstruction_refusal(
+                obstruction,
+                pending_intent['payload']['command'] if pending_intent else command,
+            ))
     if pending_intent is not None:
         intent = pending_intent['payload']
         operation_id = intent['operation_id']
@@ -5002,9 +5106,11 @@ def _restore_control_manifest_after_integration_rebuild_locked(
             'Rerun the rebuild from a fresh plan'
         )
     control_manifest_io_checkpoint('ref_updated')
+    alignment_obstruction = {}
     try:
         integration_worktree = align_control_manifest_worktree(
-            repo_root, manifest, replay_tip, control_commit, expected_digest
+            repo_root, manifest, replay_tip, control_commit, expected_digest,
+            obstruction_state=alignment_obstruction,
         )
     except ControlManifestAlignmentDrift as exc:
         abandon_control_manifest_intent(
@@ -5047,6 +5153,12 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         ),
     )
     control_manifest_io_checkpoint('ledger_saved')
+    if alignment_obstruction:
+        print(
+            'warning: '
+            + control_manifest_obstruction_warning(alignment_obstruction, command),
+            file=sys.stderr,
+        )
     return True
 
 
@@ -5060,9 +5172,77 @@ def control_manifest_divergence_remedy(repo_root, manifest_path):
     return quoted(command)
 
 
+def resolve_superseded_control_manifest_intent(
+    repo_root, manifest_path, manifest, intent, branch, allow_new_operation,
+):
+    """Close an interrupted intent whose source already carries a newer proposal."""
+    source_manifest, _ = load_manifest(repo_root, manifest_path)
+    try:
+        source_file_manifest = json.loads(Path(manifest_path).read_text())
+    except FileNotFoundError:
+        source_file_manifest = None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(
+            f'control manifest source is unreadable: {manifest_path}'
+        ) from exc
+    if source_manifest is None and source_file_manifest is None:
+        return None
+    source_digest = (
+        manifest_digest(source_manifest) if source_manifest is not None else None
+    )
+    source_file_digest = (
+        manifest_digest(source_file_manifest)
+        if source_file_manifest is not None else None
+    )
+    if not {source_digest, source_file_digest}.isdisjoint({
+        intent.get('source_manifest_digest'),
+        intent.get('expected_manifest_digest'),
+    }):
+        return None
+    control_commit = intent['expected_control_commit']
+    replay_tip = intent.get('replay_tip')
+    current_tip = ref_tip(repo_root, f'refs/heads/{branch}')
+    proposal = source_manifest or manifest
+    if current_tip == control_commit:
+        # The CAS already landed, so the operation owes only its terminal
+        # record. Write it against the proposal the source now holds, so the
+        # newer declarations are never replaced by the interrupted one.
+        payload = control_manifest_event_payload(
+            repo_root, manifest_path, proposal, control_commit,
+            intent.get('replay_mode'), intent['reason'], intent['command'],
+            {
+                'replay_tip': replay_tip,
+                'persisted_manifest_digest': intent.get('expected_manifest_digest'),
+                'source_superseded': True,
+            },
+            operation_id=intent['operation_id'],
+        )
+        append_ledger_event(
+            repo_root,
+            'manifest_saved',
+            payload,
+            manifest_path,
+            idempotency_key=control_manifest_event_idempotency_key(
+                proposal, replay_tip, control_commit, intent['command'],
+                intent['operation_id'],
+            ),
+        )
+        return proposal
+    if allow_new_operation:
+        abandon_control_manifest_intent(
+            repo_root, manifest_path, intent, current_tip, 'superseded_local_proposal',
+        )
+        return proposal
+    raise SyncwheelError(
+        'control manifest changed after the interrupted persistence intent; '
+        'refusing to replace the newer local proposal. Review the proposal, then run: '
+        + control_manifest_divergence_remedy(repo_root, manifest_path)
+    )
+
+
 def recover_incomplete_control_manifest_persistence(
     repo_root, manifest_path, manifest, allow_new_operation=False,
-    recovery_state=None,
+    recovery_state=None, intents_only=False,
 ):
     """Recover ledger intent before relying on the ref subject or source file."""
     if recovery_state is not None:
@@ -5087,6 +5267,8 @@ def recover_incomplete_control_manifest_persistence(
             + (branch or str(manifest_path))
         )
     pending_intent = pending[0] if pending else None
+    if pending_intent is None and intents_only:
+        return manifest
     if pending_intent is not None:
         branch = pending_intent['payload'].get('integration_branch')
     if not branch:
@@ -5133,6 +5315,16 @@ def recover_incomplete_control_manifest_persistence(
                     f'control manifest intent {intent["operation_id"]} references an '
                     'invalid expected control object; refusing recovery'
                 )
+            superseded = resolve_superseded_control_manifest_intent(
+                repo_root, manifest_path, manifest, intent, branch, allow_new_operation,
+            )
+            if superseded is not None:
+                if recovery_state is not None:
+                    recovery_state.update({
+                        'recovered': True,
+                        'control_commit': control_commit,
+                    })
+                return superseded
             restore_control_manifest_after_integration_rebuild(
                 repo_root,
                 manifest_path,
@@ -12350,12 +12542,12 @@ def run_command_list(commands, repo_root, apply):
         print(quoted_with_env(env, effective_command))
 
 
-def ensure_non_in_place_target_clean(repo_root, branch, worktree):
+def ensure_non_in_place_target_clean(repo_root, branch, worktree, allowed_paths=None):
     if worktree is None:
         return
     path = Path(worktree).resolve()
     if worktree_matches_branch(repo_root, branch, path):
-        ensure_clean_worktree(path)
+        ensure_clean_worktree(path, allowed_paths=allowed_paths)
         current_branch = get_current_branch(path)
         if current_branch != branch:
             raise SyncwheelError(
@@ -17660,12 +17852,20 @@ def command_reconcile(args):
                     repo_root,
                     allowed_status_prefixes=['?? .syncwheel/'],
                     remedy_commands=primary_checkout_remedy_commands(manifest),
+                    allowed_paths=control_manifest_source_allowance(
+                        repo_root, manifest_path
+                    ),
                 )
                 worktree = None
                 in_place = True
             else:
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
-                ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
+                ensure_non_in_place_target_clean(
+                    repo_root, integration['branch'], worktree,
+                    allowed_paths=control_manifest_source_allowance(
+                        repo_root, manifest_path
+                    ),
+                )
                 in_place = False
             mode, worktree = select_replay_mode(
                 repo_root,
@@ -17958,16 +18158,24 @@ def command_int_rebuild(args):
         resolve_int_rebuild_location(repo_root, manifest, args),
         plumbing_supported=integration_supports_plumbing(manifest),
     )
+    source_allowance = control_manifest_source_allowance(repo_root, manifest_path)
     if not args.dry_run and mode == 'in-place':
-        ensure_in_place_target(repo_root, manifest['integration']['branch'], manifest)
+        ensure_in_place_target(
+            repo_root, manifest['integration']['branch'], manifest,
+            allowed_paths=source_allowance,
+        )
     if not args.dry_run and mode in ('ephemeral', 'plumbing'):
         ensure_non_in_place_target_clean(
             repo_root,
             manifest['integration']['branch'],
             find_worktree_for_branch(repo_root, manifest['integration']['branch']),
+            allowed_paths=source_allowance,
         )
     if not args.dry_run and mode == 'desk':
-        ensure_non_in_place_target_clean(repo_root, manifest['integration']['branch'], worktree)
+        ensure_non_in_place_target_clean(
+            repo_root, manifest['integration']['branch'], worktree,
+            allowed_paths=source_allowance,
+        )
     result = execute_replay(
         repo_root,
         replay_plan(
@@ -18035,15 +18243,16 @@ def command_int_push(args):
                 repo_root, manifest_path, manifest
             )
             replay_tip = ref_tip(repo_root, manifest['integration']['branch'])
-            restore_control_manifest_after_integration_rebuild(
-                repo_root,
-                manifest_path,
-                manifest,
-                replay_tip,
-                'control',
-                reason='publish integration control manifest',
-                command='syncwheel int push',
-            )
+            if replay_tip:
+                restore_control_manifest_after_integration_rebuild(
+                    repo_root,
+                    manifest_path,
+                    manifest,
+                    replay_tip,
+                    'control',
+                    reason='publish integration control manifest',
+                    command='syncwheel int push',
+                )
         integration = manifest['integration']
         config = coordination_config(manifest)
         coordinated_push_remote(args, config)
@@ -22291,15 +22500,19 @@ def command_self_mode(args):
     return 0
 
 
-def command_behavior_table():
-    """Single registry ready to absorb primary-checkout mutation behavior."""
+def entrypoint_behavior_table():
+    """Single registry for command and internal state-writer behavior."""
     table = {}
 
-    def register(functions, *, mutates='never', manifest_mutates='never', remedy=False):
+    def register(
+        functions, *, mutates='never', manifest_mutates='never', remedy=False,
+        command=True,
+    ):
         for function in functions:
             if function in table:
                 raise RuntimeError(f'duplicate command behavior: {function.__name__}')
             table[function] = {
+                'command': command,
                 'mutates': mutates,
                 'manifestMutates': manifest_mutates,
                 'primaryGuardRemedy': remedy,
@@ -22336,6 +22549,9 @@ def command_behavior_table():
         command_int_show,
         command_int_sync_status,
     ))
+    # The revision-provider command deliberately owns its narrower transaction
+    # inside the backend, after request and lease validation have completed.
+    register((command_revision_provider,), mutates='always', manifest_mutates='internal')
     register((
         command_repo_add,
         command_repo_set_manifest,
@@ -22354,21 +22570,24 @@ def command_behavior_table():
         command_stack_set,
         command_stack_resolve_integration,
         command_stack_add,
-        command_stack_capture_integration,
     ), mutates='always', manifest_mutates='always')
+    register(
+        (command_stack_capture_integration,),
+        mutates='always',
+        manifest_mutates='always',
+        remedy=True,
+    )
     register((
+        command_repo_tracking_set,
+        command_repo_authority_set,
         command_coordination_init,
         command_coordination_disable,
         command_coordination_compose,
-        command_manifest_require_integration,
-        command_repo_authority_set,
-        command_repo_tracking_set,
         command_reconcile,
         command_resume,
         command_sync,
         command_publish,
-        command_stack_classify_integration,
-        command_stack_land,
+        command_manifest_require_integration,
         command_channel_create,
         command_channel_add,
         command_channel_remove,
@@ -22380,6 +22599,8 @@ def command_behavior_table():
         command_channel_publish,
         command_channel_close,
         command_channel_reconcile_outcome,
+        command_stack_classify_integration,
+        command_stack_land,
     ), mutates='apply', manifest_mutates='apply')
     register((
         command_coordination_repair,
@@ -22391,25 +22612,53 @@ def command_behavior_table():
     register((
         command_self_update,
         command_self_install_hooks,
-    ), mutates='not-dry-run')
+    ), mutates='execute')
     register((
         command_int_align_remote,
-        command_int_push,
-        command_int_rebuild,
         command_stack_push,
-        command_stack_rebuild,
-    ), mutates='not-dry-run', manifest_mutates='execute')
+        command_int_rebuild,
+        command_int_push,
+    ), mutates='execute', manifest_mutates='execute')
+    register(
+        (command_stack_rebuild,),
+        mutates='execute',
+        manifest_mutates='update-manifest',
+    )
     register((command_self_mode,), mutates='mode')
     register((command_use,), mutates='profile-selection')
     register((command_replay_mode,), mutates='mode-or-clear')
-    register((command_init,), mutates='unless-stdout', manifest_mutates='init')
+    register((command_init,), mutates='init', manifest_mutates='init')
     register((command_journal_schedule,), mutates='schedule-apply')
     register((command_stack_git, command_int_git), mutates='git-passthrough')
-    # The revision-provider command deliberately owns its narrower transaction
-    # inside the backend, after request and lease validation have completed.
-    register((command_revision_provider,), mutates='always', manifest_mutates='internal')
-    register((SyncwheelRevisionBackend.ensure_stack_owned,), manifest_mutates='internal')
+    register(
+        (SyncwheelRevisionBackend.ensure_stack_owned,),
+        manifest_mutates='internal',
+        command=False,
+    )
     return table
+
+
+def command_behavior_table():
+    """Command-only projection of the authoritative entrypoint registry."""
+    return {
+        function: behavior
+        for function, behavior in entrypoint_behavior_table().items()
+        if behavior['command']
+    }
+
+
+def command_parser_nodes(parser):
+    stack = [parser]
+    seen = set()
+    while stack:
+        current = stack.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        yield current
+        for action in current._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                stack.extend(action.choices.values())
 
 
 def mutation_rule_requested(rule, args):
@@ -22570,10 +22819,12 @@ CONTROL_MANIFEST_RECOVERY_ENTRYPOINTS = {
 
 def recover_control_manifest_before_command(args):
     """Run FC4 recovery before an entrypoint can require its manifest source."""
-    if (
-        args.func not in CONTROL_MANIFEST_RECOVERY_ENTRYPOINTS
-        or bool(getattr(args, 'dry_run', False))
-    ):
+    if not hasattr(args, 'repo') or bool(getattr(args, 'dry_run', False)):
+        return None
+    entrypoint = args.func in CONTROL_MANIFEST_RECOVERY_ENTRYPOINTS
+    if not entrypoint and not manifest_mutation_requested(args):
+        # Every other manifest writer must still settle a pending intent before
+        # it replaces the source the interrupted operation was persisting.
         return None
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(
@@ -22592,6 +22843,7 @@ def recover_control_manifest_before_command(args):
             args.func == command_int_rebuild and bool(getattr(args, 'reason', None))
         ),
         recovery_state=recovery_state,
+        intents_only=not entrypoint,
     )
     args._control_manifest_recovery_state = recovery_state
     return recovered

@@ -15,6 +15,24 @@
   binds that digest and compares public topology snapshots structurally.
 - Derive the global manifest-write transaction from one statically checked
   saver registry, including repository authority and coordination compose.
+  Every parser command declares its behavior in that registry, and the
+  command table is a projection of it.
+- Publish the updated control commit from `stack push` as well, so the
+  integration ref advances whenever a stack push changes the manifest.
+- Probe the integration checkout before the control ref CAS: unrelated
+  uncommitted work there now refuses the command, names the checkout, the
+  paths and the command to rerun, and leaves the ref where it was. When the
+  same work appears after the CAS, the operation still finishes, aligns the
+  control manifest alone, and warns instead of leaving a pending intent.
+- Settle a pending control-manifest intent from any manifest writer, not only
+  from `stack push`, `int rebuild` and `int push`, so a later `stack create`
+  can no longer strand the delivery commands. A source that already carries a
+  newer proposal is kept: the interrupted operation is receipted when its
+  control commit is already on the ref, and `int rebuild --reason` abandons it
+  otherwise.
+- Accept a modified `.syncwheel/manifest.json` as rebuild input, so the
+  reviewed-proposal remedy named by a cross-clone divergence refusal can
+  actually run in the checkout that carries the divergence.
 
 ## 0.42.0 - 2026-09-02
 

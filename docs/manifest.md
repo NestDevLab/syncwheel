@@ -38,12 +38,26 @@ control commit learned from another clone never authorizes replacing a
 different local proposal. A receipt already durable at the crash boundary is
 not duplicated, while a later rebuild of the same deterministic SHA has a new
 operation ID and its own receipt.
+
+The integration checkout is probed before the intent and the CAS. Uncommitted
+work there that the alignment would overwrite refuses the command, names the
+checkout, the paths and the command to rerun, and moves nothing; work that
+appears only after the CAS lets the operation finish, aligns the control
+manifest path alone, and reports the rest as a warning.
+
+Any command that writes the manifest settles a pending intent first. When the
+source already holds a newer proposal, the interrupted operation is receipted
+if its control commit is already on the integration ref, and `int rebuild
+--reason` abandons it otherwise; the newer proposal is never replaced.
+
 External manifest files are written from the same desired in-memory manifest
 as the control commit. `int rebuild --reason TEXT` is required for an
 `ai-managed` repository and is the explicit path for adopting a reviewed local
-proposal after cross-clone divergence. This control commit is part of the
-integration projection and is recreated on later rebuilds; do not treat it as
-a stack-owned product commit.
+proposal after cross-clone divergence. That rebuild reads its own
+`.syncwheel/manifest.json` as input, so a divergent tracked manifest in the
+checkout does not block the remedy the refusal names. This control commit is
+part of the integration projection and is recreated on later rebuilds; do not
+treat it as a stack-owned product commit.
 
 ## Shape
 

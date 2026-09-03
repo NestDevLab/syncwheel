@@ -1453,7 +1453,7 @@ class DeploymentChannelTest(unittest.TestCase):
 
             registered = {
                 ('syncwheel', entrypoint.__qualname__)
-                for entrypoint, behavior in module.command_behavior_table().items()
+                for entrypoint, behavior in module.entrypoint_behavior_table().items()
                 if behavior['manifestMutates'] != 'never'
             }
             covered = set()

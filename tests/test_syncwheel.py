@@ -1,4 +1,6 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
 import shlex
@@ -5719,6 +5721,51 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             abandoned[0]['payload']['outcome'], 'checkout_alignment_ref_drift'
         )
 
+    def test_alignment_keeps_a_foreign_manifest_in_the_integration_checkout(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/foreign-checkout-manifest'
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        external = self.tmp / 'foreign-checkout-source.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        foreign = json.loads(json.dumps(desired))
+        foreign['defaults']['base_branch'] = 'foreign-local-proposal'
+        internal.write_text(json.dumps(foreign, indent=2) + '\n')
+        before = internal.read_bytes()
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, desired, parent
+        )
+
+        stderr = io.StringIO()
+        with module.manifest_write_transaction(self.repo, external):
+            with contextlib.redirect_stderr(stderr):
+                persisted = module.restore_control_manifest_after_integration_rebuild(
+                    self.repo, external, desired, parent, 'in-place',
+                    reason='keep a foreign checkout manifest',
+                    command='syncwheel int rebuild',
+                )
+
+        self.assertTrue(persisted)
+        self.assertIn('still carries uncommitted changes', stderr.getvalue())
+        self.assertEqual(internal.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', branch), control_commit)
+        self.assertEqual(
+            module.pending_control_manifest_intents(
+                module.load_ledger_events(self.repo, external)
+            ),
+            [],
+        )
+
     def test_control_manifest_recovery_requires_local_intent_for_external_proposal(self):
         module = self.load_syncwheel_module()
         internal = self.repo / '.syncwheel' / 'manifest.json'
@@ -5971,6 +6018,27 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertEqual(len({event['payload']['operation_id'] for event in receipts}), 2)
         self.assertEqual(len({event['idempotency_key'] for event in receipts}), 2)
+
+    def test_every_parser_command_declares_its_entrypoint_behavior(self):
+        module = self.load_syncwheel_module()
+        parser = module.build_parser()
+        table = module.entrypoint_behavior_table()
+        commands = module.command_behavior_table()
+        functions = set()
+        for node in module.command_parser_nodes(parser):
+            function = node.get_default('func')
+            if function is not None:
+                functions.add(function)
+
+        self.assertTrue(functions)
+        self.assertEqual(functions - set(table), set())
+        self.assertEqual(set(commands), functions)
+        for function in functions:
+            with self.subTest(command=function.__qualname__):
+                for rule in ('mutates', 'manifestMutates'):
+                    module.mutation_rule_requested(
+                        table[function][rule], SimpleNamespace()
+                    )
 
     def test_int_rebuild_is_classified_as_a_manifest_mutation(self):
         module = self.load_syncwheel_module()
