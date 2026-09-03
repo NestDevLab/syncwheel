@@ -137,14 +137,25 @@ Backfill uses create-only leases and never overwrites a foreign claim.
 `required` refuses published state that lists an owned source without a claim.
 Syncwheel covers concurrent Syncwheel commands, process death, ordinary Git on
 unowned refs, and arbitrary readers. It fails closed on a detectable CAS,
-ordering, intent, or recovery violation; forced/raw mutation of Syncwheel-owned
-refs and hostile remotes or hooks remain outside that guarantee.
+ordering, intent, or recovery violation, and it never leaves state that a retry
+of the recorded operation cannot resolve; forced/raw mutation of
+Syncwheel-owned refs and hostile remotes or hooks remain outside that guarantee.
 
 Every mutating coordinated publisher records a durable operation token before
 the atomic push. If process death occurs after remote success, the retry accepts
-only state and claims carrying that token and completes without republishing.
-Draft create uses the same token in its create intent and remote claim, and
-cleans up its token-derived temporary worktree registration on retry.
+only state and claims carrying that token and completes without republishing,
+including when later publications have moved the shared state on. Draft create
+uses the same token in its create intent and remote claim, and cleans up its
+token-derived temporary worktree registration on retry.
+
+A publication intent is always terminal. When the state tip it reviewed has been
+overtaken and its own claims are not on the remote, it can never satisfy its
+leases again: the next publication, `reconcile`, or `resume` records
+`coordination_publish_abandoned` for it and continues, and `stack promote`
+re-observes the state and republishes under a renewed plan. So a clone that lost
+a publication race, or died before its push, keeps publishing after a plain
+retry. An unreachable coordination remote during `stack push` or `int push`
+fails closed and names the retry command.
 
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:
@@ -387,8 +398,10 @@ between push and save recognizes its operation token in the tombstone and
 completes idempotently; an unreachable remote fails closed without changing the
 manifest, including during recovery. If a later create has advanced the claim,
 the old close is terminalized as `close_superseded` and cannot close the new
-generation. `stack close --reason absorbed` first fetches and records the observed
-delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
+generation. A close whose tombstone already landed completes from its intent
+even when unrelated publications have advanced the state, instead of publishing
+a second tombstone. `stack close --reason absorbed` first fetches and records
+the observed delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
 path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
 
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a

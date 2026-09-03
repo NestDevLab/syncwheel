@@ -57,13 +57,21 @@ do not repeat the push. Create propagates its `stack_create_intent` token into
 the claim and removes only the deterministic temporary worktree owned by that
 generation.
 
+When that evidence does not exist and the reviewed state tip has been overtaken,
+the intent is dead: record `coordination_publish_abandoned` and continue rather
+than freezing on it. Never leave a publish intent that no command can
+terminalize, and never let a foreign pending intent be the reason an unrelated
+publication cannot run.
+
 For draft close, the order is intent, remote tombstone claim plus state CAS,
 local manifest save, terminal event. Do not reintroduce remote observations
 around the filesystem save: they cannot make that boundary atomic. A retry may
 complete only when the remote tombstone contains its exact operation token.
 If the claim has advanced, record `close_superseded` and stop without applying
-the old close to the current generation. Remote failure during either the first
-attempt or recovery must name the same remote-first retry command.
+the old close to the current generation; decide that from the claim of that
+generation, never from a state tip that unrelated publications also move.
+Remote failure during either the first attempt or recovery must name the same
+remote-first retry command.
 
 For channels, inspect `channel contract`, `channel list`, `channel show`, and
 `channel diff` first. Every mutation previews a `channelPlan`; repeat the same

@@ -90,6 +90,22 @@ if checkpoint == 'authorized_push':
             os.kill(os.getpid(), signal.SIGKILL)
         return result
     module.run_authorized_push = killed
+elif checkpoint.startswith('ledger_event:'):
+    wanted = checkpoint.split(':', 1)[1]
+    original = module.append_ledger_event
+    def killed(repo_root, event_type, payload, manifest_path=None):
+        result = original(repo_root, event_type, payload, manifest_path)
+        if event_type == wanted:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    module.append_ledger_event = killed
+elif checkpoint == 'publish_intent':
+    original = module.begin_coordination_publication
+    def killed(*call_args, **call_kwargs):
+        result = original(*call_args, **call_kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    module.begin_coordination_publication = killed
 elif checkpoint == 'worktree_add':
     original = module.git
     def killed(repo_root, *git_args, **kwargs):
@@ -155,6 +171,21 @@ module.main()
         self.git(path, 'config', 'user.name', f'Syncwheel {name}')
         self.git(path, 'config', 'user.email', f'syncwheel-{name}@example.com')
         return path
+
+    def mirror_coordinated_clone(self, origin, source, name, branches):
+        """A second clone of the same git-tracked manifest, as another agent sees it."""
+        repo = self.clone(origin, name)
+        (repo / '.syncwheel').mkdir(parents=True, exist_ok=True)
+        (repo / '.syncwheel' / 'manifest.json').write_text(
+            (source / '.syncwheel' / 'manifest.json').read_text()
+        )
+        self.disable_fixture_hooks(repo)
+        for branch in branches:
+            self.git(
+                repo, 'fetch', '-q', str(source),
+                f'refs/heads/{branch}:refs/heads/{branch}',
+            )
+        return repo
 
     def init_coordinated(self, repo, integration='integration/shared', integration_membership='legacy'):
         self.git(repo, 'branch', integration, 'origin/main')
@@ -3824,3 +3855,279 @@ module.main()
             and event['payload'].get('scope') == 'partial'
         ]
         self.assertTrue(completed[-1]['recovered'])
+
+    def test_a_lost_publish_race_leaves_the_clone_able_to_publish(self):
+        origin = self.create_remote('round7-push-race')
+        loser = self.clone(origin, 'round7-push-race-loser')
+        self.init_coordinated(loser)
+        self.run_cli(loser, 'int', 'push')
+        source = self.commit_on_branch(loser, 'pr/race', 'race.txt')
+        self.run_cli(
+            loser, 'stack', 'create', 'race', source, '--branch', 'pr/race'
+        )
+        winner = self.mirror_coordinated_clone(
+            origin, loser, 'round7-push-race-winner',
+            ['integration/shared', 'pr/race'],
+        )
+        module = self.load_module()
+        real_read = module.read_remote_coordination_state
+        reads = []
+
+        def read_then_lose_the_race(*call_args, **call_kwargs):
+            observed = real_read(*call_args, **call_kwargs)
+            reads.append(observed['tip'])
+            if len(reads) == 1:
+                self.run_cli(winner, 'stack', 'push', 'race')
+            return observed
+
+        push_args = SimpleNamespace(
+            repo=str(loser), manifest=None, personal=None, stack='race',
+            remote=None, dry_run=False, git_args=[], force_with_lease=False,
+            command='stack',
+        )
+        with mock.patch.object(
+            module, 'read_remote_coordination_state',
+            side_effect=read_then_lose_the_race,
+        ):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'remote state changed after the reviewed plan'
+            ):
+                module.command_stack_push(push_args)
+
+        self.run_cli(loser, 'int', 'push')
+        abandoned = [
+            event['payload'] for event in module.load_ledger_events(loser)
+            if event['type'] == 'coordination_publish_abandoned'
+        ]
+        self.assertEqual(abandoned[-1]['scope'], 'stack:race')
+        self.assertEqual(abandoned[-1]['reason'], 'superseded')
+        self.run_cli(loser, 'stack', 'push', 'race')
+        _, state = self.remote_state(origin)
+        self.assertEqual(
+            state['managed_refs']['refs/heads/pr/race'],
+            self.git(loser, 'rev-parse', 'pr/race').stdout.strip(),
+        )
+
+    def test_promote_intent_killed_before_the_push_survives_a_foreign_publish(self):
+        origin = self.create_remote('round7-promote-superseded')
+        repo = self.clone(origin, 'round7-promote-superseded')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'scratch/promote-superseded', 'promote-superseded.txt'
+        )
+        self.run_cli(
+            repo, 'stack', 'create', 'promote-superseded', source, '--draft'
+        )
+        other = self.mirror_coordinated_clone(
+            origin, repo, 'round7-promote-superseded-other',
+            ['integration/shared', 'syncwheel/draft/promote-superseded'],
+        )
+        self.run_cli_sigkill_after(
+            repo, 'publish_intent', 'stack', 'promote', 'promote-superseded'
+        )
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/promote-superseded').stdout.strip(),
+            '',
+        )
+        before_state, _ = self.remote_state(origin)
+        self.run_cli(other, 'int', 'push')
+        self.assertNotEqual(self.remote_state(origin)[0], before_state)
+
+        self.run_cli(repo, 'stack', 'promote', 'promote-superseded')
+
+        module = self.load_module()
+        abandoned = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_abandoned'
+        ]
+        self.assertEqual(abandoned[-1]['scope'], 'promote:promote-superseded')
+        self.assertEqual(abandoned[-1]['reason'], 'superseded')
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(
+            item for item in saved['stacks'] if item['id'] == 'promote-superseded'
+        )
+        self.assertEqual(promoted['branch'], 'pr/promote-superseded')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+        _, state = self.remote_state(origin)
+        self.assertIn('refs/heads/pr/promote-superseded', state['managed_refs'])
+
+    def test_published_intent_completes_after_unrelated_local_manifest_work(self):
+        origin = self.create_remote('round7-already-published')
+        repo = self.clone(origin, 'round7-already-published')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/landed', 'landed.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'landed', source, '--branch', 'pr/landed'
+        )
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'push', 'landed'
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref('refs/heads/pr/landed')
+        before = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        follow_up = self.commit_on_branch(repo, 'scratch/follow-up', 'follow-up.txt')
+        self.run_cli(repo, 'stack', 'add', 'landed', follow_up)
+        intent = next(
+            event['payload'] for event in reversed(module.load_ledger_events(repo))
+            if event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('scope') == 'stack:landed'
+        )
+
+        self.run_cli(repo, 'stack', 'push', 'landed')
+
+        completed = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_completed'
+            and event['payload'].get('operation_token') == intent['operation_token']
+        ]
+        self.assertEqual(completed[-1]['coordination_status'], 'already_published')
+        self.assertNotEqual(
+            self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0], before
+        )
+
+    def test_close_retry_completes_after_an_unrelated_publication(self):
+        origin = self.create_remote('round7-close-unrelated')
+        closer = self.clone(origin, 'round7-close-unrelated-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'scratch/close-quiet', 'close-quiet.txt')
+        self.run_cli(closer, 'stack', 'create', 'close-quiet', source, '--draft')
+        self.run_cli_sigkill_after(
+            closer, 'authorized_push', 'stack', 'close', 'close-quiet', '--force'
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref(
+            'refs/heads/syncwheel/draft/close-quiet'
+        )
+        before = self.git(closer, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        before_state, published = self.remote_state(origin)
+        other = self.mirror_coordinated_clone(
+            origin, closer, 'round7-close-unrelated-other', ['integration/shared'],
+        )
+        other_manifest, other_path = module.load_manifest(other)
+        module.save_manifest(
+            other_path,
+            module.apply_coordination_snapshot(other_manifest, published['manifest']),
+        )
+        unrelated = self.commit_on_branch(other, 'scratch/unrelated', 'unrelated.txt')
+        self.run_cli(other, 'stack', 'create', 'unrelated', unrelated, '--draft')
+        self.assertNotEqual(self.remote_state(origin)[0], before_state)
+
+        self.run_cli(closer, 'stack', 'close', 'close-quiet', '--force')
+
+        self.assertEqual(
+            self.git(closer, 'ls-remote', 'origin', claim_ref).stdout.split()[0], before
+        )
+        saved = json.loads((closer / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('close-quiet', [item['id'] for item in saved['stacks']])
+        self.assertFalse([
+            event for event in module.load_ledger_events(closer)
+            if event['type'] == 'stack_close_abandoned'
+            and event['payload'].get('stack') == 'close-quiet'
+        ])
+
+    def test_stack_push_remote_failure_names_a_retry_command(self):
+        origin = self.create_remote('round7-push-unreachable')
+        repo = self.clone(origin, 'round7-push-unreachable')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/unreachable', 'unreachable.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'unreachable', source,
+            '--branch', 'pr/unreachable',
+        )
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'push', 'unreachable'
+        )
+        self.git(repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git'))
+
+        failure = self.run_cli(repo, 'stack', 'push', 'unreachable', expected=2)
+
+        self.assertIn('could not inspect the coordination remote', failure.stderr)
+        self.assertIn('syncwheel stack push unreachable', failure.stderr)
+
+    def test_reconcile_refuses_a_pending_intent_from_another_operation(self):
+        origin = self.create_remote('round7-reconcile-fingerprint')
+        repo = self.clone(origin, 'round7-reconcile-fingerprint')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/fingerprint', 'fingerprint.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'fingerprint', source,
+            '--branch', 'pr/fingerprint',
+        )
+        self.run_cli(repo, 'stack', 'push', 'fingerprint')
+        module = self.load_module()
+        _manifest, manifest_path = module.load_manifest(repo)
+        module.append_ledger_event(
+            repo,
+            'coordination_publish_intent',
+            {
+                'coordination_id': 'default',
+                'scope': 'partial',
+                'projection_status': 'partial',
+                'changed_refs': {
+                    'refs/heads/pr/fingerprint': module.ref_tip(
+                        repo, 'integration/shared'
+                    )
+                },
+                'fingerprint': 'not-the-current-operation',
+                'operation_token': 'foreign-reconcile-token',
+                'expected_coordination_state_tip': self.remote_state(origin)[0],
+            },
+            manifest_path,
+        )
+        published = self.remote_state(origin)[1]['managed_refs'][
+            'refs/heads/pr/fingerprint'
+        ]
+
+        failure = self.run_cli(
+            repo, 'reconcile', '--apply', '--push', '--stack', 'fingerprint',
+            '--skip-integration', '--rebuild', 'none', expected=2,
+        )
+
+        self.assertIn(
+            'no longer matches its pending coordinated publication intent',
+            failure.stderr,
+        )
+        self.assertEqual(
+            self.remote_state(origin)[1]['managed_refs']['refs/heads/pr/fingerprint'],
+            published,
+        )
+
+    def test_close_before_its_tombstone_survives_an_unrelated_publication(self):
+        origin = self.create_remote('round7-close-pre-tombstone')
+        closer = self.clone(origin, 'round7-close-pre-tombstone-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'scratch/close-early', 'close-early.txt')
+        self.run_cli(closer, 'stack', 'create', 'close-early', source, '--draft')
+        other = self.mirror_coordinated_clone(
+            origin, closer, 'round7-close-pre-tombstone-other',
+            ['integration/shared', 'syncwheel/draft/close-early'],
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref(
+            'refs/heads/syncwheel/draft/close-early'
+        )
+        self.run_cli_sigkill_after(
+            closer, 'ledger_event:stack_close_intent',
+            'stack', 'close', 'close-early', '--force',
+        )
+        before = self.git(closer, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        before_state, _ = self.remote_state(origin)
+        self.run_cli(other, 'int', 'push')
+        self.assertNotEqual(self.remote_state(origin)[0], before_state)
+
+        self.run_cli(closer, 'stack', 'close', 'close-early', '--force')
+
+        saved = json.loads((closer / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('close-early', [item['id'] for item in saved['stacks']])
+        after = self.git(closer, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        self.assertNotEqual(after, before)
+        self.git(closer, 'fetch', '-q', 'origin', claim_ref)
+        self.assertTrue(
+            module.coordination_claim_from_commit(closer, after)['closed']
+        )
