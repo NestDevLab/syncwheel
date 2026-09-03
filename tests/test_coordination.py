@@ -38,12 +38,33 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         shutil.rmtree(self.tmp)
 
     def git(self, repo, *args, expected=0):
+        manifest_path = Path(repo) / '.syncwheel' / 'manifest.json'
+        preserved_manifest = None
+        if args and args[0] == 'switch' and manifest_path.exists():
+            # Fixture-only Git switches create product history. Preserve the
+            # local control source while branches differ on whether it is
+            # tracked by the integration control commit.
+            preserved_manifest = manifest_path.read_bytes()
+            tracked = subprocess.run(
+                ['git', 'ls-files', '--error-unmatch', '--', '.syncwheel/manifest.json'],
+                cwd=repo, text=True, capture_output=True,
+            ).returncode == 0
+            if tracked:
+                subprocess.run(
+                    ['git', 'checkout', '--', '.syncwheel/manifest.json'],
+                    cwd=repo, check=True, capture_output=True, text=True,
+                )
+            else:
+                manifest_path.unlink()
         result = subprocess.run(
             ['git', *args],
             cwd=repo,
             text=True,
             capture_output=True,
         )
+        if preserved_manifest is not None:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_bytes(preserved_manifest)
         if result.returncode != expected:
             raise AssertionError(
                 f"git {args} expected {expected}, got {result.returncode}\n"
@@ -314,7 +335,9 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'remote_state': remote_state,
             'orphan_tip': orphan_tip,
             'new_tip': new_tip,
-            'integration_tip': integration_commits[-1],
+            'integration_tip': base_state['managed_refs'][
+                'refs/heads/integration/shared'
+            ],
             'integration_commits': integration_commits,
             'plan': plan,
             'proposed': proposed,
@@ -390,6 +413,14 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.init_coordinated(first)
         self.run_cli(first, 'int', 'push')
         first_tip, first_state = self.remote_state(origin)
+        module = self.load_module()
+        integration_ref = 'refs/heads/integration/shared'
+        integration_tip = first_state['managed_refs'][integration_ref]
+        committed_manifest = json.loads(
+            self.git(
+                first, 'show', f'{integration_tip}:.syncwheel/manifest.json'
+            ).stdout
+        )
 
         self.assertIsNone(first_state['parent_state'])
         self.assertEqual(first_state['publication_scope'], 'integration')
@@ -400,6 +431,14 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertNotIn('syncwheel-first@example.com', serialized)
         self.assertNotIn('syncwheel_worktree_root', serialized)
         self.assertNotIn('syncwheel_tracking', first_state['manifest'])
+        self.assertEqual(
+            first_state['manifest_digest'],
+            module.manifest_digest(committed_manifest),
+        )
+        self.assertNotEqual(
+            first_state['manifest_digest'],
+            module.canonical_json_digest(first_state['manifest']),
+        )
         identity = subprocess.run(
             ['git', '--git-dir', str(origin), 'show', '-s', '--format=%an <%ae>|%cn <%ce>', first_tip],
             text=True,
@@ -517,7 +556,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(restored['coordination']['remote'], 'alice-laptop')
         self.assertEqual(restored['stacks'][0]['target_remote'], 'alice-laptop')
 
-    def test_published_state_keeps_the_legacy_coordination_snapshot_and_digest(self):
+    def test_coordination_manifest_digest_uses_the_full_control_manifest(self):
         module = self.load_module()
         manifest = {
             'version': 2,
@@ -560,7 +599,42 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         )
         self.assertEqual(
             module.coordination_manifest_digest(manifest),
-            'c96c05ff86ecd527db0ec077d8efbe457db0659f69bf108315dd28fecd10b38b',
+            module.manifest_digest(manifest),
+        )
+        self.assertNotEqual(
+            module.coordination_manifest_digest(manifest),
+            module.canonical_json_digest(snapshot),
+        )
+
+    def test_state_digest_fetch_accepts_historical_integration_tip_object(self):
+        module = self.load_module()
+        tip = 'a' * 40
+        committed = {'version': 2, 'integration': {'branch': 'integration/shared'}}
+        state = {
+            'manifest': {'integration': {'branch': 'integration/shared'}},
+            'managed_refs': {'refs/heads/integration/shared': tip},
+        }
+        fetched = SimpleNamespace(returncode=0)
+
+        with mock.patch.object(
+            module, 'commit_exists', side_effect=[False, True],
+        ), mock.patch.object(
+            module, 'git', return_value=fetched,
+        ) as git_call, mock.patch.object(
+            module, 'manifest_from_tree', return_value=committed,
+        ):
+            observed = module.coordination_state_manifest_digest(
+                self.tmp, state, 'origin'
+            )
+
+        self.assertEqual(observed, module.manifest_digest(committed))
+        git_call.assert_called_once_with(
+            self.tmp,
+            'fetch',
+            '--quiet',
+            'origin',
+            'refs/heads/integration/shared',
+            check=False,
         )
 
     def test_v2_manifest_and_snapshot_both_reject_derived_provenance(self):
@@ -2162,7 +2236,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
     def test_compose_is_digest_bound_and_rejects_non_additive_or_drifted_inputs(self):
         fixture = self.prepare_additive_compose('compose-drift')
         module = fixture['module']
-        with self.assertRaisesRegex(module.SyncwheelError, 'snapshot digest does not match'):
+        with self.assertRaisesRegex(module.SyncwheelError, 'manifest digest does not match'):
             module.coordination_compose_stack_plan(
                 fixture['repo'],
                 fixture['manifest'],

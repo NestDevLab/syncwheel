@@ -1,3 +1,4 @@
+import ast
 import importlib.util
 import contextlib
 import json
@@ -35,6 +36,10 @@ class DeploymentChannelTest(unittest.TestCase):
         self.b = self.make_stack('b', 'b.txt', 'b one\n')
         self.git('switch', '-q', '-c', 'main-integration', 'main')
         self.write_manifest(version=2)
+        # Coordination state now binds the manifest carried by the exact
+        # integration tip, so channel fixtures must start from that invariant.
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: persist integration control manifest')
         self.cli(
             'hooks', 'remove', '--disable',
             '--reason', 'channel fixture uses raw primary branch setup', '--apply',
@@ -44,9 +49,30 @@ class DeploymentChannelTest(unittest.TestCase):
         self.temp.cleanup()
 
     def git(self, *args, check=True):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        preserved_manifest = None
+        if args and args[0] == 'switch' and manifest_path.exists():
+            # Raw branch switches in these fixtures are product-history setup,
+            # not control-manifest operations. Preserve the local control source
+            # while Git changes whether that path is tracked on the target.
+            preserved_manifest = manifest_path.read_bytes()
+            tracked = subprocess.run(
+                ['git', 'ls-files', '--error-unmatch', '--', '.syncwheel/manifest.json'],
+                cwd=self.repo, text=True, capture_output=True,
+            ).returncode == 0
+            if tracked:
+                subprocess.run(
+                    ['git', 'checkout', '--', '.syncwheel/manifest.json'],
+                    cwd=self.repo, check=True, capture_output=True, text=True,
+                )
+            else:
+                manifest_path.unlink()
         result = subprocess.run(
             ['git', *args], cwd=self.repo, text=True, capture_output=True
         )
+        if preserved_manifest is not None:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_bytes(preserved_manifest)
         if check and result.returncode:
             self.fail(result.stderr)
         return result.stdout.strip()
@@ -1309,45 +1335,49 @@ class DeploymentChannelTest(unittest.TestCase):
 
     def test_every_existing_delivery_manifest_writer_joins_global_lock(self):
         module = self.load_module()
-        always = (
-            module.command_stack_close,
-            module.command_stack_create,
-            module.command_stack_promote,
-            module.command_stack_demote,
-            module.command_stack_sync,
-            module.command_stack_absorb,
-            module.command_stack_set,
-            module.command_stack_resolve_integration,
-            module.command_stack_add,
-            module.command_stack_capture_integration,
-        )
-        for func in always:
-            with self.subTest(func=func.__name__):
-                self.assertTrue(module.manifest_mutation_requested(mock.Mock(func=func)))
-        gated = (
-            module.command_coordination_init,
-            module.command_coordination_disable,
-            module.command_manifest_require_integration,
-            module.command_repo_tracking_set,
-            module.command_reconcile,
-            module.command_resume,
-            module.command_sync,
-            module.command_publish,
-        )
-        for func in gated:
-            with self.subTest(func=func.__name__):
-                self.assertTrue(module.manifest_mutation_requested(
-                    mock.Mock(func=func, apply=True)
-                ))
-                self.assertFalse(module.manifest_mutation_requested(
-                    mock.Mock(func=func, apply=False)
-                ))
-        self.assertTrue(module.manifest_mutation_requested(
-            mock.Mock(func=module.command_stack_rebuild, update_manifest=True)
-        ))
-        self.assertFalse(module.manifest_mutation_requested(
-            mock.Mock(func=module.command_stack_rebuild, update_manifest=False)
-        ))
+        tree = ast.parse(CLI.read_text())
+        functions = {
+            node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        calls = {
+            name: {
+                child.func.id
+                for child in ast.walk(node)
+                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+            }
+            for name, node in functions.items()
+        }
+
+        def reaches_saver(name, trail=()):
+            if name in trail:
+                return False
+            for callee in calls.get(name, set()):
+                if callee in {'save_manifest', 'append_ledger_event'}:
+                    return True
+                if callee in functions and reaches_saver(callee, (*trail, name)):
+                    return True
+            return False
+
+        statically_derived = {
+            name for name in functions
+            if name.startswith('command_') and reaches_saver(name)
+        }
+        registered = {
+            command.__name__ for command in module.MANIFEST_SAVER_COMMANDS
+        }
+        self.assertEqual(registered, statically_derived)
+        for command in (
+            module.command_repo_authority_set,
+            module.command_coordination_compose,
+        ):
+            with self.subTest(command=command.__name__):
+                self.assertTrue(module.manifest_mutation_requested(mock.Mock(
+                    func=command, apply=True,
+                )))
+                self.assertFalse(module.manifest_mutation_requested(mock.Mock(
+                    func=command, apply=False,
+                )))
 
     def test_old_git_uses_ephemeral_materialization_fallback(self):
         self.create(stacks=('a',))

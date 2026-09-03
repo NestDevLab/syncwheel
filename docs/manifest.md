@@ -18,11 +18,14 @@ including when `--manifest` names an external file. It creates a
 The object is verified before an exact ref CAS, so hooks and staged files cannot
 alter it. Its identity and dates are inherited deterministically from the replay
 parent; the same parent and manifest produce the same SHA. After the ref moves,
-the manifest source is saved and the ledger receipt records the actual SHA,
-digest, actor, reason, command, and replay mode. `int rebuild --reason TEXT` is
-required for an `ai-managed` repository. This control commit is part of the
-integration projection and is recreated on later rebuilds; do not treat it as a
-stack-owned product commit.
+the checked-out branch and manifest source are aligned before a keyed ledger
+receipt records the actual SHA, digest, actor, reason, command, and replay mode.
+A retry recognizes an already-moved ref and completes those remaining stages;
+an event already durable at the crash boundary is not duplicated. External
+manifest files are written from the same desired in-memory manifest as the
+control commit. `int rebuild --reason TEXT` is required for an `ai-managed`
+repository. This control commit is part of the integration projection and is
+recreated on later rebuilds; do not treat it as a stack-owned product commit.
 
 ## Shape
 

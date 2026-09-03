@@ -7,6 +7,14 @@
   manifest when the rebuild itself replaces it. The manifest-only control
   commit is built deterministically with an isolated index, verified before
   its integration ref CAS, and recorded with actor, command, and reason.
+- Finish control-manifest persistence idempotently after a crash: align a
+  checked-out integration branch after the ref CAS, rewrite external sources
+  from the same desired manifest, and deduplicate the durable ledger receipt.
+- Publish one manifest digest in coordination state: the canonical digest of
+  `.syncwheel/manifest.json` on the recorded integration tip. Additive compose
+  binds that digest and compares public topology snapshots structurally.
+- Derive the global manifest-write transaction from one statically checked
+  saver registry, including repository authority and coordination compose.
 
 ## 0.42.0 - 2026-09-02
 

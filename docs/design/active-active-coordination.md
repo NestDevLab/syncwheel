@@ -86,8 +86,10 @@ does not create or update a remote coordination state branch.
 The state branch is an append-only chain of Git commits. Each state snapshot
 contains:
 
-- the normalized public manifest projection and its digest, with local remote
-  aliases and remote-qualified local refs removed;
+- the normalized public manifest projection, with local remote aliases and
+  remote-qualified local refs removed;
+- the canonical digest of `.syncwheel/manifest.json` on the exact integration
+  tip recorded in `managed_refs`;
 - the complete observed managed-ref map and the refs changed by this publication;
 - publication scope and projection status;
 - Syncwheel protocol version, state parent, publication UUID, and tombstones;
@@ -265,9 +267,10 @@ pre- or post-CAS managed-ref drift stops fail-closed.
 
 `coordination compose` is separate from repair. It handles a known common state
 whose local and remote descendants independently add stack records. The plan
-binds the exact known base state and snapshot digest, current remote state and
-snapshot, local proposal, composed snapshot, source and integration tips, all
-managed-ref observations, and unmapped integration commits.
+binds the exact known base state and its integration-tip control-manifest
+digest, current remote state and public snapshot, local proposal, composed
+snapshot, source and integration tips, all managed-ref observations, and
+unmapped integration commits.
 
 Version 1 is deliberately additive-only: the local side must add exactly the
 requested stack, while the remote side may add stacks. Neither side may remove,

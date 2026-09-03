@@ -384,7 +384,7 @@ from that exact base instead of attempting a stale push:
 syncwheel coordination compose \
   --stack agentwheel-<operation-id> \
   --known-base-state <journal-coordination-state-tip> \
-  --known-base-snapshot-digest <journal-coordination-manifest-digest> \
+  --known-base-manifest-digest <journal-coordination-manifest-digest> \
   > compose-plan.json
 syncwheel coordination compose --apply --plan-file compose-plan.json
 ```
