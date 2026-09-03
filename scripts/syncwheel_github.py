@@ -118,14 +118,24 @@ def _commit_authors(pr):
     for item in pr.get("commits") or []:
         if not isinstance(item, dict):
             continue
-        author = item.get("author") or {}
-        if not isinstance(author, dict):
-            author = {}
-        authors.append({
-            "sha": item.get("oid") or item.get("sha"),
-            "login": (author.get("user") or {}).get("login") if isinstance(author.get("user"), dict) else author.get("login"),
-            "name": author.get("name"),
-        })
+        sha = item.get("oid") or item.get("sha")
+        raw_authors = item.get("authors")
+        if isinstance(raw_authors, list):
+            commit_authors = [author for author in raw_authors if isinstance(author, dict)]
+        else:
+            author = item.get("author") or {}
+            commit_authors = [author] if isinstance(author, dict) else []
+        if not commit_authors:
+            commit_authors = [{}]
+        for author in commit_authors:
+            user = author.get("user")
+            if isinstance(user, dict):
+                login = user.get("login")
+                name = author.get("name") or user.get("name")
+            else:
+                login = author.get("login")
+                name = author.get("name")
+            authors.append({"sha": sha, "login": login, "name": name})
     return authors
 
 

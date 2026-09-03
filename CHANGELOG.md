@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.42.6 - 2026-09-03
+
+- Fix the GitHub adapter to read commit identities from the `authors[]` shape
+  returned by `gh pr view`, while preserving fail-closed records for unresolved
+  commit authors and supporting the legacy author shape.
+- Add regression coverage for resolved and unresolved commit author identities.
+
 ## 0.42.5 - 2026-09-03
 
 - Add a private, clone-local GitHub PR merge policy with strict provenance
