@@ -51,10 +51,19 @@ proof. Treat `coordination.claims: advisory` as a migration state, inspect
 the dry-run reports zero unclaimed owned refs. Backfill with `--apply --reason`
 never replaces a claim owned by another coordination domain.
 
+Every coordinated remote mutation must have a fsynced caller intent and stable
+operation token. On retry, exact token-bearing claim/state evidence is adopted;
+do not repeat the push. Create propagates its `stack_create_intent` token into
+the claim and removes only the deterministic temporary worktree owned by that
+generation.
+
 For draft close, the order is intent, remote tombstone claim plus state CAS,
 local manifest save, terminal event. Do not reintroduce remote observations
 around the filesystem save: they cannot make that boundary atomic. A retry may
 complete only when the remote tombstone contains its exact operation token.
+If the claim has advanced, record `close_superseded` and stop without applying
+the old close to the current generation. Remote failure during either the first
+attempt or recovery must name the same remote-first retry command.
 
 For channels, inspect `channel contract`, `channel list`, `channel show`, and
 `channel diff` first. Every mutation previews a `channelPlan`; repeat the same

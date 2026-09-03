@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import signal
 import shutil
 import subprocess
 import tempfile
@@ -66,6 +67,60 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
                 f"syncwheel {args} expected {expected}, got {result.returncode}\n"
                 f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
             )
+        return result
+
+    def run_cli_sigkill_after(self, repo, checkpoint, *args):
+        child = r'''
+import importlib.util
+import json
+import os
+import signal
+import sys
+
+cli, checkpoint, encoded_args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_sigkill_under_test', cli)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+if checkpoint == 'authorized_push':
+    original = module.run_authorized_push
+    def killed(repo_root, command, remote, refs, check=True):
+        result = original(repo_root, command, remote, refs, check=check)
+        if result.returncode == 0 and any('/syncwheel/state/' in ref for ref in refs):
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    module.run_authorized_push = killed
+elif checkpoint == 'worktree_add':
+    original = module.git
+    def killed(repo_root, *git_args, **kwargs):
+        result = original(repo_root, *git_args, **kwargs)
+        if git_args[:2] == ('worktree', 'add'):
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    module.git = killed
+else:
+    raise AssertionError('unknown SIGKILL checkpoint: ' + checkpoint)
+
+sys.argv = [cli, *json.loads(encoded_args)]
+module.main()
+'''
+        env = dict(os.environ)
+        env.update(self.environment)
+        result = subprocess.run(
+            [
+                'python3', '-c', child, str(CLI), checkpoint,
+                json.dumps(list(args)),
+            ],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            env=env,
+        )
+        self.assertEqual(
+            result.returncode,
+            -signal.SIGKILL,
+            f'child was not killed at {checkpoint}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}',
+        )
         return result
 
     def load_module(self):
@@ -1004,6 +1059,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
                 {old_ref: old_tip},
                 'seed:draft-a',
                 'partial',
+                operation_token='seed-draft-a',
             )
 
         candidate, candidate_path = module.load_manifest(first)
@@ -1020,6 +1076,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
                 {'refs/heads/pr/draft-a': old_tip},
                 'unpermitted:rename',
                 'partial',
+                operation_token='unpermitted-rename',
             )
         self.git(first, 'branch', '-D', 'pr/draft-a')
 
@@ -1200,8 +1257,13 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         original_materialize = module.materialize_new_stack_branch
         source_ref = 'refs/heads/syncwheel/draft/collision'
 
-        def materialize_then_publish_foreign(repo_root, stack, planned_tip=None):
-            original_materialize(repo_root, stack, planned_tip=planned_tip)
+        def materialize_then_publish_foreign(
+            repo_root, stack, planned_tip=None, operation_token=None
+        ):
+            original_materialize(
+                repo_root, stack, planned_tip=planned_tip,
+                operation_token=operation_token,
+            )
             self.git(repo, 'push', '-q', 'origin', f'{foreign_tip}:{source_ref}')
 
         with mock.patch.object(
@@ -2125,6 +2187,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
                 },
                 'partial',
                 'partial',
+                operation_token='atomic-rejection-test',
             )
 
         for ref in ('refs/heads/pr/good', 'refs/heads/pr/reject', 'refs/heads/syncwheel/state/default'):
@@ -2883,6 +2946,12 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(result['remote_state_tip'], accepted_tip)
         persisted, _ = module.load_manifest(fixture['repo'], fixture['manifest_path'])
         self.assertEqual([stack['id'] for stack in persisted['stacks']], ['orphan', 'new-stack'])
+        completed = [
+            event['payload'] for event in module.load_ledger_events(fixture['repo'])
+            if event['type'] == 'coordination_publish_completed'
+            and event['payload'].get('scope') == 'compose-stack:new-stack'
+        ]
+        self.assertTrue(completed[-1]['recovered'])
 
     def test_compose_stops_when_remote_state_lease_moves_after_plan(self):
         fixture = self.prepare_additive_compose('compose-state-race')
@@ -2930,6 +2999,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             competitor_kwargs = dict(kwargs)
             competitor_kwargs.pop('expected_coordination_state_tip', None)
             competitor_kwargs.pop('expected_observed_refs', None)
+            competitor_kwargs['operation_token'] = 'competing-publication-token'
             original_publish(*args, **competitor_kwargs)
             return original_publish(*args, **kwargs)
 
@@ -3536,3 +3606,221 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertIn('close-unreachable', [item['id'] for item in saved['stacks']])
         self.assertIn('retry', failure.stderr.lower())
+
+    def test_old_close_retry_cannot_close_a_new_stack_generation(self):
+        origin = self.create_remote('round6-close-generation')
+        closer = self.clone(origin, 'round6-close-generation-closer')
+        creator = self.clone(origin, 'round6-close-generation-creator')
+        self.init_coordinated(closer)
+        self.init_coordinated(creator)
+        old_source = self.commit_on_branch(
+            closer, 'scratch/old-generation', 'old-generation.txt'
+        )
+        self.add_legacy_unpublished_draft(closer, 'same-generation', old_source)
+        self.run_cli_sigkill_after(
+            closer, 'authorized_push', 'stack', 'close', 'same-generation', '--force'
+        )
+        new_source = self.commit_on_branch(
+            creator, 'scratch/new-generation', 'new-generation.txt'
+        )
+        self.run_cli(
+            creator, 'stack', 'create', 'same-generation', new_source, '--draft'
+        )
+
+        failure = self.run_cli(
+            closer, 'stack', 'close', 'same-generation', '--force', expected=2
+        )
+
+        self.assertIn('close_superseded', failure.stderr)
+        module = self.load_module()
+        _, state = self.remote_state(origin)
+        self.assertIn('same-generation', [item['id'] for item in state['manifest']['stacks']])
+        claim_ref = module.coordination_claim_ref(
+            'refs/heads/syncwheel/draft/same-generation'
+        )
+        claim_tip = self.git(creator, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        self.git(creator, 'fetch', '-q', 'origin', claim_ref)
+        claim = module.coordination_claim_from_commit(creator, claim_tip)
+        self.assertIsNot(claim.get('closed'), True)
+        abandoned = [
+            event['payload'] for event in module.load_ledger_events(closer)
+            if event['type'] == 'stack_close_abandoned'
+            and event['payload'].get('stack') == 'same-generation'
+        ]
+        self.assertEqual(abandoned[-1]['status'], 'close_superseded')
+
+    def test_stack_push_retry_recovers_its_published_intent_without_republishing(self):
+        origin = self.create_remote('round6-stack-push-intent')
+        repo = self.clone(origin, 'round6-stack-push-intent')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/push-intent', 'push-intent.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'push-intent', source,
+            '--branch', 'pr/push-intent',
+        )
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'push', 'push-intent'
+        )
+        module = self.load_module()
+        events = module.load_ledger_events(repo)
+        self.assertTrue(any(
+            event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('scope') == 'stack:push-intent'
+            for event in events
+        ))
+        claim_ref = module.coordination_claim_ref('refs/heads/pr/push-intent')
+        before = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+
+        self.run_cli(repo, 'stack', 'push', 'push-intent')
+
+        after = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        self.assertEqual(after, before)
+        events = module.load_ledger_events(repo)
+        self.assertTrue(any(
+            event['type'] == 'coordination_publish_completed'
+            and event['payload'].get('scope') == 'stack:push-intent'
+            and event['payload'].get('recovered') is True
+            for event in events
+        ))
+
+    def test_create_claim_uses_the_stack_create_intent_token(self):
+        origin = self.create_remote('round6-create-token')
+        repo = self.clone(origin, 'round6-create-token')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/create-token', 'create-token.txt')
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'create', 'create-token', source, '--draft'
+        )
+        module = self.load_module()
+        intent = next(
+            event['payload'] for event in reversed(module.load_ledger_events(repo))
+            if event['type'] == 'stack_create_intent'
+            and event['payload'].get('stack') == 'create-token'
+        )
+        claim_ref = module.coordination_claim_ref(
+            'refs/heads/syncwheel/draft/create-token'
+        )
+        claim_tip = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        claim = module.coordination_claim_from_commit(repo, claim_tip)
+
+        self.assertEqual(claim['operation_token'], intent['operation_token'])
+        self.run_cli(repo, 'stack', 'create', 'create-token', source, '--draft')
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('create-token', [item['id'] for item in saved['stacks']])
+        terminal = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('reason') == 'stack_create'
+            and (event['payload'].get('context') or {}).get('stack') == 'create-token'
+        ]
+        self.assertEqual(
+            terminal[-1]['context']['operation_token'], intent['operation_token']
+        )
+
+    def test_create_retry_removes_its_sigkill_worktree_registration(self):
+        origin = self.create_remote('round6-create-worktree')
+        repo = self.clone(origin, 'round6-create-worktree')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'scratch/create-worktree', 'create-worktree.txt'
+        )
+        self.run_cli_sigkill_after(
+            repo, 'worktree_add', 'stack', 'create', 'create-worktree', source, '--draft'
+        )
+        before = self.git(repo, 'worktree', 'list', '--porcelain').stdout
+        self.assertIn('syncwheel-stack-create-', before)
+
+        self.run_cli(repo, 'stack', 'create', 'create-worktree', source, '--draft')
+
+        after = self.git(repo, 'worktree', 'list', '--porcelain').stdout
+        self.assertNotIn('syncwheel-stack-create-', after)
+
+    def test_pending_close_remote_failure_names_remote_first_retry(self):
+        origin = self.create_remote('round6-pending-close-unreachable')
+        repo = self.clone(origin, 'round6-pending-close-unreachable')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(
+            repo, 'scratch/pending-unreachable', 'pending-unreachable.txt'
+        )
+        self.add_legacy_unpublished_draft(repo, 'pending-unreachable', source)
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'close', 'pending-unreachable', '--force'
+        )
+        self.git(repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git'))
+
+        failure = self.run_cli(
+            repo, 'stack', 'close', 'pending-unreachable', '--force', expected=2
+        )
+
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('pending-unreachable', [item['id'] for item in saved['stacks']])
+        self.assertIn('remote-first close', failure.stderr)
+        self.assertIn(
+            'syncwheel stack close pending-unreachable --force', failure.stderr
+        )
+
+    def test_promote_retry_recovers_after_sigkill_without_republishing(self):
+        origin = self.create_remote('round6-promote-intent')
+        repo = self.clone(origin, 'round6-promote-intent')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(
+            repo, 'scratch/promote-intent', 'promote-intent.txt'
+        )
+        self.run_cli(
+            repo, 'stack', 'create', 'promote-intent', source, '--draft'
+        )
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'promote', 'promote-intent'
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref(
+            'refs/heads/pr/promote-intent'
+        )
+        before = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+
+        self.run_cli(repo, 'stack', 'promote', 'promote-intent')
+
+        after = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        self.assertEqual(after, before)
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(item for item in saved['stacks'] if item['id'] == 'promote-intent')
+        self.assertEqual(promoted['branch'], 'pr/promote-intent')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+
+    def test_reconcile_retry_recovers_after_sigkill_without_republishing(self):
+        origin = self.create_remote('round6-reconcile-intent')
+        repo = self.clone(origin, 'round6-reconcile-intent')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'scratch/reconcile-intent', 'reconcile-intent.txt'
+        )
+        self.git(repo, 'branch', 'pr/reconcile-intent', source)
+        self.run_cli(
+            repo, 'stack', 'create', 'reconcile-intent', source,
+            '--branch', 'pr/reconcile-intent',
+        )
+        command = (
+            'reconcile', '--apply', '--push', '--stack', 'reconcile-intent',
+            '--skip-integration', '--rebuild', 'none',
+        )
+        self.run_cli_sigkill_after(repo, 'authorized_push', *command)
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref(
+            'refs/heads/pr/reconcile-intent'
+        )
+        before = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+
+        self.run_cli(repo, *command)
+
+        after = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        self.assertEqual(after, before)
+        completed = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_completed'
+            and event['payload'].get('scope') == 'partial'
+        ]
+        self.assertTrue(completed[-1]['recovered'])

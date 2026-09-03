@@ -140,6 +140,12 @@ unowned refs, and arbitrary readers. It fails closed on a detectable CAS,
 ordering, intent, or recovery violation; forced/raw mutation of Syncwheel-owned
 refs and hostile remotes or hooks remain outside that guarantee.
 
+Every mutating coordinated publisher records a durable operation token before
+the atomic push. If process death occurs after remote success, the retry accepts
+only state and claims carrying that token and completes without republishing.
+Draft create uses the same token in its create intent and remote claim, and
+cleans up its token-derived temporary worktree registration on retry.
+
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:
 
@@ -379,7 +385,9 @@ records `stack_close_intent`, atomically publishes a tombstone claim plus state,
 saves the manifest, and only then records `stack_closed`. A retry after a crash
 between push and save recognizes its operation token in the tombstone and
 completes idempotently; an unreachable remote fails closed without changing the
-manifest. `stack close --reason absorbed` first fetches and records the observed
+manifest, including during recovery. If a later create has advanced the claim,
+the old close is terminalized as `close_superseded` and cannot close the new
+generation. `stack close --reason absorbed` first fetches and records the observed
 delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
 path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
 

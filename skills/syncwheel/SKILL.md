@@ -162,6 +162,10 @@ An unchanged claim or a lease on a ref absent from the refspec proves nothing.
 Existing manifests default to `coordination.claims: advisory`; inspect and then
 apply `syncwheel coordination claims backfill --apply --reason <reason>` before
 an explicitly approved switch to `required`. Never overwrite a foreign claim.
+Every mutating coordinated publish records a durable intent token before its
+atomic push. A retry adopts only claim/state evidence bearing that token and
+must not republish. Draft create uses its `stack_create_intent` token in the
+claim and removes its token-derived temporary worktree registration on retry.
 Install the plan-first managed-ref guard in each clone with `syncwheel hooks
 install`, review the reported hook/chaining path and digest, then apply with
 `syncwheel hooks install --apply`. The guard is composable and catches accidental
@@ -314,7 +318,9 @@ active-active coordination its *source* ref does publish to the coordination rem
 can rebuild it from the manifest alone. Closing an unpublished draft is also a
 remote operation: intent first, atomic tombstone claim plus state, manifest
 save, then terminal event. If the remote is unavailable, stop without saving;
-a retry after a crash completes only from its exact tombstone token.
+a retry after a crash completes only from its exact tombstone token. If a newer
+claim has superseded that token, record `close_superseded` and stop without
+closing the newer stack generation.
 `syncwheel stack demote <id>` goes back, and refuses when the
 stack already has an open PR recorded.
 
