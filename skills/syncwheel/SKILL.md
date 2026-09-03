@@ -14,6 +14,91 @@ described in a manifest; Syncwheel reconciles Git to match it. Plain manual
 `git`/worktree surgery is the exception path, used only when Syncwheel is
 unavailable, blocked, or cannot express the needed recovery.
 
+## Ratified working rules (read this first)
+
+These four are ratified operating rules (MGT-0206), not suggestions. A real incident
+happened because an operator resolved a rebuild conflict with raw git instead of rule 2 —
+the mechanism already existed; only the visibility was missing. Read rule 2 twice.
+
+1. **Never author in the primary checkout.** It stays on `manifest.integration.branch` as
+   the shared test projection. Open a governed lane instead:
+   ```bash
+   syncwheel worktree open <lane> [--into <stack>] [--full]
+   ```
+   As of 0.42.4, where the guard hooks are installed, this is enforced: a manual commit on
+   the primary, or an unauthorized move of the integration ref there, is refused, and every
+   mutating Syncwheel command refuses to run while the primary has tracked changes. Arm the
+   guard once per clone:
+   ```bash
+   syncwheel hooks install --apply
+   ```
+   Opt out only with a reasoned, ledgered, clone-local disable:
+   ```bash
+   syncwheel hooks remove --disable --reason "<why>" --apply
+   ```
+
+2. **Never resolve a replay conflict with raw git.** A plumbing replay never descends
+   silently into a conflict; it names the exact retry:
+   ```bash
+   syncwheel stack rebuild <id> --replay-mode desk
+   ```
+   Resolve inside that worktree through the manifest, not through a manual merge commit:
+   ```bash
+   syncwheel stack absorb <stack> [<path>...|--staged]
+   syncwheel stack resolve-integration <stack> <resolved-commit>...
+   ```
+   A manual `git merge` or `git commit` on the integration branch during a conflict is
+   outside Syncwheel's bookkeeping. The next `stack rebuild` / `int rebuild` reconstructs
+   the branch from the manifest's own commit projection, has no record that a manual
+   resolution ever happened, and silently drops it.
+
+3. **Integration composition is a declared, visible operation.** Before testing on
+   integration, or before blaming your own code for something that looks broken there,
+   check what is actually integrated:
+   ```bash
+   syncwheel int show
+   ```
+   Add a stack by declaring it — required-membership manifests include every declared stack
+   in `integration.stacks` by default — then rebuild:
+   ```bash
+   syncwheel stack create <id> [<commit-or-range>...] [--draft]
+   syncwheel int rebuild --reason "<why>"
+   ```
+   Remove one by closing it, then rebuild:
+   ```bash
+   syncwheel stack close <id> --reason "<why>"
+   syncwheel int rebuild --reason "<why>"
+   ```
+
+4. **Every mutating command carries `--reason`; it is mandatory in `ai-managed`
+   repositories.** Pass it always, not only on the commands that already refuse to run
+   without one (`int rebuild` in an ai-managed repo, `hooks remove --disable`,
+   `worktree release`, `coordination provenance reset`, among others). The reason lands in
+   the append-only ledger together with the actor and the exact command:
+   ```bash
+   syncwheel ledger show
+   ```
+
+### When something looks wrong
+
+Do not force a push, do not hand-edit `.syncwheel/manifest.json` or the coordination
+state, and do not fall back to raw git. Re-observe, then use the exact remedy the failing
+command names.
+
+For a managed ref that disagrees with the coordination state, `syncwheel coordination
+repair` is the family of named remedies, always plan-first then `--apply --plan-file
+<plan>`:
+
+| Situation | Backend |
+|---|---|
+| The ref is otherwise correct, only the recorded tip is wrong (ref repair) | default — `syncwheel coordination repair --ref <ref> > plan.json` |
+| Recorded and observed commits differ only in shape, same tree | `--freeze-backend tree-equivalent-state-cas` |
+| The ref advanced through an exact, reviewed fast-forward | `--freeze-backend fast-forward-state-cas` |
+| A state was published before 0.42.2 and carries the legacy manifest-digest form | `--freeze-backend state-digest-migration` (or let the next publish/push/compose migrate it automatically) |
+
+Each backend proves ancestry/tree/ownership before writing and only ever appends
+coordination state — none of them touch the managed branch itself.
+
 ## When to use (Syncwheel-first)
 
 **First, detect the regime.** Before branch, worktree, integration, PR, recovery,
