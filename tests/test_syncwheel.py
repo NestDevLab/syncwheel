@@ -5,6 +5,7 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -108,6 +109,114 @@ raise SystemExit(module.main())
         )
         return result
 
+    def run_cli_until_registry_lock_sigkill(self, lock_state, *args):
+        script = r'''
+import importlib.util
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+
+cli_path, repo_path, lock_state, raw_args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_registry_lock_sigkill_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lock_path = module.governed_worktree_lock_path(Path(repo_path)).resolve(strict=False)
+
+if lock_state == 'empty':
+    original_open = module.os.open
+
+    def kill_after_exclusive_create(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            flags & os.O_EXCL
+            and Path(path).resolve(strict=False) == lock_path
+        ):
+            os.kill(os.getpid(), signal.SIGKILL)
+        return descriptor
+
+    module.os.open = kill_after_exclusive_create
+elif lock_state == 'truncated':
+    original_write_all = module._write_all
+
+    def kill_during_metadata_write(descriptor, payload):
+        descriptor_path = Path(f'/proc/self/fd/{descriptor}').resolve(strict=False)
+        if descriptor_path == lock_path:
+            os.write(descriptor, payload[:max(1, len(payload) // 2)])
+            os.fsync(descriptor)
+            os.kill(os.getpid(), signal.SIGKILL)
+        return original_write_all(descriptor, payload)
+
+    module._write_all = kill_during_metadata_write
+else:
+    raise AssertionError(lock_state)
+
+os.chdir(repo_path)
+sys.argv = [cli_path, *json.loads(raw_args)]
+raise SystemExit(module.main())
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        result = subprocess.run(
+            [
+                'python3', '-c', script, str(CLI), str(self.repo), lock_state,
+                json.dumps(list(args)),
+            ],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(
+            result.returncode,
+            -signal.SIGKILL,
+            f'lock state {lock_state!r} was not reached\n'
+            f'STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}',
+        )
+        return result
+
+    def start_registry_lock_holder(self, ready_path):
+        script = r'''
+import importlib.util
+import os
+import signal
+import sys
+from pathlib import Path
+
+cli_path, repo_path, ready_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_registry_lock_holder_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with module.governed_worktree_registry_lock(Path(repo_path)):
+    Path(ready_path).write_text(str(os.getpid()), encoding='utf-8')
+    signal.pause()
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        holder = subprocess.Popen(
+            ['python3', '-c', script, str(CLI), str(self.repo), str(ready_path)],
+            cwd=self.repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        deadline = time.monotonic() + 10
+        while not ready_path.exists():
+            if time.monotonic() >= deadline:
+                stdout, stderr = holder.communicate(timeout=5)
+                self.fail(
+                    f'registry lock holder did not become ready\n'
+                    f'STDOUT:\n{stdout}\nSTDERR:\n{stderr}'
+                )
+            time.sleep(0.01)
+        return holder
+
     def run_script(self, script_path, *args, expected=0, cwd=None):
         result = subprocess.run(
             ['python3', str(script_path), *args],
@@ -192,6 +301,138 @@ raise SystemExit(module.main())
 
     def assert_path_equal(self, left, right):
         self.assertEqual(Path(left).resolve(), Path(right).resolve())
+
+    def exercise_external_manifest_lane_capture(self, operation):
+        manifest_path = self.tmp / f'{operation}-manifest.json'
+        manifest = self.read_manifest()
+        if operation == 'capture':
+            stack_id = 'external-capture-stack'
+            integration_branch = 'integration/external-capture'
+            manifest['defaults']['integration_membership'] = 'required'
+            manifest['integration'] = {
+                'branch': integration_branch,
+                'base': 'main',
+                'stacks': [],
+            }
+            manifest['stacks'] = []
+            self.git('branch', integration_branch, 'main')
+            self.git('switch', '-q', integration_branch)
+        elif operation == 'create':
+            stack_id = 'external-created-stack'
+        else:
+            stack_id = 'feature-a'
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + '\n',
+            encoding='utf-8',
+        )
+        if operation == 'capture':
+            self.run_cli(
+                'stack', 'create', stack_id, '--draft',
+                '--manifest', str(manifest_path),
+            )
+        lane_id = f'external-{operation}'
+        target = None if operation == 'create' else stack_id
+        open_args = [
+            'worktree', 'open', lane_id,
+            '--manifest', str(manifest_path),
+            '--json',
+        ]
+        if target:
+            open_args.extend(['--into', target])
+        opened = json.loads(self.run_cli(*open_args).stdout)
+        original_generation = opened['lane']['generation_token']
+        lane_path = Path(opened['lane']['path'])
+        filename = f'{operation}-owned.txt'
+        (lane_path / filename).write_text(
+            f'{operation} owns this lane\n',
+            encoding='utf-8',
+        )
+        subprocess.run(['git', 'add', filename], cwd=lane_path, check=True)
+        subprocess.run(
+            ['git', 'commit', '-qm', f'feat: exercise external {operation} capture'],
+            cwd=lane_path,
+            check=True,
+        )
+        commit = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=lane_path,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+        if operation == 'create':
+            self.run_cli(
+                'stack', 'create', stack_id, commit,
+                '--branch', 'pr/external-created-stack',
+                '--manifest', str(manifest_path),
+            )
+        elif operation == 'add':
+            self.run_cli(
+                'stack', 'add', stack_id, commit,
+                '--manifest', str(manifest_path),
+            )
+        elif operation == 'capture':
+            self.run_cli(
+                'stack', 'capture-integration', stack_id, commit,
+                '--manifest', str(manifest_path),
+            )
+        else:
+            self.fail(f'unknown capture operation: {operation}')
+
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        captured = next(item for item in registry['lanes'] if item['id'] == lane_id)
+        self.assertEqual(captured['state'], 'reaped')
+        self.assertEqual(captured['pending_reason'], 'ledger_pending')
+        self.assertFalse(lane_path.exists())
+        default_cleanup = [
+            event for event in module.governed_worktree_cleanup_ledger(self.repo)['events']
+            if event['type'].startswith('governed_worktree_')
+        ]
+        self.assertEqual(default_cleanup, [])
+        external_cleanup = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'].startswith('governed_worktree_')
+        ]
+        self.assertEqual(
+            [event['type'] for event in external_cleanup],
+            ['governed_worktree_cleanup_intent'],
+        )
+
+        self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json',
+            '--manifest', str(manifest_path),
+        )
+
+        external_cleanup = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'].startswith('governed_worktree_')
+        ]
+        self.assertEqual(
+            [event['type'] for event in external_cleanup],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
+        )
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+        reopen_args = [
+            'worktree', 'open', lane_id,
+            '--manifest', str(manifest_path),
+            '--json', '--into', stack_id,
+        ]
+        reopened = json.loads(self.run_cli(*reopen_args).stdout)
+        self.assertNotEqual(reopened['lane']['generation_token'], original_generation)
+        shared_retry = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json'
+        ).stdout)
+        self.assertEqual(shared_retry['governed_worktree_failures'], [])
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 1)
+        self.assertEqual(registry['lanes'][0]['id'], lane_id)
+        self.assertEqual(
+            registry['lanes'][0]['generation_token'],
+            reopened['lane']['generation_token'],
+        )
 
     def tracked_status(self):
         return self.git('status', '--porcelain', '--untracked-files=no')
@@ -1240,6 +1481,87 @@ raise SystemExit(module.main())
         recovery = json.loads(recovery_log.read_text().splitlines()[-1])
         self.assertEqual(recovery['reason'], 'process_start_time_mismatch')
 
+    def test_registry_lock_recovers_empty_and_truncated_files_after_sigkill(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+
+        for index, lock_state in enumerate(('empty', 'truncated')):
+            with self.subTest(lock_state=lock_state):
+                lane_id = f'incomplete-lock-{index}'
+                opened = json.loads(self.run_cli(
+                    'worktree', 'open', lane_id, '--json'
+                ).stdout)
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                self.run_cli_until_registry_lock_sigkill(
+                    lock_state,
+                    'gc', '--apply', '--no-fetch', '--json',
+                )
+
+                payload = lock_path.read_bytes()
+                if lock_state == 'empty':
+                    self.assertEqual(payload, b'')
+                else:
+                    self.assertTrue(payload)
+                    with self.assertRaises(json.JSONDecodeError):
+                        json.loads(payload)
+                retry = self.run_cli('gc', '--apply', '--no-fetch', '--json')
+                self.assertIn('incomplete_metadata', retry.stderr)
+                self.assertFalse(Path(opened['lane']['path']).exists())
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+
+        recoveries = [json.loads(line) for line in recovery_log.read_text().splitlines()]
+        self.assertEqual(
+            [item['reason'] for item in recoveries[-2:]],
+            ['incomplete_metadata', 'incomplete_metadata'],
+        )
+
+    def test_registry_lock_recovers_an_unreaped_zombie_owner(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'zombie-lock', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        ready_path = self.tmp / 'registry-lock-holder.ready'
+        holder = self.start_registry_lock_holder(ready_path)
+        try:
+            os.kill(holder.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 10
+            observed_state = None
+            while time.monotonic() < deadline:
+                try:
+                    raw_stat = Path(f'/proc/{holder.pid}/stat').read_text(encoding='utf-8')
+                except FileNotFoundError:
+                    break
+                closing_paren = raw_stat.rfind(')')
+                fields = raw_stat[closing_paren + 2:].split() if closing_paren >= 0 else []
+                observed_state = fields[0] if fields else None
+                if observed_state == 'Z':
+                    break
+                time.sleep(0.01)
+            self.assertEqual(observed_state, 'Z')
+            self.assertIsNone(holder.returncode)
+
+            retry = self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+            self.assertIn('process_zombie', retry.stderr)
+            self.assertFalse(Path(opened['lane']['path']).exists())
+            self.assertFalse(lock_path.exists())
+            persisted, _ = module.load_governed_worktree_registry(self.repo)
+            self.assertEqual(persisted['lanes'], [])
+        finally:
+            holder.wait(timeout=10)
+            holder.stdout.close()
+            holder.stderr.close()
+
     def test_reaper_refuses_when_the_lane_path_reappears(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'path-reappeared', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
@@ -1639,43 +1961,83 @@ raise SystemExit(module.main())
         self.assertEqual(module.ref_tip(self.repo, terminal['payload']['recovery_ref']), advanced_tip)
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
 
-    def test_branch_advanced_remedy_names_a_command_that_accepts_it(self):
-        opened = json.loads(self.run_cli('worktree', 'open', 'advanced-release', '--json').stdout)
+    def test_automatic_branch_advanced_remedy_reanchors_and_completes_with_release(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'actual-advanced-release', '--json'
+        ).stdout)
         lane_path = Path(opened['lane']['path'])
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         lane = registry['lanes'][0]
-        old_tip = module.ref_tip(self.repo, lane['branch'])
-        old_recovery_ref = 'refs/syncwheel/recovery/lanes/advanced-release-old'
-        self.git('update-ref', old_recovery_ref, old_tip)
-        (lane_path / 'advanced.txt').write_text('advanced but clean\n')
-        subprocess.run(['git', 'add', 'advanced.txt'], cwd=lane_path, check=True)
-        subprocess.run(['git', 'commit', '-qm', 'feat: advance release lane'], cwd=lane_path, check=True)
-        advanced_tip = module.ref_tip(self.repo, lane['branch'])
-        lane.update({
-            'state': 'captured_pending_cleanup',
-            'pending_reason': 'branch_advanced',
-            'cleanup_tip': old_tip,
-            'recovery_ref': old_recovery_ref,
-            'cleanup_event_type': 'governed_worktree_released',
-            'cleanup_event_reason': 'retry advanced release',
-        })
+        anchored_tip = module.ref_tip(self.repo, lane['branch'])
+        lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
+        original_ensure = module.ensure_governed_worktree_recovery_ref
+        injected = {'done': False}
 
-        remedy = module.governed_worktree_pending_remedy(self.read_manifest(), lane)
-        self.assertIn(
-            'syncwheel worktree release advanced-release --reason',
-            remedy,
+        def advance_branch_after_anchor(repo_root, recovery_ref, expected_tip):
+            original_ensure(repo_root, recovery_ref, expected_tip)
+            if not injected['done']:
+                injected['done'] = True
+                (lane_path / 'advanced.txt').write_text('advanced but clean\n')
+                subprocess.run(['git', 'add', 'advanced.txt'], cwd=lane_path, check=True)
+                subprocess.run(
+                    ['git', 'commit', '-qm', 'feat: advance release lane'],
+                    cwd=lane_path,
+                    check=True,
+                )
+
+        module.ensure_governed_worktree_recovery_ref = advance_branch_after_anchor
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.ensure_governed_worktree_recovery_ref = original_ensure
+
+        advanced_tip = module.ref_tip(self.repo, opened['lane']['branch'])
+        self.assertNotEqual(advanced_tip, anchored_tip)
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(
+            result['failures'],
+            [{'id': 'actual-advanced-release', 'code': 'branch_advanced'}],
         )
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        pending = registry['lanes'][0]
+        self.assertEqual(pending['pending_reason'], 'branch_advanced')
+        self.assertEqual(pending['cleanup_event_type'], 'governed_worktree_reaped')
+        old_recovery_ref = pending['recovery_ref']
+        old_key = pending['cleanup_idempotency_key']
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+
+        remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
+        self.assertIn('syncwheel gc --apply', remedy)
         released = json.loads(self.run_cli(
-            'worktree', 'release', 'advanced-release',
-            '--reason', 'retry advanced release', '--apply', '--json',
+            'worktree', 'release', 'actual-advanced-release',
+            '--reason', 'operator release', '--apply', '--json',
         ).stdout)
 
-        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), old_tip)
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
         self.assertEqual(module.ref_tip(self.repo, released['lane']['recovery_ref']), advanced_tip)
         self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
         self.assertFalse(lane_path.exists())
+        events = module.load_ledger_events(self.repo)
+        intents = [
+            event for event in events
+            if event['type'] == 'governed_worktree_cleanup_intent'
+        ]
+        terminals = [
+            event for event in events
+            if event['type'] in {'governed_worktree_reaped', 'governed_worktree_released'}
+        ]
+        self.assertEqual(len(intents), 2)
+        self.assertEqual(intents[-1]['payload']['supersedes'], old_key)
+        self.assertEqual(intents[-1]['payload']['terminal_type'], 'governed_worktree_released')
+        self.assertEqual(intents[-1]['payload']['reason'], 'operator release')
+        self.assertEqual([event['type'] for event in terminals], ['governed_worktree_released'])
+        self.assertEqual(terminals[0]['payload']['reason'], 'operator release')
+        self.assertEqual(
+            terminals[0]['payload']['idempotency_key'],
+            intents[-1]['payload']['idempotency_key'],
+        )
 
     def test_lane_branch_cannot_be_reattached_while_cleanup_holds_the_lock(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'locked-reattach', '--json').stdout)
@@ -2084,6 +2446,15 @@ raise SystemExit(module.main())
         self.assertTrue(lane['recovery_ref'].startswith('refs/syncwheel/recovery/lanes/captured-'))
         self.assertEqual(self.git('rev-parse', lane['recovery_ref']), commit)
         self.assertFalse(lane_path.exists())
+
+    def test_stack_create_keeps_external_manifest_lane_cleanup_in_one_ledger(self):
+        self.exercise_external_manifest_lane_capture('create')
+
+    def test_stack_add_keeps_external_manifest_lane_cleanup_in_one_ledger(self):
+        self.exercise_external_manifest_lane_capture('add')
+
+    def test_stack_capture_keeps_external_manifest_lane_cleanup_in_one_ledger(self):
+        self.exercise_external_manifest_lane_capture('capture')
 
     def test_env_repo_allows_running_outside_target_repo(self):
         result = self.run_cli(

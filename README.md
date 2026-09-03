@@ -248,21 +248,27 @@ Syncwheel resolves and checks the current path before deciding whether the lane
 is eligible, and retains moved dirty or externally locked worktrees.
 
 The clone-local registry mutex records its PID, process start time, and a unique
-token. A new command atomically renames and logs the lock only when those fields
-prove that its owner died or that the PID was reused, so a plain retry can resume
-after `SIGKILL`. While holding that mutex, cleanup takes a Git worktree lock with
-a deterministic Syncwheel token before classifying the lane or changing a ref.
-A lock failure is reported as a lane in use and stops the operation.
+token. A successor first obtains the old inode's non-blocking `flock`, then
+atomically renames and logs it when the metadata proves owner death, PID reuse,
+or an unreaped zombie. An empty or truncated lock is recovered only after a
+brief initialization grace, so a plain retry can resume even when `SIGKILL`
+lands between exclusive creation and metadata fsync. The creator verifies that
+its inode still owns the lock path before entering the critical section. While
+holding that mutex, cleanup takes a Git worktree lock with a deterministic
+Syncwheel token before classifying the lane or changing a ref. A lock failure is
+reported as a lane in use and stops the operation.
 
 Under both locks, Syncwheel verifies the exact Git admin directory and its
 `gitdir`, fsyncs a ledger `governed_worktree_cleanup_intent`, and saves the
 pending registry state through a temp-file and parent-directory fsync guarded by
-the observed pre-image digest. Only then may it create the recovery ref and
-commit one expected-old ref transaction that verifies the recovery ref while
-deleting the lane branch. A restart rebuilds missing or rolled-back registry
-state from the durable intent. A final tracked/untracked probe precedes removal
-of the exact verified registration; cleanup never uses a global `git worktree
-prune`.
+the observed pre-image digest. Stack create, add, and capture keep that intent
+and its terminal event in the ledger selected by the effective shared,
+personal, or external manifest. Only then may cleanup create the recovery ref
+and commit one expected-old ref transaction that verifies the recovery ref
+while deleting the lane branch. A restart rebuilds missing or rolled-back
+registry state from the durable intent. A final tracked/untracked probe precedes
+removal of the exact verified registration; cleanup never uses a global `git
+worktree prune`.
 
 A reappearing path, changed registration, or moved recovery ref fails closed
 with a retryable record. If a clean lane branch advanced after its first anchor,
@@ -288,11 +294,14 @@ be released; any remaining Git worktree registration is removed before the
 registry record. It refuses an existing dirty lane and names the recovery
 remedy instead of removing it. Pending cleanup, including a branch that advanced
 before its expected-old transaction, and ledger writes are retryable and
-idempotent; the original release reason is retained across retries. If the first
-release completed but its response was lost, the identical command returns the
-matching terminal ledger event instead of reporting an unknown lane. `gc`
-reselects eligible lanes while holding the registry lock, avoids stale lane-id
-reuse, and also works when active-active coordination is disabled.
+idempotent. An explicit release may supersede the automatic `branch_advanced`
+intent, retain its earlier recovery ref, anchor the new tip, and close with the
+operator's release reason; a release-originated retry retains its original
+reason. If the first release completed but its response was lost, the identical
+command returns the matching terminal ledger event instead of reporting an
+unknown lane. `gc` reselects eligible lanes while holding the registry lock,
+avoids stale lane-id reuse, and also works when active-active coordination is
+disabled.
 
 Automatic lane reaping runs only before an explicitly mutating lifecycle
 operation. Status, check, handoff, `gc` without `--apply`, `reconcile` or

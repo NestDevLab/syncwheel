@@ -160,6 +160,7 @@ GOVERNED_WORKTREE_DEFAULT_CAPACITY = 4
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
+GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
 ZERO_OBJECT_ID = '0' * 40
 _REGISTRY_EXPECTED_DIGEST_UNSET = object()
 JOURNAL_SENSITIVE_PARTS = {
@@ -4282,6 +4283,30 @@ def governed_worktree_process_start_time(pid):
     return f'ps:{started}' if observed.returncode == 0 and started else None
 
 
+def governed_worktree_process_state(pid):
+    """Return the kernel process state, including Z for an unreaped zombie."""
+    try:
+        raw = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+    except (OSError, ValueError):
+        raw = None
+    if raw is not None:
+        closing_paren = raw.rfind(')')
+        fields = raw[closing_paren + 2:].split() if closing_paren >= 0 else []
+        if fields:
+            return fields[0]
+    try:
+        observed = subprocess.run(
+            ['ps', '-o', 'stat=', '-p', str(pid)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    state = observed.stdout.strip()
+    return state[0] if observed.returncode == 0 and state else None
+
+
 def governed_worktree_lock_metadata(pid=None, token=None):
     pid = os.getpid() if pid is None else pid
     return {
@@ -4313,17 +4338,31 @@ def parse_governed_worktree_lock_metadata(payload):
         return {}
 
 
-def governed_worktree_stale_lock_reason(metadata):
+def governed_worktree_stale_lock_reason(metadata, *, lock_available=False, lock_age=None):
     try:
         pid = int(metadata.get('pid'))
     except (AttributeError, TypeError, ValueError):
+        if (
+            lock_available
+            and lock_age is not None
+            and lock_age >= GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS
+        ):
+            return 'incomplete_metadata'
         return None
     if pid <= 0:
+        if (
+            lock_available
+            and lock_age is not None
+            and lock_age >= GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS
+        ):
+            return 'incomplete_metadata'
         return None
     recorded_start = metadata.get('process_start_time')
     current_start = governed_worktree_process_start_time(pid)
     if recorded_start is not None and current_start is not None and str(recorded_start) != current_start:
         return 'process_start_time_mismatch'
+    if governed_worktree_process_state(pid) == 'Z':
+        return 'process_zombie'
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -4358,6 +4397,18 @@ def log_governed_worktree_lock_recovery(lock_path, stale_path, metadata, reason,
     )
 
 
+def governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        path_stat = lock_path.stat()
+    except (FileNotFoundError, OSError):
+        return False
+    return (
+        descriptor_stat.st_ino == path_stat.st_ino
+        and descriptor_stat.st_dev == path_stat.st_dev
+    )
+
+
 @contextlib.contextmanager
 def governed_worktree_registry_lock(repo_root):
     """Serialize clone-local lane state and recover a provably dead owner."""
@@ -4379,12 +4430,21 @@ def governed_worktree_registry_lock(repo_root):
                 _write_all(candidate, encoded_metadata)
                 os.fsync(candidate)
                 fsync_directory_path(lock_path.parent)
+                # A contender may recover an empty file if this creator was
+                # descheduled beyond the initialization grace before flock.
+                # Never enter the critical section through the renamed inode.
+                if not governed_worktree_lock_descriptor_matches_path(lock_path, candidate):
+                    os.close(candidate)
+                    continue
             except BaseException:
+                owns_path = governed_worktree_lock_descriptor_matches_path(lock_path, candidate)
                 os.close(candidate)
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+                if owns_path:
+                    try:
+                        lock_path.unlink()
+                        fsync_directory_path(lock_path.parent)
+                    except FileNotFoundError:
+                        pass
                 raise
             descriptor = candidate
         except FileExistsError:
@@ -4410,7 +4470,12 @@ def governed_worktree_registry_lock(repo_root):
                         continue
                     os.lseek(candidate, 0, os.SEEK_SET)
                     stale_metadata = parse_governed_worktree_lock_metadata(os.read(candidate, 65536))
-                    stale_reason = governed_worktree_stale_lock_reason(stale_metadata)
+                    lock_age = max(0.0, time.time() - candidate_stat.st_mtime)
+                    stale_reason = governed_worktree_stale_lock_reason(
+                        stale_metadata,
+                        lock_available=True,
+                        lock_age=lock_age,
+                    )
                     if stale_reason:
                         stale_token = uuid.uuid4().hex
                         stale_path = lock_path.with_name(
@@ -4450,7 +4515,7 @@ def governed_worktree_registry_lock(repo_root):
         yield lock_path
     finally:
         try:
-            if os.fstat(descriptor).st_ino == lock_path.stat().st_ino:
+            if governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
                 lock_path.unlink()
                 fsync_directory_path(lock_path.parent)
         except FileNotFoundError:
@@ -5306,11 +5371,18 @@ def reap_governed_worktree_lane(
         }
     if retrying_advanced and current_tip:
         superseded_key = lane.get('cleanup_idempotency_key')
+        superseded_event_type = lane.get('cleanup_event_type')
         lane.pop('cleanup_tip', None)
         lane.pop('branch_delete_tip', None)
         lane.pop('recovery_ref', None)
         lane.pop('cleanup_idempotency_key', None)
         lane.pop('cleanup_operation_token', None)
+        if (
+            event_type == 'governed_worktree_released'
+            and superseded_event_type != event_type
+        ):
+            lane.pop('cleanup_event_type', None)
+            lane.pop('cleanup_event_reason', None)
         if superseded_key:
             lane['cleanup_supersedes_key'] = superseded_key
 
@@ -10721,12 +10793,20 @@ def command_worktree_release(args):
             )
         pending_event_type = lane.get('cleanup_event_type')
         pending_event_reason = lane.get('cleanup_event_reason')
-        if pending_event_type and pending_event_type != 'governed_worktree_released':
+        converting_advanced_reap = bool(
+            lane.get('pending_reason') == 'branch_advanced'
+            and pending_event_type == 'governed_worktree_reaped'
+        )
+        if (
+            pending_event_type
+            and pending_event_type != 'governed_worktree_released'
+            and not converting_advanced_reap
+        ):
             raise SyncwheelError(
                 f"governed worktree lane {lane_id!r} is already pending as {pending_event_type}; "
                 'retry with syncwheel gc --apply'
             )
-        if pending_event_type and pending_event_reason != reason:
+        if pending_event_type == 'governed_worktree_released' and pending_event_reason != reason:
             raise SyncwheelError(
                 f"governed worktree lane {lane_id!r} must retry its original --reason "
                 f'{pending_event_reason!r}'
@@ -10814,7 +10894,7 @@ def governed_worktree_commit_set(repo_root, lane):
     return set(rev_list(repo_root, f"{lane['base']}..{lane['branch']}"))
 
 
-def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id):
+def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest_path=None):
     stack = require_stack(manifest, stack_id)
     owned = {commit_full_sha(repo_root, commit) for commit in stack['commits']}
     with governed_worktree_registry_lock(repo_root):
@@ -10824,6 +10904,7 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id):
             repo_root,
             registry,
             persist,
+            manifest_path,
         )
         captured = []
         for lane in registry['lanes']:
@@ -10839,6 +10920,7 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id):
                 manifest,
                 lane,
                 persist=persist,
+                manifest_path=manifest_path,
             )
             captured.append({
                 'id': lane['id'], 'state': lane['state'], 'detail': detail['code'], 'reaped': reaped,
@@ -13886,7 +13968,12 @@ def command_stack_create(args):
         'stack_create',
         {'stack': args.stack, 'branch': branch},
     )
-    capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+    capture_governed_worktrees_for_stack(
+        repo_root,
+        manifest,
+        args.stack,
+        manifest_path=manifest_path,
+    )
     print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
     return 0
 
@@ -14414,7 +14501,12 @@ def command_stack_add(args):
         'stack_add',
         {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
     )
-    capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+    capture_governed_worktrees_for_stack(
+        repo_root,
+        manifest,
+        args.stack,
+        manifest_path=manifest_path,
+    )
     print(f"{args.stack}: now has {len(stack['commits'])} commits")
     return 0
 
@@ -14523,7 +14615,12 @@ def command_stack_capture_integration(args):
         'stack_capture_integration',
         {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
     )
-    capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+    capture_governed_worktrees_for_stack(
+        repo_root,
+        manifest,
+        args.stack,
+        manifest_path=manifest_path,
+    )
     print(f"{args.stack}: captured {len(added_commits)} integration commit(s)")
     return 0
 
