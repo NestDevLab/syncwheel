@@ -263,6 +263,28 @@ operation never updates the managed branch. A non-descendant tip, an oversized
 interval, a changed plan, ownership uncertainty, state lease loss, or any
 pre- or post-CAS managed-ref drift stops fail-closed.
 
+### Recorded control-manifest digest forms
+
+A state's `manifest_digest` covers `.syncwheel/manifest.json` as committed on
+the integration tip the state itself records. Releases up to 0.42.0 recorded the
+digest of the normalized public snapshot derived from that manifest, so a state
+published then can never satisfy a file-digest comparison. Verification
+therefore recomputes both forms from the same committed manifest and reports
+which one matched; a digest that matches neither is still a fail-closed error,
+and a digest that only matches a snapshot of some other manifest is not
+accepted.
+
+Migration is a publication, not a rewrite. Any publish, stack push, or compose
+over a legacy state writes its successor with the control-manifest digest and
+records a `coordination_state_digest_migrated` ledger event naming both digests
+and both forms. When there is nothing else to publish, the
+`state-digest-migration` backend covers the same state-only CAS boundary as the
+other evidence backends: the plan reports `digest-migration-required` rather
+than `noop`, binds the recorded and expected digests, and refuses any ref
+discrepancy. Its child keeps the parent's snapshot, managed refs, and
+tombstones byte-for-byte, leaves `changed_refs` empty, and carries the recorded
+digest in `repair_evidence`.
+
 ## Composing additive stack proposals
 
 `coordination compose` is separate from repair. It handles a known common state

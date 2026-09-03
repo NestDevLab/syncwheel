@@ -155,6 +155,18 @@ under the same exact state-ref lease. It never updates the managed branch and
 refuses non-descendants, intervals above 1024 commits, plan drift, ownership
 uncertainty, or concurrent ref changes.
 
+A coordination state records the digest of `.syncwheel/manifest.json` on its
+integration tip. States published before 0.42.2 recorded the digest of the
+normalized public snapshot of that same manifest instead, so the guard accepts
+either form and reports which one matched; anything else still fails closed.
+The first publish, push, or compose over a legacy state rewrites the state with
+the control-manifest digest and records a `coordination_state_digest_migrated`
+ledger event. To migrate without publishing anything else, plan and apply with
+`--freeze-backend state-digest-migration`: the plan reports
+`digest-migration-required` instead of `noop`, binds both digests, and apply
+appends a state child that changes only the recorded digest under the same
+exact state-ref lease.
+
 When the remote state and a stale local manifest independently added stacks,
 compose the proposals explicitly instead of weakening `stack push`:
 
