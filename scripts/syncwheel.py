@@ -4321,15 +4321,15 @@ def append_ledger_event(
             payload['idempotency_key'] = idempotency_key
             matching = [
                 event for event in events
-                if event.get('idempotency_key') == idempotency_key
-                or (event.get('payload') or {}).get('idempotency_key') == idempotency_key
+                if event.get('type') == event_type
+                and (
+                    event.get('idempotency_key') == idempotency_key
+                    or (event.get('payload') or {}).get('idempotency_key')
+                    == idempotency_key
+                )
             ]
             if matching:
-                if (
-                    len(matching) != 1
-                    or matching[0].get('type') != event_type
-                    or matching[0].get('payload') != payload
-                ):
+                if len(matching) != 1:
                     raise SyncwheelError(
                         f'ledger idempotency collision: {idempotency_key}'
                     )
@@ -22570,6 +22570,7 @@ def entrypoint_behavior_table():
         command_stack_set,
         command_stack_resolve_integration,
         command_stack_add,
+        command_coordination_provenance_reset,
     ), mutates='always', manifest_mutates='always')
     register(
         (command_stack_capture_integration,),
@@ -22601,10 +22602,11 @@ def entrypoint_behavior_table():
         command_channel_reconcile_outcome,
         command_stack_classify_integration,
         command_stack_land,
+        command_worktree_release,
+        command_gc,
     ), mutates='apply', manifest_mutates='apply')
     register((
         command_coordination_repair,
-        command_gc,
         command_journal_snapshot,
         command_journal_publish,
     ), mutates='apply')
@@ -22632,6 +22634,13 @@ def entrypoint_behavior_table():
     register((command_stack_git, command_int_git), mutates='git-passthrough')
     register(
         (SyncwheelRevisionBackend.ensure_stack_owned,),
+        manifest_mutates='internal',
+        command=False,
+    )
+    # Governed-lane maintenance writes the same ledger from the pre-command
+    # reconcile, so it joins the registry without being a command.
+    register(
+        (reconcile_governed_worktrees, prune_governed_worktree_stale_locks),
         manifest_mutates='internal',
         command=False,
     )

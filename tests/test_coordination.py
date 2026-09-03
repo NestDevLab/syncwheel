@@ -783,8 +783,14 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             base_state['manifest_digest'],
         )
 
+        integration_tip = self.git(
+            repo, 'rev-parse', 'integration/shared'
+        ).stdout.strip()
         self.assertEqual(plan['status'], 'publish-required')
-        self.assertEqual(plan['expectedIntegrationTip'], derived_tip)
+        self.assertEqual(plan['expectedIntegrationTip'], integration_tip)
+        self.git(
+            repo, 'merge-base', '--is-ancestor', derived_tip, integration_tip,
+        )
         self.assertEqual(plan['unmappedIntegrationCommits'], [])
         self.assertEqual(
             plan['composedSnapshot']['integration']['derived_paths'], ['locks/']
