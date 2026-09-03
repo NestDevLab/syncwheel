@@ -265,6 +265,25 @@ class GithubPrMergeTest(unittest.TestCase):
 
 
 class GithubAdapterTest(unittest.TestCase):
+    def test_commit_authors_reads_gh_cli_authors_list(self):
+        observed = {
+            'commits': [{
+                'oid': 'a' * 40,
+                'authors': [{'login': 'Yehonal', 'name': 'Yehonal'}],
+            }],
+        }
+        self.assertEqual(
+            ADAPTER._commit_authors(observed),
+            [{'sha': 'a' * 40, 'login': 'Yehonal', 'name': 'Yehonal'}],
+        )
+
+    def test_commit_authors_preserves_unresolved_author_as_blocking_record(self):
+        observed = {'commits': [{'oid': 'b' * 40, 'authors': []}]}
+        self.assertEqual(
+            ADAPTER._commit_authors(observed),
+            [{'sha': 'b' * 40, 'login': None, 'name': None}],
+        )
+
     def test_core_preserves_nonzero_merge_adapter_result_for_reconciliation(self):
         response = {
             'schemaVersion': 1,
