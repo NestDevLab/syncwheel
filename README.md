@@ -243,15 +243,25 @@ worktree and local lane branch. A dirty, unavailable, or current-directory lane
 is retained and reported; it is never removed automatically. A missing lane
 whose lease expired, or whose local owner PID is known to be dead, is reaped on
 the next applicable mutation even when an old registry path is outside the
-current configured root; its branch tip is always anchored first, including
-when it still equals the lane base. If Git reports that the branch's worktree
-moved, Syncwheel resolves and checks the current path before deciding whether
-the lane is eligible, and retains moved dirty or locked worktrees. Cleanup
-resolves the branch worktree and repeats the lock and dirty checks after
-anchoring, removes a missing directory's exact Git worktree registration, then
-deletes the lane branch with an expected-old ref transaction that verifies the
-recovery ref still points to the anchored tip. A moved recovery ref or an
-advanced branch leaves the branch intact with a named retry state.
+current configured root. If Git reports that the branch's worktree moved,
+Syncwheel resolves and checks the current path before deciding whether the lane
+is eligible, and retains moved dirty or externally locked worktrees.
+
+Cleanup takes a Git worktree lock with a deterministic Syncwheel token before
+classifying the lane or changing a ref. A lock failure is reported as a lane in
+use and stops the operation. Under that lock, Syncwheel verifies the exact Git
+admin directory and its `gitdir`, persists the pending cleanup intent, creates
+the recovery ref with expected-old protection, and commits one expected-old ref
+transaction that verifies the recovery ref and deletes the lane branch. Only
+then does a final tracked/untracked probe run before the exact verified
+registration is removed; cleanup never uses a global `git worktree prune`. A
+reappearing path, changed registration, moved recovery ref, or advanced branch
+fails closed with a retryable record, while the committed tip remains reachable
+from a recovery ref. The lock covers concurrent Syncwheel cleanup and ordinary
+non-forced Git worktree operations. Raw mutation of Syncwheel-owned refs,
+double-force worktree operations, and direct non-owner writes into a lane during
+cleanup are outside the supported concurrency model and fail closed when their
+effects are detectable.
 
 To retire a known dead or abandoned lane deliberately, preview the operation
 first and provide a durable reason:
@@ -265,12 +275,13 @@ syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --
 an existing lane-branch tip, removes the registry record, and appends a ledger
 event. An explicitly abandoned record whose path is already missing can still
 be released; any remaining Git worktree registration is removed before the
-branch and registry record. It refuses an existing dirty lane and names the
-recovery remedy instead of removing it. Pending cleanup and ledger writes are
-retryable and idempotent; the original release reason is retained across
-retries. `gc` previews the same expired and pending lane set that `gc --apply`
-may process, including each pending category, and also works when active-active
-coordination is disabled.
+the registry record. It refuses an existing dirty lane and names the recovery
+remedy instead of removing it. Pending cleanup, including a branch that advanced
+before its expected-old transaction, and ledger writes are retryable and
+idempotent; the original release reason is retained across retries. `gc`
+previews the same expired and pending lane set that `gc --apply` may process,
+including each pending category, and also works when active-active coordination
+is disabled.
 
 Automatic lane reaping runs only before an explicitly mutating lifecycle
 operation. Status, check, handoff, `gc` without `--apply`, `reconcile` or

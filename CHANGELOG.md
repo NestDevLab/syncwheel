@@ -21,11 +21,17 @@
 - Make recovery-ref creation, pending cleanup, and ledger append retries
   idempotent, preserving release event type and reason after interruptions, and
   make `gc` preview and apply enumerate the same pending categories.
-- Verify the anchored recovery ref in the same expected-old ref transaction
-  that deletes a lane branch, re-evaluate moved, locked, or dirty worktrees
-  after anchoring, remove prunable Git worktree registrations for missing
-  directories, and allow explicit release of a clean record whose path already
-  disappeared.
+- Make governed-lane cleanup lock-first: acquire a tokenized Git worktree lock,
+  verify its exact admin-dir and `gitdir`, persist retry intent, then anchor and
+  delete refs through expected-old operations before touching the worktree.
+- Probe tracked and untracked state immediately before removing only the
+  verified registration, retain reappearing or changed paths, and never use a
+  global worktree prune; interrupted removal and ref conflicts remain
+  retryable through their recovery ref.
+- Verify that the ref transaction reports `commit: ok`, accept the documented
+  release retry for `branch_advanced`, and cover non-UTC lease expiry plus every
+  lock, ordering, persistence, and targeted-cleanup invariant with
+  mutation-sensitive tests.
 
 ## 0.40.1 - 2026-09-02
 

@@ -916,13 +916,12 @@ class SyncwheelFixtureTest(unittest.TestCase):
         owner = f'agent@{module.socket.gethostname()}:999999999999999999999999'
         self.assertFalse(module.governed_worktree_owner_is_dead(owner))
 
-    def test_non_utc_lease_is_compared_in_utc(self):
-        opened = json.loads(self.run_cli('worktree', 'open', 'offset-lease', '--json').stdout)
+    def test_lease_expiry_honours_a_non_utc_offset(self):
         module = self.load_syncwheel_module()
-        registry, _ = module.load_governed_worktree_registry(self.repo)
-        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00-07:00'
-        module.save_governed_worktree_registry(self.repo, registry)
-        self.assertEqual(json.loads(self.run_cli('status', '--json').stdout)['governed_worktrees']['lanes'][0]['code'], 'expired')
+        lane = {'lease_expires_at': '2030-01-01T00:30:00-07:00'}
+        now = module.datetime.datetime(2030, 1, 1, 4, 0, tzinfo=module.datetime.timezone.utc)
+
+        self.assertFalse(module.governed_worktree_lane_lease_expired(lane, now))
 
     def test_gc_apply_never_reaps_a_dirty_lane(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'gc-dirty', '--json').stdout)
@@ -938,6 +937,27 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertTrue((lane_path / 'keep.txt').exists())
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['state'], 'active')
+
+    def test_gc_returns_nonzero_when_governed_cleanup_fails(self):
+        module = self.load_syncwheel_module()
+        module.governed_worktree_cleanup_candidates = lambda *args, **kwargs: [{'id': 'failed-lane'}]
+        module.reconcile_governed_worktrees = lambda *args, **kwargs: {
+            'reaped': [],
+            'failures': [{'id': 'failed-lane', 'code': 'branch_advanced'}],
+        }
+        module.run_coordination_gc = lambda *args, **kwargs: {
+            'enabled': False,
+            'candidates': [],
+        }
+        module.governed_worktree_diagnostics = lambda *args, **kwargs: {'lanes': []}
+
+        with mock.patch('builtins.print'):
+            result = module.command_gc(SimpleNamespace(
+                repo=str(self.repo), manifest=None, personal=None,
+                apply=True, fetch=False, json=True,
+            ))
+
+        self.assertEqual(result, 1)
 
     def test_missing_expired_directory_prunes_git_metadata_before_followup_rebuild(self):
         self.prepare_replay_stack()
@@ -965,6 +985,142 @@ class SyncwheelFixtureTest(unittest.TestCase):
             'stack', 'rebuild', 'replay', '--worktree', str(self.tmp / 'replay-worktree')
         )
 
+    def test_cleanup_takes_the_git_worktree_lock_first_and_treats_failure_as_lane_in_use(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'lock-first', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_git = module.git
+        mutations = []
+
+        def refuse_cleanup_lock(repo_root, *args, **kwargs):
+            if args[:2] == ('worktree', 'lock'):
+                mutations.append(args)
+                return module.subprocess.CompletedProcess(args, 1, '', 'already locked')
+            if args[:2] == ('update-ref', '--stdin') or args[:1] == ('update-ref',):
+                mutations.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = refuse_cleanup_lock
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.git = original_git
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'lock-first', 'code': 'lane_in_use'}])
+        self.assertEqual(mutations[0][:2], ('worktree', 'lock'))
+        self.assertEqual(len(mutations), 1)
+        self.assertTrue(lane_path.is_dir())
+        self.assertIsNotNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        persisted, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(persisted['lanes'][0]['state'], 'active')
+        self.assertNotIn('recovery_ref', persisted['lanes'][0])
+
+    def test_reaper_resumes_its_lock_after_a_crash_before_registry_intent(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'lock-crash', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        reason = module.governed_worktree_cleanup_lock_reason(lane)
+        self.git('worktree', 'lock', '--reason', reason, opened['lane']['path'])
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'lock-crash'}])
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_reaper_refuses_when_the_lane_path_reappears(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'path-reappeared', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        shutil.rmtree(lane_path)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        tip = module.ref_tip(self.repo, opened['lane']['branch'])
+        original_delete = module.delete_governed_worktree_branch_with_anchor
+
+        def recreate_after_ref_transaction(repo_root, lane, expected_tip):
+            deleted, detail = original_delete(repo_root, lane, expected_tip)
+            if deleted:
+                lane_path.mkdir(parents=True)
+                (lane_path / 'late-draft.txt').write_text('must survive\n')
+            return deleted, detail
+
+        module.delete_governed_worktree_branch_with_anchor = recreate_after_ref_transaction
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.delete_governed_worktree_branch_with_anchor = original_delete
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'path-reappeared', 'code': 'path_reappeared'}])
+        self.assertEqual((lane_path / 'late-draft.txt').read_text(), 'must survive\n')
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        persisted, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(persisted['lanes'][0]['pending_reason'], 'worktree_remove_failed')
+        self.assertEqual(module.ref_tip(self.repo, persisted['lanes'][0]['recovery_ref']), tip)
+        self.assertIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
+
+    def test_cleanup_targets_only_the_registration_whose_gitdir_matches(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'targeted-registration', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        unrelated_path = self.tmp / 'unrelated-prunable-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'unrelated-prunable', str(unrelated_path), 'main')
+        shutil.rmtree(lane_path)
+        shutil.rmtree(unrelated_path)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        before = self.git('worktree', 'list', '--porcelain')
+        self.assertIn(str(lane_path), before)
+        self.assertIn(str(unrelated_path), before)
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'targeted-registration'}])
+        after = self.git('worktree', 'list', '--porcelain')
+        self.assertNotIn(str(lane_path), after)
+        self.assertIn(str(unrelated_path), after)
+
+    def test_cleanup_never_removes_a_worktree_whose_gitdir_does_not_match_the_record(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gitdir-mismatch', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        admin_dir = module.governed_worktree_admin_dir_for_path(self.repo, lane_path)
+        gitdir_path = admin_dir / 'gitdir'
+        original_gitdir = gitdir_path.read_text()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_delete = module.delete_governed_worktree_branch_with_anchor
+
+        def change_gitdir_after_ref_transaction(repo_root, lane, tip):
+            deleted, detail = original_delete(repo_root, lane, tip)
+            if deleted:
+                gitdir_path.write_text(str(self.tmp / 'foreign-worktree' / '.git') + '\n')
+            return deleted, detail
+
+        module.delete_governed_worktree_branch_with_anchor = change_gitdir_after_ref_transaction
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.delete_governed_worktree_branch_with_anchor = original_delete
+            gitdir_path.write_text(original_gitdir)
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'gitdir-mismatch', 'code': 'registration_mismatch'}])
+        self.assertTrue(lane_path.is_dir())
+        persisted, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(persisted['lanes'][0]['pending_reason'], 'worktree_remove_failed')
+
     def test_reaper_reports_when_a_worktree_becomes_dirty_before_remove(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'dirty-race', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
@@ -972,15 +1128,15 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        original_run = module.run
+        original_delete = module.delete_governed_worktree_branch_with_anchor
 
-        def dirty_before_remove(command, *args, **kwargs):
-            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[3]) == lane_path:
+        def dirty_after_ref_transaction(repo_root, lane, tip):
+            deleted, detail = original_delete(repo_root, lane, tip)
+            if deleted:
                 (lane_path / 'late-draft.txt').write_text('keep late change\n')
-                return module.subprocess.CompletedProcess(command, 1, '', 'worktree is dirty')
-            return original_run(command, *args, **kwargs)
+            return deleted, detail
 
-        module.run = dirty_before_remove
+        module.delete_governed_worktree_branch_with_anchor = dirty_after_ref_transaction
         try:
             completed, detail = module.reap_governed_worktree_lane(
                 self.repo,
@@ -989,43 +1145,51 @@ class SyncwheelFixtureTest(unittest.TestCase):
                 persist=lambda: module.save_governed_worktree_registry(self.repo, registry),
             )
         finally:
-            module.run = original_run
+            module.delete_governed_worktree_branch_with_anchor = original_delete
 
         self.assertFalse(completed)
         self.assertEqual(detail['code'], 'dirty')
         self.assertIn('became dirty before removal', detail['remedy'])
         self.assertEqual((lane_path / 'late-draft.txt').read_text(), 'keep late change\n')
-        self.assertIsNotNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'worktree_remove_failed')
+        self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), registry['lanes'][0]['cleanup_tip'])
 
-    def test_reaper_persists_recovery_and_pending_state_before_a_failed_branch_delete(self):
+    def test_registry_records_pending_delete_before_the_ref_transaction_starts(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'delete-retry', '--json').stdout)
-        self.git('worktree', 'remove', opened['lane']['path'])
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
         original_git = module.git
+        observed = []
 
-        def fail_delete(repo_root, *args, **kwargs):
+        def inspect_delete_intent(repo_root, *args, **kwargs):
             if args[:2] == ('update-ref', '--stdin'):
-                return module.subprocess.CompletedProcess(args, 1, '', 'injected')
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                pending = persisted['lanes'][0]
+                self.assertEqual(pending['state'], 'captured_pending_cleanup')
+                self.assertEqual(pending['pending_reason'], 'reaping')
+                self.assertEqual(pending['cleanup_tip'], module.ref_tip(self.repo, opened['lane']['branch']))
+                self.assertTrue(pending['recovery_ref'].startswith('refs/syncwheel/recovery/lanes/'))
+                self.assertTrue(pending['cleanup_idempotency_key'].startswith('governed-worktree-cleanup:'))
+                self.assertTrue(pending['cleanup_lock_reason'].startswith('syncwheel-cleanup:delete-retry:'))
+                observed.append(True)
             return original_git(repo_root, *args, **kwargs)
 
-        module.git = fail_delete
+        module.git = inspect_delete_intent
         try:
             result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         finally:
             module.git = original_git
 
-        self.assertEqual(result['reaped'], [])
-        self.assertEqual(result['failures'][0]['code'], 'branch_delete_failed')
-        registry, _ = module.load_governed_worktree_registry(self.repo)
-        self.assertEqual(registry['lanes'][0]['pending_reason'], 'branch_delete_failed')
-        self.assertIn('recovery_ref', registry['lanes'][0])
-        module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        self.assertEqual(observed, [True])
+        self.assertEqual(result['reaped'], [{'id': 'delete-retry'}])
+        self.assertEqual(result['failures'], [])
         self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
 
-    def test_reaper_refuses_a_recovery_ref_moved_after_anchor(self):
+    def test_recovery_ref_conflict_fails_before_the_worktree_is_touched(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'anchor-moved', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
         (lane_path / 'saved.txt').write_text('unique anchored commit\n')
@@ -1038,28 +1202,30 @@ class SyncwheelFixtureTest(unittest.TestCase):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        original_ensure = module.ensure_governed_worktree_recovery_ref
+        original_git = module.git
         injected = {'done': False}
 
-        def move_ref_after_anchor(repo_root, recovery_ref, expected_tip):
-            original_ensure(repo_root, recovery_ref, expected_tip)
-            if not injected['done']:
+        def move_ref_before_transaction(repo_root, *args, **kwargs):
+            if args[:2] == ('update-ref', '--stdin') and not injected['done']:
                 injected['done'] = True
-                self.git('update-ref', recovery_ref, opened['lane']['base'], expected_tip)
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                recovery_ref = persisted['lanes'][0]['recovery_ref']
+                original_git(repo_root, 'update-ref', recovery_ref, opened['lane']['base'], tip)
+            return original_git(repo_root, *args, **kwargs)
 
-        module.ensure_governed_worktree_recovery_ref = move_ref_after_anchor
+        module.git = move_ref_before_transaction
         try:
-            with self.assertRaisesRegex(
-                module.SyncwheelError,
-                rf'recovery ref .* points to {opened["lane"]["base"]} instead of {tip}',
-            ):
-                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         finally:
-            module.ensure_governed_worktree_recovery_ref = original_ensure
+            module.git = original_git
 
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'anchor-moved', 'code': 'recovery_ref_moved'}])
         self.assertTrue(lane_path.is_dir())
+        self.assertEqual((lane_path / 'saved.txt').read_text(), 'unique anchored commit\n')
         self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), tip)
         registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'recovery_ref_moved')
         self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), opened['lane']['base'])
         self.assertEqual(self.read_ledger_state()['recent_events'], [])
 
@@ -1102,41 +1268,78 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), anchored_tip)
         self.assertEqual(self.read_ledger_state()['recent_events'], [])
 
-    def test_reaper_rechecks_moved_locked_dirty_worktree_after_anchor(self):
-        opened = json.loads(self.run_cli('worktree', 'open', 'post-anchor-move', '--json').stdout)
-        old_path = Path(opened['lane']['path'])
-        moved_path = old_path.with_name('syncwheel-lane-post-anchor-move-current')
+    def test_branch_advanced_remedy_names_a_command_that_accepts_it(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'advanced-release', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        old_tip = module.ref_tip(self.repo, lane['branch'])
+        old_recovery_ref = 'refs/syncwheel/recovery/lanes/advanced-release-old'
+        self.git('update-ref', old_recovery_ref, old_tip)
+        (lane_path / 'advanced.txt').write_text('advanced but clean\n')
+        subprocess.run(['git', 'add', 'advanced.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: advance release lane'], cwd=lane_path, check=True)
+        advanced_tip = module.ref_tip(self.repo, lane['branch'])
+        lane.update({
+            'state': 'captured_pending_cleanup',
+            'pending_reason': 'branch_advanced',
+            'cleanup_tip': old_tip,
+            'recovery_ref': old_recovery_ref,
+            'cleanup_event_type': 'governed_worktree_released',
+            'cleanup_event_reason': 'retry advanced release',
+        })
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        remedy = module.governed_worktree_pending_remedy(self.read_manifest(), lane)
+        self.assertIn(
+            'syncwheel worktree release advanced-release --reason',
+            remedy,
+        )
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'advanced-release',
+            '--reason', 'retry advanced release', '--apply', '--json',
+        ).stdout)
+
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), old_tip)
+        self.assertEqual(module.ref_tip(self.repo, released['lane']['recovery_ref']), advanced_tip)
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertFalse(lane_path.exists())
+
+    def test_lane_branch_cannot_be_reattached_while_cleanup_holds_the_lock(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'locked-reattach', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        reattached_path = lane_path.with_name('syncwheel-lane-locked-reattach-second')
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        tip = module.ref_tip(self.repo, opened['lane']['branch'])
         original_ensure = module.ensure_governed_worktree_recovery_ref
-        injected = {'done': False}
+        attempts = []
 
-        def move_lock_and_dirty_after_anchor(repo_root, recovery_ref, expected_tip):
+        def try_reattach_while_locked(repo_root, recovery_ref, expected_tip):
+            worktree = module.governed_worktree_record_for_path(repo_root, lane_path)
+            self.assertTrue(str(worktree.get('locked')).startswith('syncwheel-cleanup:locked-reattach:'))
+            attempts.append(subprocess.run(
+                ['git', 'worktree', 'add', str(reattached_path), opened['lane']['branch']],
+                cwd=repo_root,
+                text=True,
+                capture_output=True,
+            ))
             original_ensure(repo_root, recovery_ref, expected_tip)
-            if not injected['done']:
-                injected['done'] = True
-                self.git('worktree', 'move', str(old_path), str(moved_path))
-                self.git('worktree', 'lock', '--reason', 'late active work', str(moved_path))
-                (moved_path / 'late-draft.txt').write_text('must survive cleanup\n')
 
-        module.ensure_governed_worktree_recovery_ref = move_lock_and_dirty_after_anchor
+        module.ensure_governed_worktree_recovery_ref = try_reattach_while_locked
         try:
             result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         finally:
             module.ensure_governed_worktree_recovery_ref = original_ensure
 
-        self.assertEqual(result['reaped'], [])
-        self.assertEqual(result['failures'], [{'id': 'post-anchor-move', 'code': 'locked'}])
-        registry, _ = module.load_governed_worktree_registry(self.repo)
-        self.assertEqual(Path(registry['lanes'][0]['path']).resolve(), moved_path.resolve())
-        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), tip)
-        self.assertEqual((moved_path / 'late-draft.txt').read_text(), 'must survive cleanup\n')
-        worktree = module.find_worktree_record_for_branch(self.repo, opened['lane']['branch'])
-        self.assertTrue(worktree['locked'])
-        self.assertEqual(self.read_ledger_state()['recent_events'], [])
+        self.assertEqual(len(attempts), 1)
+        self.assertNotEqual(attempts[0].returncode, 0)
+        self.assertIn('already used by worktree', attempts[0].stderr)
+        self.assertEqual(result['reaped'], [{'id': 'locked-reattach'}])
+        self.assertEqual(result['failures'], [])
+        self.assertFalse(reattached_path.exists())
 
     def test_release_retry_accepts_branch_delete_failed_and_preserves_reason(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'release-delete-retry', '--json').stdout)
@@ -1203,6 +1406,39 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual([event['type'] for event in events], ['governed_worktree_reaped'])
         self.assertEqual(module.ref_tip(self.repo, recovery_ref), tip)
 
+    def test_reaper_recovers_after_worktree_remove_succeeds_before_state_persist(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'remove-crash', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_run = module.run
+
+        def stop_after_remove(command, *args, **kwargs):
+            result = original_run(command, *args, **kwargs)
+            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[-1]) == lane_path:
+                raise SystemExit('injected crash after worktree removal')
+            return result
+
+        module.run = stop_after_remove
+        try:
+            with self.assertRaisesRegex(SystemExit, 'injected crash'):
+                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.run = original_run
+
+        self.assertFalse(lane_path.exists())
+        pending, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(pending['lanes'][0]['state'], 'captured_pending_cleanup')
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'remove-crash'}])
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
     def test_reaper_retry_reuses_an_existing_matching_recovery_ref(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'remove-retry', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
@@ -1213,7 +1449,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         original_run = module.run
 
         def fail_remove(command, *args, **kwargs):
-            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[3]) == lane_path:
+            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[-1]) == lane_path:
                 raise module.SyncwheelError('injected worktree remove failure')
             return original_run(command, *args, **kwargs)
 
@@ -1242,7 +1478,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         original_run = module.run
 
         def fail_remove(command, *args, **kwargs):
-            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[3]) == lane_path:
+            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[-1]) == lane_path:
                 raise module.SyncwheelError('injected worktree remove failure')
             return original_run(command, *args, **kwargs)
 
@@ -1265,9 +1501,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         ):
             module.reconcile_governed_worktrees(self.repo, self.read_manifest())
 
-    def test_reaper_anchors_before_it_deletes_the_lane_branch(self):
+    def test_cleanup_ref_transaction_is_committed_not_aborted(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'anchor-order', '--json').stdout)
-        self.git('worktree', 'remove', opened['lane']['path'])
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
@@ -1286,15 +1521,23 @@ class SyncwheelFixtureTest(unittest.TestCase):
         finally:
             module.git = original_git
 
-        recovery_index = next(index for index, (args, _) in enumerate(calls)
-                              if args[0] == 'update-ref' and args[1].startswith('refs/syncwheel/recovery/'))
-        delete_index = next(index for index, (args, _) in enumerate(calls)
-                            if args[:2] == ('update-ref', '--stdin'))
-        self.assertLess(recovery_index, delete_index)
-        transaction = calls[delete_index][1]['input_text']
+        recovery_index = next(
+            index for index, (args, _) in enumerate(calls)
+            if args[0] == 'update-ref' and args[1].startswith('refs/syncwheel/recovery/')
+        )
+        transaction_index = next(
+            index for index, (args, _) in enumerate(calls)
+            if args[:2] == ('update-ref', '--stdin')
+        )
+        self.assertLess(recovery_index, transaction_index)
+        transaction = calls[transaction_index][1]['input_text']
         recovery_ref = calls[recovery_index][0][1]
         self.assertIn(f'update {recovery_ref} {tip} {tip}\n', transaction)
         self.assertIn(f'delete refs/heads/{opened["lane"]["branch"]} {tip}\n', transaction)
+        self.assertIn('prepare\ncommit\n', transaction)
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertEqual(module.ref_tip(self.repo, recovery_ref), tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
 
     def test_reaper_keeps_a_retryable_record_when_ledger_append_fails(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'ledger-retry', '--json').stdout)

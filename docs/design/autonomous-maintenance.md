@@ -786,6 +786,22 @@ Preconditions and execution must reuse `coordination_gc_plan` and
 - a missing inactive tombstoned ref is a valid remote observation. Its historic
   tip remains required only for the independent local recoverability proof.
 
+Governed lane cleanup uses a narrower lock-first protocol. The first cleanup
+mutation is a tokenized `git worktree lock`; failure means the lane is in use
+and no ref or path is changed. While holding that lock, Syncwheel verifies the
+registration's exact admin-dir and `gitdir`, persists retry intent, anchors the
+tip with expected-old protection, and commits an expected-old transaction that
+verifies the recovery ref while deleting the lane branch. A final
+tracked/untracked probe precedes removal of that registration only; global
+worktree prune is forbidden. Ref conflict, path reappearance, registration
+drift, or process death leaves a retryable record and an immutable recovery ref.
+
+This guarantee covers concurrent Syncwheel commands and ordinary non-forced Git
+operations. Raw changes to Syncwheel-owned refs, double-force operations that
+bypass Git's worktree lock, and direct non-owner writes into the lane during
+cleanup are outside the supported threat model; Syncwheel still fails closed
+when it detects their effects.
+
 ## 10. Unsafe cases and exact questions
 
 The following table defines the required human-facing question. The
