@@ -45,6 +45,16 @@
   --apply` and an explicit release that re-anchors the new tip, make completed
   releases idempotent after a lost response, and select GC candidates under the
   registry lock so a reused lane id cannot yield a null-code failure.
+- Answer `worktree release` with the terminal another concurrent Syncwheel
+  command already wrote for the lane, instead of an unknown lane, and record the
+  operator's `--reason` as a `governed_worktree_release_noted` ledger event
+  whenever the terminal carries a different one.
+- Let `worktree release` complete every pending reap state, not only
+  `branch_advanced`, keeping the terminal type and reason of the intent already
+  fsynced for it.
+- Report an uninitialized registry lock recovery as such rather than as a stale
+  owner, and prune retained stale lock inodes nobody holds during the next
+  cleanup, keeping the recovery log as the durable evidence.
 
 ## 0.40.1 - 2026-09-02
 

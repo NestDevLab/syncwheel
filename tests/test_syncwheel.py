@@ -217,6 +217,120 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             time.sleep(0.01)
         return holder
 
+    def run_cli_pair_concurrently(self, first, second):
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        processes = [
+            subprocess.Popen(
+                ['python3', str(CLI), *args],
+                cwd=self.repo,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            for args in (first, second)
+        ]
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=120)
+            results.append(SimpleNamespace(
+                returncode=process.returncode, stdout=stdout, stderr=stderr,
+            ))
+        return results
+
+    def lane_release_reason_recorded(self, module, lane_id, reason):
+        for event in module.load_ledger_events(self.repo):
+            if event['type'] not in {
+                'governed_worktree_released', 'governed_worktree_release_noted',
+            }:
+                continue
+            payload = event.get('payload') or {}
+            if payload.get('lane') == lane_id and payload.get('reason') == reason:
+                return True
+        return False
+
+    def start_registry_lock_race(self, label, trace_path, hold, ready_path=None):
+        script = r'''
+import importlib.util
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+cli_path, repo_path, label, trace_path, hold, ready_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_registry_lock_race_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lock_path = module.governed_worktree_lock_path(Path(repo_path)).resolve(strict=False)
+original_open = module.os.open
+
+
+def trace(mark):
+    descriptor = original_open(trace_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, (mark + '\n').encode('utf-8'))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+if ready_path:
+    stopped = []
+
+    def stop_after_exclusive_create(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            not stopped
+            and flags & os.O_EXCL
+            and Path(path).resolve(strict=False) == lock_path
+        ):
+            stopped.append(True)
+            Path(ready_path).write_text(str(os.getpid()), encoding='utf-8')
+            os.kill(os.getpid(), signal.SIGSTOP)
+        return descriptor
+
+    module.os.open = stop_after_exclusive_create
+
+with module.governed_worktree_registry_lock(Path(repo_path)):
+    trace(label + '-enter')
+    time.sleep(float(hold))
+    trace(label + '-exit')
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        return subprocess.Popen(
+            [
+                'python3', '-c', script, str(CLI), str(self.repo), label,
+                str(trace_path), str(hold), str(ready_path or ''),
+            ],
+            cwd=self.repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+
+    def await_condition(self, predicate, message, timeout=20):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() >= deadline:
+                self.fail(message)
+            time.sleep(0.01)
+
+    def process_state(self, pid):
+        try:
+            raw = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+        except FileNotFoundError:
+            return None
+        closing = raw.rfind(')')
+        fields = raw[closing + 2:].split() if closing >= 0 else []
+        return fields[0] if fields else None
+
     def run_script(self, script_path, *args, expected=0, cwd=None):
         result = subprocess.run(
             ['python3', str(script_path), *args],
@@ -1455,8 +1569,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 persisted, _ = module.load_governed_worktree_registry(self.repo)
                 self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
 
-        stale_locks = list(lock_path.parent.glob(f'{lock_path.name}.stale-*'))
-        self.assertEqual(len(stale_locks), len(stages))
+        self.assertEqual(list(lock_path.parent.glob(f'{lock_path.name}.stale-*')), [])
         recoveries = [json.loads(line) for line in recovery_log.read_text().splitlines()]
         self.assertEqual(len(recoveries), len(stages))
         self.assertTrue(all(item['reason'] == 'pid_not_alive' for item in recoveries))
@@ -1561,6 +1674,240 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             holder.wait(timeout=10)
             holder.stdout.close()
             holder.stderr.close()
+
+    def test_worktree_release_is_idempotent_after_gc_reaped_the_same_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'reaped-first', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'reaped-first',
+            '--reason', 'operator release', '--apply', '--json',
+        ).stdout)
+
+        self.assertTrue(released['applied'])
+        self.assertTrue(released['idempotent'])
+        self.assertEqual(released['terminal_type'], 'governed_worktree_reaped')
+        self.assertEqual(released['terminal_reason'], 'expired')
+        self.assertEqual(released['note']['payload']['reason'], 'operator release')
+        self.assertEqual(released['note']['payload']['terminal_seq'], released['terminal']['seq'])
+        self.assertFalse(Path(opened['lane']['path']).exists())
+
+        repeated = json.loads(self.run_cli(
+            'worktree', 'release', 'reaped-first',
+            '--reason', 'operator release', '--apply', '--json',
+        ).stdout)
+
+        self.assertEqual(repeated['terminal'], released['terminal'])
+        notes = [
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_release_noted'
+        ]
+        self.assertEqual(len(notes), 1)
+
+    def test_worktree_release_preview_never_writes_a_note_for_a_reaped_lane(self):
+        self.run_cli('worktree', 'open', 'reaped-preview', '--json')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+        before = len(module.load_ledger_events(self.repo))
+
+        preview = json.loads(self.run_cli(
+            'worktree', 'release', 'reaped-preview', '--reason', 'operator release', '--json',
+        ).stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertTrue(preview['idempotent'])
+        self.assertNotIn('note', preview)
+        self.assertEqual(len(module.load_ledger_events(self.repo)), before)
+
+    def test_release_racing_gc_never_reports_an_unknown_lane(self):
+        module = self.load_syncwheel_module()
+        reason = 'operator release'
+
+        for index in range(6):
+            with self.subTest(iteration=index):
+                lane_id = f'race-gc-{index}'
+                self.run_cli('worktree', 'open', lane_id, '--json')
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                release, collector = self.run_cli_pair_concurrently(
+                    ['worktree', 'release', lane_id, '--reason', reason, '--apply', '--json'],
+                    ['gc', '--apply', '--no-fetch', '--json'],
+                )
+
+                self.assertNotIn('unknown governed worktree lane', release.stderr)
+                self.assertEqual(release.returncode, 0, release.stderr)
+                self.assertEqual(collector.returncode, 0, collector.stderr)
+                self.assertTrue(self.lane_release_reason_recorded(module, lane_id, reason))
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+
+    def test_release_racing_worktree_open_never_reports_an_unknown_lane(self):
+        module = self.load_syncwheel_module()
+        reason = 'operator release'
+
+        for index in range(6):
+            with self.subTest(iteration=index):
+                lane_id = f'race-open-{index}'
+                self.run_cli('worktree', 'open', lane_id, '--json')
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                release, reopen = self.run_cli_pair_concurrently(
+                    ['worktree', 'release', lane_id, '--reason', reason, '--apply', '--json'],
+                    ['worktree', 'open', lane_id, '--json'],
+                )
+
+                self.assertNotIn('unknown governed worktree lane', release.stderr)
+                self.assertEqual(release.returncode, 0, release.stderr)
+                self.assertEqual(reopen.returncode, 0, reopen.stderr)
+                self.assertTrue(self.lane_release_reason_recorded(module, lane_id, reason))
+                self.run_cli(
+                    'worktree', 'release', lane_id,
+                    '--reason', 'iteration cleanup', '--apply', '--json',
+                )
+
+    def test_release_completes_a_reap_interrupted_by_sigkill(self):
+        module = self.load_syncwheel_module()
+        stages = ('after_cleanup_intent', 'after_ref_transaction', 'before_worktree_remove')
+
+        for stage in stages:
+            with self.subTest(stage=stage):
+                lane_id = f'crashed-{stage.replace("_", "-")}'
+                opened = json.loads(self.run_cli('worktree', 'open', lane_id, '--json').stdout)
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                self.run_cli_until_cleanup_sigkill(stage, 'gc', '--apply', '--no-fetch', '--json')
+
+                pending, _ = module.load_governed_worktree_registry(self.repo)
+                record = next(item for item in pending['lanes'] if item['id'] == lane_id)
+                self.assertEqual(record['cleanup_event_type'], 'governed_worktree_reaped')
+                self.assertEqual(record['pending_reason'], 'reaping')
+
+                released = json.loads(self.run_cli(
+                    'worktree', 'release', lane_id,
+                    '--reason', 'operator takeover', '--apply', '--json',
+                ).stdout)
+
+                self.assertTrue(released['applied'])
+                self.assertEqual(released['terminal_type'], 'governed_worktree_reaped')
+                self.assertFalse(Path(opened['lane']['path']).exists())
+                self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+                self.assertTrue(
+                    self.lane_release_reason_recorded(module, lane_id, 'operator takeover')
+                )
+                intents = [
+                    event for event in module.load_ledger_events(self.repo)
+                    if event['type'] == 'governed_worktree_cleanup_intent'
+                    and (event['payload'] or {}).get('lane') == lane_id
+                ]
+                terminals = [
+                    event for event in module.load_ledger_events(self.repo)
+                    if event['type'] in {
+                        'governed_worktree_reaped', 'governed_worktree_released',
+                    }
+                    and (event['payload'] or {}).get('lane') == lane_id
+                ]
+                self.assertEqual(len(intents), 1)
+                self.assertEqual(len(terminals), 1)
+                self.assertEqual(
+                    terminals[0]['payload']['idempotency_key'],
+                    intents[0]['payload']['idempotency_key'],
+                )
+
+    def test_registry_lock_never_steals_a_lock_younger_than_the_initialization_grace(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600))
+
+        started = time.monotonic()
+        with module.governed_worktree_registry_lock(self.repo):
+            waited = time.monotonic() - started
+
+        self.assertGreaterEqual(waited, 0.2)
+        recovery = json.loads(
+            lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+            .read_text().splitlines()[-1]
+        )
+        self.assertEqual(recovery['reason'], 'incomplete_metadata')
+
+    def test_a_stolen_uninitialized_lock_keeps_its_creator_out_of_the_critical_section(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+        trace_path = self.tmp / 'registry-lock-race.trace'
+        ready_path = self.tmp / 'registry-lock-race.ready'
+
+        creator = self.start_registry_lock_race('A', trace_path, 0.2, ready_path=ready_path)
+        contender = None
+        try:
+            self.await_condition(
+                ready_path.exists, 'the lock creator never created the lock file'
+            )
+            self.await_condition(
+                lambda: self.process_state(creator.pid) == 'T',
+                'the lock creator never stopped between creation and flock',
+            )
+            contender = self.start_registry_lock_race('B', trace_path, 1.0)
+            self.await_condition(
+                lambda: trace_path.exists() and 'B-enter' in trace_path.read_text(),
+                'the contender never recovered the uninitialized lock',
+            )
+            os.kill(creator.pid, signal.SIGCONT)
+            contender_stdout, contender_stderr = contender.communicate(timeout=60)
+            creator_stdout, creator_stderr = creator.communicate(timeout=60)
+        finally:
+            for process in (creator, contender):
+                if process is not None and process.poll() is None:
+                    os.kill(process.pid, signal.SIGCONT)
+                    process.kill()
+                    process.wait(timeout=10)
+
+        self.assertEqual(contender.returncode, 0, contender_stderr)
+        self.assertEqual(creator.returncode, 0, creator_stderr)
+        self.assertEqual(
+            trace_path.read_text().split(),
+            ['B-enter', 'B-exit', 'A-enter', 'A-exit'],
+        )
+        self.assertIn('incomplete_metadata', contender_stderr)
+        self.assertIn('uninitialized governed worktree registry lock', contender_stderr)
+        self.assertNotIn('recovered stale governed worktree registry lock', contender_stderr)
+        recovery = json.loads(recovery_log.read_text().splitlines()[-1])
+        self.assertEqual(recovery['reason'], 'incomplete_metadata')
+
+    def test_retained_stale_registry_locks_are_pruned_by_the_next_cleanup(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stale_path = lock_path.with_name(f'{lock_path.name}.stale-20000101T000000Z-0123456789ab')
+        stale_path.write_text('{}\n')
+
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+        self.assertFalse(stale_path.exists())
+        pruned = [
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_stale_locks_pruned'
+        ]
+        self.assertEqual(len(pruned), 1)
+        self.assertEqual(pruned[0]['payload']['files'], [stale_path.name])
 
     def test_reaper_refuses_when_the_lane_path_reappears(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'path-reappeared', '--json').stdout)

@@ -161,6 +161,18 @@ GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
 GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
+GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES = (
+    'governed_worktree_released',
+    'governed_worktree_reaped',
+)
+GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
+    'reaping',
+    'worktree_remove_failed',
+    'branch_delete_failed',
+    'recovery_ref_moved',
+    'registration_mismatch',
+    'ledger_pending',
+})
 ZERO_OBJECT_ID = '0' * 40
 _REGISTRY_EXPECTED_DIGEST_UNSET = object()
 JOURNAL_SENSITIVE_PARTS = {
@@ -4390,11 +4402,18 @@ def log_governed_worktree_lock_recovery(lock_path, stale_path, metadata, reason,
         os.close(descriptor)
     if not existed:
         fsync_directory_path(log_path.parent)
-    print(
-        f"WARNING: recovered stale governed worktree registry lock from pid "
-        f"{metadata.get('pid', 'unknown')} ({reason}); retained {stale_path.name}",
-        file=sys.stderr,
-    )
+    if reason == 'incomplete_metadata':
+        # Nothing here proves the creator died; it may be alive and descheduled.
+        message = (
+            'recovered an uninitialized governed worktree registry lock '
+            f'({reason}); its creator, if still running, retries'
+        )
+    else:
+        message = (
+            'recovered stale governed worktree registry lock from pid '
+            f"{metadata.get('pid', 'unknown')} ({reason})"
+        )
+    print(f'WARNING: {message}; retained {stale_path.name}', file=sys.stderr)
 
 
 def governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
@@ -4523,6 +4542,45 @@ def governed_worktree_registry_lock(repo_root):
         finally:
             fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+
+
+def prune_governed_worktree_stale_locks(repo_root, manifest_path=None):
+    """Drop retained stale lock inodes nobody holds; the recovery log keeps the evidence."""
+    if fcntl is None:
+        return []
+    lock_path = governed_worktree_lock_path(repo_root)
+    directory = lock_path.parent
+    pruned = []
+    for candidate in sorted(directory.glob(f'{lock_path.name}.stale-*')):
+        try:
+            descriptor = os.open(str(candidate), os.O_RDWR)
+        except OSError:
+            continue
+        held = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue
+            held = True
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                continue
+            pruned.append(candidate.name)
+        finally:
+            if held:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+    if pruned:
+        fsync_directory_path(directory)
+        append_ledger_event(
+            repo_root,
+            'governed_worktree_stale_locks_pruned',
+            {'files': pruned, 'count': len(pruned)},
+            manifest_path,
+        )
+    return pruned
 
 
 def load_governed_worktree_registry(repo_root):
@@ -5008,24 +5066,59 @@ def recover_governed_worktree_registry_from_ledger(
     return ledger
 
 
-def governed_worktree_release_terminal(repo_root, lane_id, reason, manifest_path=None):
+def governed_worktree_release_terminal(repo_root, lane_id, manifest_path=None):
+    """Latest terminal any Syncwheel command wrote for this lane, release or reap."""
     ledger = governed_worktree_cleanup_ledger(repo_root, manifest_path)
     intent_keys = {
         key for key, event in ledger['intents'].items()
         if (event.get('payload') or {}).get('lane') == lane_id
     }
     for event in reversed(ledger['events']):
-        if event.get('type') != 'governed_worktree_released':
+        if event.get('type') not in GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES:
             continue
         payload = event.get('payload') or {}
-        key = payload.get('idempotency_key')
         if (
             payload.get('lane') == lane_id
-            and payload.get('reason') == reason
-            and key in intent_keys
+            and payload.get('idempotency_key') in intent_keys
         ):
             return event
     return None
+
+
+def governed_worktree_release_note_key(lane_id, terminal, reason):
+    payload = terminal.get('payload') or {}
+    material = {
+        'lane': lane_id,
+        'generation_token': payload.get('generation_token'),
+        'terminal_type': terminal.get('type'),
+        'terminal_key': payload.get('idempotency_key'),
+        'reason': reason,
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()
+    return f'governed-worktree-release-note:{digest}'
+
+
+def append_governed_worktree_release_note(repo_root, lane_id, reason, terminal, manifest_path=None):
+    payload = terminal.get('payload') or {}
+    return append_ledger_event(
+        repo_root,
+        'governed_worktree_release_noted',
+        {
+            'lane': lane_id,
+            'reason': reason,
+            'terminal_type': terminal.get('type'),
+            'terminal_seq': terminal.get('seq'),
+            'terminal_reason': payload.get('reason'),
+            'generation_token': payload.get('generation_token'),
+            'branch': payload.get('branch'),
+            'path': payload.get('path'),
+            'recovery_ref': payload.get('recovery_ref'),
+        },
+        manifest_path,
+        idempotency_key=governed_worktree_release_note_key(lane_id, terminal, reason),
+    )
 
 
 def ensure_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
@@ -5571,6 +5664,7 @@ def completed_governed_worktree_lane(lane):
 
 def reconcile_governed_worktrees(repo_root, manifest, manifest_path=None, candidate_ids=None):
     with governed_worktree_registry_lock(repo_root):
+        prune_governed_worktree_stale_locks(repo_root, manifest_path)
         registry, _ = load_governed_worktree_registry(repo_root)
         persist = governed_worktree_registry_cas_persister(repo_root, registry)
         recover_governed_worktree_registry_from_ledger(
@@ -10755,52 +10849,80 @@ def command_worktree_release(args):
         )
         lane = next((item for item in registry['lanes'] if item['id'] == lane_id), None)
         if lane is None:
-            terminal = governed_worktree_release_terminal(
-                repo_root,
-                lane_id,
-                reason,
-                manifest_path,
+            terminal = governed_worktree_release_terminal(repo_root, lane_id, manifest_path)
+            if terminal is None:
+                raise SyncwheelError(f'unknown governed worktree lane: {lane_id}')
+            payload = terminal.get('payload') or {}
+            terminal_type = terminal.get('type')
+            terminal_reason = payload.get('reason')
+            note = None
+            already_recorded = (
+                terminal_type == 'governed_worktree_released'
+                and terminal_reason == reason
             )
-            if terminal is not None:
-                payload = terminal.get('payload') or {}
-                terminal_lane = {
-                    'id': lane_id,
-                    'branch': payload.get('branch'),
-                    'path': payload.get('path'),
-                    'recovery_ref': payload.get('recovery_ref'),
-                    'generation_token': payload.get('generation_token'),
-                }
-                output = {
-                    'lane': terminal_lane,
-                    'reason': reason,
-                    'registry_path': str(registry_path),
-                    'applied': True,
-                    'idempotent': True,
-                    'terminal': terminal,
-                }
-                if args.json:
-                    print(json.dumps(output, indent=2, sort_keys=True))
-                else:
-                    print(
-                        f'already released governed worktree {lane_id}; '
-                        f"terminal ledger event {terminal.get('seq')}"
-                    )
-                return 0
-            raise SyncwheelError(f'unknown governed worktree lane: {lane_id}')
+            if args.apply and not already_recorded:
+                note = append_governed_worktree_release_note(
+                    repo_root,
+                    lane_id,
+                    reason,
+                    terminal,
+                    manifest_path,
+                )
+            terminal_lane = {
+                'id': lane_id,
+                'branch': payload.get('branch'),
+                'path': payload.get('path'),
+                'recovery_ref': payload.get('recovery_ref'),
+                'generation_token': payload.get('generation_token'),
+            }
+            output = {
+                'lane': terminal_lane,
+                'reason': reason,
+                'registry_path': str(registry_path),
+                'applied': bool(args.apply),
+                'idempotent': True,
+                'terminal': terminal,
+                'terminal_type': terminal_type,
+                'terminal_reason': terminal_reason,
+            }
+            if note is not None:
+                output['note'] = note
+            if args.json:
+                print(json.dumps(output, indent=2, sort_keys=True))
+            elif already_recorded:
+                print(
+                    f'already released governed worktree {lane_id}; '
+                    f"terminal ledger event {terminal.get('seq')}"
+                )
+            else:
+                print(
+                    f'governed worktree {lane_id} was already cleaned up as '
+                    f'{terminal_type} ({terminal_reason}); '
+                    f"terminal ledger event {terminal.get('seq')}"
+                )
+                if note is not None:
+                    print(f'  recorded release reason: {reason}')
+            return 0
         if lane['state'] not in {'active', 'captured_pending_cleanup', 'reaped'}:
             raise SyncwheelError(
                 f"governed worktree lane {lane_id!r} is already {lane['state']}; it cannot be released"
             )
         pending_event_type = lane.get('cleanup_event_type')
         pending_event_reason = lane.get('cleanup_event_reason')
+        pending_reap = pending_event_type == 'governed_worktree_reaped'
         converting_advanced_reap = bool(
-            lane.get('pending_reason') == 'branch_advanced'
-            and pending_event_type == 'governed_worktree_reaped'
+            pending_reap and lane.get('pending_reason') == 'branch_advanced'
+        )
+        completing_pending_reap = bool(
+            pending_reap
+            and not converting_advanced_reap
+            and lane.get('pending_reason') in GOVERNED_WORKTREE_REAP_PENDING_REASONS
         )
         if (
             pending_event_type
             and pending_event_type != 'governed_worktree_released'
             and not converting_advanced_reap
+            and not completing_pending_reap
         ):
             raise SyncwheelError(
                 f"governed worktree lane {lane_id!r} is already pending as {pending_event_type}; "
@@ -10854,16 +10976,31 @@ def command_worktree_release(args):
             lane,
             persist=persist,
             manifest_path=manifest_path,
-            event_type='governed_worktree_released',
-            event_reason=reason,
+            event_type=(
+                'governed_worktree_reaped' if completing_pending_reap
+                else 'governed_worktree_released'
+            ),
+            event_reason=(
+                (pending_event_reason or 'expired') if completing_pending_reap else reason
+            ),
         )
         if not released:
             raise SyncwheelError(
                 f"cannot release governed worktree lane {lane_id!r}: {detail['code']}; {detail['remedy']}"
             )
+        terminal_type = lane.get('cleanup_event_type') or 'governed_worktree_reaped'
+        terminal_reason = lane.get('cleanup_event_reason') or 'expired'
         try:
             governed_worktree_cleanup_checkpoint('before_terminal_ledger')
-            append_governed_worktree_cleanup_event(repo_root, lane, manifest_path)
+            terminal = append_governed_worktree_cleanup_event(repo_root, lane, manifest_path)
+            if terminal_type != 'governed_worktree_released' or terminal_reason != reason:
+                append_governed_worktree_release_note(
+                    repo_root,
+                    lane_id,
+                    reason,
+                    terminal,
+                    manifest_path,
+                )
             governed_worktree_cleanup_checkpoint('after_terminal_ledger')
         except Exception:
             lane['state'] = 'reaped'
@@ -10878,11 +11015,15 @@ def command_worktree_release(args):
         'reason': reason,
         'registry_path': str(registry_path),
         'applied': True,
+        'terminal_type': terminal_type,
+        'terminal_reason': terminal_reason,
     }
     if args.json:
         print(json.dumps(output, indent=2, sort_keys=True))
     else:
         print(f"released governed worktree {lane_id}: {lane['path']}")
+        if terminal_type != 'governed_worktree_released':
+            print(f'  completed the pending {terminal_type} ({terminal_reason})')
         if lane.get('recovery_ref'):
             print(f"  recovery ref: {lane['recovery_ref']}")
     return 0

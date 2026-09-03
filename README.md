@@ -253,7 +253,11 @@ atomically renames and logs it when the metadata proves owner death, PID reuse,
 or an unreaped zombie. An empty or truncated lock is recovered only after a
 brief initialization grace, so a plain retry can resume even when `SIGKILL`
 lands between exclusive creation and metadata fsync. The creator verifies that
-its inode still owns the lock path before entering the critical section. While
+its inode still owns the lock path before entering the critical section, so a
+stolen uninitialized lock never puts two processes inside it. That recovery is
+reported as an uninitialized lock rather than a dead owner, because its creator
+may be alive and merely descheduled, and the renamed inode is pruned by the next
+cleanup once nobody holds it; the durable recovery log keeps the evidence. While
 holding that mutex, cleanup takes a Git worktree lock with a deterministic
 Syncwheel token before classifying the lane or changing a ref. A lock failure is
 reported as a lane in use and stops the operation.
@@ -297,9 +301,14 @@ before its expected-old transaction, and ledger writes are retryable and
 idempotent. An explicit release may supersede the automatic `branch_advanced`
 intent, retain its earlier recovery ref, anchor the new tip, and close with the
 operator's release reason; a release-originated retry retains its original
-reason. If the first release completed but its response was lost, the identical
-command returns the matching terminal ledger event instead of reporting an
-unknown lane. `gc` reselects eligible lanes while holding the registry lock,
+reason. A release also completes any other pending reap state, including one
+left by `SIGKILL`, terminalizing it under the intent already fsynced for it. If
+another Syncwheel command already terminalized the lane, or the first release
+completed but its response was lost, the release reports that terminal ledger
+event instead of an unknown lane. Whenever the recorded terminal is not this
+operator's own release reason, `--apply` records that reason as a
+`governed_worktree_release_noted` ledger event, once per terminal; the dry run
+records nothing. `gc` reselects eligible lanes while holding the registry lock,
 avoids stale lane-id reuse, and also works when active-active coordination is
 disabled.
 
