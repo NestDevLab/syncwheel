@@ -182,6 +182,13 @@ DEFAULT_JOURNAL_INTERVAL = '30m'
 CHANNEL_LIFECYCLES = {'shared', 'ephemeral'}
 CHANNEL_PLAN_SCHEMA_VERSION = 1
 STACK_LAND_PLAN_SCHEMA_VERSION = 1
+GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
+GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
+GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
+GITHUB_PR_MERGE_BYPASSES = {'required_reviews'}
+GITHUB_PR_MERGE_CHECKS = {'all'}
+GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
+GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
 GOVERNED_WORKTREE_REGISTRY_VERSION = 1
 GOVERNED_WORKTREE_DEFAULT_CAPACITY = 4
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
@@ -6626,6 +6633,770 @@ def save_repo_profile(repo_root, profile):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(profile, indent=2, sort_keys=True) + '\n')
     return path
+
+
+def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
+    """Validate the clone-local, deliberately narrow GitHub merge policy."""
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{path} must be an object')
+    allowed = {
+        'enabled', 'repository', 'base_branches', 'merge_method',
+        'allowed_bypasses', 'merge_actors', 'pr_authors', 'commit_authors',
+        'head_repositories', 'checks',
+    }
+    unknown = sorted(set(value) - allowed)
+    if unknown:
+        raise SyncwheelError(f'{path} contains unsupported keys: ' + ', '.join(unknown))
+
+    def string_list(field, *, required=False):
+        candidate = value.get(field)
+        if candidate is None and not required:
+            return None
+        if not isinstance(candidate, list) or not candidate:
+            raise SyncwheelError(f'{path}.{field} must be a non-empty string array')
+        normalized = []
+        for index, item in enumerate(candidate):
+            if not isinstance(item, str) or not item.strip() or '\x00' in item:
+                raise SyncwheelError(f'{path}.{field}[{index}] must be a non-empty string')
+            normalized.append(item.strip())
+        if len(set(item.casefold() for item in normalized)) != len(normalized):
+            raise SyncwheelError(f'{path}.{field} contains duplicate case-insensitive values')
+        return normalized
+
+    enabled = value.get('enabled')
+    if not isinstance(enabled, bool):
+        raise SyncwheelError(f'{path}.enabled must be a boolean')
+    repository = value.get('repository')
+    if not isinstance(repository, str) or not re.fullmatch(
+        r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository.strip()
+    ):
+        raise SyncwheelError(f'{path}.repository must be an OWNER/REPO identifier')
+    base_branches = string_list('base_branches', required=True)
+    method = value.get('merge_method')
+    if method not in GITHUB_PR_MERGE_METHODS:
+        raise SyncwheelError(
+            f'{path}.merge_method must be one of: ' + ', '.join(sorted(GITHUB_PR_MERGE_METHODS))
+        )
+    bypasses = string_list('allowed_bypasses', required=True)
+    if any(item not in GITHUB_PR_MERGE_BYPASSES for item in bypasses):
+        raise SyncwheelError(f'{path}.allowed_bypasses accepts only required_reviews')
+    checks = value.get('checks')
+    if checks not in GITHUB_PR_MERGE_CHECKS:
+        raise SyncwheelError(f'{path}.checks accepts only all')
+    merge_actors = string_list('merge_actors', required=True)
+    filters = {
+        field: string_list(field)
+        for field in ('pr_authors', 'commit_authors', 'head_repositories')
+    }
+    if not any(filters.values()):
+        raise SyncwheelError(
+            f'{path} requires at least one of pr_authors, commit_authors, or head_repositories'
+        )
+    normalized = {
+        'enabled': enabled,
+        'repository': repository.strip(),
+        'base_branches': base_branches,
+        'merge_method': method,
+        'allowed_bypasses': bypasses,
+        'merge_actors': merge_actors,
+        'checks': checks,
+    }
+    for field, candidate in filters.items():
+        if candidate is not None:
+            normalized[field] = candidate
+    return normalized
+
+
+def github_pr_merge_policy_from_profile(profile):
+    value = profile.get(GITHUB_PR_MERGE_POLICY_KEY)
+    if value is None:
+        return None
+    return normalize_github_pr_merge_policy(value)
+
+
+def github_pr_merge_policy_status(repo_root):
+    path = repo_profile_path(repo_root)
+    profile = load_repo_profile(repo_root)
+    policy = None
+    error = None
+    if GITHUB_PR_MERGE_POLICY_KEY in profile:
+        try:
+            policy = github_pr_merge_policy_from_profile(profile)
+        except SyncwheelError as exc:
+            error = str(exc)
+    ignored = git(
+        repo_root, 'check-ignore', '--quiet', '--no-index', '--',
+        '.syncwheel/profile.local.json', check=False,
+    ).returncode == 0
+    tracked = git_path_is_tracked(repo_root, path)
+    return {
+        'path': str(path),
+        'configured': policy is not None and error is None,
+        'enabled': bool(policy and policy.get('enabled')),
+        'policy': policy,
+        'error': error,
+        'ignored': ignored,
+        'tracked': tracked,
+        'failClosed': not (policy and policy.get('enabled')) or bool(error) or tracked or not ignored,
+    }
+
+
+def ensure_github_pr_merge_policy_is_private(repo_root):
+    path = repo_profile_path(repo_root)
+    if git_path_is_tracked(repo_root, path):
+        raise SyncwheelError(
+            f'{path} is tracked; refusing to write a private PR merge policy'
+        )
+    ignored = git(
+        repo_root, 'check-ignore', '--quiet', '--no-index', '--',
+        '.syncwheel/profile.local.json', check=False,
+    ).returncode == 0
+    if not ignored:
+        raise SyncwheelError(
+            '.syncwheel/profile.local.json is not ignored; refusing to write a private PR merge policy'
+        )
+
+
+def github_pr_merge_policy_edit(repo_root, proposed, *, apply, clear=False, json_mode=False):
+    ensure_github_pr_merge_policy_is_private(repo_root)
+    current_profile = load_repo_profile(repo_root)
+    next_profile = dict(current_profile)
+    if clear:
+        next_profile.pop(GITHUB_PR_MERGE_POLICY_KEY, None)
+    else:
+        next_profile[GITHUB_PR_MERGE_POLICY_KEY] = normalize_github_pr_merge_policy(proposed)
+    output = {
+        'path': str(repo_profile_path(repo_root)),
+        'current': current_profile.get(GITHUB_PR_MERGE_POLICY_KEY),
+        'proposed': next_profile.get(GITHUB_PR_MERGE_POLICY_KEY),
+        'preservedKeys': sorted(key for key in current_profile if key != GITHUB_PR_MERGE_POLICY_KEY),
+        'ignored': True,
+        'tracked': False,
+        'applied': bool(apply),
+        'dryRun': not apply,
+    }
+    if not apply:
+        print(json.dumps(output, indent=2, sort_keys=True) if json_mode else json.dumps(output, indent=2))
+        return 0
+    save_repo_profile(repo_root, next_profile)
+    append_ledger_event(
+        repo_root,
+        'github_pr_merge_policy_changed',
+        {
+            'operation': 'clear' if clear else 'set',
+            'enabled': bool(next_profile.get(GITHUB_PR_MERGE_POLICY_KEY, {}).get('enabled')),
+            'repository': next_profile.get(GITHUB_PR_MERGE_POLICY_KEY, {}).get('repository'),
+        },
+        repo_root / '.syncwheel' / 'manifest.json',
+    )
+    output['status'] = github_pr_merge_policy_status(repo_root)
+    print(json.dumps(output, indent=2, sort_keys=True) if json_mode else json.dumps(output, indent=2))
+    return 0
+
+
+def command_repo_pr_merge_policy_status(args):
+    repo_root = resolve_repo_root(args.repo)
+    report = github_pr_merge_policy_status(repo_root)
+    if args.json:
+        print(json.dumps(report, indent=2, sort_keys=True))
+    else:
+        print(f"policy: {'configured' if report['configured'] else 'missing/invalid'}")
+        print(f"enabled: {'yes' if report['enabled'] else 'no'}")
+        print(f"private: {'yes' if report['ignored'] and not report['tracked'] else 'no'}")
+        if report['error']:
+            print(f"error: {report['error']}")
+    return 0
+
+
+def command_repo_pr_merge_policy_set(args):
+    repo_root = resolve_repo_root(args.repo)
+    proposed = {
+        'enabled': True,
+        'repository': args.repository,
+        'base_branches': list(args.base),
+        'merge_method': args.method,
+        'allowed_bypasses': list(args.allow_bypass),
+        'merge_actors': list(args.merge_actor),
+        'checks': args.checks,
+    }
+    for option, field in (
+        (args.pr_author, 'pr_authors'),
+        (args.commit_author, 'commit_authors'),
+        (args.head_repository, 'head_repositories'),
+    ):
+        if option:
+            proposed[field] = list(option)
+    return github_pr_merge_policy_edit(
+        repo_root, proposed, apply=args.apply, json_mode=args.json,
+    )
+
+
+def command_repo_pr_merge_policy_clear(args):
+    repo_root = resolve_repo_root(args.repo)
+    return github_pr_merge_policy_edit(
+        repo_root, None, apply=args.apply, clear=True, json_mode=args.json,
+    )
+
+
+def github_adapter_request(repo_root, request):
+    """Call only the fixed Syncwheel GitHub adapter entrypoint."""
+    adapter = shutil.which('syncwheel-github')
+    command = [adapter] if adapter else [sys.executable, str(Path(__file__).with_name('syncwheel_github.py'))]
+    try:
+        result = subprocess.run(
+            command,
+            cwd=repo_root,
+            input=json.dumps(request, sort_keys=True),
+            text=True,
+            capture_output=True,
+            timeout=GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS,
+            shell=False,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise SyncwheelError(f'GitHub adapter failed: {exc}') from exc
+    output = (result.stdout or '')[-GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT:]
+    try:
+        response = json.loads(output)
+    except json.JSONDecodeError as exc:
+        detail = (result.stderr or result.stdout or 'adapter returned invalid JSON').strip()
+        raise SyncwheelError(f'GitHub adapter returned invalid JSON: {detail[:1000]}') from exc
+    if not isinstance(response, dict) or response.get('ok') is not True:
+        # A GitHub merge command can return a non-zero status after GitHub has
+        # accepted or rejected the request. Preserve that bounded command
+        # result so the caller can re-observe the PR and write a receipt
+        # instead of losing the operation at the adapter boundary.
+        if (
+            request.get('operation') == 'merge'
+            and isinstance(response, dict)
+            and isinstance(response.get('returncode'), int)
+            and isinstance(response.get('argv'), list)
+        ):
+            return response
+        detail = response.get('error') if isinstance(response, dict) else None
+        raise SyncwheelError(f'GitHub adapter error: {(detail or result.stderr or "unknown error")[:1000]}')
+    return response.get('observation', response)
+
+
+def github_blocker(blockers, code, detail, **evidence):
+    item = {'code': code, 'detail': detail}
+    if evidence:
+        item['evidence'] = evidence
+    blockers.append(item)
+
+
+def github_ci_check_result(check):
+    if not isinstance(check, dict):
+        return None
+    status = str(check.get('conclusion') or check.get('status') or '').upper()
+    return status if status in {'SUCCESS', 'SKIPPED'} else None
+
+
+def github_required_check_names(rules):
+    """Extract required check names from supported GitHub rule response shapes."""
+    names = []
+    protection = rules.get('branchProtection') if isinstance(rules, dict) else None
+    required = protection.get('required_status_checks') if isinstance(protection, dict) else None
+    if isinstance(required, dict):
+        candidates = [*(required.get('contexts') or []), *(required.get('checks') or [])]
+        for item in candidates:
+            if isinstance(item, str) and item:
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get('context') or item.get('name')
+                if isinstance(name, str) and name:
+                    names.append(name)
+    rulesets = rules.get('rulesets') if isinstance(rules, dict) else None
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        if rule_type != 'required_status_checks':
+            continue
+        parameters = rule.get('parameters') or {}
+        for item in parameters.get('required_status_checks') or []:
+            if isinstance(item, str) and item:
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get('context') or item.get('name')
+                if isinstance(name, str) and name:
+                    names.append(name)
+    return list(dict.fromkeys(names))
+
+
+def github_rule_review_required(rules):
+    protection = rules.get('branchProtection') if isinstance(rules, dict) else None
+    if isinstance(protection, dict) and protection.get('required_pull_request_reviews'):
+        return True
+    rulesets = rules.get('rulesets') if isinstance(rules, dict) else None
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        parameters = rule.get('parameters') or {}
+        if rule_type in {'pull_request', 'required_pull_request_reviews'}:
+            count = parameters.get('required_approving_review_count', 1) if isinstance(parameters, dict) else 1
+            try:
+                requires_approval = int(count) > 0
+            except (TypeError, ValueError):
+                requires_approval = True
+            if not parameters or requires_approval:
+                return True
+    return False
+
+
+def github_rules_blockers(rules, blockers):
+    if not isinstance(rules, dict):
+        return
+    if rules.get('mergeQueue') is True or rules.get('merge_queue') is True:
+        github_blocker(blockers, 'merge_queue', 'merge queue is enabled and unsupported')
+    if rules.get('branchProtectionStatus') not in (None, 200, 404) and rules.get('branchProtectionError'):
+        github_blocker(blockers, 'rules_unavailable', 'GitHub branch protection could not be observed')
+    rulesets = rules.get('rulesets')
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    known = {
+        'pull_request', 'required_pull_request_reviews', 'required_status_checks',
+        'non_fast_forward', 'deletion', 'required_linear_history', 'merge_queue',
+    }
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        if rule_type and rule_type not in known:
+            github_blocker(blockers, 'unknown_rule', f'unrecognized GitHub rule: {rule_type}')
+        if rule_type == 'merge_queue':
+            github_blocker(blockers, 'merge_queue', 'merge queue rule is unsupported')
+    if rules.get('rulesetsStatus') not in (None, 200, 404) and rules.get('rulesetsError'):
+        github_blocker(blockers, 'rules_unavailable', 'GitHub rules could not be observed')
+
+
+def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
+    source_revision = None
+    declared = []
+    try:
+        declared = [commit_full_sha(repo_root, item) for item in stack.get('commits', [])]
+    except SyncwheelError as exc:
+        github_blocker(blockers, 'stack_commit_missing', str(exc))
+    if stack.get('state', 'published') != 'published':
+        github_blocker(blockers, 'stack_not_published', 'stack must have state=published')
+    if not isinstance(stack.get('branch'), str) or not branch_exists(repo_root, stack['branch']):
+        github_blocker(blockers, 'source_branch_missing', 'stack source branch is missing')
+    else:
+        source_revision = ref_tip(repo_root, stack['branch'])
+        if declared:
+            try:
+                actual = rev_list(repo_root, f"{stack.get('base', '')}..{stack['branch']}")
+            except SyncwheelError as exc:
+                github_blocker(blockers, 'stack_base_missing', str(exc))
+            else:
+                if actual != declared:
+                    github_blocker(
+                        blockers, 'stack_projection_mismatch',
+                        'source branch does not exactly equal declared stack commits',
+                        declared=declared, actual=actual,
+                    )
+    remote = stack.get('target_remote') or manifest['defaults']['publication_remote']
+    if not remote_is_configured(repo_root, remote):
+        github_blocker(blockers, 'publication_remote_missing', f'publication remote is not configured: {remote}')
+    elif stack.get('branch'):
+        try:
+            remote_tip = remote_ref_tips(repo_root, remote, [f"refs/heads/{stack['branch']}"])[f"refs/heads/{stack['branch']}"]
+            if not remote_tip:
+                github_blocker(blockers, 'source_remote_missing', 'source branch is absent on the publication remote')
+            elif source_revision and remote_tip != source_revision:
+                github_blocker(blockers, 'source_remote_drift', 'remote source branch differs from stack revision', remote=remote_tip, expected=source_revision)
+        except SyncwheelError as exc:
+            github_blocker(blockers, 'source_remote_unavailable', str(exc))
+    integration = manifest.get('integration') or {}
+    integration_branch = integration.get('branch')
+    in_integration = stack.get('id') in integration.get('stacks', [])
+    if manifest['defaults'].get('integration_membership') == INTEGRATION_MEMBERSHIP_REQUIRED and not in_integration:
+        github_blocker(blockers, 'integration_membership', 'stack is not present in required integration')
+    elif in_integration and (not integration_branch or not branch_exists(repo_root, integration_branch)):
+        github_blocker(blockers, 'integration_missing', 'integration branch is missing')
+    elif in_integration:
+        for commit in stack_integration_commits(stack):
+            if not branch_contains(repo_root, integration_branch, commit):
+                github_blocker(blockers, 'integration_not_validated', f'stack commit is absent from integration: {commit}')
+    for dependency_id in stack.get('depends_on', []):
+        try:
+            dependency = require_stack(manifest, dependency_id)
+        except SyncwheelError as exc:
+            github_blocker(blockers, 'dependency_missing', str(exc), dependency=dependency_id)
+            continue
+        if not branch_contains(repo_root, stack.get('base'), dependency['branch']):
+            github_blocker(blockers, 'dependency_not_absorbed', f'dependency is not absorbed: {dependency_id}')
+    try:
+        diagnostics = governed_worktree_diagnostics(repo_root, manifest)
+        for lane in diagnostics.get('lanes', []):
+            if lane.get('target') == stack.get('id') and lane.get('code') in {'dirty', 'locked', 'lane_in_use', 'unavailable'}:
+                github_blocker(blockers, 'associated_lane_dirty', lane.get('remedy') or lane.get('code'))
+            elif lane.get('code') == 'dirty':
+                warnings.append({'code': 'unrelated_dirty_worktree', 'path': lane.get('path')})
+    except (OSError, SyncwheelError) as exc:
+        warnings.append({'code': 'worktree_diagnostics_unavailable', 'detail': str(exc)[:400]})
+    return source_revision, declared
+
+
+def github_pr_merge_plan_digest(plan):
+    unsigned = copy.deepcopy(plan)
+    unsigned.pop('planDigest', None)
+    unsigned.pop('operationId', None)
+    return canonical_json_digest(unsigned)
+
+
+def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, args):
+    require_delivery_manifest(manifest)
+    policy = github_pr_merge_policy_from_profile(load_repo_profile(repo_root))
+    if policy is None:
+        raise SyncwheelError('GitHub PR merge policy is missing or invalid; configure profile.local.json first')
+    if not policy['enabled']:
+        raise SyncwheelError('GitHub PR merge policy is disabled')
+    authority = manifest_authority(manifest)
+    if authority['mode'] != AUTHORITY_MODE_AI_MANAGED or AUTHORITY_CLASS_SOURCE_CHANGE not in authority['allow']:
+        raise SyncwheelError('GitHub PR merge requires authority.mode=ai-managed with source_change allowed')
+    stack = require_stack(manifest, stack_id)
+    blockers = []
+    warnings = []
+    validation = validate_manifest(repo_root, manifest)
+    for error in validation.get('errors', []):
+        github_blocker(blockers, 'manifest_invalid', error)
+    source_revision, declared = github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings)
+    base_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
+    if base_branch not in policy['base_branches']:
+        github_blocker(blockers, 'base_branch_not_allowed', f'base branch is not allowlisted: {base_branch}')
+    pr_number = None
+    github = stack.get('github')
+    if isinstance(github, dict):
+        pr_number = github.get('pr')
+    if pr_number is not None and (isinstance(pr_number, bool) or not re.fullmatch(r'\d+', str(pr_number))):
+        github_blocker(blockers, 'invalid_pr_number', 'stack github.pr must be a positive integer')
+        pr_number = None
+    request = {
+        'operation': 'observe',
+        'repository': policy['repository'],
+        'targetRemote': stack.get('target_remote') or manifest['defaults']['publication_remote'],
+        'baseBranch': base_branch,
+        'headBranch': stack.get('branch'),
+        'pullRequestNumber': int(pr_number) if pr_number is not None else None,
+    }
+    observation = None
+    adapter_error = None
+    try:
+        observation = github_adapter_request(repo_root, request)
+    except SyncwheelError as exc:
+        adapter_error = str(exc)
+        github_blocker(blockers, 'github_observation_failed', adapter_error)
+    pr = (observation or {}).get('pr') if isinstance(observation, dict) else None
+    selection = (observation or {}).get('selection') if isinstance(observation, dict) else None
+    if pr is None:
+        count = selection.get('count') if isinstance(selection, dict) else None
+        if count == 0:
+            github_blocker(blockers, 'pull_request_not_found', 'no open PR matched exact head and base')
+        elif count is not None:
+            github_blocker(blockers, 'pull_request_ambiguous', f'exact PR lookup returned {count} matches')
+        else:
+            github_blocker(blockers, 'pull_request_missing', 'adapter did not return a unique pull request')
+    identity = (observation or {}).get('identity') if isinstance(observation, dict) else {}
+    repository_info = (observation or {}).get('repositoryInfo') if isinstance(observation, dict) else {}
+    rules = (observation or {}).get('rules') if isinstance(observation, dict) else {}
+    if isinstance(observation, dict) and observation.get('repository', '').casefold() != policy['repository'].casefold():
+        github_blocker(blockers, 'repository_mismatch', 'observed repository differs from local policy')
+    actor = identity.get('login') if isinstance(identity, dict) else None
+    if not isinstance(actor, str) or actor.casefold() not in {item.casefold() for item in policy['merge_actors']}:
+        github_blocker(blockers, 'merge_actor_not_allowed', 'effective gh actor is not allowlisted', actor=actor)
+    permissions = repository_info.get('permissions') if isinstance(repository_info, dict) else {}
+    if not isinstance(permissions, dict) or permissions.get('admin') is not True:
+        github_blocker(blockers, 'merge_actor_not_admin', 'effective gh actor has no repository admin permission')
+    if isinstance(pr, dict):
+        if pr_number is not None and pr.get('number') != int(pr_number):
+            github_blocker(blockers, 'pull_request_number_mismatch', 'observed PR number differs from the stack declaration')
+        if pr.get('state') != 'OPEN':
+            github_blocker(blockers, 'pull_request_not_open', 'pull request is not open')
+        if pr.get('isDraft') is True:
+            github_blocker(blockers, 'pull_request_draft', 'pull request is draft')
+        if pr.get('headRefName') != stack.get('branch'):
+            github_blocker(blockers, 'head_branch_mismatch', 'PR head branch differs from stack branch')
+        if source_revision and pr.get('headRefOid') != source_revision:
+            github_blocker(blockers, 'head_sha_mismatch', 'PR head SHA differs from stack revision')
+        if pr.get('baseRefName') != base_branch:
+            github_blocker(blockers, 'base_branch_mismatch', 'PR base branch differs from stack target')
+        author = pr.get('author')
+        if policy.get('pr_authors') is not None and (
+            not isinstance(author, str) or author.casefold() not in {item.casefold() for item in policy['pr_authors']}
+        ):
+            github_blocker(blockers, 'pr_author_not_allowed', 'PR author is not allowlisted', author=author)
+        head_repo = pr.get('headRepository')
+        if policy.get('head_repositories') is not None and (
+            not isinstance(head_repo, str) or head_repo.casefold() not in {item.casefold() for item in policy['head_repositories']}
+        ):
+            github_blocker(blockers, 'head_repository_not_allowed', 'PR source repository is not allowlisted', headRepository=head_repo)
+        commit_authors = pr.get('commitAuthors') or []
+        if policy.get('commit_authors') is not None:
+            allowed = {item.casefold() for item in policy['commit_authors']}
+            if not commit_authors:
+                github_blocker(blockers, 'commit_authors_missing', 'commit author identities could not be resolved')
+            for commit in commit_authors:
+                login = commit.get('login') if isinstance(commit, dict) else None
+                if not isinstance(login, str) or login.casefold() not in allowed:
+                    github_blocker(blockers, 'commit_author_not_allowed', 'a commit author is not allowlisted', commit=commit.get('sha') if isinstance(commit, dict) else None, login=login)
+        review = pr.get('review') or {}
+        if review.get('changesRequested') or review.get('decision') == 'CHANGES_REQUESTED':
+            github_blocker(blockers, 'changes_requested', 'review changes requested')
+        if review.get('unresolvedThreads'):
+            github_blocker(blockers, 'unresolved_review_threads', 'review has active unresolved threads')
+        if pr.get('threadsTruncated') is True:
+            github_blocker(blockers, 'review_threads_truncated', 'not all review threads were observed')
+        decision = review.get('decision')
+        if decision == 'REVIEW_REQUIRED' and not github_rule_review_required(rules):
+            github_blocker(blockers, 'review_rule_unproven', 'review is required but the effective GitHub rule was not observed')
+        elif decision not in (None, '', 'APPROVED', 'REVIEW_REQUIRED'):
+            github_blocker(blockers, 'unknown_review_state', f'unrecognized review decision: {decision}')
+        if pr.get('mergeable') != 'MERGEABLE':
+            github_blocker(blockers, 'not_mergeable', f"mergeable={pr.get('mergeable')}")
+        if pr.get('mergeStateStatus') in {'BEHIND', 'DIRTY', 'UNKNOWN', 'UNSTABLE'}:
+            github_blocker(blockers, 'base_obsolete_or_dirty', f"mergeStateStatus={pr.get('mergeStateStatus')}")
+        checks = pr.get('checks') or []
+        if not checks:
+            github_blocker(blockers, 'checks_missing', 'at least one successful check is required')
+        else:
+            for check in checks:
+                if github_ci_check_result(check) is None:
+                    github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
+        required_names = github_required_check_names(rules)
+        if required_names:
+            observed_names = {item.get('name') for item in checks if isinstance(item, dict)}
+            for name in required_names:
+                if name not in observed_names:
+                    github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
+        if decision == 'REVIEW_REQUIRED':
+            path = 'admin-review-bypass'
+        else:
+            path = 'normal'
+        if pr.get('mergeStateStatus') == 'BLOCKED' and decision != 'REVIEW_REQUIRED':
+            github_blocker(blockers, 'blocked_for_unknown_reason', 'GitHub reports BLOCKED for a reason other than proven required review')
+    else:
+        path = 'normal'
+    allow_methods = repository_info.get('allowMergeMethods') if isinstance(repository_info, dict) else {}
+    if isinstance(allow_methods, dict) and allow_methods.get(policy['merge_method']) is not True:
+        github_blocker(blockers, 'merge_method_disabled', f"merge method is disabled: {policy['merge_method']}")
+    github_rules_blockers(rules, blockers)
+    try:
+        target_base_sha = remote_ref_tips(
+            repo_root,
+            stack.get('target_remote') or manifest['defaults']['publication_remote'],
+            [f'refs/heads/{base_branch}'],
+        )[f'refs/heads/{base_branch}']
+    except SyncwheelError as exc:
+        target_base_sha = None
+        github_blocker(blockers, 'base_observation_failed', str(exc))
+    if target_base_sha is None:
+        github_blocker(blockers, 'base_remote_missing', 'delivery base branch is absent on the target remote')
+    if pr and target_base_sha and pr.get('baseRefOid') and pr.get('baseRefOid') != target_base_sha:
+        github_blocker(blockers, 'base_changed', 'PR base SHA differs from the observed delivery base', pr=pr.get('baseRefOid'), observed=target_base_sha)
+    if not isinstance(pr, dict):
+        pr = {}
+    number = pr.get('number') or (int(pr_number) if pr_number is not None else None)
+    command = None
+    if number and source_revision:
+        command = ['gh', 'pr', 'merge', str(number), '--repo', policy['repository'], f"--{policy['merge_method']}"]
+        if path == 'admin-review-bypass':
+            command.append('--admin')
+        command.extend(['--match-head-commit', source_revision])
+    plan = {
+        'schemaVersion': GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION,
+        'kind': 'githubPrMergePlan',
+        'stack': stack_id,
+        'branch': stack.get('branch'),
+        'commit': source_revision,
+        'declaredCommits': declared,
+        'repository': policy['repository'],
+        'targetRemote': stack.get('target_remote') or manifest['defaults']['publication_remote'],
+        'baseBranch': base_branch,
+        'pullRequest': {
+            'number': number,
+            'url': pr.get('url'),
+            'headSha': pr.get('headRefOid'),
+            'baseSha': pr.get('baseRefOid'),
+        },
+        'headSha': pr.get('headRefOid'),
+        'baseSha': pr.get('baseRefOid') or target_base_sha,
+        'author': pr.get('author'),
+        'commitAuthors': pr.get('commitAuthors') or [],
+        'headRepository': pr.get('headRepository'),
+        'mergeActor': actor,
+        'checks': pr.get('checks') or [],
+        'review': pr.get('review') or {},
+        'threads': (pr.get('review') or {}).get('threads') or [],
+        'rules': rules,
+        'mergeMethod': policy['merge_method'],
+        'path': path,
+        'command': command,
+        'adapterRequest': request,
+        'policy': policy,
+        'authority': authority,
+        'source': {'branch': stack.get('branch'), 'revision': source_revision, 'base': stack.get('base'), 'commits': declared},
+        'integration': {'branch': (manifest.get('integration') or {}).get('branch'), 'revision': ref_tip(repo_root, (manifest.get('integration') or {}).get('branch'))},
+        'warnings': warnings,
+        'blockers': blockers,
+        'status': 'ready' if not blockers and command else 'blocked',
+        'next': 'apply with the exact operationId and planDigest' if not blockers and command else 'resolve blockers and preview again',
+    }
+    plan['planDigest'] = github_pr_merge_plan_digest(plan)
+    requested = normalize_channel_operation_id(getattr(args, 'operation_id', None))
+    plan['operationId'] = requested or 'github-pr-merge-' + plan['planDigest'][:24]
+    return plan
+
+
+def github_pr_merge_events(repo_root, manifest_path, operation_id):
+    return [
+        event for event in load_ledger_events(repo_root, manifest_path)
+        if event.get('type') in {'github_pr_merge_started', 'github_pr_merge_prepared', 'github_pr_merge_receipt'}
+        and (event.get('payload') or {}).get('operationId') == operation_id
+    ]
+
+
+def record_github_pr_merge_event(repo_root, manifest_path, event_type, plan, **extra):
+    payload = {
+        'operationId': plan['operationId'],
+        'planDigest': plan['planDigest'],
+        'stack': plan['stack'],
+        'plan': plan,
+        **extra,
+    }
+    append_ledger_event(repo_root, event_type, payload, manifest_path)
+    return payload
+
+
+def github_pr_merge_postverify(repo_root, plan):
+    remote = plan['source'].get('targetRemote') or plan['policy'].get('repository')
+    target_remote = None
+    stack = plan.get('source') or {}
+    # The Git remote alias is intentionally taken from the stack/manifest, not
+    # from the GitHub repository string. It is evidence only, never a command.
+    try:
+        target_remote = plan.get('targetRemote') or 'origin'
+        base_ref = f"{target_remote}/{plan['baseBranch']}"
+        fetched = git(
+            repo_root, 'fetch', '--quiet', target_remote,
+            f"refs/heads/{plan['baseBranch']}:refs/remotes/{target_remote}/{plan['baseBranch']}",
+            check=False,
+        )
+        if fetched.returncode != 0:
+            return {'status': 'unavailable', 'detail': 'could not fetch delivery base'}
+        if plan['mergeMethod'] in {'squash', 'rebase'}:
+            cherry = git(repo_root, 'cherry', base_ref, plan['branch'], check=False)
+            if cherry.returncode != 0:
+                return {'status': 'unavailable', 'detail': 'git cherry verification failed'}
+            return {'status': 'verified', 'gitCherry': cherry.stdout.splitlines(), 'unabsorbed': any(line.startswith('+') for line in cherry.stdout.splitlines())}
+        return {'status': 'verified', 'ancestry': branch_contains(repo_root, base_ref, plan['headSha'])}
+    except (OSError, SyncwheelError) as exc:
+        return {'status': 'unavailable', 'detail': str(exc)[:400]}
+
+
+def github_pr_merge_classify(plan, observation, command_ok):
+    pr = (observation or {}).get('pr') if isinstance(observation, dict) else None
+    if isinstance(pr, dict) and pr.get('state') == 'MERGED' and pr.get('headRefOid') == plan.get('headSha'):
+        return 'succeeded' if command_ok else 'succeeded-equivalent'
+    if isinstance(pr, dict) and pr.get('state') == 'OPEN' and (
+        pr.get('headRefOid') == plan.get('headSha') and pr.get('baseRefOid') == plan.get('baseSha')
+    ):
+        return 'failed'
+    return 'unknown'
+
+
+def github_pr_merge_receipt(repo_root, manifest_path, plan, status, observation, command_result=None, detail=None):
+    pr = (observation or {}).get('pr') if isinstance(observation, dict) else {}
+    receipt = {
+        'schemaVersion': GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION,
+        'kind': 'githubPrMergeReceipt',
+        'stack': plan['stack'],
+        'operationId': plan['operationId'],
+        'planDigest': plan['planDigest'],
+        'status': status,
+        'path': plan['path'],
+        'command': plan.get('command'),
+        'pullRequest': plan.get('pullRequest'),
+        'headSha': plan.get('headSha'),
+        'mergedAt': pr.get('mergedAt') if isinstance(pr, dict) else None,
+        'mergedBy': pr.get('mergedBy') if isinstance(pr, dict) else None,
+        'mergeCommit': pr.get('mergeCommit') if isinstance(pr, dict) else None,
+        'postVerification': github_pr_merge_postverify(repo_root, plan) if status.startswith('succeeded') else None,
+        'adapterResult': command_result,
+        'detail': detail,
+        'recordedAt': iso_utc_now(),
+    }
+    append_ledger_event(repo_root, 'github_pr_merge_receipt', receipt, manifest_path)
+    return receipt
+
+
+def reconcile_github_pr_merge_operation(repo_root, manifest_path, operation_id, plan_digest):
+    events = github_pr_merge_events(repo_root, manifest_path, operation_id)
+    if not events:
+        return None
+    if any((event.get('payload') or {}).get('planDigest') != plan_digest for event in events):
+        raise SyncwheelError(f'GitHub PR merge operation id collision: {operation_id} is bound to another plan')
+    terminal = next((event.get('payload') or {} for event in reversed(events) if event.get('type') == 'github_pr_merge_receipt'), None)
+    if terminal:
+        return terminal
+    prepared = next((event.get('payload') or {} for event in reversed(events) if event.get('type') == 'github_pr_merge_prepared'), None)
+    if not prepared:
+        raise SyncwheelError(f'GitHub PR merge operation {operation_id} is incomplete without prepared evidence')
+    plan = prepared.get('plan') or {}
+    observation = github_adapter_request(repo_root, {**(plan.get('adapterRequest') or {}), 'pullRequestNumber': (plan.get('pullRequest') or {}).get('number')})
+    status = github_pr_merge_classify(plan, observation, False)
+    return github_pr_merge_receipt(
+        repo_root, manifest_path, plan, status, observation,
+        detail='reconciled without retrying gh pr merge',
+    )
+
+
+def command_stack_merge_pr(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if args.apply:
+        if not args.operation_id or not args.plan_digest:
+            raise SyncwheelError('stack merge-pr --apply requires --operation-id and --plan-digest')
+        existing = reconcile_github_pr_merge_operation(
+            repo_root, manifest_path, args.operation_id, args.plan_digest,
+        )
+        if existing:
+            print(json.dumps(existing, indent=2, sort_keys=True))
+            return 0 if existing.get('status', '').startswith('succeeded') else 2
+    plan = build_github_pr_merge_plan(repo_root, manifest, manifest_path, args.stack, args)
+    if not args.apply:
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    if args.plan_digest != plan['planDigest']:
+        raise SyncwheelError('GitHub PR merge plan is stale; generate a new preview and use its exact planDigest')
+    if plan['status'] != 'ready':
+        raise SyncwheelError('GitHub PR merge STOP: plan is blocked; resolve blockers and preview again')
+    record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
+    record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
+    merge_result = github_adapter_request(repo_root, {
+        'operation': 'merge',
+        'repository': plan['repository'],
+        'pullRequestNumber': plan['pullRequest']['number'],
+        'method': plan['mergeMethod'],
+        'admin': plan['path'] == 'admin-review-bypass',
+        'headSha': plan['headSha'],
+    })
+    observed = github_adapter_request(repo_root, {
+        **plan['adapterRequest'],
+        'pullRequestNumber': plan['pullRequest']['number'],
+    })
+    status = github_pr_merge_classify(plan, observed, bool(merge_result.get('ok')))
+    receipt = github_pr_merge_receipt(
+        repo_root, manifest_path, plan, status, observed, merge_result,
+        detail=(merge_result.get('stderr') or merge_result.get('stdout')) if status in {'failed', 'unknown'} else None,
+    )
+    print(json.dumps(receipt, indent=2, sort_keys=True))
+    return 0 if status.startswith('succeeded') else 2
 
 
 def governed_worktree_registry_path(repo_root):
@@ -22251,6 +23022,34 @@ def build_parser():
     repo_authority_set_p.add_argument('-j', '--json', action='store_true')
     repo_authority_set_p.set_defaults(func=command_repo_authority_set)
 
+    repo_pr_merge_p = repo_sub.add_parser(
+        'pr-merge-policy', help='inspect or set the private GitHub PR merge policy'
+    )
+    repo_pr_merge_sub = repo_pr_merge_p.add_subparsers(
+        dest='pr_merge_policy_command', required=True
+    )
+    repo_pr_merge_status_p = repo_pr_merge_sub.add_parser('status', parents=[common])
+    repo_pr_merge_status_p.add_argument('-j', '--json', action='store_true')
+    repo_pr_merge_status_p.set_defaults(func=command_repo_pr_merge_policy_status)
+    repo_pr_merge_set_p = repo_pr_merge_sub.add_parser('set', parents=[common])
+    repo_pr_merge_set_p.add_argument('provider', choices=('github',))
+    repo_pr_merge_set_p.add_argument('--repository', required=True)
+    repo_pr_merge_set_p.add_argument('--base', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--method', choices=sorted(GITHUB_PR_MERGE_METHODS), required=True)
+    repo_pr_merge_set_p.add_argument('--allow-bypass', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--merge-actor', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--pr-author', action='append')
+    repo_pr_merge_set_p.add_argument('--commit-author', action='append')
+    repo_pr_merge_set_p.add_argument('--head-repository', action='append')
+    repo_pr_merge_set_p.add_argument('--checks', choices=sorted(GITHUB_PR_MERGE_CHECKS), default='all')
+    repo_pr_merge_set_p.add_argument('-a', '--apply', action='store_true')
+    repo_pr_merge_set_p.add_argument('-j', '--json', action='store_true')
+    repo_pr_merge_set_p.set_defaults(func=command_repo_pr_merge_policy_set)
+    repo_pr_merge_clear_p = repo_pr_merge_sub.add_parser('clear', parents=[common])
+    repo_pr_merge_clear_p.add_argument('-a', '--apply', action='store_true')
+    repo_pr_merge_clear_p.add_argument('-j', '--json', action='store_true')
+    repo_pr_merge_clear_p.set_defaults(func=command_repo_pr_merge_policy_clear)
+
     self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
     self_sub = self_p.add_subparsers(dest='self_command', required=True)
 
@@ -22889,6 +23688,17 @@ def build_parser():
     stack_land_p.add_argument('-j', '--json', action='store_true')
     stack_land_p.set_defaults(func=command_stack_land)
 
+    stack_merge_pr_p = stack_sub.add_parser(
+        'merge-pr', parents=[common],
+        help='plan or apply a policy-bound GitHub PR merge',
+    )
+    stack_merge_pr_p.add_argument('stack')
+    stack_merge_pr_p.add_argument('--operation-id')
+    stack_merge_pr_p.add_argument('--plan-digest')
+    stack_merge_pr_p.add_argument('-a', '--apply', action='store_true')
+    stack_merge_pr_p.add_argument('-j', '--json', action='store_true')
+    stack_merge_pr_p.set_defaults(func=command_stack_merge_pr)
+
     stack_close_p = stack_sub.add_parser(
         'close',
         aliases=['cl'],
@@ -23327,6 +24137,7 @@ def entrypoint_behavior_table():
         command_repo_ls,
         command_repo_tracking_status,
         command_repo_authority_status,
+        command_repo_pr_merge_policy_status,
         command_self_status,
         command_self_check_update,
         command_hooks_status,
@@ -23386,6 +24197,8 @@ def entrypoint_behavior_table():
     register((
         command_repo_tracking_set,
         command_repo_authority_set,
+        command_repo_pr_merge_policy_set,
+        command_repo_pr_merge_policy_clear,
         command_coordination_init,
         command_coordination_disable,
         command_coordination_compose,
@@ -23407,6 +24220,7 @@ def entrypoint_behavior_table():
         command_channel_reconcile_outcome,
         command_stack_classify_integration,
         command_stack_land,
+        command_stack_merge_pr,
         command_worktree_release,
         command_gc,
     ), mutates='apply', manifest_mutates='apply')

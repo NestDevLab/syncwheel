@@ -153,6 +153,21 @@ syncwheel repo authority status
 Only a maintainer sets this policy (`syncwheel repo authority set ... --apply`).
 Never set it, widen it, or infer it for yourself.
 
+## GitHub PR merge policy
+
+An `ai-managed` delivery repository may opt into the deterministic GitHub PR
+merge path with a private clone-local policy. Configure it with
+`repo pr-merge-policy set github`, inspect the dry-run, and apply only after
+reviewing the exact local diff. Then use `stack merge-pr <stack>` to produce a
+digest-bound JSON plan. See [`github-pr-merge.md`](github-pr-merge.md) for the
+full contract.
+
+The policy is fail-closed: it requires an allowlisted actor with repository
+admin permission, an allowlisted PR/commit/source repository, an exact stack
+head, green CI, no unresolved review work, and recognized GitHub rules. The
+admin bypass is limited to required reviews and always includes
+`--match-head-commit`; no branch deletion is performed.
+
 ## Agentwheel installable skill
 
 When Agentwheel is available, install the Syncwheel agent skill into the local
