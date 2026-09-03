@@ -50,6 +50,39 @@
   composed stack result for a non-empty NUL-separated touched-path set,
   including squash-equivalent deliveries while rejecting odd-path omissions
   and content removed by a later revert.
+- Serialize every coordinated publication cycle in a clone behind
+  `<git-common-dir>/syncwheel/coordination-publication.lock`, held from the
+  intent through the push, the local remainder and the terminal event. A second
+  command exits 2 naming the live owner's pid instead of terminalizing an intent
+  that is still in flight, and a plain retry after it finishes succeeds. Process
+  death releases the lock, so the next command still recovers a dead owner's
+  intent; dry runs and `handoff` take no lock.
+- Record the owner (installation, host, pid, process start time, lock token) in
+  every publication intent and name it in the abandonment event. Intents written
+  by earlier versions stay terminalizable and are marked `legacy_intent`.
+- Refuse a second terminal ledger record for one operation token.
+- Prove that a coordinated operation landed from a state commit inside the
+  intent's own window that declares its token, scope, changed refs, projection
+  status and manifest digest, and from a claim carrying that token for every
+  touched source ref. A token reused for a different operation, a state chain
+  scanned before the recorded expected tip, and an intent with no recorded
+  expected tip no longer prove a landing, and a claim still carrying the token
+  proves one the state chain no longer carries.
+- Undo the local rename of an abandoned promotion only when the remote carries
+  neither the promoted ref nor a claim bearing that operation token.
+- Derive the coordination token of a channel publish or close from the operation
+  itself instead of the caller's `--operation-id`, which stays the clone-local
+  idempotency key, and record it in the channel operation events so a retry
+  recovers the same token.
+- Record and terminalize a publication intent for
+  `coordination claims backfill --apply`, whose claims now carry that operation
+  token, and name the retry command when the coordination remote is unreachable
+  during it or during `stack create --draft`.
+- Complete a landed promotion at the head of `stack rebuild`, `stack sync` and
+  `stack add` as well, and anchor a diverged rematerialized draft branch under
+  `refs/syncwheel/recovery/drafts/` before dropping it, so a promotion that
+  landed before its manifest save can no longer block unrelated stacks or name a
+  remedy that refuses itself.
 
 ## 0.42.0 - 2026-09-02
 

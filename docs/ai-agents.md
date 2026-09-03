@@ -57,17 +57,31 @@ do not repeat the push. Create propagates its `stack_create_intent` token into
 the claim and removes only the deterministic temporary worktree owned by that
 generation.
 
-Prove landing from the operation token in the published state chain, never from
-current ref tips: in an active-active fleet another clone may legitimately move a
-published ref, and an unrelated clone may push the same tip. When that evidence
-does not exist the intent is dead whether or not the state tip moved: record
-`coordination_publish_abandoned` with reason `not_landed` or `superseded` and
-continue rather than freezing on it. A landed promotion still owes only its
-manifest save; `stack promote`, `stack push`, `int push`, `stack create`,
-`stack close`, and `reconcile --apply` complete it from the published state and
-rebuild the promoted branch instead of requiring a particular local branch
-layout. Never leave a publish intent that no command can terminalize, and never
-let a foreign pending intent be the reason an unrelated publication cannot run.
+Take the clone's publication lock around the whole intent, push, local
+remainder and terminal event. The lock, not the intent payload, says what is in
+flight: a command that cannot take it exits 2 naming the live owner and touches
+nothing, and one that takes it knows no other cycle is running here, because
+process death releases the lock. The owner record in the intent names a dead
+owner in the abandonment event; it never authorizes a transition.
+
+Prove landing from a state commit inside the intent's recorded window carrying
+its token, scope, changed refs, projection status and manifest digest, plus a
+claim carrying that token for every touched source ref; never from current ref
+tips, and never from a token alone. In an active-active fleet another clone may
+legitimately move a published ref, push the same tip, or reuse a caller-supplied
+identifier. Without an expected state tip there is no window and the chain
+proves nothing; the claims are then the remaining evidence. When no evidence
+holds, record `coordination_publish_abandoned` with reason `not_landed` or
+`superseded` and continue rather than freezing on it, and undo the local rename
+only when the remote carries neither the promoted ref nor a claim bearing that
+token. Write exactly one terminal record per operation token. A landed promotion
+still owes only its manifest save; `stack promote`, `stack push`, `int push`,
+`stack create`, `stack close`, `stack rebuild`, `stack sync`, `stack add`, and
+`reconcile --apply` complete it from the published state and rebuild the
+promoted branch instead of requiring a particular local branch layout, anchoring
+a diverged draft branch under `refs/syncwheel/recovery/drafts/` before dropping
+it. Never leave a publish intent that no command can terminalize, and never let
+a foreign pending intent be the reason an unrelated publication cannot run.
 
 For draft close, the order is intent, remote tombstone claim plus state CAS,
 local manifest save, terminal event. Do not reintroduce remote observations

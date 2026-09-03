@@ -149,21 +149,39 @@ including when later publications have moved the shared state on. Draft create
 uses the same token in its create intent and remote claim, and cleans up its
 token-derived temporary worktree registration on retry.
 
-A publication intent is always terminal. Landing is proved by the operation's
-own token in the published state chain, never by current ref tips, so another
-clone legitimately advancing the same ref cannot turn a landed operation into an
-abandoned one. An intent that is absent from that chain never reached the remote
-and is recorded as `coordination_publish_abandoned` by the next publication,
-`reconcile`, or `resume`, with reason `not_landed` when nothing else published
-meanwhile and `superseded` when the reviewed state tip was overtaken. A promotion
-whose push landed before its manifest save owes only that save: the next
-coordinated command completes it from the published state and rebuilds the
-promoted branch, so an intervening `sync` cannot strand it. A clone that lost a
+One publication cycle runs at a time in a clone. Every coordinated command takes
+`<git-common-dir>/syncwheel/coordination-publication.lock` around its whole
+intent, push, local remainder and terminal event, and a second command refuses
+with the live owner's pid rather than deciding anything about its intent; a
+plain retry after it finishes succeeds. Process death releases the lock, so a
+dead owner's intent is recovered by the next command. Dry runs and `handoff`
+take no lock and are never refused.
+
+A publication intent is always terminal, and a token has exactly one terminal
+record. Landing is proved by a state commit inside the intent's own window that
+declares this operation's token, scope, changed refs, projection status and
+manifest digest, together with a claim carrying that token for every touched
+source ref; never by current ref tips, so another clone legitimately advancing
+the same ref cannot turn a landed operation into an abandoned one, and a token
+reused for another operation cannot prove this one. An intent with no recorded
+expected state tip is never proved landed by the chain. An intent absent from
+that evidence never reached the remote and is recorded as
+`coordination_publish_abandoned` by the next publication, `reconcile`, or
+`resume`, with reason `not_landed` when nothing else published meanwhile and
+`superseded` when the reviewed state tip was overtaken; the local rename of an
+abandoned promotion is undone only when the remote carries neither the promoted
+ref nor a claim bearing its token. A promotion whose push landed before its
+manifest save owes only that save: the next coordinated command, `stack
+rebuild`, `stack sync` and `stack add` included, completes it from the published
+state and rebuilds the promoted branch, so an intervening `sync` cannot strand
+it, and a draft branch that came back with commits of its own is anchored under
+`refs/syncwheel/recovery/drafts/` before it is dropped. A clone that lost a
 publication race, was refused by the remote, or died before its push keeps
 publishing after a plain retry. A coordination remote that is unreachable, or
 that refuses the atomic push without changing anything, fails closed and names
-the retry command for `stack push`, `int push`, `stack promote`, `publish`, and
-`reconcile --apply --push`.
+the retry command for `stack push`, `int push`, `stack promote`, `stack create
+--draft`, `publish`, `reconcile --apply --push`, and `coordination claims
+backfill`.
 
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:
