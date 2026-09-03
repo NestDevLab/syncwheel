@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.42.4 - 2026-09-03
+
+- Add the `state-digest-heal` coordination repair class for a manifest_digest
+  that matches neither the raw control-manifest digest nor the legacy
+  snapshot form. This happens when a prior repair moved a managed ref while
+  the manifest it pointed at genuinely changed: repair preserves the
+  parent's digest byte for byte by design (it corrects transport evidence,
+  not topology), leaving the digest orphaned even though the ref itself is
+  correct. Previously `coordination_repair_plan` classified this state as
+  neither raw nor legacy, swallowed the error, and reported `noop`, leaving
+  every publish path permanently blocked. The plan now reports
+  `digest-heal-required` and recomputes the digest from the manifest already
+  committed at the aligned integration tip; apply appends a state child that
+  changes only the recorded digest, under the same state-only CAS boundary as
+  the other evidence backends, and records
+  `coordination_state_digest_healed` in the ledger with both digests. A ref
+  that also needs its own topology repaired is never healed alone (topology
+  repair keeps priority), and an unreadable or missing registered tip stays a
+  fatal error rather than a healing candidate.
+
 ## 0.42.3 - 2026-09-03
 
 - Accept both recorded control-manifest digest forms in coordination state:
