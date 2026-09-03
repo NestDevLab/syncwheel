@@ -6254,9 +6254,15 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertFalse(module.pending_coordination_publications(repo, manifest_path))
 
     def prepare_foreign_operation_on_a_pending_ref(
-        self, name, stack_id, *, scope, extra_refs=(),
+        self, name, stack_id, *, scope, extra_refs=(), split_claims=False,
     ):
-        """Another clone lands this token on the same ref under its own operation."""
+        """Another clone lands this token on the same ref under its own operation.
+
+        With split_claims, each ref in extra_refs is claimed by its own
+        coordinated_publish call instead of joining the main changed dict, so
+        every resulting claim's own changed_refs covers only the one ref it
+        was published with rather than the full set touched under this token.
+        """
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
@@ -6278,13 +6284,24 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         manifest, manifest_path = module.load_manifest(other)
         changed = {f'refs/heads/{branch}': module.ref_tip(other, branch)}
-        for ref in extra_refs:
-            changed[ref] = module.ref_tip(other, ref.split('refs/heads/', 1)[-1])
+        if not split_claims:
+            for ref in extra_refs:
+                changed[ref] = module.ref_tip(other, ref.split('refs/heads/', 1)[-1])
         with contextlib.redirect_stdout(io.StringIO()):
             module.coordinated_publish(
                 other, manifest, manifest_path, changed, scope, 'partial',
                 operation_token=intent['operation_token'],
             )
+            if split_claims:
+                for ref in extra_refs:
+                    manifest, manifest_path = module.load_manifest(other)
+                    extra_changed = {
+                        ref: module.ref_tip(other, ref.split('refs/heads/', 1)[-1])
+                    }
+                    module.coordinated_publish(
+                        other, manifest, manifest_path, extra_changed, scope, 'partial',
+                        operation_token=intent['operation_token'],
+                    )
         return {
             'origin': origin, 'repo': repo, 'module': module, 'other': other,
             'stack': stack_id, 'branch': branch, 'intent': intent,
@@ -6332,11 +6349,15 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assert_pending_intent_was_abandoned(fixture)
 
     def test_claim_proof_requires_the_recorded_changed_refs(self):
+        # A9 folds the integration ref into changed_refs here (stale control
+        # manifest), so the foreign side must claim both refs to match the
+        # intent's set. split_claims makes it claim them one at a time, so
+        # each claim's own changed_refs covers only its own ref, not the pair.
         fixture = self.prepare_foreign_operation_on_a_pending_ref(
             'round10-claim-refs', 'claim-refs', scope='stack:claim-refs',
-            extra_refs=['refs/heads/integration/shared'],
+            extra_refs=['refs/heads/integration/shared'], split_claims=True,
         )
-        self.assertEqual(len(fixture['intent']['changed_refs']), 1)
+        self.assertEqual(len(fixture['intent']['changed_refs']), 2)
         self.assert_pending_intent_was_abandoned(fixture)
 
     def derived_provenance_record(self, commit):
