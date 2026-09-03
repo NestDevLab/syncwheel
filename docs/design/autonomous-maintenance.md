@@ -786,6 +786,43 @@ Preconditions and execution must reuse `coordination_gc_plan` and
 - a missing inactive tombstoned ref is a valid remote observation. Its historic
   tip remains required only for the independent local recoverability proof.
 
+Governed lane cleanup uses a narrower lock-first protocol. The clone-local
+registry mutex records PID, process start time, and token. After obtaining the
+old inode's non-blocking `flock`, a successor may atomically rename and log it
+when the owner is dead, its PID was reused, or it is an unreaped zombie; an empty
+or truncated file becomes recoverable only after a brief creator grace. A
+creator verifies that its inode still owns the path before entering. The first
+lane mutation is then a tokenized `git worktree lock`; failure means the lane is
+in use and no ref or path is changed. While holding both locks, Syncwheel
+verifies the registration's exact admin-dir and `gitdir`, fsyncs a cleanup
+intent in the effective manifest's ledger, and saves registry state by durable
+pre-image-digest CAS before anchoring the tip or changing a ref. Stack create,
+add, and capture propagate that same manifest ledger through terminalization. A
+restart reconstructs pending state from that intent even if the registry rolled
+back.
+
+The ref phase anchors the tip with expected-old protection and commits an
+expected-old transaction that verifies the recovery ref while deleting the lane
+branch. A final tracked/untracked probe precedes removal of that registration
+only; global worktree prune is forbidden. Ref conflict, path reappearance,
+registration drift, or process death leaves state a plain retry can resume. A
+real automatic `branch_advanced` retry retains the old recovery ref and anchors
+the new tip. Either GC can finish it automatically or an explicit release can
+supersede it, re-anchor the new tip, and terminalize it as released. A release
+over any other pending reap state completes it under the intent already fsynced
+for that state.
+A release whose lane another command already terminalized — a concurrent GC reap
+or the preflight of `worktree open` — reports that terminal instead of an unknown
+lane, and any reason that is not the recorded one is appended once as a release
+note. GC chooses its candidates under the registry lock, and prunes retained
+stale lock inodes that nobody holds.
+
+This guarantee covers concurrent Syncwheel commands and ordinary non-forced Git
+operations. Raw changes to Syncwheel-owned refs, double-force operations that
+bypass Git's worktree lock, and direct non-owner writes into the lane during
+cleanup are outside the supported threat model; Syncwheel still fails closed
+when it detects their effects.
+
 ## 10. Unsafe cases and exact questions
 
 The following table defines the required human-facing question. The

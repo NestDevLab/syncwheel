@@ -1,5 +1,6 @@
 import copy
 import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -142,11 +144,14 @@ class RevisionProviderRepository:
         return result.stdout.strip()
 
     def cli(self, *args, expected=0, payload=None):
+        return self.cli_at(self.repo, *args, expected=expected, payload=payload)
+
+    def cli_at(self, cwd, *args, expected=0, payload=None):
         env = os.environ.copy()
         env['SYNCWHEEL_UPDATE_MODE'] = 'off'
         result = subprocess.run(
             ['python3', str(CLI), *args],
-            cwd=self.repo,
+            cwd=cwd,
             input=(json.dumps(payload) if payload is not None else None),
             text=True,
             capture_output=True,
@@ -186,7 +191,9 @@ class RevisionProviderRepository:
                 {
                     'path': path,
                     'beforeSha256': before,
-                    'afterSha256': self.sha256(after_content),
+                    'afterSha256': (
+                        None if after_content is None else self.sha256(after_content)
+                    ),
                 }
             ],
         }
@@ -255,23 +262,29 @@ class RevisionProviderRepository:
         self.git('add', '--', '.syncwheel/manifest.json')
         self.git('commit', '-q', '-m', 'test: configure revision-provider base')
 
-    def install_existing_stack(self, *, path='base.txt', content='existing\n'):
-        self.git('switch', '-q', '-c', 'syncwheel/stack/existing', 'origin/main')
+    def install_existing_stack(
+        self, *, path='base.txt', content='existing\n', manifest_on_base=False
+    ):
+        stack_base = self.git('rev-parse', 'origin/main')
+        self.git('switch', '-q', '-c', 'syncwheel/stack/existing', stack_base)
         target = self.repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
         self.git('add', '--', path)
         self.git('commit', '-q', '-m', 'test: existing stack product')
         product = self.git('rev-parse', 'HEAD')
-        self.git('switch', '-q', 'main-integration')
-        self.git('merge', '-q', '--ff-only', 'syncwheel/stack/existing')
+        if manifest_on_base:
+            self.git('switch', '-q', 'main')
+        else:
+            self.git('switch', '-q', 'main-integration')
+            self.git('merge', '-q', '--ff-only', 'syncwheel/stack/existing')
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
         manifest = json.loads(manifest_path.read_text())
         manifest['stacks'].append(
             {
                 'id': 'existing',
                 'branch': 'syncwheel/stack/existing',
-                'base': 'origin/main',
+                'base': stack_base if manifest_on_base else 'origin/main',
                 'target_remote': 'origin',
                 'target_branch': 'main',
                 'integration_branch': 'main-integration',
@@ -284,8 +297,147 @@ class RevisionProviderRepository:
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
         self.git('add', '.syncwheel/manifest.json')
         self.git('commit', '-q', '-m', 'test: register existing stack')
+        if manifest_on_base:
+            self.git('push', '-q', 'origin', 'main')
+            self.git('switch', '-q', 'main-integration')
+            self.git('reset', '--hard', 'origin/main')
+            self.git('cherry-pick', product)
         self.cli('validate')
         return product
+
+    @property
+    def manifest_path(self):
+        return self.repo / '.syncwheel' / 'manifest.json'
+
+    def read_manifest(self):
+        return json.loads(self.manifest_path.read_text())
+
+    def write_manifest(self, manifest):
+        self.manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+    def staged_derived_digest(self, *paths):
+        path_blobs = {}
+        for path in paths:
+            result = subprocess.run(
+                ['git', 'rev-parse', '--verify', f':{path}'],
+                cwd=self.repo,
+                text=True,
+                capture_output=True,
+            )
+            path_blobs[path] = (
+                result.stdout.strip() if result.returncode == 0 else None
+            )
+        return SYNCWHEEL.derived_projection_paths_digest(path_blobs)
+
+    def append_derived_provenance(self, operation_id, commit, paths):
+        manifest = self.read_manifest()
+        paths = sorted(paths)
+        paths_digest = SYNCWHEEL.derived_projection_commit_paths_digest(
+            self.repo, commit, paths
+        )
+        payload = {
+            'operation_id': operation_id,
+            'commit': commit,
+            'paths': paths,
+            'paths_digest': paths_digest,
+            'composition_digest': SYNCWHEEL.integration_composition_digest(
+                manifest
+            ),
+        }
+        SYNCWHEEL.record_common_derived_provenance(
+            self.repo, manifest, payload
+        )
+        SYNCWHEEL.append_ledger_event(
+            self.repo,
+            'revision_provider_derived_commit',
+            payload,
+            self.manifest_path,
+        )
+        return paths_digest
+
+    def commit_derived_projection(self, operation_id, paths, *, subject):
+        paths = sorted(paths)
+        paths_digest = self.staged_derived_digest(*paths)
+        self.git(
+            'commit',
+            '-q',
+            '-m',
+            subject,
+            '-m',
+            f'Syncwheel-Derived-Projection: {operation_id}\n'
+            f'Syncwheel-Derived-Paths: {paths_digest}',
+        )
+        commit = self.git('rev-parse', 'HEAD')
+        self.append_derived_provenance(operation_id, commit, paths)
+        return commit
+
+    def enable_derived_paths(self, *prefixes, on_base=False):
+        """Enable manifest-v3 derived paths on integration or its canonical base."""
+        if on_base:
+            self.git('switch', '-q', 'main')
+        manifest = self.read_manifest()
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = list(prefixes or ('locks/',))
+        manifest.setdefault('channels', [])
+        self.write_manifest(manifest)
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: enable derived projections')
+        commit = self.git('rev-parse', 'HEAD')
+        if on_base:
+            self.git('push', '-q', 'origin', 'main')
+            self.git('switch', '-q', 'main-integration')
+            self.git('reset', '--hard', 'origin/main')
+        return commit
+
+
+def run_cli(cwd, *args):
+    env = os.environ.copy()
+    env['SYNCWHEEL_UPDATE_MODE'] = 'off'
+    return subprocess.run(
+        ['python3', str(CLI), *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+class CoordinationPeer:
+    """A second clone of the fixture's coordination remote, sharing its helpers."""
+
+    git = RevisionProviderRepository.git
+    cli = RevisionProviderRepository.cli
+    cli_at = RevisionProviderRepository.cli_at
+    manifest_path = RevisionProviderRepository.manifest_path
+    read_manifest = RevisionProviderRepository.read_manifest
+    write_manifest = RevisionProviderRepository.write_manifest
+    staged_derived_digest = RevisionProviderRepository.staged_derived_digest
+    append_derived_provenance = RevisionProviderRepository.append_derived_provenance
+    commit_derived_projection = RevisionProviderRepository.commit_derived_projection
+
+    def __init__(self, fixture, name='peer-b'):
+        self.root = fixture.root
+        self.remote = fixture.remote
+        self.repo = fixture.root / name
+        subprocess.run(
+            ['git', '-C', str(self.remote), 'symbolic-ref', 'HEAD', 'refs/heads/main'],
+            check=True,
+        )
+        subprocess.run(
+            ['git', 'clone', '-q', str(self.remote), str(self.repo)], check=True
+        )
+        self.git('config', 'user.name', f'Revision Provider {name}')
+        self.git('config', 'user.email', f'{name}@example.invalid')
+        self.git(
+            'switch', '-q', '-c', 'main-integration', '--track', 'origin/main-integration'
+        )
+        self.git(
+            'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'
+        )
+        self.cli(
+            'hooks', 'remove', '--disable',
+            '--reason', 'isolated coordination peer', '--apply',
+        )
 
 
 class RevisionProviderProtocolTest(unittest.TestCase):
@@ -1090,6 +1242,898 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         repeated, _ = self.fixture.protocol_request({**request, 'action': 'recover'})
         self.assertEqual(repeated, {**finalized, 'action': 'recover'})
 
+    def test_route_is_manifest_base_when_projection_reproduces_product_blobs(self):
+        request = self.fixture.request(
+            'preflight', operation_id='manifest-base-route'
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'manifest-base-route.json').read_text()
+        )
+        manifest = self.fixture.read_manifest()
+        stack = next(
+            item for item in manifest['stacks']
+            if item['id'] == 'agentwheel-manifest-base-route'
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        self.assertEqual(stack['base'], self.fixture.git('rev-parse', 'origin/main'))
+
+    def test_manifest_base_route_edits_a_base_file_end_to_end(self):
+        request = self.fixture.request(
+            'preflight',
+            operation_id='manifest-base-edit',
+            path='base.txt',
+            before=self.fixture.sha256('base\n'),
+            after_content='edited\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'base.txt').write_text('edited\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'manifest-base-edit.json').read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        self.assertEqual(
+            self.fixture.git('show', f"{finalized['draftTipSha']}:base.txt"),
+            'edited',
+        )
+
+    def test_route_compares_product_blobs_without_requiring_equal_modes(self):
+        stack_base = self.fixture.git('rev-parse', 'origin/main')
+        self.fixture.git(
+            'switch', '-q', '-c', 'syncwheel/stack/mode-only', stack_base
+        )
+        (self.fixture.repo / 'base.txt').chmod(0o755)
+        self.fixture.git('add', 'base.txt')
+        self.fixture.git('commit', '-q', '-m', 'test: stack changes mode only')
+        stack_commit = self.fixture.git('rev-parse', 'HEAD')
+        self.fixture.git('switch', '-q', 'main-integration')
+        self.fixture.git('merge', '-q', '--ff-only', 'syncwheel/stack/mode-only')
+        manifest = self.fixture.read_manifest()
+        manifest['stacks'].append(
+            {
+                'id': 'mode-only',
+                'branch': 'syncwheel/stack/mode-only',
+                'base': 'origin/main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+                'commits': [stack_commit],
+                'state': 'draft',
+                'publication': {'enabled': False},
+            }
+        )
+        manifest['integration']['stacks'].append('mode-only')
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: register mode-only stack')
+        request = self.fixture.request(
+            'preflight',
+            operation_id='blob-only-route-test',
+            path='base.txt',
+            before=self.fixture.sha256('base\n'),
+            after_content='provider\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'base.txt').write_text('provider\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'blob-only-route-test.json').read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        projected_mode = self.fixture.git(
+            'ls-tree', finalized['draftTipSha'], '--', 'base.txt'
+        ).split()[0]
+        candidate_mode = self.fixture.git(
+            'ls-tree', journal['candidateProductCommitSha'], '--', 'base.txt'
+        ).split()[0]
+        self.assertEqual(projected_mode, '100644')
+        self.assertEqual(candidate_mode, '100755')
+
+    def test_manifest_base_route_deletes_a_base_file_end_to_end(self):
+        request = self.fixture.request(
+            'preflight',
+            operation_id='manifest-base-delete',
+            path='base.txt',
+            before=self.fixture.sha256('base\n'),
+            after_content=None,
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'base.txt').unlink()
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'manifest-base-delete.json').read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        self.assertEqual(
+            self.fixture.git('ls-tree', finalized['draftTipSha'], '--', 'base.txt'),
+            '',
+        )
+
+    def test_route_ignores_a_manifest_only_control_commit_ahead_of_base(self):
+        self.fixture.git('switch', '-q', 'main')
+        (self.fixture.repo / 'absorbed.txt').write_text('absorbed\n')
+        self.fixture.git('add', 'absorbed.txt')
+        self.fixture.git('commit', '-q', '-m', 'test: product already delivered')
+        absorbed = self.fixture.git('rev-parse', 'HEAD')
+        self.fixture.git('branch', 'syncwheel/stack/absorbed', absorbed)
+        self.fixture.git('push', '-q', 'origin', 'main')
+        self.fixture.git('switch', '-q', 'main-integration')
+        self.fixture.git('reset', '--hard', 'origin/main')
+        manifest = self.fixture.read_manifest()
+        manifest['stacks'].append(
+            {
+                'id': 'absorbed',
+                'branch': 'syncwheel/stack/absorbed',
+                'base': 'origin/main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+                'commits': [absorbed],
+                'state': 'draft',
+                'publication': {'enabled': False},
+            }
+        )
+        manifest['integration']['stacks'].append('absorbed')
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: record absorbed stack')
+        self.fixture.cli('validate')
+        request = self.fixture.request(
+            'preflight', operation_id='control-only-route'
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'control-only-route.json').read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        self.assertEqual(
+            self.fixture.git('rev-list', '--count', 'origin/main..' + request['expectedHead']),
+            '1',
+        )
+
+    def test_route_is_derived_when_projection_changes_a_product_blob(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        manifest_path = self.fixture.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: enable derived lock projections')
+        request = self.fixture.request(
+            'preflight',
+            operation_id='integration-first-lock',
+            path='locks/codex.lock',
+            before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertIsNone(finalized['draftStackId'])
+        self.assertIsNone(finalized['draftBranch'])
+        self.assertIsNone(finalized['draftTipSha'])
+        self.assertIn(
+            'Syncwheel-Derived-Projection: integration-first-lock',
+            self.fixture.git('show', '-s', '--format=%B', finalized['productCommitSha']),
+        )
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'integration-first-lock.json').read_text()
+        )
+        self.assertEqual(journal['projectionRoute'], 'derived')
+
+    def test_derived_route_deletes_a_stack_only_file_end_to_end(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='stack-only\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        request = self.fixture.request(
+            'preflight',
+            operation_id='derived-delete',
+            path='locks/codex.lock',
+            before=self.fixture.sha256('stack-only\n'),
+            after_content=None,
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').unlink()
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (self.fixture.provider_journal_root() / 'derived-delete.json').read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'derived')
+        self.assertEqual(journal['candidateDraftCommitSha'], None)
+        self.assertEqual(
+            self.fixture.git(
+                'ls-tree', finalized['productCommitSha'], '--', 'locks/codex.lock'
+            ),
+            '',
+        )
+        message = self.fixture.git(
+            'show', '-s', '--format=%B', finalized['productCommitSha']
+        )
+        self.assertIn('Syncwheel-Derived-Projection: derived-delete', message)
+        self.assertIn(
+            f"Syncwheel-Derived-Paths: {journal['derivedContentDigest']}",
+            message,
+        )
+
+    def test_derived_route_preserves_a_path_containing_lf_end_to_end(self):
+        path = 'locks/line\nbreak.lock'
+        self.fixture.install_existing_stack(path=path, content='first\n')
+        self.fixture.enable_derived_paths('locks/')
+        request = self.fixture.request(
+            'preflight',
+            operation_id='derived-lf-path',
+            path=path,
+            before=self.fixture.sha256('first\n'),
+            after_content='second\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / path).write_text('second\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(
+            SYNCWHEEL.commit_changed_files(
+                self.fixture.repo, finalized['productCommitSha']
+            ),
+            [path],
+        )
+        manifest, _ = SYNCWHEEL.load_manifest(self.fixture.repo)
+        validation = SYNCWHEEL.validate_manifest(self.fixture.repo, manifest)
+        self.assertEqual(
+            validation['details']['integration']['derived_commits'],
+            [finalized['productCommitSha']],
+        )
+        self.assertEqual(
+            validation['details']['integration']['unmapped_commits'],
+            [],
+        )
+
+    def test_derived_route_creates_no_draft_ref_and_no_manifest_delta(self):
+        """A lock delta already represented by integration is a derived commit, never a stack."""
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        manifest_path = self.fixture.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: enable derived lock projections')
+
+        request = self.fixture.request(
+            'preflight', operation_id='derived-lock', path='locks/codex.lock',
+            before=self.fixture.sha256('first-owner\n'), after_content='second-owner\n',
+        )
+        manifest_before = manifest_path.read_bytes()
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+        finalized, _ = self.fixture.protocol_request({**request, 'action': 'finalize'})
+
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertIsNotNone(finalized['productCommitSha'])
+        self.assertIsNone(finalized['draftStackId'])
+        self.assertIsNone(finalized['draftBranch'])
+        self.assertIsNone(finalized['draftTipSha'])
+        self.assertEqual(manifest_path.read_bytes(), manifest_before)
+        self.assertEqual(
+            self.fixture.git(
+                'rev-parse', '--verify', 'refs/heads/syncwheel/draft/agentwheel-derived-lock',
+                check=False,
+            ),
+            '',
+        )
+        message = self.fixture.git('show', '-s', '--format=%B', finalized['productCommitSha'])
+        self.assertIn('Syncwheel-Derived-Projection: derived-lock', message)
+
+    def test_derived_route_refuses_paths_outside_derived_paths(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        request = self.fixture.request(
+            'preflight', operation_id='mixed-derived-paths',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        request['paths'].append(
+            {
+                'path': 'source.py',
+                'beforeSha256': None,
+                'afterSha256': self.fixture.sha256('print("source")\n'),
+            }
+        )
+        expected_head = request['expectedHead']
+        manifest_before = self.fixture.manifest_path.read_bytes()
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        (self.fixture.repo / 'source.py').write_text('print("source")\n')
+        self.fixture.protocol_request(request)
+
+        rejected, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}, expected=2
+        )
+
+        self.assertIn('derived route refuses paths outside', rejected['error'])
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), expected_head)
+        self.assertEqual(self.fixture.manifest_path.read_bytes(), manifest_before)
+        self.assertEqual(
+            self.fixture.git(
+                'rev-parse', '--verify',
+                'refs/heads/syncwheel/draft/agentwheel-mixed-derived-paths',
+                check=False,
+            ),
+            '',
+        )
+
+    def test_agentwheel_response_shape_unchanged_for_derived_route(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        request = self.fixture.request(
+            'preflight', operation_id='derived-response-shape',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertIsNotNone(finalized['productCommitSha'])
+        self.assertIsNone(finalized['draftStackId'])
+        self.assertIsNone(finalized['draftBranch'])
+        self.assertIsNone(finalized['draftTipSha'])
+        self.assertIsNone(finalized['controlCommitSha'])
+        self.assertEqual(finalized['unmappedIntegrationCommits'], [])
+        self.assertFalse(finalized['published'])
+
+    def test_recovery_keeps_the_hook_validated_derived_candidate_immutable(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        hook_log = self.fixture.root / 'validated-commits.log'
+        hook = self.fixture.repo / '.git' / 'hooks' / 'commit-msg'
+        hook.write_text(
+            '#!/bin/sh\n'
+            f'printf "%s\\n" "$SYNCWHEEL_REVISION_PROVIDER_COMMIT" >> {shlex.quote(str(hook_log))}\n'
+        )
+        hook.chmod(0o755)
+        request_payload = self.fixture.request(
+            'preflight', operation_id='derived-hook-recovery',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        request = protocol.parse_request(request_payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(request_payload))
+        )
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        protocol.handle_request(backend, request)
+
+        class FaultAfterProductHooks(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(inner_self, phase):
+                if phase == 'product_hooks_validated':
+                    raise protocol.RevisionProviderError('injected post-hook fault')
+
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'post-hook fault'):
+            protocol.handle_request(
+                FaultAfterProductHooks(protocol), replace(request, action='finalize')
+            )
+        validated = hook_log.read_text().splitlines()
+        self.assertEqual(len(validated), 1)
+        time.sleep(1.1)
+
+        recovered = protocol.handle_request(
+            backend, replace(request, action='recover')
+        )
+
+        self.assertEqual(recovered['status'], 'verified')
+        self.assertEqual(recovered['productCommitSha'], validated[0])
+        self.assertEqual(hook_log.read_text().splitlines(), validated)
+
+    def test_partial_route_journal_names_release_and_new_update_remedy(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        payload = self.fixture.request(
+            'preflight',
+            operation_id='partial-route-journal',
+            path='locks/codex.lock',
+            before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        protocol.handle_request(backend, request)
+
+        class FaultAfterRoute(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(inner_self, phase):
+                if phase == 'route_decided':
+                    raise protocol.RevisionProviderError('injected after route')
+
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'after route'):
+            protocol.handle_request(
+                FaultAfterRoute(protocol), replace(request, action='finalize')
+            )
+        journal = backend.load_journal(request)
+        journal.pop('productPathObjects')
+        backend.save_journal(request, journal)
+
+        rejected, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'recover'}, expected=2
+        )
+
+        self.assertIn('journaled productPathObjects is missing or invalid', rejected['error'])
+        self.assertIn('release the prepared operation', rejected['error'])
+        self.assertIn('run a new Agentwheel update', rejected['error'])
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), payload['expectedHead'])
+        released, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'release'}
+        )
+        self.assertEqual(released['status'], 'released')
+
+    def test_manifest_base_provider_operation_can_land_end_to_end(self):
+        request = self.fixture.request(
+            'preflight', operation_id='landability-repro'
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        self.fixture.protocol_request(request)
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+        self.assertEqual(finalized['status'], 'verified')
+
+        preview = json.loads(
+            self.fixture.cli(
+                'stack', 'land', finalized['draftStackId'], '--allow-direct',
+                '--operation-id', 'provider-land',
+            ).stdout
+        )
+        self.assertEqual(preview['status'], 'ready')
+        applied = json.loads(
+            self.fixture.cli(
+                'stack', 'land', finalized['draftStackId'], '--allow-direct',
+                '--operation-id', 'provider-land', '--plan-digest', preview['planDigest'],
+                '--apply',
+            ).stdout
+        )
+        self.assertEqual(applied['status'], 'succeeded')
+        self.assertEqual(
+            self.fixture.git('ls-remote', '--heads', str(self.fixture.remote), 'main').split()[0],
+            finalized['draftTipSha'],
+        )
+
+    def test_manifest_invalidated_pending_receipt_expires_with_ledger_remedy(self):
+        class ManifestChangedAfterProductObjects(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(inner_self, phase):
+                if phase == 'product_objects_prepared':
+                    manifest_path = inner_self._repo_root(request) / '.syncwheel' / 'manifest.json'
+                    manifest = json.loads(manifest_path.read_text())
+                    manifest['revision_provider_test_marker'] = 'manifest changed'
+                    manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        payload = self.fixture.request('preflight', operation_id='manifest-expiry')
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation manifest-expiry expired: manifest changed before draft object preparation; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(
+                ManifestChangedAfterProductObjects(protocol),
+                replace(request, action='finalize'),
+            )
+
+        journal = backend.load_journal(request)
+        self.assertEqual(journal['phase'], 'expired')
+        self.assertEqual(journal['expiration']['remedy'], 'run a new Agentwheel update')
+        events = SYNCWHEEL.load_ledger_events(self.fixture.repo)
+        expired = [
+            event for event in events
+            if event['type'] == 'revision_provider_expired'
+            and event['payload']['operation_id'] == request.operation_id
+        ]
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0]['payload']['remedy'], 'run a new Agentwheel update')
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation manifest-expiry expired: manifest changed before draft object preparation; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(backend, replace(request, action='recover'))
+
+    def test_manifest_drift_before_route_expires_terminally(self):
+        payload = self.fixture.request(
+            'preflight', operation_id='drift-before-route'
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+        manifest = self.fixture.read_manifest()
+        manifest['unrelated_marker'] = 'changed after preflight'
+        self.fixture.write_manifest(manifest)
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation drift-before-route expired: manifest changed after preflight; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(backend, replace(request, action='finalize'))
+
+        journal = backend.load_journal(request)
+        self.assertEqual(journal['phase'], 'expired')
+        expired = [
+            event for event in SYNCWHEEL.load_ledger_events(self.fixture.repo)
+            if event['type'] == 'revision_provider_expired'
+            and event['payload']['operation_id'] == request.operation_id
+        ]
+        self.assertEqual(len(expired), 1)
+
+    def test_unrelated_manifest_edit_does_not_expire_a_derived_receipt(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        payload = self.fixture.request(
+            'preflight', operation_id='unrelated-derived-manifest-edit',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        protocol.handle_request(backend, request)
+
+        class EditUnrelatedManifestAfterRoute(SYNCWHEEL.SyncwheelRevisionBackend):
+            changed = False
+
+            def checkpoint(inner_self, phase):
+                if phase == 'route_decided' and not inner_self.changed:
+                    inner_self.changed = True
+                    manifest = self.fixture.read_manifest()
+                    manifest['unrelated_marker'] = 'preserve me'
+                    self.fixture.write_manifest(manifest)
+                    raise protocol.RevisionProviderError('injected after unrelated edit')
+
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'unrelated edit'):
+            protocol.handle_request(
+                EditUnrelatedManifestAfterRoute(protocol),
+                replace(request, action='finalize'),
+            )
+
+        recovered = protocol.handle_request(
+            backend, replace(request, action='recover')
+        )
+
+        self.assertEqual(recovered['status'], 'verified')
+        self.assertEqual(self.fixture.read_manifest()['unrelated_marker'], 'preserve me')
+        self.assertEqual(
+            self.fixture.git('diff', '--name-only'), '.syncwheel/manifest.json'
+        )
+        self.assertEqual(
+            self.fixture.git('show', f"{recovered['productCommitSha']}:.syncwheel/manifest.json"),
+            self.fixture.git('show', f"{payload['expectedHead']}:.syncwheel/manifest.json"),
+        )
+
+    def test_composition_change_expires_derived_receipt_terminally(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        payload = self.fixture.request(
+            'preflight', operation_id='derived-composition-expiry',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        protocol.handle_request(backend, request)
+
+        class ChangeCompositionAfterRoute(SYNCWHEEL.SyncwheelRevisionBackend):
+            changed = False
+
+            def checkpoint(inner_self, phase):
+                if phase == 'route_decided' and not inner_self.changed:
+                    inner_self.changed = True
+                    manifest = self.fixture.read_manifest()
+                    manifest['integration']['strategy'] = 'merge-stacks'
+                    self.fixture.write_manifest(manifest)
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation derived-composition-expiry expired: integration composition changed '
+            r'while derived projection was pending; run a new Agentwheel update',
+        ):
+            protocol.handle_request(
+                ChangeCompositionAfterRoute(protocol),
+                replace(request, action='finalize'),
+            )
+
+        journal = backend.load_journal(request)
+        self.assertEqual(journal['phase'], 'expired')
+        self.assertNotEqual(
+            journal['expiration']['observedDigest'],
+            journal['expiration']['currentDigest'],
+        )
+        expired = [
+            event for event in SYNCWHEEL.load_ledger_events(self.fixture.repo)
+            if event['type'] == 'revision_provider_expired'
+            and event['payload']['operation_id'] == request.operation_id
+        ]
+        self.assertEqual(len(expired), 1)
+
+    def test_derived_paths_change_after_cas_expires_terminally(self):
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        self.fixture.enable_derived_paths('locks/')
+        payload = self.fixture.request(
+            'preflight', operation_id='derived-paths-expiry',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        protocol.handle_request(backend, request)
+
+        class ChangeDerivedPathsAfterCas(SYNCWHEEL.SyncwheelRevisionBackend):
+            changed = False
+
+            def checkpoint(inner_self, phase):
+                if phase == 'integration_product_cas' and not inner_self.changed:
+                    inner_self.changed = True
+                    manifest = self.fixture.read_manifest()
+                    manifest['integration']['derived_paths'] = ['other/']
+                    self.fixture.write_manifest(manifest)
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation derived-paths-expiry expired: integration.derived_paths changed '
+            r'while derived projection was pending; run a new Agentwheel update',
+        ):
+            protocol.handle_request(
+                ChangeDerivedPathsAfterCas(protocol),
+                replace(request, action='finalize'),
+            )
+
+        journal = backend.load_journal(request)
+        self.assertEqual(journal['phase'], 'expired')
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), journal['candidateProductCommitSha'])
+        self.assertNotEqual(
+            journal['expiration']['observedDigest'],
+            journal['expiration']['currentDigest'],
+        )
+
+    def test_expiry_is_idempotent_after_a_crash_between_journal_and_ledger(self):
+        payload = self.fixture.request(
+            'preflight', operation_id='journal-first-expiry'
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+
+        class CrashAfterExpirationJournal(SYNCWHEEL.SyncwheelRevisionBackend):
+            changed = False
+
+            def checkpoint(inner_self, phase):
+                if phase == 'product_objects_prepared' and not inner_self.changed:
+                    inner_self.changed = True
+                    manifest = self.fixture.read_manifest()
+                    manifest['expiry_marker'] = 'first'
+                    self.fixture.write_manifest(manifest)
+                elif phase == 'receipt_expired':
+                    raise protocol.RevisionProviderError('injected after expiration journal')
+
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'expiration journal'):
+            protocol.handle_request(
+                CrashAfterExpirationJournal(protocol),
+                replace(request, action='finalize'),
+            )
+        stored = copy.deepcopy(backend.load_journal(request)['expiration'])
+        self.assertEqual(backend.load_journal(request)['phase'], 'expired')
+        self.assertEqual(SYNCWHEEL.load_ledger_events(self.fixture.repo), [])
+        manifest = self.fixture.read_manifest()
+        manifest['expiry_marker'] = 'second'
+        self.fixture.write_manifest(manifest)
+
+        for _ in range(2):
+            with self.assertRaisesRegex(
+                protocol.RevisionProviderError,
+                r'operation journal-first-expiry expired: manifest changed before draft object '
+                r'preparation; run a new Agentwheel update',
+            ):
+                protocol.handle_request(backend, replace(request, action='recover'))
+
+        journal = backend.load_journal(request)
+        self.assertEqual(journal['expiration'], stored)
+        expired = [
+            event for event in SYNCWHEEL.load_ledger_events(self.fixture.repo)
+            if event['type'] == 'revision_provider_expired'
+        ]
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0]['payload']['current_digest'], stored['currentDigest'])
+
+    def test_release_and_recover_on_expired_receipt_are_terminal(self):
+        payload = self.fixture.request(
+            'preflight', operation_id='terminal-expired-actions'
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+        manifest = self.fixture.read_manifest()
+        manifest['expiry_marker'] = 'changed'
+        self.fixture.write_manifest(manifest)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'expired'):
+            protocol.handle_request(backend, replace(request, action='finalize'))
+
+        released = protocol.handle_request(
+            backend, replace(request, action='release')
+        )
+        self.assertEqual(released['status'], 'expired')
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation terminal-expired-actions expired: manifest changed after preflight; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(backend, replace(request, action='recover'))
+        self.assertEqual(backend.load_journal(request)['phase'], 'expired')
+
+    def test_check_on_expired_receipt_returns_the_terminal_error(self):
+        payload = self.fixture.request(
+            'preflight', operation_id='check-expired-receipt'
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+        manifest = self.fixture.read_manifest()
+        manifest['expiry_marker'] = 'changed'
+        self.fixture.write_manifest(manifest)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'expired'):
+            protocol.handle_request(backend, replace(request, action='finalize'))
+
+        with self.assertRaisesRegex(
+            protocol.RevisionProviderError,
+            r'operation check-expired-receipt expired: manifest changed after preflight; '
+            r'run a new Agentwheel update',
+        ):
+            protocol.handle_request(
+                backend, protocol.parse_request(self.fixture.check_request(payload))
+            )
+
+    def test_conflict_diagnostic_names_the_conflicted_path(self):
+        self.fixture.install_existing_stack(path='base.txt', content='stack\n')
+        payload = self.fixture.request(
+            'preflight',
+            operation_id='projection-conflict-detail',
+            path='base.txt',
+            before=self.fixture.sha256('stack\n'),
+            after_content='provider\n',
+        )
+        request = protocol.parse_request(payload)
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(
+            backend, protocol.parse_request(self.fixture.check_request(payload))
+        )
+        (self.fixture.repo / 'base.txt').write_text('provider\n')
+        protocol.handle_request(backend, request)
+        journal = backend.load_journal(request)
+        journal.update(
+            backend.prepare_product_commit(request, protocol.product_commit_message(request))
+        )
+        journal['projectionBaseSha'] = self.fixture.git('rev-parse', 'origin/main')
+        backend.save_journal(request, journal)
+
+        with self.assertRaises(protocol.RevisionProviderError) as rejected:
+            backend.prepare_draft_projection(request, journal)
+        message = str(rejected.exception)
+        self.assertIn('conflicts: base.txt', message)
+        self.assertIn(f'base {journal["projectionBaseSha"]}', message)
+        self.assertNotRegex(message, r'conflicts: [0-9a-f]{40}')
+
     def test_preflight_rejects_dirty_checkout_and_operation_id_collision(self):
         dirty = self.fixture.request('preflight', operation_id='dirty-op')
         (self.fixture.repo / 'unrelated.txt').write_text('dirty\n')
@@ -1208,43 +2252,46 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         ):
             protocol.parse_request(payload)
 
-    def test_empty_and_conflicting_projections_move_no_managed_ref(self):
-        for scenario in ('empty', 'conflict'):
-            with self.subTest(scenario=scenario):
-                fixture = RevisionProviderRepository()
-                try:
-                    path = 'existing-only.txt' if scenario == 'empty' else 'base.txt'
-                    fixture.install_existing_stack(path=path)
-                    before_head = fixture.git('rev-parse', 'HEAD')
-                    request = fixture.request(
-                        'preflight', operation_id=f'{scenario}-projection', path=path,
-                        before=fixture.sha256('existing\n'),
-                        after_content='agentwheel\n',
-                    )
-                    if scenario == 'empty':
-                        request['paths'][0]['afterSha256'] = None
-                    fixture.protocol_request(fixture.check_request(request))
-                    if scenario == 'empty':
-                        (fixture.repo / path).unlink()
-                    else:
-                        (fixture.repo / path).write_text('agentwheel\n')
-                    fixture.protocol_request(request)
-                    rejected, _ = fixture.protocol_request(
-                        {**request, 'action': 'finalize'}, expected=2
-                    )
-                    projection_word = 'empty' if scenario == 'empty' else 'conflicting'
-                    self.assertIn(f'{projection_word} draft projection', rejected['error'])
-                    self.assertEqual(fixture.git('rev-parse', 'HEAD'), before_head)
-                    self.assertEqual(
-                        fixture.git(
-                            'rev-parse', '--verify',
-                            f'refs/heads/syncwheel/draft/agentwheel-{scenario}-projection',
-                            check=False,
-                        ),
-                        '',
-                    )
-                finally:
-                    fixture.close()
+    def test_conflicting_projection_moves_no_managed_ref(self):
+        fixture = RevisionProviderRepository()
+        try:
+            fixture.install_existing_stack(path='base.txt')
+            before_head = fixture.git('rev-parse', 'HEAD')
+            payload = fixture.request(
+                'preflight', operation_id='conflict-projection', path='base.txt',
+                before=fixture.sha256('existing\n'),
+                after_content='agentwheel\n',
+            )
+            request = protocol.parse_request(payload)
+            backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+            protocol.handle_request(
+                backend, protocol.parse_request(fixture.check_request(payload))
+            )
+            (fixture.repo / 'base.txt').write_text('agentwheel\n')
+            protocol.handle_request(backend, request)
+            journal = backend.load_journal(request)
+            journal.update(
+                backend.prepare_product_commit(
+                    request, protocol.product_commit_message(request)
+                )
+            )
+            journal['projectionBaseSha'] = fixture.git('rev-parse', 'origin/main')
+            backend.save_journal(request, journal)
+            with self.assertRaisesRegex(
+                protocol.RevisionProviderError, 'conflicting draft projection'
+            ):
+                backend.prepare_draft_projection(request, journal)
+            self.assertEqual(fixture.git('rev-parse', 'HEAD'), before_head)
+            self.assertEqual(
+                fixture.git(
+                    'rev-parse', '--verify',
+                    f'refs/heads/{request.draft_branch}',
+                    check=False,
+                ),
+                '',
+            )
+        finally:
+            fixture.close()
 
     def test_draft_ref_race_fails_before_integration_advances(self):
         request = self.fixture.request('preflight', operation_id='draft-race')
@@ -1736,10 +2783,1063 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             rejected, _ = fixture.protocol_request(
                 fixture.check_request(next_request), expected=2
             )
-
             self.assertIn('integration already contains unmapped commits', rejected['error'])
         finally:
             fixture.close()
+
+    def test_untrailed_lock_commit_stays_unmapped(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        path = 'locks/codex.lock'
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / path).write_text('manual\n')
+        self.fixture.git('add', '--', path)
+        self.fixture.git('commit', '-q', '-m', 'test: manual lock update')
+        commit = self.fixture.git('rev-parse', 'HEAD')
+        self.fixture.append_derived_provenance(
+            'untrailed-lock', commit, [path]
+        )
+        request = self.fixture.request(
+            'preflight', operation_id='untrailed-lock'
+        )
+
+        rejected, _ = self.fixture.protocol_request(
+            self.fixture.check_request(request), expected=2
+        )
+
+        self.assertIn('integration already contains unmapped commits', rejected['error'])
+        self.assertIn(commit, rejected['error'])
+
+    def test_false_derived_trailer_in_message_body_stays_unmapped(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('manual\n')
+        self.fixture.git('add', 'locks/codex.lock')
+        self.fixture.git(
+            'commit', '-q', '-m',
+            'test: false trailer body\n\n'
+            'Syncwheel-Derived-Projection: false-body\n'
+            'This prose keeps the line outside the trailer block.',
+        )
+        commit = self.fixture.git('rev-parse', 'HEAD')
+        message = self.fixture.git('show', '-s', '--format=%B', commit)
+        parsed = subprocess.run(
+            ['git', 'interpret-trailers', '--parse'], cwd=self.fixture.repo,
+            text=True, input=message, capture_output=True, check=True,
+        )
+        self.assertEqual(parsed.stdout, '')
+        request = self.fixture.request(
+            'preflight', operation_id='false-trailer-body'
+        )
+
+        rejected, _ = self.fixture.protocol_request(
+            self.fixture.check_request(request), expected=2
+        )
+
+        self.assertIn('integration already contains unmapped commits', rejected['error'])
+        self.assertIn(commit, rejected['error'])
+
+    def test_derived_trailers_with_unknown_operation_stay_unmapped(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        path = 'locks/codex.lock'
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / path).write_text('manual\n')
+        self.fixture.git('add', '--', path)
+        digest = self.fixture.staged_derived_digest(path)
+        self.fixture.git(
+            'commit',
+            '-q',
+            '-m',
+            'test: unproven derived projection',
+            '-m',
+            'Syncwheel-Derived-Projection: nonexistent-operation\n'
+            f'Syncwheel-Derived-Paths: {digest}',
+        )
+        commit = self.fixture.git('rev-parse', 'HEAD')
+        request = self.fixture.request(
+            'preflight', operation_id='unknown-derived-operation'
+        )
+
+        rejected, _ = self.fixture.protocol_request(
+            self.fixture.check_request(request), expected=2
+        )
+
+        self.assertIn('integration already contains unmapped commits', rejected['error'])
+        self.assertIn(commit, rejected['error'])
+
+    def test_verified_requires_every_declared_stack_present_in_integration(self):
+        product = self.fixture.install_existing_stack()
+        manifest = self.fixture.read_manifest()
+        self.fixture.git('reset', '--hard', 'origin/main')
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: omit declared stack projection')
+        request = self.fixture.request(
+            'preflight', operation_id='missing-declared-stack'
+        )
+
+        rejected, _ = self.fixture.protocol_request(
+            self.fixture.check_request(request), expected=2
+        )
+
+        self.assertIn('declared stack(s) are missing from integration', rejected['error'])
+        self.assertIn(product, rejected['error'])
+
+    def test_verified_gate_ignores_stacks_outside_integration_stacks(self):
+        self.fixture.git(
+            'switch', '-q', '-c', 'syncwheel/stack/outside', 'origin/main'
+        )
+        (self.fixture.repo / 'outside.txt').write_text('outside\n')
+        self.fixture.git('add', 'outside.txt')
+        self.fixture.git('commit', '-q', '-m', 'test: outside stack')
+        product = self.fixture.git('rev-parse', 'HEAD')
+        self.fixture.git('switch', '-q', 'main-integration')
+        manifest = self.fixture.read_manifest()
+        manifest['defaults']['integration_membership'] = 'legacy'
+        manifest['stacks'].append(
+            {
+                'id': 'outside',
+                'branch': 'syncwheel/stack/outside',
+                'base': 'origin/main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+                'commits': [product],
+                'state': 'draft',
+                'publication': {'enabled': False},
+            }
+        )
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: declare outside stack')
+        request = self.fixture.request(
+            'preflight', operation_id='outside-stack-is-allowed'
+        )
+
+        response, _ = self.fixture.protocol_request(
+            self.fixture.check_request(request)
+        )
+
+        self.assertEqual(response['status'], 'ready')
+
+    def test_land_rejects_a_source_containing_a_derived_commit(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        self.fixture.git(
+            'switch', '-q', '-c', 'syncwheel/stack/derived-source', 'origin/main'
+        )
+        path = 'locks/line\nbreak.lock'
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / path).write_text('derived\n')
+        self.fixture.git('add', '--', path)
+        derived = self.fixture.commit_derived_projection(
+            'derived-source',
+            [path],
+            subject='test: derived source',
+        )
+        self.fixture.git('switch', '-q', 'main-integration')
+        self.fixture.git('merge', '-q', '--ff-only', 'syncwheel/stack/derived-source')
+        manifest = self.fixture.read_manifest()
+        manifest['stacks'].append(
+            {
+                'id': 'derived-source',
+                'branch': 'syncwheel/stack/derived-source',
+                'base': 'origin/main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+                'commits': [derived],
+                'state': 'draft',
+                'publication': {'enabled': False},
+            }
+        )
+        manifest['integration']['stacks'].append('derived-source')
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: register derived source')
+
+        rejected = self.fixture.cli(
+            'stack', 'land', 'derived-source', '--allow-direct', expected=2
+        )
+
+        self.assertIn('source contains derived projection commit', rejected.stderr)
+        self.assertIn(derived, rejected.stderr)
+
+    def test_common_dir_provenance_blocks_land_from_a_linked_worktree(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        self.fixture.git(
+            'switch', '-q', '-c', 'syncwheel/stack/linked-derived', 'origin/main'
+        )
+        path = 'locks/codex.lock'
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / path).write_text('derived\n')
+        self.fixture.git('add', '--', path)
+        derived = self.fixture.commit_derived_projection(
+            'linked-derived', [path], subject='test: linked derived source'
+        )
+        self.fixture.git('switch', '-q', 'main-integration')
+        self.fixture.git('merge', '-q', '--ff-only', 'syncwheel/stack/linked-derived')
+        manifest = self.fixture.read_manifest()
+        manifest['stacks'].append(
+            {
+                'id': 'linked-derived',
+                'branch': 'syncwheel/stack/linked-derived',
+                'base': 'origin/main',
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+                'commits': [derived],
+                'state': 'draft',
+                'publication': {'enabled': False},
+            }
+        )
+        manifest['integration']['stacks'].append('linked-derived')
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: register linked derived source')
+        lane = self.fixture.root / 'linked-land'
+        self.fixture.git(
+            'worktree', 'add', '-q', '--detach', str(lane), 'main-integration'
+        )
+        try:
+            common_path = SYNCWHEEL.derived_provenance_store_path(self.fixture.repo)
+            self.assertTrue(common_path.is_file())
+            self.assertEqual(common_path, SYNCWHEEL.derived_provenance_store_path(lane))
+            self.assertEqual(common_path.stat().st_mode & 0o777, 0o600)
+            lane_manifest, _ = SYNCWHEEL.load_manifest(lane)
+            self.assertTrue(
+                SYNCWHEEL.is_derived_projection_commit(
+                    lane, lane_manifest, derived
+                )
+            )
+
+            rejected = self.fixture.cli_at(
+                lane,
+                'stack',
+                'land',
+                'linked-derived',
+                '--allow-direct',
+                expected=2,
+            )
+
+            self.assertIn(
+                'source contains derived projection commit', rejected.stderr
+            )
+            self.assertIn(derived, rejected.stderr)
+            self.assertEqual(
+                self.fixture.git('rev-parse', 'refs/remotes/origin/main'),
+                self.fixture.git('ls-remote', str(self.fixture.remote), 'refs/heads/main').split()[0],
+            )
+        finally:
+            self.fixture.git('worktree', 'remove', str(lane))
+
+    def test_linked_worktree_check_and_rebuild_share_common_provenance(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock',
+            content='first-owner\n',
+            manifest_on_base=True,
+        )
+        request = self.fixture.request(
+            'preflight',
+            operation_id='linked-provider-derived',
+            path='locks/codex.lock',
+            before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+        lane = self.fixture.root / 'linked-rebuild'
+        self.fixture.git(
+            'worktree', 'add', '-q', '--detach', str(lane), 'main-integration'
+        )
+        try:
+            lane_manifest, _ = SYNCWHEEL.load_manifest(lane)
+            self.assertTrue(
+                SYNCWHEEL.is_derived_projection_commit(
+                    lane, lane_manifest, finalized['productCommitSha']
+                )
+            )
+            subprocess.run(
+                [
+                    'git',
+                    'switch',
+                    '-q',
+                    '--ignore-other-worktrees',
+                    'main-integration',
+                ],
+                cwd=lane,
+                check=True,
+            )
+            self.fixture.cli_at(
+                lane,
+                'hooks',
+                'remove',
+                '--disable',
+                '--reason',
+                'linked revision-provider fixture',
+                '--apply',
+            )
+            lane_check = self.fixture.check_request(
+                self.fixture.request(
+                    'preflight', operation_id='linked-provider-check'
+                )
+            )
+            lane_check['repositoryRoot'] = str(lane.resolve())
+            lane_check['expectedHead'] = self.fixture.git(
+                'rev-parse', 'HEAD', cwd=lane
+            )
+            checked = self.fixture.cli_at(
+                lane, 'revision-provider', payload=lane_check
+            )
+            self.assertEqual(json.loads(checked.stdout)['status'], 'ready')
+            subprocess.run(
+                ['git', 'switch', '-q', '--detach'], cwd=lane, check=True
+            )
+
+            self.fixture.cli_at(lane, 'int', 'rebuild')
+            stale = self.fixture.cli_at(lane, 'validate', expected=1)
+
+            self.assertIn('derived-projection-stale', stale.stdout)
+            self.assertIn('locks/codex.lock', stale.stdout)
+            self.assertIn('run a new Agentwheel update', stale.stdout)
+        finally:
+            self.fixture.git('worktree', 'remove', str(lane))
+
+    def test_narrowed_derived_paths_have_an_executable_rebuild_remedy(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        path = 'locks/codex.lock'
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / path).write_text('derived\n')
+        self.fixture.git('add', '--', path)
+        derived = self.fixture.commit_derived_projection(
+            'narrowed-derived', [path], subject='test: derived before narrowing'
+        )
+        self.fixture.git('switch', '-q', 'main')
+        manifest = self.fixture.read_manifest()
+        manifest['integration']['derived_paths'] = ['locks/graph/']
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: narrow derived paths')
+        policy_commit = self.fixture.git('rev-parse', 'HEAD')
+        self.fixture.git('push', '-q', 'origin', 'main')
+        self.fixture.git('switch', '-q', 'main-integration')
+        self.fixture.git('cherry-pick', policy_commit)
+
+        validated = self.fixture.cli('validate', expected=1)
+        status = self.fixture.cli('status')
+        planned = self.fixture.cli('plan', '--json', expected=1)
+        push_preview = self.fixture.cli('int', 'push', '--dry-run')
+        missing_reason = self.fixture.cli('int', 'rebuild', expected=2)
+
+        for output in (validated.stdout, status.stdout):
+            self.assertIn('derived-paths-narrowed', output)
+            self.assertIn(derived, output)
+            self.assertIn(path, output)
+            self.assertIn('int rebuild --reason', output)
+        plan = json.loads(planned.stdout)
+        narrowed_action = next(
+            item for item in plan if item['type'] == 'derived-paths-narrowed'
+        )
+        self.assertEqual(narrowed_action['commits'], [derived])
+        self.assertEqual(narrowed_action['paths'], [path])
+        self.assertIn('int rebuild --reason', narrowed_action['remedy'])
+        self.assertIn('git push', push_preview.stdout)
+        self.assertIn('reconciliation requires --reason', missing_reason.stderr)
+
+        self.fixture.cli(
+            'int',
+            'rebuild',
+            '--reason',
+            'accept removal after derived path policy narrowing',
+        )
+
+        reconciled_manifest, _ = SYNCWHEEL.load_manifest(self.fixture.repo)
+        self.assertEqual(
+            SYNCWHEEL.derived_provenance_records(
+                self.fixture.repo, reconciled_manifest
+            ),
+            [],
+        )
+        self.assertFalse(
+            SYNCWHEEL.branch_contains(
+                self.fixture.repo, 'main-integration', derived
+            )
+        )
+        self.fixture.cli('validate')
+        rebuilt = [
+            event for event in SYNCWHEEL.load_ledger_events(self.fixture.repo)
+            if event.get('type') == 'integration_rebuilt'
+        ][-1]['payload']
+        self.assertEqual(
+            rebuilt['reason'],
+            'accept removal after derived path policy narrowing',
+        )
+        self.assertEqual(
+            rebuilt['derived_provenance_reconciled'][0]['commit'], derived
+        )
+
+    def test_active_active_narrowing_keeps_push_and_rebuild_available(self):
+        self.fixture.close()
+        self.fixture = RevisionProviderRepository(
+            coordination_mode='active-active'
+        )
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        self.fixture.cli('int', 'push')
+        path = 'locks/codex.lock'
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / path).write_text('derived\n')
+        self.fixture.git('add', '--', path)
+        derived = self.fixture.commit_derived_projection(
+            'coordinated-narrowing',
+            [path],
+            subject='test: coordinated derived before narrowing',
+        )
+        self.fixture.cli('int', 'push')
+
+        self.fixture.git('switch', '-q', 'main')
+        manifest = self.fixture.read_manifest()
+        manifest['integration']['derived_paths'] = []
+        self.fixture.write_manifest(manifest)
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-q', '-m', 'test: empty derived paths')
+        policy_commit = self.fixture.git('rev-parse', 'HEAD')
+        self.fixture.git('push', '-q', 'origin', 'main')
+        self.fixture.git('switch', '-q', 'main-integration')
+        self.fixture.git('cherry-pick', policy_commit)
+
+        validated = self.fixture.cli('validate', expected=1)
+        status = self.fixture.cli('status')
+        planned = self.fixture.cli('plan', '--json', expected=1)
+        self.fixture.cli('int', 'push', '--dry-run')
+
+        self.assertIn('derived-paths-narrowed', validated.stdout)
+        self.assertIn('derived-paths-narrowed', status.stdout)
+        self.assertEqual(
+            next(
+                item for item in json.loads(planned.stdout)
+                if item['type'] == 'derived-paths-narrowed'
+            )['commits'],
+            [derived],
+        )
+
+        self.fixture.cli(
+            'int',
+            'rebuild',
+            '--reason',
+            'reconcile coordinated derived path removal',
+        )
+        self.fixture.cli('validate')
+        self.fixture.cli('int', 'push')
+        published = SYNCWHEEL.local_coordination_provenance_state(
+            self.fixture.repo, self.fixture.read_manifest()
+        )
+        self.assertEqual(
+            published['manifest']['integration']['derived_provenance'], []
+        )
+
+    def assert_provenance_commands_stay_executable(self, repo):
+        outcomes = {}
+        probes = (
+            ('validate', ('validate',), True),
+            ('status', ('status',), True),
+            ('plan', ('plan', '--json'), True),
+            ('handoff', ('handoff', '--no-fetch', '--json'), True),
+            ('check', ('check',), True),
+            ('reconcile', ('reconcile', '--json'), True),
+            ('int rebuild', ('int', 'rebuild', '--dry-run', '--reason', 'inspect'), True),
+            ('int push', ('int', 'push', '--dry-run'), False),
+        )
+        for name, argv, bounded in probes:
+            result = run_cli(repo, *argv)
+            outcomes[name] = result
+            output = result.stdout + result.stderr
+            self.assertNotIn('clone-local derived provenance conflicts', output, msg=name)
+            self.assertNotIn('run syncwheel handoff and retry', output, msg=name)
+            if bounded:
+                self.assertIn(
+                    result.returncode,
+                    (0, 1),
+                    msg=f'{name} exited {result.returncode}: {output}',
+                )
+        return outcomes
+
+    def publish_a_competing_peer_record(self):
+        """Leave this clone with a pending record the coordination snapshot has passed."""
+        self.fixture.close()
+        self.fixture = RevisionProviderRepository(coordination_mode='active-active')
+        fixture = self.fixture
+        fixture.enable_derived_paths('locks/', on_base=True)
+        fixture.cli('int', 'push')
+        peer = CoordinationPeer(fixture)
+        path = 'locks/codex.lock'
+        (fixture.repo / 'locks').mkdir()
+        (fixture.repo / path).write_text('peer-a\n')
+        fixture.git('add', '--', path)
+        pending = fixture.commit_derived_projection(
+            'peer-a-derived', [path], subject='test: peer A derived projection'
+        )
+        (peer.repo / 'locks').mkdir()
+        (peer.repo / path).write_text('peer-b\n')
+        peer.git('add', '--', path)
+        published = peer.commit_derived_projection(
+            'peer-b-derived', [path], subject='test: peer B derived projection'
+        )
+        peer.cli('int', 'push')
+        fixture.git('fetch', '-q', 'origin')
+        return path, pending, published
+
+    def test_published_snapshot_supersedes_a_pending_peer_record(self):
+        path, pending, published = self.publish_a_competing_peer_record()
+        fixture = self.fixture
+
+        outcomes = self.assert_provenance_commands_stay_executable(fixture.repo)
+
+        effective, diverged = SYNCWHEEL.derived_provenance_snapshot(
+            fixture.repo, fixture.read_manifest()
+        )
+        self.assertEqual([item['commit'] for item in effective], [published])
+        self.assertEqual(
+            diverged,
+            [{
+                'paths': [path],
+                'base_commit': None,
+                'local_commit': pending,
+                'snapshot_commit': published,
+            }],
+        )
+        self.assertIn('derived-provenance-diverged', outcomes['validate'].stdout)
+        self.assertIn(pending, outcomes['validate'].stdout)
+        self.assertIn(published, outcomes['validate'].stdout)
+        self.assertIn(
+            'syncwheel coordination provenance reset', outcomes['validate'].stdout
+        )
+        planned = next(
+            item for item in json.loads(outcomes['plan'].stdout)
+            if item['type'] == 'derived-provenance-diverged'
+        )
+        self.assertEqual(planned['paths'], [path])
+        self.assertEqual(planned['local_commits'], [pending])
+        self.assertEqual(planned['snapshot_commits'], [published])
+
+        remedy = run_cli(
+            fixture.repo, *shlex.split(planned['remedy'])[1:]
+        )
+
+        self.assertEqual(remedy.returncode, 0, msg=remedy.stdout + remedy.stderr)
+        self.assertEqual(
+            SYNCWHEEL.load_derived_provenance_store(fixture.repo)['overrides'], []
+        )
+        self.assertNotIn(
+            'derived-provenance-diverged', run_cli(fixture.repo, 'validate').stdout
+        )
+
+    def test_a_new_local_record_rebinds_to_the_published_snapshot(self):
+        path, _pending, published = self.publish_a_competing_peer_record()
+        fixture = self.fixture
+        self.assertEqual(
+            len(SYNCWHEEL.derived_provenance_snapshot(
+                fixture.repo, fixture.read_manifest()
+            )[1]),
+            1,
+        )
+
+        (fixture.repo / path).write_text('peer-a-again\n')
+        fixture.git('add', '--', path)
+        replacement = fixture.commit_derived_projection(
+            'peer-a-rebound', [path], subject='test: peer A derived projection again'
+        )
+
+        effective, diverged = SYNCWHEEL.derived_provenance_snapshot(
+            fixture.repo, fixture.read_manifest()
+        )
+        self.assertEqual(diverged, [])
+        self.assertEqual([item['commit'] for item in effective], [replacement])
+        self.assertEqual(
+            [item['base_commit'] for item in SYNCWHEEL.load_derived_provenance_store(
+                fixture.repo
+            )['overrides']],
+            [published],
+        )
+        self.assertNotIn(
+            'derived-provenance-diverged', run_cli(fixture.repo, 'validate').stdout
+        )
+
+    def test_peer_provenance_resolution_keeps_a_pending_record_recoverable(self):
+        self.fixture.close()
+        self.fixture = RevisionProviderRepository(coordination_mode='active-active')
+        fixture = self.fixture
+        fixture.enable_derived_paths('locks/', on_base=True)
+        fixture.cli('int', 'push')
+        path = 'locks/codex.lock'
+        (fixture.repo / 'locks').mkdir()
+        (fixture.repo / path).write_text('published\n')
+        fixture.git('add', '--', path)
+        fixture.commit_derived_projection(
+            'peer-a-published', [path], subject='test: peer A published projection'
+        )
+        fixture.cli('int', 'push')
+        peer = CoordinationPeer(fixture)
+        (fixture.repo / path).write_text('pending\n')
+        fixture.git('add', '--', path)
+        pending = fixture.commit_derived_projection(
+            'peer-a-pending', [path], subject='test: peer A pending projection'
+        )
+
+        peer.git('switch', '-q', 'main')
+        peer_manifest = peer.read_manifest()
+        peer_manifest['integration']['derived_paths'] = []
+        peer.write_manifest(peer_manifest)
+        peer.git('add', '.syncwheel/manifest.json')
+        peer.git('commit', '-q', '-m', 'test: empty derived paths')
+        policy_commit = peer.git('rev-parse', 'HEAD')
+        peer.git('push', '-q', 'origin', 'main')
+        peer.git('switch', '-q', 'main-integration')
+        peer.git('cherry-pick', policy_commit)
+        peer.cli('validate', expected=1)
+        peer.cli('int', 'rebuild', '--reason', SYNCWHEEL.DERIVED_PATHS_REBUILD_REASON)
+        peer.cli('validate')
+        peer.cli('int', 'push')
+        published = SYNCWHEEL.local_coordination_provenance_state(
+            peer.repo, peer.read_manifest()
+        )
+        self.assertEqual(
+            published['manifest']['integration']['derived_provenance'], []
+        )
+        fixture.git('fetch', '-q', 'origin')
+
+        outcomes = self.assert_provenance_commands_stay_executable(fixture.repo)
+
+        effective, diverged = SYNCWHEEL.derived_provenance_snapshot(
+            fixture.repo, fixture.read_manifest()
+        )
+        self.assertEqual(effective, [])
+        self.assertEqual(
+            [(item['paths'], item['local_commit'], item['snapshot_commit'])
+             for item in diverged],
+            [([path], pending, None)],
+        )
+        self.assertIn('derived-provenance-diverged', outcomes['validate'].stdout)
+        self.assertIn(pending, outcomes['validate'].stdout)
+        self.assertIn(
+            'syncwheel coordination provenance reset', outcomes['validate'].stdout
+        )
+
+        remedy = run_cli(
+            fixture.repo,
+            'coordination', 'provenance', 'reset',
+            '--reason', 'peer B resolved the published record',
+        )
+
+        self.assertEqual(remedy.returncode, 0, msg=remedy.stdout + remedy.stderr)
+        self.assertEqual(
+            SYNCWHEEL.load_derived_provenance_store(fixture.repo)['overrides'], []
+        )
+        self.assertEqual(
+            [
+                event['payload']['discarded'][0]['paths']
+                for event in SYNCWHEEL.load_ledger_events(fixture.repo)
+                if event['type'] == 'derived_provenance_reset'
+            ],
+            [[path]],
+        )
+
+    def test_common_provenance_writes_serialize_on_the_exclusive_store_lock(self):
+        self.fixture.enable_derived_paths('locks/')
+        manifest = self.fixture.read_manifest()
+        record = {
+            'operation_id': 'serialized-write',
+            'commit': self.fixture.git('rev-parse', 'HEAD'),
+            'paths': ['locks/codex.lock'],
+            'paths_digest': '11' * 32,
+            'composition_digest': '22' * 32,
+        }
+        lock_path = SYNCWHEEL.derived_provenance_store_lock_path(self.fixture.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        written = threading.Event()
+        failures = []
+
+        def writer():
+            try:
+                SYNCWHEEL.record_common_derived_provenance(
+                    self.fixture.repo, manifest, record
+                )
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                written.set()
+
+        with lock_path.open('a+b') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            thread = threading.Thread(target=writer)
+            thread.start()
+            serialized = not written.wait(3)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        thread.join(60)
+
+        self.assertEqual(failures, [])
+        self.assertTrue(written.wait(60))
+        self.assertTrue(serialized, msg='a concurrent write ignored the store lock')
+        self.assertEqual(
+            [
+                item['record']['operation_id']
+                for item in SYNCWHEEL.load_derived_provenance_store(
+                    self.fixture.repo
+                )['overrides']
+            ],
+            ['serialized-write'],
+        )
+
+    def test_common_provenance_store_write_is_atomic_and_durable(self):
+        store_path = SYNCWHEEL.derived_provenance_store_path(self.fixture.repo)
+        first = {
+            'version': SYNCWHEEL.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{
+                'paths': ['locks/codex.lock'],
+                'base_commit': None,
+                'record': {
+                    'operation_id': 'durable-first',
+                    'commit': self.fixture.git('rev-parse', 'HEAD'),
+                    'paths': ['locks/codex.lock'],
+                    'paths_digest': '33' * 32,
+                    'composition_digest': '44' * 32,
+                },
+            }],
+        }
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        orphan = store_path.parent / f'.{store_path.name}.tmp-abandoned'
+        orphan.write_bytes(b'{}')
+        SYNCWHEEL.save_derived_provenance_store(self.fixture.repo, first)
+        self.assertFalse(orphan.exists())
+        original = store_path.read_bytes()
+        real_fsync = os.fsync
+        renames = []
+        fsyncs = []
+
+        def refuse_rename(source, target):
+            renames.append((Path(source), Path(target)))
+            raise OSError('rename refused')
+
+        def record_fsync(descriptor):
+            fsyncs.append(descriptor)
+            return real_fsync(descriptor)
+
+        with (
+            mock.patch.object(SYNCWHEEL.os, 'replace', refuse_rename),
+            mock.patch.object(SYNCWHEEL.os, 'fsync', record_fsync),
+            self.assertRaises(OSError),
+        ):
+            SYNCWHEEL.save_derived_provenance_store(
+                self.fixture.repo,
+                SYNCWHEEL.default_derived_provenance_store(),
+            )
+
+        self.assertEqual(store_path.read_bytes(), original)
+        self.assertEqual(len(renames), 1)
+        source, target = renames[0]
+        self.assertEqual(target, store_path)
+        self.assertEqual(source.parent, store_path.parent)
+        self.assertTrue(source.name.startswith(f'.{store_path.name}.tmp-'))
+        self.assertTrue(fsyncs)
+        self.assertEqual(
+            sorted(store_path.parent.glob(f'.{store_path.name}.tmp-*')), []
+        )
+
+    def test_unreadable_common_provenance_store_names_an_executable_remedy(self):
+        self.fixture.enable_derived_paths('locks/')
+        store_path = SYNCWHEEL.derived_provenance_store_path(self.fixture.repo)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_text('{"version": 1, "overrides"')
+
+        blocked = run_cli(self.fixture.repo, 'validate')
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn('invalid derived provenance store', blocked.stderr)
+        remedy = shlex.split(
+            blocked.stderr.split('discard it with ', 1)[1].strip()
+        )
+        self.assertEqual(remedy[0], 'syncwheel')
+
+        repaired = run_cli(self.fixture.repo, *remedy[1:])
+
+        self.assertEqual(repaired.returncode, 0, msg=repaired.stdout + repaired.stderr)
+        self.assertEqual(
+            SYNCWHEEL.load_derived_provenance_store(self.fixture.repo),
+            SYNCWHEEL.default_derived_provenance_store(),
+        )
+        self.fixture.cli('validate')
+
+    def test_manifest_base_operation_resolves_a_stale_derived_record_end_to_end(self):
+        self.fixture.enable_derived_paths('locks/')
+        base = self.fixture.git('rev-parse', 'HEAD')
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.fixture.git('add', 'locks/codex.lock')
+        self.fixture.commit_derived_projection(
+            'orphaned-derived',
+            ['locks/codex.lock'],
+            subject='test: orphaned derived projection',
+        )
+        self.fixture.git('reset', '--hard', base)
+        self.fixture.cli('validate', expected=1)
+        request = self.fixture.request(
+            'preflight',
+            operation_id='manifest-base-lock-replacement',
+            path='locks/codex.lock',
+            before=None,
+            after_content='manifest-base\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('manifest-base\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (
+                self.fixture.provider_journal_root()
+                / 'manifest-base-lock-replacement.json'
+            ).read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        self.assertEqual(
+            SYNCWHEEL.derived_provenance_records(
+                self.fixture.repo, self.fixture.read_manifest()
+            ),
+            [],
+        )
+        self.fixture.cli('validate')
+
+    def test_rebuild_drops_derived_commit_and_reports_stale_blocker(self):
+        self.fixture.enable_derived_paths('locks/', on_base=True)
+        self.fixture.install_existing_stack(
+            path='locks/codex.lock',
+            content='first-owner\n',
+            manifest_on_base=True,
+        )
+        request = self.fixture.request(
+            'preflight', operation_id='derived-before-rebuild',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(request)
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+        self.fixture.cli('int', 'rebuild')
+
+        stale = self.fixture.cli('validate', expected=1)
+
+        self.assertIn('derived-projection-stale', stale.stdout)
+        self.assertIn('locks/codex.lock', stale.stdout)
+        self.assertIn('run a new Agentwheel update', stale.stdout)
+        replacement = self.fixture.request(
+            'preflight', operation_id='derived-after-rebuild',
+            path='locks/codex.lock', before=self.fixture.sha256('first-owner\n'),
+            after_content='second-owner\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(replacement))
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        self.fixture.protocol_request(replacement)
+        regenerated, _ = self.fixture.protocol_request(
+            {**replacement, 'action': 'finalize'}
+        )
+        self.assertNotEqual(regenerated['productCommitSha'], finalized['productCommitSha'])
+        validated = self.fixture.cli('validate')
+        self.assertNotIn('derived-projection-stale', validated.stdout)
+
+    def test_fresh_peer_reports_shared_derived_provenance_stale_after_rebuild(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            fixture.enable_derived_paths('locks/', on_base=True)
+            fixture.cli('publish')
+            fixture.install_existing_stack(
+                path='locks/codex.lock',
+                content='first-owner\n',
+                manifest_on_base=True,
+            )
+            fixture.cli('publish')
+            request = fixture.request(
+                'preflight',
+                operation_id='shared-derived-before-rebuild',
+                path='locks/codex.lock',
+                before=fixture.sha256('first-owner\n'),
+                after_content='second-owner\n',
+            )
+            fixture.protocol_request(fixture.check_request(request))
+            (fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+            fixture.protocol_request(request)
+            finalized, _ = fixture.protocol_request(
+                {**request, 'action': 'finalize'}
+            )
+            fixture.cli('int', 'push')
+
+            peer = fixture.root / 'peer-b'
+            subprocess.run(
+                ['git', 'clone', '-q', str(fixture.remote), str(peer)],
+                check=True,
+            )
+            subprocess.run(
+                ['git', 'config', 'user.name', 'Revision Provider Peer B'],
+                cwd=peer,
+                check=True,
+            )
+            subprocess.run(
+                ['git', 'config', 'user.email', 'peer-b@example.invalid'],
+                cwd=peer,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    'git',
+                    'switch',
+                    '-q',
+                    '-c',
+                    'main-integration',
+                    '--track',
+                    'origin/main-integration',
+                ],
+                cwd=peer,
+                check=True,
+            )
+            peer_manifest, _ = SYNCWHEEL.load_manifest(peer)
+            state = SYNCWHEEL.coordination_state_from_commit(
+                peer,
+                'origin/syncwheel/state/revision-provider-test',
+                'revision-provider-test',
+            )
+            self.assertEqual(SYNCWHEEL.load_ledger_events(peer), [])
+            self.assertEqual(
+                state['manifest']['integration']['derived_provenance'][0]['commit'],
+                finalized['productCommitSha'],
+            )
+            self.assertEqual(
+                SYNCWHEEL.validate_manifest(peer, peer_manifest)['errors'],
+                [],
+            )
+            environment = os.environ.copy()
+            environment['SYNCWHEEL_UPDATE_MODE'] = 'off'
+            rebuilt = subprocess.run(
+                ['python3', str(CLI), 'int', 'rebuild'],
+                cwd=peer,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertEqual(
+                rebuilt.returncode,
+                0,
+                msg=f'stdout={rebuilt.stdout}\nstderr={rebuilt.stderr}',
+            )
+
+            stale = subprocess.run(
+                ['python3', str(CLI), 'validate'],
+                cwd=peer,
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+
+            self.assertEqual(stale.returncode, 1)
+            self.assertIn('derived-projection-stale', stale.stdout)
+            self.assertIn('locks/codex.lock', stale.stdout)
+            self.assertIn('run a new Agentwheel update', stale.stdout)
+        finally:
+            fixture.close()
+
+    def test_manifest_base_ownership_reconciles_a_stale_derived_path(self):
+        self.fixture.enable_derived_paths('locks/')
+        base = self.fixture.git('rev-parse', 'HEAD')
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.fixture.git('add', 'locks/codex.lock')
+        derived = self.fixture.commit_derived_projection(
+            'orphaned-derived',
+            ['locks/codex.lock'],
+            subject='test: orphaned derived projection',
+        )
+        manifest = self.fixture.read_manifest()
+        self.fixture.git('reset', '--hard', base)
+        self.assertEqual(
+            [
+                item['path'] for item in SYNCWHEEL.stale_derived_projection_records(
+                    self.fixture.repo, manifest, 'main-integration'
+                )
+            ],
+            ['locks/codex.lock'],
+        )
+
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('manifest-base\n')
+        self.fixture.git('add', 'locks/codex.lock')
+        self.fixture.git('commit', '-q', '-m', 'test: manifest-base replacement')
+        product = self.fixture.git('rev-parse', 'HEAD')
+        SYNCWHEEL.resolve_common_derived_provenance(
+            self.fixture.repo,
+            manifest,
+            ['locks/codex.lock'],
+            expected_commit=derived,
+        )
+        SYNCWHEEL.append_ledger_event(
+            self.fixture.repo,
+            'manifest_saved',
+            SYNCWHEEL.manifest_event_payload(
+                self.fixture.manifest_path,
+                manifest,
+                'revision_provider_stack_ownership',
+                {
+                    'operation_id': 'manifest-base-replacement',
+                    'product_commit': product,
+                    'paths': ['locks/codex.lock'],
+                },
+            ),
+            self.fixture.manifest_path,
+        )
+
+        self.assertEqual(
+            SYNCWHEEL.stale_derived_projection_records(
+                self.fixture.repo, manifest, 'main-integration'
+            ),
+            [],
+        )
+
+    def test_provider_requires_one_update_to_cover_every_stale_derived_path(self):
+        self.fixture.enable_derived_paths('locks/')
+        base = self.fixture.git('rev-parse', 'HEAD')
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'a.lock').write_text('a\n')
+        (self.fixture.repo / 'locks' / 'b.lock').write_text('b\n')
+        self.fixture.git('add', 'locks/a.lock', 'locks/b.lock')
+        derived = self.fixture.commit_derived_projection(
+            'orphaned-multi-path',
+            ['locks/a.lock', 'locks/b.lock'],
+            subject='test: orphaned multi-path projection',
+        )
+        self.fixture.git('reset', '--hard', base)
+        request = self.fixture.request(
+            'preflight',
+            operation_id='partial-stale-repair',
+            path='locks/a.lock',
+            before=None,
+            after_content='a\n',
+        )
+
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'a.lock').write_text('a\n')
+        rejected, _ = self.fixture.protocol_request(request, expected=2)
+
+        self.assertIn('derived-projection-stale', rejected['error'])
+        self.assertIn('locks/a.lock', rejected['error'])
+        self.assertIn('locks/b.lock', rejected['error'])
 
 
 class RevisionProviderRecoveryTest(unittest.TestCase):
@@ -2555,7 +4655,7 @@ int renameat(
         fault_points = (
             *protocol.PHASES,
             'product_objects_prepared',
-            'draft_objects_prepared',
+            'route_decided',
             'product_hooks_validated',
             'draft_ref_cas',
             'ref_transaction_prepared',

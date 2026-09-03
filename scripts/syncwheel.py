@@ -38,6 +38,10 @@ class ManifestDurabilityError(SyncwheelError):
     """The manifest was replaced, but durable directory sync could not be proven."""
 
 
+class DerivedProvenanceDurabilityError(SyncwheelError):
+    """The provenance store was replaced, but directory durability is unknown."""
+
+
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
@@ -162,7 +166,38 @@ GOVERNED_WORKTREE_DEFAULT_CAPACITY = 4
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
+GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
+GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES = (
+    'governed_worktree_released',
+    'governed_worktree_reaped',
+)
+GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
+    'reaping',
+    'worktree_remove_failed',
+    'branch_delete_failed',
+    'recovery_ref_moved',
+    'registration_mismatch',
+    'ledger_pending',
+})
 ZERO_OBJECT_ID = '0' * 40
+_REGISTRY_EXPECTED_DIGEST_UNSET = object()
+DERIVED_PROJECTION_TRAILER = 'syncwheel-derived-projection'
+DERIVED_PATHS_TRAILER = 'syncwheel-derived-paths'
+DERIVED_OPERATION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}')
+DERIVED_PROVENANCE_FIELDS = {
+    'operation_id',
+    'commit',
+    'paths',
+    'paths_digest',
+    'composition_digest',
+}
+DERIVED_PROVENANCE_STORE_VERSION = 1
+DERIVED_PROVENANCE_OVERRIDE_FIELDS = {'paths', 'base_commit', 'record'}
+DERIVED_PATHS_REBUILD_REASON = 'reconcile narrowed derived paths'
+DERIVED_PROVENANCE_DISCARD_REASON = (
+    'discard clone-local derived provenance superseded by the coordination snapshot'
+)
+DERIVED_PROVENANCE_RESET_REASON = 'discard an unreadable clone-local derived provenance store'
 JOURNAL_SENSITIVE_PARTS = {
     '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
     'id_rsa', 'id_ed25519', 'credentials', 'credentials.json',
@@ -2207,10 +2242,19 @@ def commit_subject(repo_root, commit):
 
 
 def commit_changed_files(repo_root, commit, limit=None):
-    result = git(repo_root, 'show', '--format=', '--name-only', '--no-renames', commit, check=False)
+    result = git(
+        repo_root,
+        'show',
+        '--format=',
+        '--name-only',
+        '--no-renames',
+        '-z',
+        commit,
+        check=False,
+    )
     if result.returncode != 0:
         return []
-    files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    files = [path for path in result.stdout.split('\0') if path]
     return files[:limit] if limit else files
 
 
@@ -2218,6 +2262,646 @@ def is_manifest_only_commit(repo_root, commit):
     """Whether a commit changes only the tracked Syncwheel coordination manifest."""
     files = commit_changed_files(repo_root, commit)
     return bool(files) and set(files) == {'.syncwheel/manifest.json'}
+
+
+def integration_composition_digest(manifest):
+    """Digest only declared integration composition, not unrelated manifest metadata."""
+    integration = manifest['integration']
+    stacks = stack_map(manifest)
+    return canonical_json_digest({
+        'base': integration['base'],
+        'strategy': integration['strategy'],
+        'stacks': [
+            {
+                'id': stack_id,
+                'commits': list(stacks[stack_id].get('commits') or []),
+                'integration_commits': list(stacks[stack_id].get('integration_commits') or []),
+                'integration_only_commits': list(stacks[stack_id].get('integration_only_commits') or []),
+            }
+            for stack_id in integration.get('stacks') or []
+            if stack_id in stacks
+        ],
+    })
+
+
+def parsed_commit_trailers(repo_root, commit):
+    """Return Git's parsed trailer block without accepting trailer-like body text."""
+    message = git(repo_root, 'show', '-s', '--format=%B', commit).stdout
+    parsed = git(
+        repo_root,
+        'interpret-trailers',
+        '--parse',
+        input_text=message,
+    ).stdout
+    trailers = []
+    for line in parsed.splitlines():
+        key, separator, value = line.partition(':')
+        if separator:
+            trailers.append((key.strip(), value.strip()))
+    return trailers
+
+
+def commit_path_blob(repo_root, commit, path):
+    """Return the exact blob at path in commit, or None when the path is absent."""
+    listing = git(repo_root, 'ls-tree', '-z', commit, '--', path, check=False)
+    if listing.returncode != 0:
+        return None
+    entries = [entry for entry in listing.stdout.split('\0') if entry]
+    if not entries:
+        return None
+    if len(entries) != 1:
+        raise SyncwheelError(f'ambiguous tree entry for derived path: {path}')
+    metadata, separator, listed_path = entries[0].partition('\t')
+    if not separator or listed_path != path:
+        raise SyncwheelError(f'ambiguous tree entry for derived path: {path}')
+    _mode, object_type, object_id = metadata.split(' ', 2)
+    if object_type != 'blob' or not re.fullmatch(r'[0-9a-f]{40,64}', object_id):
+        raise SyncwheelError(f'derived path is not a blob: {path}')
+    return object_id
+
+
+def derived_projection_paths_digest(path_blobs):
+    """Hash sorted ``path NUL resulting-blob NUL`` records; absence is an empty blob id."""
+    digest = hashlib.sha256()
+    for path in sorted(path_blobs):
+        blob = path_blobs[path]
+        if not isinstance(path, str) or not path or '\0' in path:
+            raise SyncwheelError('derived projection digest requires non-empty NUL-free paths')
+        if blob is not None and (
+            not isinstance(blob, str) or not re.fullmatch(r'[0-9a-f]{40,64}', blob)
+        ):
+            raise SyncwheelError(f'derived projection digest has an invalid blob for {path}')
+        digest.update(path.encode('utf-8'))
+        digest.update(b'\0')
+        digest.update((blob or '').encode('ascii'))
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
+def derived_projection_commit_paths_digest(repo_root, commit, paths):
+    return derived_projection_paths_digest({
+        path: commit_path_blob(repo_root, commit, path)
+        for path in paths
+    })
+
+
+def normalize_derived_provenance(records, prefixes=None, label='derived provenance'):
+    if records is None:
+        records = []
+    if not isinstance(records, list):
+        raise SyncwheelError(f'{label} must be an array')
+    normalized = []
+    operation_ids = set()
+    path_sets = set()
+    for index, raw in enumerate(records):
+        if not isinstance(raw, dict) or set(raw) != DERIVED_PROVENANCE_FIELDS:
+            raise SyncwheelError(
+                f'{label}[{index}] must contain exactly: '
+                + ', '.join(sorted(DERIVED_PROVENANCE_FIELDS))
+            )
+        operation_id = raw.get('operation_id')
+        commit = raw.get('commit')
+        paths = raw.get('paths')
+        paths_digest = raw.get('paths_digest')
+        composition_digest = raw.get('composition_digest')
+        if not isinstance(operation_id, str) or not DERIVED_OPERATION_ID.fullmatch(operation_id):
+            raise SyncwheelError(f'{label}[{index}].operation_id is invalid')
+        if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
+            raise SyncwheelError(f'{label}[{index}].commit must be a full SHA-1')
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
+            or paths != sorted(paths)
+            or len(paths) != len(set(paths))
+        ):
+            raise SyncwheelError(
+                f'{label}[{index}].paths must be a non-empty sorted unique NUL-free string array'
+            )
+        if prefixes is not None and not all(
+            any(path.startswith(prefix) for prefix in prefixes) for path in paths
+        ):
+            raise SyncwheelError(f'{label}[{index}] contains a path outside integration.derived_paths')
+        if not isinstance(paths_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', paths_digest):
+            raise SyncwheelError(f'{label}[{index}].paths_digest must be a SHA-256')
+        if not isinstance(composition_digest, str) or not re.fullmatch(
+            r'[0-9a-f]{64}', composition_digest
+        ):
+            raise SyncwheelError(f'{label}[{index}].composition_digest must be a SHA-256')
+        path_key = tuple(paths)
+        if operation_id in operation_ids:
+            raise SyncwheelError(f'{label} contains duplicate operation_id {operation_id!r}')
+        if path_key in path_sets:
+            raise SyncwheelError(f'{label} contains duplicate declared path sets')
+        operation_ids.add(operation_id)
+        path_sets.add(path_key)
+        normalized.append({
+            'operation_id': operation_id,
+            'commit': commit,
+            'paths': list(paths),
+            'paths_digest': paths_digest,
+            'composition_digest': composition_digest,
+        })
+    return sorted(normalized, key=lambda item: (item['paths'], item['operation_id']))
+
+
+def derived_provenance_store_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.json'
+
+
+def derived_provenance_store_lock_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.lock'
+
+
+def default_derived_provenance_store():
+    return {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': [],
+    }
+
+
+def normalize_derived_provenance_store(data, label='derived provenance store'):
+    if not isinstance(data, dict) or set(data) != {'version', 'overrides'}:
+        raise SyncwheelError(f'{label} must contain exactly: overrides, version')
+    if data.get('version') != DERIVED_PROVENANCE_STORE_VERSION:
+        raise SyncwheelError(f'{label} has an unsupported version')
+    overrides = data.get('overrides')
+    if not isinstance(overrides, list):
+        raise SyncwheelError(f'{label}.overrides must be an array')
+    normalized = []
+    path_sets = set()
+    for index, raw in enumerate(overrides):
+        item_label = f'{label}.overrides[{index}]'
+        if not isinstance(raw, dict) or set(raw) != DERIVED_PROVENANCE_OVERRIDE_FIELDS:
+            raise SyncwheelError(
+                f'{item_label} must contain exactly: '
+                + ', '.join(sorted(DERIVED_PROVENANCE_OVERRIDE_FIELDS))
+            )
+        paths = raw.get('paths')
+        if (
+            not isinstance(paths, list)
+            or not paths
+            or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
+            or paths != sorted(paths)
+            or len(paths) != len(set(paths))
+        ):
+            raise SyncwheelError(
+                f'{item_label}.paths must be a non-empty sorted unique NUL-free string array'
+            )
+        path_key = tuple(paths)
+        if path_key in path_sets:
+            raise SyncwheelError(f'{label} contains duplicate declared path sets')
+        path_sets.add(path_key)
+        base_commit = raw.get('base_commit')
+        if base_commit is not None and (
+            not isinstance(base_commit, str)
+            or not re.fullmatch(r'[0-9a-f]{40}', base_commit)
+        ):
+            raise SyncwheelError(f'{item_label}.base_commit must be null or a full SHA-1')
+        record = raw.get('record')
+        if record is not None:
+            record = normalize_derived_provenance(
+                [record], label=f'{item_label}.record'
+            )[0]
+            if record['paths'] != paths:
+                raise SyncwheelError(f'{item_label}.record paths do not match its override key')
+        normalized.append({
+            'paths': list(paths),
+            'base_commit': base_commit,
+            'record': record,
+        })
+    return {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': sorted(normalized, key=lambda item: item['paths']),
+    }
+
+
+def load_derived_provenance_store(repo_root):
+    path = derived_provenance_store_path(repo_root)
+    if not path.exists():
+        return default_derived_provenance_store()
+    try:
+        data = json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(
+            f'invalid derived provenance store {path}: {exc}; discard it with '
+            + derived_provenance_reset_remedy(whole_store=True)
+        ) from exc
+    try:
+        return normalize_derived_provenance_store(data, str(path))
+    except SyncwheelError as exc:
+        raise SyncwheelError(
+            f'{exc}; discard the derived provenance store with '
+            + derived_provenance_reset_remedy(whole_store=True)
+        ) from exc
+
+
+def save_derived_provenance_store(repo_root, store):
+    store = normalize_derived_provenance_store(store)
+    path = derived_provenance_store_path(repo_root)
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        fsync_directory_path(path.parent.parent)
+    payload = (json.dumps(store, indent=2, sort_keys=True) + '\n').encode('utf-8')
+    temporary_prefix = f'.{path.name}.tmp-'
+    for orphan in path.parent.glob(f'{temporary_prefix}*'):
+        orphan.unlink(missing_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=temporary_prefix, dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    replaced = False
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, 'wb') as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        replaced = True
+        try:
+            fsync_directory_path(path.parent)
+        except OSError as exc:
+            raise DerivedProvenanceDurabilityError(
+                'derived provenance replace completed but parent directory '
+                f'durability check failed; outcome is unknown: {path}'
+            ) from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if not replaced:
+            temporary.unlink(missing_ok=True)
+    return path
+
+
+@contextlib.contextmanager
+def derived_provenance_store_lock(repo_root):
+    if fcntl is None:
+        raise SyncwheelError('derived provenance writes require POSIX file locking support')
+    lock_path = derived_provenance_store_lock_path(repo_root)
+    parent_existed = lock_path.parent.exists()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if not parent_existed:
+        fsync_directory_path(lock_path.parent.parent)
+    existed = lock_path.exists()
+    with lock_path.open('a+b') as handle:
+        if not existed:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.flush()
+            os.fsync(handle.fileno())
+            fsync_directory_path(lock_path.parent)
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def local_coordination_provenance_state(repo_root, manifest):
+    """Return the newest locally available published coordination state."""
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    candidates = []
+    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
+    remote_tip = ref_tip(repo_root, remote_state_ref)
+    if remote_tip:
+        candidates.append(remote_tip)
+    _profile, local_coordination = coordination_profile(repo_root)
+    seen = local_coordination.get('last_seen_state') or {}
+    if seen.get('coordination_id') == config['id'] and isinstance(seen.get('state_tip'), str):
+        candidates.append(seen['state_tip'])
+    candidates = list(dict.fromkeys(candidates))
+    available = [tip for tip in candidates if commit_exists(repo_root, tip)]
+    if not available:
+        return None
+    newest = available[0]
+    for candidate in available[1:]:
+        if git(
+            repo_root,
+            'merge-base',
+            '--is-ancestor',
+            newest,
+            candidate,
+            check=False,
+        ).returncode == 0:
+            newest = candidate
+    return coordination_state_from_commit(repo_root, newest, config['id'])
+
+
+def shared_derived_provenance_records(repo_root, manifest, coordination_state=None):
+    """Return the active-active snapshot provenance, or an empty clone-local base."""
+    active = coordination_is_active(manifest)
+    state = coordination_state if active else None
+    if active and state is None:
+        state = local_coordination_provenance_state(repo_root, manifest)
+    if state:
+        shared = (state.get('manifest', {}).get('integration', {}).get(
+            'derived_provenance'
+        ) or [])
+    elif active:
+        shared = manifest.get('integration', {}).get('derived_provenance') or []
+    else:
+        shared = []
+    return normalize_derived_provenance(
+        shared, label='integration.derived_provenance'
+    )
+
+
+def resolve_derived_provenance_overrides(shared, store, *, coordinated=True):
+    """Return the effective records plus the clone-local entries the snapshot supersedes.
+
+    Under coordination the snapshot wins: a superseded cache entry is dropped, never raised.
+    """
+    records = normalize_derived_provenance(
+        shared, label='shared derived provenance'
+    )
+    by_paths = {tuple(item['paths']): item for item in records}
+    store = normalize_derived_provenance_store(store)
+    diverged = []
+    for override in store['overrides']:
+        key = tuple(override['paths'])
+        current = by_paths.get(key)
+        desired = override['record']
+        if current == desired:
+            continue
+        current_commit = current['commit'] if current else None
+        if coordinated and current_commit != override['base_commit']:
+            diverged.append({
+                'paths': list(override['paths']),
+                'base_commit': override['base_commit'],
+                'local_commit': desired['commit'] if desired else None,
+                'snapshot_commit': current_commit,
+            })
+            continue
+        if desired is None:
+            by_paths.pop(key, None)
+        else:
+            by_paths[key] = desired
+    return (
+        normalize_derived_provenance(
+            list(by_paths.values()), label='effective derived provenance'
+        ),
+        sorted(diverged, key=lambda item: item['paths']),
+    )
+
+
+def apply_derived_provenance_overrides(shared, store, *, coordinated=True):
+    return resolve_derived_provenance_overrides(
+        shared, store, coordinated=coordinated
+    )[0]
+
+
+def derived_provenance_snapshot(repo_root, manifest, coordination_state=None):
+    """Resolve provenance from the shared snapshot plus Git-common-dir state."""
+    shared = shared_derived_provenance_records(
+        repo_root, manifest, coordination_state
+    )
+    return resolve_derived_provenance_overrides(
+        shared,
+        load_derived_provenance_store(repo_root),
+        coordinated=coordination_is_active(manifest),
+    )
+
+
+def derived_provenance_records(repo_root, manifest, coordination_state=None):
+    return derived_provenance_snapshot(repo_root, manifest, coordination_state)[0]
+
+
+def update_common_derived_provenance(
+    repo_root,
+    manifest,
+    paths,
+    record,
+    *,
+    expected_commit=None,
+    coordination_state=None,
+):
+    """Atomically set or resolve one complete provenance path set."""
+    paths = list(paths)
+    if (
+        not paths
+        or paths != sorted(paths)
+        or len(paths) != len(set(paths))
+        or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
+    ):
+        raise SyncwheelError(
+            'derived provenance update paths must be a non-empty sorted unique '
+            'NUL-free string array'
+        )
+    if record is not None:
+        record = normalize_derived_provenance(
+            [record], label='derived provenance update'
+        )[0]
+        if record['paths'] != paths:
+            raise SyncwheelError('derived provenance update record paths do not match')
+    with derived_provenance_store_lock(repo_root):
+        shared = shared_derived_provenance_records(
+            repo_root, manifest, coordination_state
+        )
+        original_store = load_derived_provenance_store(repo_root)
+        shared_by_paths = {
+            tuple(item['paths']): item for item in shared
+        }
+        store = {
+            'version': DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [
+                item for item in original_store['overrides']
+                if item['record'] != shared_by_paths.get(tuple(item['paths']))
+            ],
+        }
+        store = normalize_derived_provenance_store(store)
+        effective = apply_derived_provenance_overrides(
+            shared, store, coordinated=coordination_is_active(manifest)
+        )
+        key = tuple(paths)
+        current = {tuple(item['paths']): item for item in effective}.get(key)
+        if expected_commit is not None and current is not None and (
+            current['commit'] != expected_commit
+        ):
+            raise SyncwheelError(
+                'derived provenance changed before reconciliation for '
+                + json.dumps(paths, ensure_ascii=True)
+            )
+        if expected_commit is not None and current is None:
+            return False
+        overrides = {
+            tuple(item['paths']): item for item in store['overrides']
+        }
+        shared_record = {
+            tuple(item['paths']): item for item in shared
+        }.get(key)
+        base_commit = shared_record['commit'] if shared_record else None
+        if record == shared_record:
+            overrides.pop(key, None)
+        else:
+            overrides[key] = {
+                'paths': paths,
+                'base_commit': base_commit,
+                'record': record,
+            }
+        updated = {
+            'version': DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': list(overrides.values()),
+        }
+        if normalize_derived_provenance_store(updated) == original_store:
+            return False
+        save_derived_provenance_store(repo_root, updated)
+        return True
+
+
+def record_common_derived_provenance(
+    repo_root, manifest, record, coordination_state=None
+):
+    normalized = normalize_derived_provenance(
+        [record], label='derived provenance record'
+    )[0]
+    return update_common_derived_provenance(
+        repo_root,
+        manifest,
+        normalized['paths'],
+        normalized,
+        coordination_state=coordination_state,
+    )
+
+
+def resolve_common_derived_provenance(
+    repo_root,
+    manifest,
+    paths,
+    *,
+    expected_commit=None,
+    coordination_state=None,
+):
+    return update_common_derived_provenance(
+        repo_root,
+        manifest,
+        sorted(paths),
+        None,
+        expected_commit=expected_commit,
+        coordination_state=coordination_state,
+    )
+
+
+def is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
+    """Verify trailers, content, and provenance independently of the current path policy."""
+    if commit_parent_count(repo_root, commit) != 1:
+        return False
+    full_commit = commit_full_sha(repo_root, commit)
+    files = commit_changed_files(repo_root, full_commit)
+    if not files:
+        return False
+    trailers = parsed_commit_trailers(repo_root, full_commit)
+    operation_values = [
+        value for key, value in trailers
+        if key.casefold() == DERIVED_PROJECTION_TRAILER
+    ]
+    digest_values = [
+        value for key, value in trailers
+        if key.casefold() == DERIVED_PATHS_TRAILER
+    ]
+    if (
+        len(operation_values) != 1
+        or not DERIVED_OPERATION_ID.fullmatch(operation_values[0])
+        or len(digest_values) != 1
+        or not re.fullmatch(r'[0-9a-f]{64}', digest_values[0])
+    ):
+        return False
+    paths = sorted(files)
+    content_digest = derived_projection_commit_paths_digest(
+        repo_root, full_commit, paths
+    )
+    if digest_values[0] != content_digest:
+        return False
+    records = normalize_derived_provenance(provenance)
+    return any(
+        record['operation_id'] == operation_values[0]
+        and record['commit'] == full_commit
+        and record['paths'] == paths
+        and record['paths_digest'] == content_digest
+        for record in records
+    )
+
+
+def is_derived_projection_commit(repo_root, manifest, commit, provenance=None):
+    """Recognize only a currently allowed, provenance-bound provider projection."""
+    full_commit = commit_full_sha(repo_root, commit)
+    prefixes = manifest.get('integration', {}).get('derived_paths') or []
+    files = commit_changed_files(repo_root, full_commit)
+    if not files or not prefixes or not all(
+        any(path.startswith(prefix) for prefix in prefixes) for path in files
+    ):
+        return False
+    records = (
+        normalize_derived_provenance(provenance)
+        if provenance is not None
+        else derived_provenance_records(repo_root, manifest)
+    )
+    return is_provenance_bound_derived_projection_commit(
+        repo_root, full_commit, records
+    )
+
+
+def narrowed_derived_provenance_records(repo_root, manifest, provenance=None):
+    """Return provenance paths excluded by the current derived-path policy."""
+    prefixes = manifest.get('integration', {}).get('derived_paths') or []
+    records = (
+        normalize_derived_provenance(provenance)
+        if provenance is not None
+        else derived_provenance_records(repo_root, manifest)
+    )
+    narrowed = []
+    for record in records:
+        outside = [
+            path for path in record['paths']
+            if not any(path.startswith(prefix) for prefix in prefixes)
+        ]
+        for path in outside:
+            narrowed.append({**record, 'path': path})
+    return sorted(
+        narrowed,
+        key=lambda item: (item['path'], item['commit'], item['operation_id']),
+    )
+
+
+def derived_provenance_reset_remedy(*, whole_store=False):
+    return (
+        'syncwheel coordination provenance reset'
+        + (' --all' if whole_store else '')
+        + ' --reason '
+        + shlex.quote(
+            DERIVED_PROVENANCE_RESET_REASON
+            if whole_store
+            else DERIVED_PROVENANCE_DISCARD_REASON
+        )
+    )
+
+
+def derived_paths_rebuild_remedy():
+    return (
+        'syncwheel int rebuild --reason '
+        + shlex.quote(DERIVED_PATHS_REBUILD_REASON)
+    )
+
+
+def stale_derived_projection_records(
+    repo_root, manifest, integration_branch, provenance=None
+):
+    """Return shared/local provider provenance no longer reachable from integration."""
+    stale = []
+    records = (
+        normalize_derived_provenance(provenance)
+        if provenance is not None
+        else derived_provenance_records(repo_root, manifest)
+    )
+    for record in records:
+        if branch_contains(repo_root, integration_branch, record['commit']):
+            continue
+        for path in record['paths']:
+            stale.append({**record, 'path': path})
+    return sorted(stale, key=lambda item: (item['path'], item['operation_id']))
 
 
 def branches_containing_commit(repo_root, commit, remotes=False):
@@ -3299,6 +3983,23 @@ def load_manifest(repo_root, manifest_path=None):
     integration.setdefault('base', defaults['base_ref'])
     integration.setdefault('strategy', 'cherry-pick')
     integration.setdefault('stacks', [])
+    if version == MANIFEST_VERSION_CHANNELS:
+        derived_paths = integration.setdefault('derived_paths', [])
+        if (
+            not isinstance(derived_paths, list)
+            or not all(isinstance(item, str) and item.endswith('/') and item for item in derived_paths)
+            or len(derived_paths) != len(set(derived_paths))
+        ):
+            raise SyncwheelError('integration.derived_paths must be a unique string array of path prefixes')
+        if 'derived_provenance' in integration:
+            integration['derived_provenance'] = normalize_derived_provenance(
+                integration['derived_provenance'],
+                label='integration.derived_provenance',
+            )
+    elif 'derived_paths' in integration:
+        raise SyncwheelError('integration.derived_paths requires manifest version 3')
+    elif 'derived_provenance' in integration:
+        raise SyncwheelError('integration.derived_provenance requires manifest version 3')
 
     stacks = data.setdefault('stacks', [])
     if not isinstance(stacks, list):
@@ -4077,13 +4778,23 @@ def next_ledger_segment_path(repo_root, manifest_path=None):
     return directory / f'{next_index:06d}.jsonl'
 
 
-def append_ledger_event(repo_root, event_type, payload, manifest_path=None):
+def append_ledger_event(repo_root, event_type, payload, manifest_path=None, idempotency_key=None):
     if not is_external_manifest_path(repo_root, manifest_path):
         tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
         ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
     with ledger_write_lock(repo_root, manifest_path):
         _recover_ledger_tail_unlocked(repo_root, manifest_path)
-        current = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
+        events = load_ledger_events(repo_root, manifest_path)
+        if idempotency_key is not None:
+            payload = dict(payload)
+            payload['idempotency_key'] = idempotency_key
+            for existing in events:
+                if (
+                    existing.get('type') == event_type
+                    and (existing.get('payload') or {}).get('idempotency_key') == idempotency_key
+                ):
+                    return existing
+        current = reduce_ledger_state(events)
         event = {
             'schema_version': LEDGER_SCHEMA_VERSION,
             'seq': current['last_seq'] + 1,
@@ -4808,30 +5519,274 @@ def governed_worktree_lock_path(repo_root):
 
 
 def governed_worktree_owner():
-    return os.environ.get('SYNCWHEEL_LANE_OWNER') or (
+    explicit_owner = os.environ.get('SYNCWHEEL_LANE_OWNER')
+    if explicit_owner:
+        return explicit_owner
+    owner_pid = os.getppid()
+    if owner_pid <= 1:
+        return f'unknown@{socket.gethostname()}:0'
+    return (
         f'{os.environ.get("USER") or os.environ.get("USERNAME") or "unknown"}'
-        f'@{socket.gethostname()}:{os.getpid()}'
+        f'@{socket.gethostname()}:{owner_pid}'
+    )
+
+
+def governed_worktree_process_start_time(pid):
+    """Return a stable process-start identity when the host exposes one."""
+    try:
+        raw = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+    except (OSError, ValueError):
+        raw = None
+    if raw is not None:
+        closing_paren = raw.rfind(')')
+        fields = raw[closing_paren + 2:].split() if closing_paren >= 0 else []
+        # The suffix starts at proc(5) field 3; starttime is field 22.
+        if len(fields) > 19:
+            return f'proc:{fields[19]}'
+    try:
+        observed = subprocess.run(
+            ['ps', '-o', 'lstart=', '-p', str(pid)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    started = observed.stdout.strip()
+    return f'ps:{started}' if observed.returncode == 0 and started else None
+
+
+def governed_worktree_process_state(pid):
+    """Return the kernel process state, including Z for an unreaped zombie."""
+    try:
+        raw = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+    except (OSError, ValueError):
+        raw = None
+    if raw is not None:
+        closing_paren = raw.rfind(')')
+        fields = raw[closing_paren + 2:].split() if closing_paren >= 0 else []
+        if fields:
+            return fields[0]
+    try:
+        observed = subprocess.run(
+            ['ps', '-o', 'stat=', '-p', str(pid)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    state = observed.stdout.strip()
+    return state[0] if observed.returncode == 0 and state else None
+
+
+def governed_worktree_lock_metadata(pid=None, token=None):
+    pid = os.getpid() if pid is None else pid
+    return {
+        'pid': pid,
+        'process_start_time': governed_worktree_process_start_time(pid),
+        'token': token or uuid.uuid4().hex,
+        'acquired_at': iso_utc_now(),
+    }
+
+
+def parse_governed_worktree_lock_metadata(payload):
+    try:
+        metadata = json.loads(payload.decode('utf-8'))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        metadata = None
+    if isinstance(metadata, dict):
+        return metadata
+    # Read the pre-0.40.2 lock format conservatively so a dead legacy owner can
+    # still be recovered without stealing a live process's lock.
+    try:
+        raw_pid, acquired_at = payload.decode('utf-8').strip().split(maxsplit=1)
+        return {
+            'pid': int(raw_pid),
+            'process_start_time': None,
+            'token': None,
+            'acquired_at': acquired_at,
+        }
+    except (UnicodeDecodeError, ValueError):
+        return {}
+
+
+def governed_worktree_stale_lock_reason(metadata, *, lock_available=False, lock_age=None):
+    try:
+        pid = int(metadata.get('pid'))
+    except (AttributeError, TypeError, ValueError):
+        if (
+            lock_available
+            and lock_age is not None
+            and lock_age >= GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS
+        ):
+            return 'incomplete_metadata'
+        return None
+    if pid <= 0:
+        if (
+            lock_available
+            and lock_age is not None
+            and lock_age >= GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS
+        ):
+            return 'incomplete_metadata'
+        return None
+    recorded_start = metadata.get('process_start_time')
+    current_start = governed_worktree_process_start_time(pid)
+    if recorded_start is not None and current_start is not None and str(recorded_start) != current_start:
+        return 'process_start_time_mismatch'
+    if governed_worktree_process_state(pid) == 'Z':
+        return 'process_zombie'
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return 'pid_not_alive'
+    except (PermissionError, OSError, OverflowError):
+        return None
+    return None
+
+
+def log_governed_worktree_lock_recovery(lock_path, stale_path, metadata, reason, token):
+    log_path = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+    existed = log_path.exists()
+    entry = {
+        'recovered_at': iso_utc_now(),
+        'reason': reason,
+        'recovery_token': token,
+        'stale_lock': str(stale_path),
+        'stale_owner': metadata,
+    }
+    descriptor = os.open(str(log_path), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        _write_all(descriptor, json.dumps(entry, sort_keys=True).encode('utf-8') + b'\n')
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    if not existed:
+        fsync_directory_path(log_path.parent)
+    if reason == 'incomplete_metadata':
+        # Nothing here proves the creator died; it may be alive and descheduled.
+        message = (
+            'recovered an uninitialized governed worktree registry lock '
+            f'({reason}); its creator, if still running, retries'
+        )
+    else:
+        message = (
+            'recovered stale governed worktree registry lock from pid '
+            f"{metadata.get('pid', 'unknown')} ({reason})"
+        )
+    print(f'WARNING: {message}; retained {stale_path.name}', file=sys.stderr)
+
+
+def governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
+    try:
+        descriptor_stat = os.fstat(descriptor)
+        path_stat = lock_path.stat()
+    except (FileNotFoundError, OSError):
+        return False
+    return (
+        descriptor_stat.st_ino == path_stat.st_ino
+        and descriptor_stat.st_dev == path_stat.st_dev
     )
 
 
 @contextlib.contextmanager
 def governed_worktree_registry_lock(repo_root):
-    """Serialize clone-local lane state without relying on POSIX-only fcntl."""
+    """Serialize clone-local lane state and recover a provably dead owner."""
+    if fcntl is None:
+        raise SyncwheelError(
+            'crash-safe governed worktree registry locking requires POSIX file locking support'
+        )
     lock_path = governed_worktree_lock_path(repo_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     deadline = time.monotonic() + GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS
     descriptor = None
+    metadata = governed_worktree_lock_metadata()
+    encoded_metadata = (json.dumps(metadata, sort_keys=True) + '\n').encode('utf-8')
     while descriptor is None:
         try:
-            descriptor = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(descriptor, f'{os.getpid()} {iso_utc_now()}\n'.encode('utf-8'))
+            candidate = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            try:
+                fcntl.flock(candidate, fcntl.LOCK_EX)
+                _write_all(candidate, encoded_metadata)
+                os.fsync(candidate)
+                fsync_directory_path(lock_path.parent)
+                # A contender may recover an empty file if this creator was
+                # descheduled beyond the initialization grace before flock.
+                # Never enter the critical section through the renamed inode.
+                if not governed_worktree_lock_descriptor_matches_path(lock_path, candidate):
+                    os.close(candidate)
+                    continue
+            except BaseException:
+                owns_path = governed_worktree_lock_descriptor_matches_path(lock_path, candidate)
+                os.close(candidate)
+                if owns_path:
+                    try:
+                        lock_path.unlink()
+                        fsync_directory_path(lock_path.parent)
+                    except FileNotFoundError:
+                        pass
+                raise
+            descriptor = candidate
         except FileExistsError:
+            try:
+                candidate = os.open(str(lock_path), os.O_RDWR)
+            except FileNotFoundError:
+                continue
+            acquired_candidate = False
+            try:
+                try:
+                    fcntl.flock(candidate, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired_candidate = True
+                except (BlockingIOError, OSError) as exc:
+                    if not isinstance(exc, BlockingIOError) and exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise
+                if acquired_candidate:
+                    candidate_stat = os.fstat(candidate)
+                    try:
+                        path_stat = lock_path.stat()
+                    except FileNotFoundError:
+                        continue
+                    if candidate_stat.st_ino != path_stat.st_ino or candidate_stat.st_dev != path_stat.st_dev:
+                        continue
+                    os.lseek(candidate, 0, os.SEEK_SET)
+                    stale_metadata = parse_governed_worktree_lock_metadata(os.read(candidate, 65536))
+                    lock_age = max(0.0, time.time() - candidate_stat.st_mtime)
+                    stale_reason = governed_worktree_stale_lock_reason(
+                        stale_metadata,
+                        lock_available=True,
+                        lock_age=lock_age,
+                    )
+                    if stale_reason:
+                        stale_token = uuid.uuid4().hex
+                        stale_path = lock_path.with_name(
+                            f'{lock_path.name}.stale-{syncwheel_timestamp()}-{stale_token[:12]}'
+                        )
+                        # The flock serializes conforming contenders on this inode;
+                        # a waiter that opened it before this rename verifies the
+                        # path inode again and retries rather than moving a new lock.
+                        os.replace(lock_path, stale_path)
+                        fsync_directory_path(lock_path.parent)
+                        log_governed_worktree_lock_recovery(
+                            lock_path,
+                            stale_path,
+                            stale_metadata,
+                            stale_reason,
+                            stale_token,
+                        )
+                        continue
+            finally:
+                if acquired_candidate:
+                    fcntl.flock(candidate, fcntl.LOCK_UN)
+                os.close(candidate)
             try:
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
                 continue
             if time.monotonic() >= deadline:
-                stale = ' (the lock looks stale; inspect it manually)' if age > GOVERNED_WORKTREE_LOCK_STALE_SECONDS else ''
+                stale = (
+                    ' (the lock metadata could not prove that its owner died; inspect it manually)'
+                    if age > GOVERNED_WORKTREE_LOCK_STALE_SECONDS else ''
+                )
                 raise SyncwheelError(
                     'governed worktree registry is busy; retry after the other local operation finishes' + stale
                 )
@@ -4840,12 +5795,53 @@ def governed_worktree_registry_lock(repo_root):
         yield lock_path
     finally:
         try:
-            if os.fstat(descriptor).st_ino == lock_path.stat().st_ino:
+            if governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
                 lock_path.unlink()
+                fsync_directory_path(lock_path.parent)
         except FileNotFoundError:
             pass
         finally:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
+
+
+def prune_governed_worktree_stale_locks(repo_root, manifest_path=None):
+    """Drop retained stale lock inodes nobody holds; the recovery log keeps the evidence."""
+    if fcntl is None:
+        return []
+    lock_path = governed_worktree_lock_path(repo_root)
+    directory = lock_path.parent
+    pruned = []
+    for candidate in sorted(directory.glob(f'{lock_path.name}.stale-*')):
+        try:
+            descriptor = os.open(str(candidate), os.O_RDWR)
+        except OSError:
+            continue
+        held = False
+        try:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue
+            held = True
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                continue
+            pruned.append(candidate.name)
+        finally:
+            if held:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            os.close(descriptor)
+    if pruned:
+        fsync_directory_path(directory)
+        append_ledger_event(
+            repo_root,
+            'governed_worktree_stale_locks_pruned',
+            {'files': pruned, 'count': len(pruned)},
+            manifest_path,
+        )
+    return pruned
 
 
 def load_governed_worktree_registry(repo_root):
@@ -4872,17 +5868,79 @@ def load_governed_worktree_registry(repo_root):
     return data, path
 
 
-def save_governed_worktree_registry(repo_root, registry):
+def governed_worktree_registry_payload(registry):
+    return (json.dumps(registry, indent=2, sort_keys=True) + '\n').encode('utf-8')
+
+
+def governed_worktree_registry_file_digest(path):
+    path = Path(path)
+    try:
+        payload = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    return hashlib.sha256(payload).hexdigest()
+
+
+def governed_worktree_registry_io_checkpoint(stage):
+    """Fault-injection seam around the registry's durable CAS write."""
+    return None
+
+
+def save_governed_worktree_registry(
+    repo_root,
+    registry,
+    expected_digest=_REGISTRY_EXPECTED_DIGEST_UNSET,
+):
     path = governed_worktree_registry_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+    payload = governed_worktree_registry_payload(registry)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    )
+    temporary = Path(temporary_name)
+    replaced = False
     try:
-        temporary.write_text(json.dumps(registry, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+        _write_all(descriptor, payload)
+        governed_worktree_registry_io_checkpoint('registry_temp_written')
+        os.fsync(descriptor)
+        governed_worktree_registry_io_checkpoint('registry_temp_fsynced')
+        os.close(descriptor)
+        descriptor = None
+        if expected_digest is not _REGISTRY_EXPECTED_DIGEST_UNSET:
+            current_digest = governed_worktree_registry_file_digest(path)
+            if current_digest != expected_digest:
+                raise SyncwheelError(
+                    'governed worktree registry changed after its decision snapshot; '
+                    'refusing a stale local-state write'
+                )
+        governed_worktree_registry_io_checkpoint('registry_preimage_verified')
         os.replace(temporary, path)
+        replaced = True
+        fsync_directory_path(path.parent)
+        governed_worktree_registry_io_checkpoint('registry_directory_fsynced')
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if descriptor is not None:
+            os.close(descriptor)
+        if not replaced:
+            temporary.unlink(missing_ok=True)
     return path
+
+
+def governed_worktree_registry_cas_persister(repo_root, registry):
+    path = governed_worktree_registry_path(repo_root)
+    state = {'expected_digest': governed_worktree_registry_file_digest(path)}
+
+    def persist():
+        save_governed_worktree_registry(
+            repo_root,
+            registry,
+            expected_digest=state['expected_digest'],
+        )
+        state['expected_digest'] = hashlib.sha256(
+            governed_worktree_registry_payload(registry)
+        ).hexdigest()
+
+    return persist
 
 
 def governed_worktree_root(repo_root, manifest):
@@ -4891,51 +5949,145 @@ def governed_worktree_root(repo_root, manifest):
     return resolve_worktree_root_path(primary, effective_worktree_root(manifest)).resolve()
 
 
+def governed_worktree_owner_is_dead(owner):
+    """Return true only for a dead PID that belongs to this host.
+
+    Owners are advisory identifiers, so an unparseable or remote owner must never
+    make a lane eligible for deletion.  A missing local process is enough to reap
+    a missing lane because there is no worktree left to protect.
+    """
+    if not isinstance(owner, str):
+        return False
+    owner_and_host, separator, raw_pid = owner.rpartition(':')
+    user, at, hostname = owner_and_host.rpartition('@')
+    if not separator or not at or not user or hostname != socket.gethostname():
+        return False
+    try:
+        pid = int(raw_pid)
+    except ValueError:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError, OverflowError):
+        return False
+    return False
+
+
+def governed_worktree_lane_lease_expired(lane, now):
+    expires = parse_coordination_timestamp(lane['lease_expires_at'])
+    return bool(expires and expires <= now)
+
+
+def governed_worktree_pending_remedy(manifest, lane):
+    if lane.get('cleanup_event_type') == 'governed_worktree_released':
+        reason = shlex.quote(lane.get('cleanup_event_reason') or 'retry requested release')
+        return (
+            f"retry with: syncwheel worktree release {shlex.quote(lane['id'])} "
+            f'--reason {reason} --apply'
+        )
+    return 'retry with: syncwheel gc --apply; ' + governed_lane_remedy(manifest, lane)
+
+
 def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     root = governed_worktree_root(repo_root, manifest)
-    path = Path(lane['path']).resolve(strict=False)
+    registered_path = Path(lane['path']).resolve(strict=False)
+    worktree = find_worktree_record_for_branch(repo_root, lane['branch'])
+    worktree_path = (
+        Path(worktree['path']).resolve(strict=False)
+        if worktree and worktree.get('path') else None
+    )
+    path_moved = bool(
+        not registered_path.exists()
+        and worktree_path is not None
+        and worktree_path != registered_path
+    )
+    path = worktree_path if path_moved else registered_path
     status = {
         'id': lane['id'], 'state': lane['state'], 'path': str(path),
         'branch': lane['branch'], 'owner': lane['owner'], 'full': lane['full'],
         'target': lane.get('target'), 'lease_expires_at': lane['lease_expires_at'],
         'code': None, 'remedy': None,
     }
+    if path_moved:
+        status['registered_path'] = str(registered_path)
+        status['path_moved'] = True
     if lane['state'] == 'reaped':
+        if lane.get('pending_reason') == 'ledger_pending':
+            status.update(
+                code='ledger_pending',
+                remedy=governed_worktree_pending_remedy(manifest, lane),
+            )
         return status
     if lane['state'] == 'captured_pending_cleanup':
         status.update(
             code=lane.get('pending_reason') or 'captured_pending_cleanup',
-            remedy=governed_lane_remedy(manifest, lane),
+            remedy=governed_worktree_pending_remedy(manifest, lane),
         )
         return status
-    if not path_is_relative_to(path, root):
+    if (
+        worktree
+        and worktree.get('locked')
+        and worktree.get('locked') != governed_worktree_cleanup_lock_reason(lane)
+    ):
+        status.update(
+            code='locked',
+            remedy='unlock the Git worktree before retrying cleanup',
+        )
+        return status
+    if path.exists():
+        if path_moved:
+            dirty = local_worktree_status(path)
+            if dirty is None:
+                status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
+                return status
+            if dirty:
+                status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
+                return status
+        if not path_is_relative_to(path, root):
+            status.update(code='outside_root', remedy='inspect and recover this lane; Syncwheel will not move or remove it')
+            return status
+        if worktree_path is None or worktree_path != path:
+            status.update(code='unregistered_worktree', remedy='inspect the path and branch; Syncwheel will not remove an unregistered worktree')
+            return status
+        dirty = local_worktree_status(path)
+        if dirty is None:
+            status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
+            return status
+        if dirty:
+            status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
+            return status
+        if governed_worktree_lane_lease_expired(lane, now):
+            status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
+            return status
+    elif governed_worktree_lane_lease_expired(lane, now) or governed_worktree_owner_is_dead(lane['owner']):
+        # An expired or dead owner cannot keep a missing path alive merely
+        # because an old root configuration no longer contains that path.
+        status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
+        return status
+    elif not path_is_relative_to(path, root):
         status.update(code='outside_root', remedy='inspect and recover this lane; Syncwheel will not move or remove it')
         return status
-    worktree = find_worktree_for_branch(repo_root, lane['branch'])
-    if worktree is None or Path(worktree).resolve(strict=False) != path:
+    elif worktree_path is None or worktree_path != path:
         status.update(code='unregistered_worktree', remedy='inspect the path and branch; Syncwheel will not remove an unregistered worktree')
-        return status
-    dirty = local_worktree_status(path)
-    if dirty is None:
-        status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
-        return status
-    if dirty:
-        status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
         return status
     expires = parse_coordination_timestamp(lane['lease_expires_at'])
     if expires is None:
         status.update(code='invalid_lease', remedy='repair the local registry before any cleanup')
-    elif expires <= now:
+    elif governed_worktree_lane_lease_expired(lane, now):
         status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
     return status
 
 
 def governed_worktree_diagnostics(repo_root, manifest):
     registry, path = load_governed_worktree_registry(repo_root)
-    known_paths = {str(Path(lane['path']).resolve(strict=False)) for lane in registry['lanes']}
     root = governed_worktree_root(repo_root, manifest)
     diagnostics = [governed_worktree_lane_status(repo_root, manifest, lane) for lane in registry['lanes']]
+    known_paths = {item['path'] for item in diagnostics if item.get('id')}
     for worktree in get_worktrees(repo_root):
         worktree_path = Path(worktree['path']).resolve(strict=False)
         if worktree_path == Path(repo_root).resolve(strict=False) or not path_is_relative_to(worktree_path, root):
@@ -4978,66 +6130,858 @@ def governed_worktree_recovery_ref(lane):
     return f'refs/syncwheel/recovery/lanes/{safe_ref_segment(lane["id"])}-{syncwheel_timestamp()}'
 
 
-def reap_governed_worktree_lane(repo_root, manifest, lane):
+def governed_worktree_cleanup_lock_reason(lane):
+    material = f"{lane['id']}\0{lane['created_at']}".encode('utf-8')
+    token = hashlib.sha256(material).hexdigest()[:24]
+    return f"syncwheel-cleanup:{safe_ref_segment(lane['id'])}:{token}"
+
+
+def governed_worktree_generation_token(lane):
+    token = lane.get('generation_token')
+    if isinstance(token, str) and token:
+        return token
+    material = f"{lane['id']}\0{lane['created_at']}\0{lane['branch']}".encode('utf-8')
+    return hashlib.sha256(material).hexdigest()
+
+
+def governed_worktree_cleanup_tip(repo_root, lane):
+    return (
+        lane.get('cleanup_tip')
+        or lane.get('branch_delete_tip')
+        or ref_tip(repo_root, lane['branch'])
+        or (ref_tip(repo_root, lane['recovery_ref']) if lane.get('recovery_ref') else None)
+    )
+
+
+def governed_worktree_cleanup_key(lane):
+    material = {
+        'lane': lane['id'],
+        'generation_token': governed_worktree_generation_token(lane),
+        'operation_token': lane.get('cleanup_operation_token'),
+        'tip': lane.get('cleanup_tip'),
+        'recovery_ref': lane.get('recovery_ref'),
+        'event_type': lane.get('cleanup_event_type'),
+        'reason': lane.get('cleanup_event_reason'),
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()
+    return f'governed-worktree-cleanup:{digest}'
+
+
+def prepare_governed_worktree_cleanup(lane, event_type, reason, tip=None):
+    existing_type = lane.get('cleanup_event_type')
+    existing_reason = lane.get('cleanup_event_reason')
+    if existing_type is None:
+        lane['cleanup_event_type'] = event_type
+        lane['cleanup_event_reason'] = reason
+    elif event_type == 'governed_worktree_released' and existing_type != event_type:
+        raise SyncwheelError(
+            f"governed worktree lane {lane['id']!r} is already pending as {existing_type}"
+        )
+    elif event_type == 'governed_worktree_released' and existing_reason != reason:
+        raise SyncwheelError(
+            f"governed worktree lane {lane['id']!r} must retry its original --reason "
+            f'{existing_reason!r}'
+        )
+    if tip and not lane.get('cleanup_tip'):
+        lane['cleanup_tip'] = tip
+    lane.setdefault('cleanup_operation_token', uuid.uuid4().hex)
+    lane.setdefault('cleanup_idempotency_key', governed_worktree_cleanup_key(lane))
+
+
+def governed_worktree_cleanup_checkpoint(stage):
+    """Fault-injection seam at process-death boundaries in lane cleanup."""
+    return None
+
+
+def governed_worktree_cleanup_intent_payload(lane):
+    return {
+        'operation_token': lane['cleanup_operation_token'],
+        'lane': lane['id'],
+        'generation_token': governed_worktree_generation_token(lane),
+        'cleanup_tip': lane.get('cleanup_tip'),
+        'recovery_ref': lane.get('recovery_ref'),
+        'terminal_type': lane.get('cleanup_event_type') or 'governed_worktree_reaped',
+        'reason': lane.get('cleanup_event_reason') or 'expired',
+        'supersedes': lane.get('cleanup_supersedes_key'),
+        'lane_record': copy.deepcopy(lane),
+    }
+
+
+def append_governed_worktree_cleanup_intent(repo_root, lane, manifest_path=None):
+    return append_ledger_event(
+        repo_root,
+        'governed_worktree_cleanup_intent',
+        governed_worktree_cleanup_intent_payload(lane),
+        manifest_path,
+        idempotency_key=lane['cleanup_idempotency_key'],
+    )
+
+
+def governed_worktree_cleanup_ledger(repo_root, manifest_path=None):
+    if not ledger_events_dir(repo_root, manifest_path).exists():
+        return {
+            'events': [],
+            'intents': {},
+            'pending': {},
+            'successful': {},
+            'superseded': set(),
+        }
+    recover_ledger_tail(repo_root, manifest_path)
+    events = load_ledger_events(repo_root, manifest_path)
+    intents = {}
+    superseded = set()
+    successful = {}
+    for event in events:
+        payload = event.get('payload') or {}
+        key = payload.get('idempotency_key')
+        if not isinstance(key, str) or not key:
+            continue
+        if event.get('type') == 'governed_worktree_cleanup_intent':
+            intents[key] = event
+            prior = payload.get('supersedes')
+            if isinstance(prior, str) and prior:
+                superseded.add(prior)
+        elif event.get('type') in {'governed_worktree_reaped', 'governed_worktree_released'}:
+            successful[key] = event
+    pending = {
+        key: event for key, event in intents.items()
+        if key not in successful and key not in superseded
+    }
+    return {
+        'events': events,
+        'intents': intents,
+        'pending': pending,
+        'successful': successful,
+        'superseded': superseded,
+    }
+
+
+def recover_governed_worktree_registry_from_ledger(
+    repo_root,
+    registry,
+    persist,
+    manifest_path=None,
+):
+    ledger = governed_worktree_cleanup_ledger(repo_root, manifest_path)
+    changed = False
+    by_id = {lane['id']: lane for lane in registry['lanes']}
+
+    for key, terminal in ledger['successful'].items():
+        payload = terminal.get('payload') or {}
+        lane_id = payload.get('lane')
+        generation = payload.get('generation_token')
+        lane = by_id.get(lane_id)
+        if (
+            lane is not None
+            and generation
+            and governed_worktree_generation_token(lane) == generation
+        ):
+            registry['lanes'].remove(lane)
+            by_id.pop(lane_id, None)
+            changed = True
+
+    pending_by_lane = {}
+    for key, intent in ledger['pending'].items():
+        payload = intent.get('payload') or {}
+        lane_id = payload.get('lane')
+        if isinstance(lane_id, str):
+            previous = pending_by_lane.get(lane_id)
+            if previous is None or intent.get('seq', 0) > previous[1].get('seq', 0):
+                pending_by_lane[lane_id] = (key, intent)
+
+    for lane_id, (key, intent) in pending_by_lane.items():
+        payload = intent.get('payload') or {}
+        recorded = payload.get('lane_record')
+        generation = payload.get('generation_token')
+        if not isinstance(recorded, dict) or not generation:
+            continue
+        lane = by_id.get(lane_id)
+        if lane is None:
+            restored = copy.deepcopy(recorded)
+            registry['lanes'].append(restored)
+            by_id[lane_id] = restored
+            changed = True
+            continue
+        if governed_worktree_generation_token(lane) != generation:
+            raise SyncwheelError(
+                f'governed worktree lane {lane_id!r} has a different generation than its '
+                'durable cleanup intent; inspect the lane before retrying cleanup'
+            )
+        current_key = lane.get('cleanup_idempotency_key')
+        if current_key == key:
+            continue
+        if current_key is not None:
+            if payload.get('supersedes') != current_key:
+                raise SyncwheelError(
+                    f'governed worktree lane {lane_id!r} has a cleanup operation that conflicts '
+                    'with its durable ledger intent'
+                )
+        lane.clear()
+        lane.update(copy.deepcopy(recorded))
+        changed = True
+
+    if changed:
+        persist()
+    return ledger
+
+
+def governed_worktree_release_terminal(repo_root, lane_id, manifest_path=None):
+    """Latest terminal any Syncwheel command wrote for this lane, release or reap."""
+    ledger = governed_worktree_cleanup_ledger(repo_root, manifest_path)
+    intent_keys = {
+        key for key, event in ledger['intents'].items()
+        if (event.get('payload') or {}).get('lane') == lane_id
+    }
+    for event in reversed(ledger['events']):
+        if event.get('type') not in GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES:
+            continue
+        payload = event.get('payload') or {}
+        if (
+            payload.get('lane') == lane_id
+            and payload.get('idempotency_key') in intent_keys
+        ):
+            return event
+    return None
+
+
+def governed_worktree_release_note_key(lane_id, terminal, reason):
+    payload = terminal.get('payload') or {}
+    material = {
+        'lane': lane_id,
+        'generation_token': payload.get('generation_token'),
+        'terminal_type': terminal.get('type'),
+        'terminal_key': payload.get('idempotency_key'),
+        'reason': reason,
+    }
+    digest = hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(',', ':')).encode('utf-8')
+    ).hexdigest()
+    return f'governed-worktree-release-note:{digest}'
+
+
+def append_governed_worktree_release_note(repo_root, lane_id, reason, terminal, manifest_path=None):
+    payload = terminal.get('payload') or {}
+    return append_ledger_event(
+        repo_root,
+        'governed_worktree_release_noted',
+        {
+            'lane': lane_id,
+            'reason': reason,
+            'terminal_type': terminal.get('type'),
+            'terminal_seq': terminal.get('seq'),
+            'terminal_reason': payload.get('reason'),
+            'generation_token': payload.get('generation_token'),
+            'branch': payload.get('branch'),
+            'path': payload.get('path'),
+            'recovery_ref': payload.get('recovery_ref'),
+        },
+        manifest_path,
+        idempotency_key=governed_worktree_release_note_key(lane_id, terminal, reason),
+    )
+
+
+def ensure_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
+    current = ref_tip(repo_root, recovery_ref)
+    if current == tip:
+        return
+    if current is not None:
+        raise SyncwheelError(
+            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
+            f'points to {current} instead of {tip}'
+        )
+    result = git(repo_root, 'update-ref', recovery_ref, tip, ZERO_OBJECT_ID, check=False)
+    if result.returncode == 0:
+        return
+    current = ref_tip(repo_root, recovery_ref)
+    if current == tip:
+        return
+    if current is not None:
+        raise SyncwheelError(
+            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
+            f'points to {current} instead of {tip}'
+        )
+    raise SyncwheelError(
+        result.stderr.strip() or result.stdout.strip()
+        or f'could not create governed worktree recovery ref {recovery_ref}'
+    )
+
+
+def verify_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
+    current = ref_tip(repo_root, recovery_ref)
+    if current != tip:
+        actual = current or 'missing'
+        raise SyncwheelError(
+            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
+            f'points to {actual} instead of {tip}; restore the anchored tip before retrying cleanup'
+        )
+
+
+def governed_worktree_record_for_path(repo_root, path):
+    expected = Path(path).resolve(strict=False)
+    for worktree in get_worktrees(repo_root):
+        if worktree.get('path') and Path(worktree['path']).resolve(strict=False) == expected:
+            return worktree
+    return None
+
+
+def governed_worktree_admin_dir_for_path(repo_root, path):
+    expected_gitdir = (Path(path).resolve(strict=False) / '.git').resolve(strict=False)
+    worktrees_dir = git_common_dir(repo_root) / 'worktrees'
+    if not worktrees_dir.is_dir():
+        return None
+    matches = []
+    for admin_dir in sorted(item for item in worktrees_dir.iterdir() if item.is_dir()):
+        gitdir_path = admin_dir / 'gitdir'
+        try:
+            raw_gitdir = gitdir_path.read_text(encoding='utf-8').strip()
+        except OSError:
+            continue
+        candidate = Path(raw_gitdir)
+        if not candidate.is_absolute():
+            candidate = admin_dir / candidate
+        if candidate.resolve(strict=False) == expected_gitdir:
+            matches.append(admin_dir.resolve(strict=False))
+    return matches[0] if len(matches) == 1 else None
+
+
+def governed_worktree_registration_matches(repo_root, lane, path, admin_dir, lock_reason):
+    path = Path(path).resolve(strict=False)
+    admin_dir = Path(admin_dir).resolve(strict=False)
+    try:
+        raw_gitdir = (admin_dir / 'gitdir').read_text(encoding='utf-8').strip()
+        head = (admin_dir / 'HEAD').read_text(encoding='utf-8').strip()
+    except OSError:
+        return False
+    registered_gitdir = Path(raw_gitdir)
+    if not registered_gitdir.is_absolute():
+        registered_gitdir = admin_dir / registered_gitdir
+    if registered_gitdir.resolve(strict=False) != (path / '.git').resolve(strict=False):
+        return False
+    if head != f"ref: refs/heads/{lane['branch']}":
+        return False
+    worktree = governed_worktree_record_for_path(repo_root, path)
+    return bool(worktree and worktree.get('locked') == lock_reason)
+
+
+def lock_governed_worktree_for_cleanup(repo_root, lane):
+    stored_admin = lane.get('cleanup_admin_dir')
+    if stored_admin:
+        path = Path(lane['path']).resolve(strict=False)
+        worktree = governed_worktree_record_for_path(repo_root, path)
+        admin_dir = Path(stored_admin).resolve(strict=False)
+        if not worktree and not admin_dir.exists() and not path.exists():
+            return {
+                'path': path,
+                'admin_dir': admin_dir,
+                'lock_reason': governed_worktree_cleanup_lock_reason(lane),
+                'registration_removed': True,
+            }, None
+    else:
+        worktree = find_worktree_record_for_branch(repo_root, lane['branch'])
+        if not worktree or not worktree.get('path'):
+            return None, None
+        path = Path(worktree['path']).resolve(strict=False)
+        admin_dir = governed_worktree_admin_dir_for_path(repo_root, path)
+    if not worktree:
+        return None, {
+            'code': 'registration_mismatch',
+            'remedy': 'inspect the recorded Git worktree registration before retrying cleanup',
+        }
+    lock_reason = governed_worktree_cleanup_lock_reason(lane)
+    locked = git(
+        repo_root,
+        'worktree',
+        'lock',
+        '--reason',
+        lock_reason,
+        str(path),
+        check=False,
+    )
+    refreshed = governed_worktree_record_for_path(repo_root, path)
+    if locked.returncode != 0 and not (refreshed and refreshed.get('locked') == lock_reason):
+        return None, {
+            'code': 'lane_in_use',
+            'remedy': 'retry after the process using the governed lane releases its Git worktree lock',
+        }
+    if admin_dir is None or not governed_worktree_registration_matches(
+        repo_root,
+        lane,
+        path,
+        admin_dir,
+        lock_reason,
+    ):
+        if refreshed and refreshed.get('locked') == lock_reason:
+            git(repo_root, 'worktree', 'unlock', str(path), check=False)
+        return None, {
+            'code': 'registration_mismatch',
+            'remedy': 'inspect the recorded Git worktree registration before retrying cleanup',
+        }
+    return {
+        'path': path,
+        'admin_dir': admin_dir,
+        'lock_reason': lock_reason,
+    }, None
+
+
+def unlock_governed_worktree_cleanup(repo_root, lock):
+    if not lock:
+        return
+    worktree = governed_worktree_record_for_path(repo_root, lock['path'])
+    if worktree and worktree.get('locked') == lock['lock_reason']:
+        git(repo_root, 'worktree', 'unlock', str(lock['path']), check=False)
+
+
+def governed_worktree_final_probe(path, anchored_tip, missing_at_classification):
+    path = Path(path).resolve(strict=False)
+    if missing_at_classification and path.exists():
+        return {
+            'code': 'path_reappeared',
+            'remedy': 'inspect the reappeared lane path, then retry its recorded worktree release',
+        }
+    if not path.exists():
+        return None
+    untracked = run(
+        ['git', '-C', str(path), 'ls-files', '--others', '--exclude-standard', '-z'],
+        check=False,
+    )
+    if untracked.returncode != 0:
+        return {
+            'code': 'unavailable',
+            'remedy': 'restore the worktree before retrying cleanup',
+        }
+    tracked = run(
+        ['git', '-C', str(path), 'diff-index', '--quiet', anchored_tip, '--'],
+        check=False,
+    )
+    if untracked.stdout or tracked.returncode != 0:
+        return {
+            'code': 'dirty',
+            'remedy': 'the worktree became dirty before removal; retain or commit its changes, then retry release',
+        }
+    return None
+
+
+def delete_governed_worktree_branch_with_anchor(repo_root, lane, tip):
+    recovery_ref = lane['recovery_ref']
+    branch_ref = f'refs/heads/{lane["branch"]}'
+    transaction = '\n'.join([
+        'start',
+        f'update {recovery_ref} {tip} {tip}',
+        f'delete {branch_ref} {tip}',
+        'prepare',
+        'commit',
+        '',
+    ])
+    deletion = git(
+        repo_root,
+        'update-ref',
+        '--stdin',
+        check=False,
+        input_text=transaction,
+    )
+    committed = 'commit: ok' in {line.strip() for line in deletion.stdout.splitlines()}
+    if (
+        deletion.returncode == 0
+        and committed
+        and ref_tip(repo_root, recovery_ref) == tip
+        and ref_tip(repo_root, lane['branch']) is None
+    ):
+        return True, None
+    recovery_tip = ref_tip(repo_root, recovery_ref)
+    branch_tip = ref_tip(repo_root, lane['branch'])
+    if recovery_tip != tip:
+        actual = recovery_tip or 'missing'
+        return False, {
+            'code': 'recovery_ref_moved',
+            'remedy': (
+                f'restore recovery ref {recovery_ref} from {actual} to anchored tip {tip}, '
+                'then retry cleanup'
+            ),
+        }
+    if branch_tip != tip:
+        return False, {
+            'code': 'branch_advanced',
+            'remedy': 'inspect the retained lane branch; its recovery ref is immutable',
+        }
+    detail = deletion.stderr.strip() or deletion.stdout.strip()
+    if deletion.returncode == 0 and not committed:
+        detail = 'ref transaction did not report commit: ok'
+    return False, {
+        'code': 'branch_delete_failed',
+        'remedy': detail or 'retry cleanup',
+    }
+
+
+def governed_worktree_cleanup_candidates(repo_root, manifest, registry=None):
+    if registry is None:
+        registry = load_governed_worktree_registry(repo_root)[0]
+    candidates = []
+    for lane in registry['lanes']:
+        status = governed_worktree_lane_status(repo_root, manifest, lane)
+        if lane['state'] == 'active' and status['code'] != 'expired':
+            continue
+        if lane['state'] == 'reaped' and lane.get('pending_reason') != 'ledger_pending':
+            continue
+        if lane['state'] not in {'active', 'captured_pending_cleanup', 'reaped'}:
+            continue
+        candidates.append(status)
+    return candidates
+
+
+def reap_governed_worktree_lane(
+    repo_root,
+    manifest,
+    lane,
+    persist=None,
+    manifest_path=None,
+    event_type='governed_worktree_reaped',
+    event_reason='expired',
+):
+    if lane['state'] == 'reaped' and lane.get('pending_reason') == 'ledger_pending':
+        return True, governed_worktree_lane_status(repo_root, manifest, lane)
+
     status = governed_worktree_lane_status(repo_root, manifest, lane)
-    if lane['state'] != 'captured_pending_cleanup' and status['code'] not in {None, 'expired'}:
-        return False, status
-    path = Path(lane['path']).resolve(strict=False)
+    lock, lock_failure = lock_governed_worktree_for_cleanup(repo_root, lane)
+    if lock_failure:
+        return False, {**status, **lock_failure}
+    governed_worktree_cleanup_checkpoint('after_git_worktree_lock')
+    path = lock['path'] if lock else Path(lane['path']).resolve(strict=False)
+    if lock and Path(lane['path']).resolve(strict=False) != path:
+        lane['path'] = str(path)
+
+    def fail_before_ref_change(code, remedy):
+        unlock_governed_worktree_cleanup(repo_root, lock)
+        return False, {**status, 'code': code, 'remedy': remedy}
+
+    path_exists = path.exists()
+    if path_exists and not path_is_relative_to(path, governed_worktree_root(repo_root, manifest)):
+        return fail_before_ref_change(
+            'outside_root',
+            'inspect and recover this lane; Syncwheel will not move or remove it',
+        )
+    if path_exists and not lock:
+        return fail_before_ref_change(
+            'unregistered_worktree',
+            'inspect the path and branch; Syncwheel will not remove an unregistered worktree',
+        )
+    if lane['state'] == 'active' and event_type != 'governed_worktree_released':
+        expired = governed_worktree_lane_lease_expired(
+            lane,
+            datetime.datetime.now(datetime.timezone.utc),
+        )
+        abandoned_missing = not path_exists and governed_worktree_owner_is_dead(lane['owner'])
+        if not expired and not abandoned_missing:
+            return fail_before_ref_change(status['code'], status['remedy'])
+    current_tip = ref_tip(repo_root, lane['branch'])
+    post_ref_cleanup = bool(
+        current_tip is None
+        and lane.get('cleanup_tip')
+        and lane.get('recovery_ref')
+    )
+    if path_exists and post_ref_cleanup:
+        retry_probe = governed_worktree_final_probe(path, lane['cleanup_tip'], False)
+        if retry_probe:
+            lane['state'] = 'captured_pending_cleanup'
+            lane['pending_reason'] = 'worktree_remove_failed'
+            lane['cleanup_failure'] = retry_probe['code']
+            if persist:
+                persist()
+            return False, {**status, **retry_probe}
+    elif path_exists:
+        dirty = local_worktree_status(path)
+        if dirty is None:
+            return fail_before_ref_change(
+                'unavailable',
+                'restore the worktree before attempting cleanup',
+            )
+        if dirty:
+            return fail_before_ref_change(
+                'dirty',
+                governed_lane_remedy(manifest, lane, commit_first=True),
+            )
     current = run(['git', 'rev-parse', '--show-toplevel'], check=False)
     current_path = Path(current.stdout.strip()).resolve(strict=False) if current.returncode == 0 else None
     if current_path == path:
+        return fail_before_ref_change(
+            'current_directory',
+            'leave the lane directory, then run a Syncwheel mutation again',
+        )
+
+    branch_advanced_pending = lane.get('pending_reason') == 'branch_advanced'
+    retrying_advanced = bool(
+        branch_advanced_pending
+        and current_tip
+        and lane.get('cleanup_tip')
+        and lane.get('recovery_ref')
+        and lane.get('cleanup_event_type')
+    )
+    if branch_advanced_pending and not retrying_advanced:
+        return False, {
+            **status,
+            'code': 'branch_advanced',
+            'remedy': governed_worktree_pending_remedy(manifest, lane),
+        }
+    if retrying_advanced and current_tip:
+        superseded_key = lane.get('cleanup_idempotency_key')
+        superseded_event_type = lane.get('cleanup_event_type')
+        lane.pop('cleanup_tip', None)
+        lane.pop('branch_delete_tip', None)
+        lane.pop('recovery_ref', None)
+        lane.pop('cleanup_idempotency_key', None)
+        lane.pop('cleanup_operation_token', None)
+        if (
+            event_type == 'governed_worktree_released'
+            and superseded_event_type != event_type
+        ):
+            lane.pop('cleanup_event_type', None)
+            lane.pop('cleanup_event_reason', None)
+        if superseded_key:
+            lane['cleanup_supersedes_key'] = superseded_key
+
+    anchored_tip = governed_worktree_cleanup_tip(repo_root, lane)
+    if lane.get('cleanup_tip') and current_tip not in {None, lane['cleanup_tip']}:
         lane['state'] = 'captured_pending_cleanup'
-        lane['pending_reason'] = 'current_directory'
-        return False, {**status, 'code': 'current_directory', 'remedy': 'leave the lane directory, then run a Syncwheel mutation again'}
-    if lane.get('pending_reason') == 'branch_advanced':
-        return False, {**status, 'code': 'branch_advanced', 'remedy': 'inspect the retained lane branch; its recovery ref is immutable'}
-    if lane.get('pending_reason') == 'branch_delete_failed':
-        expected = lane.get('branch_delete_tip')
+        lane['pending_reason'] = 'branch_advanced'
+        lane['cleanup_admin_dir'] = str(lock['admin_dir']) if lock else None
+        lane['cleanup_lock_reason'] = lock['lock_reason'] if lock else None
+        if persist:
+            persist()
+        return False, {
+            **status,
+            'code': 'branch_advanced',
+            'remedy': governed_worktree_pending_remedy(manifest, lane),
+        }
+
+    lane['state'] = 'captured_pending_cleanup'
+    lane['pending_reason'] = 'reaping'
+    if lock:
+        lane['cleanup_admin_dir'] = str(lock['admin_dir'])
+        lane['cleanup_lock_reason'] = lock['lock_reason']
+    if anchored_tip:
+        lane['cleanup_tip'] = anchored_tip
+        lane['recovery_ref'] = lane.get('recovery_ref') or governed_worktree_recovery_ref(lane)
+    prepare_governed_worktree_cleanup(lane, event_type, event_reason, anchored_tip)
+    governed_worktree_cleanup_checkpoint('before_cleanup_intent')
+    append_governed_worktree_cleanup_intent(repo_root, lane, manifest_path)
+    if persist:
+        persist()
+    governed_worktree_cleanup_checkpoint('after_cleanup_intent')
+
+    if anchored_tip:
+        try:
+            ensure_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
+            verify_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
+        except SyncwheelError:
+            lane['pending_reason'] = 'recovery_ref_moved'
+            if persist:
+                persist()
+            raise
+        governed_worktree_cleanup_checkpoint('after_recovery_anchor')
         current_tip = ref_tip(repo_root, lane['branch'])
-        if not expected or current_tip != expected:
-            lane['pending_reason'] = 'branch_advanced'
-            return False, {**status, 'code': 'branch_advanced', 'remedy': 'inspect the retained lane branch; its recovery ref is immutable'}
-        deletion = git(repo_root, 'update-ref', '-d', f'refs/heads/{lane["branch"]}', expected, check=False)
-        if deletion.returncode != 0:
-            return False, {**status, 'code': 'branch_delete_failed', 'remedy': 'inspect the lane branch before retrying cleanup'}
-        lane['state'] = 'reaped'
-        lane['reaped_at'] = iso_utc_now()
-        return True, governed_worktree_lane_status(repo_root, manifest, lane)
-    tip = ref_tip(repo_root, lane['branch'])
-    if tip and tip != lane['base']:
-        recovery_ref = lane.get('recovery_ref') or governed_worktree_recovery_ref(lane)
-        git(repo_root, 'update-ref', recovery_ref, tip, ZERO_OBJECT_ID)
-        lane['recovery_ref'] = recovery_ref
-    if path.exists():
-        run(['git', 'worktree', 'remove', str(path)], cwd=repo_root)
-    if tip:
-        deletion = git(repo_root, 'update-ref', '-d', f'refs/heads/{lane["branch"]}', tip, check=False)
-        if deletion.returncode != 0:
-            lane['state'] = 'captured_pending_cleanup'
-            lane['pending_reason'] = 'branch_delete_failed'
-            lane['branch_delete_tip'] = tip
-            return False, {**status, 'code': 'branch_delete_failed', 'remedy': 'inspect the lane branch before retrying cleanup'}
+        if current_tip is not None:
+            if current_tip != anchored_tip:
+                lane['pending_reason'] = 'branch_advanced'
+                if persist:
+                    persist()
+                return False, {
+                    **status,
+                    'code': 'branch_advanced',
+                    'remedy': governed_worktree_pending_remedy(manifest, lane),
+                }
+            deleted, delete_detail = delete_governed_worktree_branch_with_anchor(
+                repo_root,
+                lane,
+                anchored_tip,
+            )
+            if not deleted:
+                lane['pending_reason'] = delete_detail['code']
+                lane['branch_delete_tip'] = anchored_tip
+                if persist:
+                    persist()
+                if delete_detail['code'] == 'branch_advanced':
+                    delete_detail['remedy'] = governed_worktree_pending_remedy(manifest, lane)
+                return False, {**status, **delete_detail}
+            governed_worktree_cleanup_checkpoint('after_ref_transaction')
+        else:
+            try:
+                verify_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
+            except SyncwheelError:
+                lane['pending_reason'] = 'recovery_ref_moved'
+                if persist:
+                    persist()
+                raise
+
+    if lock and not lock.get('registration_removed') and not governed_worktree_registration_matches(
+        repo_root,
+        lane,
+        path,
+        lock['admin_dir'],
+        lock['lock_reason'],
+    ):
+        lane['pending_reason'] = 'worktree_remove_failed'
+        lane['cleanup_failure'] = 'registration_mismatch'
+        if persist:
+            persist()
+        return False, {
+            **status,
+            'code': 'registration_mismatch',
+            'remedy': 'the locked Git worktree registration changed; inspect it before retrying release',
+        }
+
+    final_probe = governed_worktree_final_probe(path, anchored_tip, not path_exists)
+    if final_probe:
+        lane['pending_reason'] = 'worktree_remove_failed'
+        lane['cleanup_failure'] = final_probe['code']
+        if persist:
+            persist()
+        return False, {**status, **final_probe}
+
+    if lock and not lock.get('registration_removed'):
+        governed_worktree_cleanup_checkpoint('before_worktree_remove')
+        try:
+            removal = run(
+                ['git', 'worktree', 'remove', '--force', '--force', str(path)],
+                cwd=repo_root,
+                check=False,
+            )
+        except SyncwheelError:
+            lane['pending_reason'] = 'worktree_remove_failed'
+            lane['cleanup_failure'] = 'worktree_remove_failed'
+            if persist:
+                persist()
+            raise
+        if removal.returncode != 0:
+            lane['pending_reason'] = 'worktree_remove_failed'
+            lane['cleanup_failure'] = 'worktree_remove_failed'
+            if persist:
+                persist()
+            raise SyncwheelError(
+                removal.stderr.strip() or removal.stdout.strip()
+                or f'could not remove governed worktree {path}'
+            )
+        governed_worktree_cleanup_checkpoint('after_worktree_remove')
+        if Path(lock['admin_dir']).exists():
+            lane['pending_reason'] = 'worktree_remove_failed'
+            lane['cleanup_failure'] = 'registration_mismatch'
+            if persist:
+                persist()
+            return False, {
+                **status,
+                'code': 'registration_mismatch',
+                'remedy': 'Git retained the targeted worktree registration; inspect it before retrying release',
+            }
+
     lane['state'] = 'reaped'
     lane['reaped_at'] = iso_utc_now()
+    lane['pending_reason'] = 'ledger_pending'
+    if persist:
+        persist()
     return True, governed_worktree_lane_status(repo_root, manifest, lane)
 
 
-def reconcile_governed_worktrees(repo_root, manifest):
+def governed_worktree_reaped_payload(lane, reason='expired'):
+    return {
+        'lane': lane['id'], 'branch': lane['branch'], 'reason': reason,
+        'recovery_ref': lane.get('recovery_ref'), 'target': lane.get('target'),
+        'full': lane['full'],
+        'generation_token': governed_worktree_generation_token(lane),
+        'operation_token': lane.get('cleanup_operation_token'),
+        'cleanup_tip': lane.get('cleanup_tip'),
+        'path': lane.get('path'),
+    }
+
+
+def append_governed_worktree_cleanup_event(repo_root, lane, manifest_path=None):
+    event_type = lane.get('cleanup_event_type') or 'governed_worktree_reaped'
+    reason = lane.get('cleanup_event_reason') or 'expired'
+    key = lane.get('cleanup_idempotency_key') or governed_worktree_cleanup_key(lane)
+    lane['cleanup_idempotency_key'] = key
+    return append_ledger_event(
+        repo_root,
+        event_type,
+        governed_worktree_reaped_payload(lane, reason),
+        manifest_path,
+        idempotency_key=key,
+    )
+
+
+def completed_governed_worktree_lane(lane):
+    completed = dict(lane)
+    completed.pop('pending_reason', None)
+    completed.pop('branch_delete_tip', None)
+    completed.pop('cleanup_event_type', None)
+    completed.pop('cleanup_event_reason', None)
+    completed.pop('cleanup_idempotency_key', None)
+    completed.pop('cleanup_operation_token', None)
+    completed.pop('cleanup_supersedes_key', None)
+    completed.pop('cleanup_tip', None)
+    completed.pop('cleanup_admin_dir', None)
+    completed.pop('cleanup_lock_reason', None)
+    completed.pop('cleanup_failure', None)
+    return completed
+
+
+def reconcile_governed_worktrees(repo_root, manifest, manifest_path=None, candidate_ids=None):
     with governed_worktree_registry_lock(repo_root):
+        prune_governed_worktree_stale_locks(repo_root, manifest_path)
         registry, _ = load_governed_worktree_registry(repo_root)
-        changed = []
+        persist = governed_worktree_registry_cas_persister(repo_root, registry)
+        recover_governed_worktree_registry_from_ledger(
+            repo_root,
+            registry,
+            persist,
+            manifest_path,
+        )
+        paths_updated = False
         for lane in registry['lanes']:
-            if lane['state'] not in {'active', 'captured_pending_cleanup'}:
-                continue
             status = governed_worktree_lane_status(repo_root, manifest, lane)
-            if status['code'] != 'expired' and lane['state'] != 'captured_pending_cleanup':
+            if (
+                status.get('path_moved')
+                and (candidate_ids is None or lane['id'] in candidate_ids)
+            ):
+                lane['path'] = status['path']
+                paths_updated = True
+        if paths_updated:
+            persist()
+        if candidate_ids is None:
+            candidates = governed_worktree_cleanup_candidates(repo_root, manifest, registry)
+            selected = {item['id'] for item in candidates}
+        else:
+            selected = set(candidate_ids)
+        reaped = []
+        failures = []
+        for lane in list(registry['lanes']):
+            if lane['id'] not in selected:
                 continue
-            reaped, detail = reap_governed_worktree_lane(repo_root, manifest, lane)
-            if reaped or detail['code'] != status['code']:
-                changed.append({'id': lane['id'], 'state': lane['state'], 'detail': detail['code']})
-        if changed:
-            save_governed_worktree_registry(repo_root, registry)
-        return changed
+            completed, detail = reap_governed_worktree_lane(
+                repo_root,
+                manifest,
+                lane,
+                persist=persist,
+                manifest_path=manifest_path,
+            )
+            if not completed:
+                failures.append({
+                    'id': lane['id'],
+                    'code': detail.get('code') or 'lane_generation_changed',
+                })
+                continue
+            try:
+                governed_worktree_cleanup_checkpoint('before_terminal_ledger')
+                append_governed_worktree_cleanup_event(repo_root, lane, manifest_path)
+                governed_worktree_cleanup_checkpoint('after_terminal_ledger')
+            except Exception:
+                lane['state'] = 'reaped'
+                lane['pending_reason'] = 'ledger_pending'
+                persist()
+                raise
+            registry['lanes'].remove(lane)
+            persist()
+            governed_worktree_cleanup_checkpoint('after_cleanup_record_removed')
+            reaped.append({'id': lane['id']})
+        return {'reaped': reaped, 'failures': failures}
 
 
 def coordination_profile(repo_root):
@@ -5190,7 +7134,7 @@ def local_coordination_ref(value, defaults):
     return value
 
 
-def coordination_manifest_snapshot(manifest, repo_root=None):
+def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=None):
     """Return the public, topology-only projection stored in remote coordination state."""
     defaults = manifest['defaults']
     remote_roles = coordination_manifest_remote_roles(manifest)
@@ -5212,6 +7156,18 @@ def coordination_manifest_snapshot(manifest, repo_root=None):
         },
         'stacks': [],
     }
+    if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
+        snapshot['integration']['derived_paths'] = list(
+            manifest['integration'].get('derived_paths') or []
+        )
+        snapshot['integration']['derived_provenance'] = (
+            derived_provenance_records(repo_root, manifest, coordination_state)
+            if repo_root is not None
+            else normalize_derived_provenance(
+                manifest['integration'].get('derived_provenance') or [],
+                label='integration.derived_provenance',
+            )
+        )
     for stack in manifest['stacks']:
         snapshot_stack = {
             'id': stack['id'],
@@ -5313,6 +7269,33 @@ def validate_coordination_snapshot_refs(snapshot):
         raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
     if not isinstance(integration, dict) or 'base' not in integration:
         raise SyncwheelError('coordination state manifest is missing integration.base')
+    derived_paths = integration.get('derived_paths')
+    if snapshot.get('version') == MANIFEST_VERSION_CHANNELS:
+        if (
+            not isinstance(derived_paths, list)
+            or not all(
+                isinstance(item, str) and item and item.endswith('/')
+                for item in derived_paths
+            )
+            or len(derived_paths) != len(set(derived_paths))
+        ):
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_paths must be '
+                'a unique string array of path prefixes'
+            )
+        normalize_derived_provenance(
+            integration.get('derived_provenance') or [],
+            label='coordination state manifest integration.derived_provenance',
+        )
+    else:
+        if derived_paths is not None:
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_paths requires version 3'
+            )
+        if 'derived_provenance' in integration:
+            raise SyncwheelError(
+                'coordination state manifest integration.derived_provenance requires version 3'
+            )
     if not isinstance(stacks, list):
         raise SyncwheelError('coordination state manifest stacks must be an array')
     if not isinstance(channels, list):
@@ -5585,7 +7568,11 @@ def build_coordination_state(repo_root, manifest, config, previous, observed_ref
         closed_ref = tombstone.get('ref') or f"refs/heads/{tombstone['branch']}"
         if closed_ref not in managed:
             managed[closed_ref] = tombstone.get('remote_tip')
-    snapshot = coordination_manifest_snapshot(manifest, repo_root)
+    snapshot = coordination_manifest_snapshot(
+        manifest,
+        repo_root,
+        previous_state,
+    )
     return {
         'schema_version': (
             COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
@@ -6822,10 +8809,29 @@ def deterministic_stack_projection(repo_root, base, commits):
             check=False,
         )
         if merge.returncode != 0:
+            detail = (merge.stderr.strip() or merge.stdout.strip())[:2000]
+            named = git(
+                repo_root,
+                'merge-tree',
+                '--write-tree',
+                '--name-only',
+                '-z',
+                '--no-messages',
+                f'--merge-base={commit}^',
+                head,
+                commit,
+                check=False,
+            )
+            paths = [
+                path for path in named.stdout.split('\0')
+                if path and not re.fullmatch(r'[0-9a-f]{40,64}', path)
+            ]
             return {
                 'status': 'conflict',
                 'commit': commit,
-                'detail': (merge.stderr.strip() or merge.stdout.strip())[:2000],
+                'base': head,
+                'paths': paths,
+                'detail': detail,
             }
         tree = merge.stdout.strip()
         if not tree or tree == ref_tree(repo_root, head):
@@ -7660,14 +9666,32 @@ def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info
 
 def command_gc(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    governed_candidates = governed_worktree_cleanup_candidates(repo_root, manifest)
+    governed_result = (
+        reconcile_governed_worktrees(
+            repo_root,
+            manifest,
+            manifest_path,
+        )
+        if args.apply else {'reaped': [], 'failures': []}
+    )
     plan = run_coordination_gc(repo_root, manifest, apply=args.apply, fetch=args.fetch)
+    plan['applied'] = bool(args.apply)
     plan['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest)
+    plan['governed_worktree_candidates'] = governed_candidates
+    plan['governed_worktree_reaped'] = governed_result['reaped']
+    plan['governed_worktree_failures'] = governed_result['failures']
     if args.json:
         print(json.dumps(plan, indent=2))
     else:
         if not plan['enabled']:
             print('gc: active-active coordination is not enabled')
+        if governed_result['reaped']:
+            print(f"gc: reaped {len(governed_result['reaped'])} governed lane(s)")
+        elif governed_candidates:
+            for lane in governed_candidates:
+                print(f"gc: governed lane {lane['id']} [{lane['code']}] ({lane['path']})")
         elif not plan['candidates']:
             print('gc: no eligible local worktrees, branches, or backups')
         else:
@@ -7675,7 +9699,7 @@ def command_gc(args):
                 print(f"gc: {candidate['type']} {candidate.get('branch') or candidate.get('path')}")
             if not args.apply:
                 print('gc: dry-run; pass --apply to remove eligible local artifacts')
-    return 0
+    return 1 if governed_result['failures'] else 0
 
 
 def command_handoff(args):
@@ -7744,11 +9768,16 @@ def configured_worktree_path(repo_root, branch, worktree_root):
     return default_worktree_path(repo_root, branch)
 
 
-def find_worktree_for_branch(repo_root, branch):
+def find_worktree_record_for_branch(repo_root, branch):
     for worktree in get_worktrees(repo_root):
         if worktree.get('branch') == branch:
-            return Path(worktree['path'])
+            return worktree
     return None
+
+
+def find_worktree_for_branch(repo_root, branch):
+    worktree = find_worktree_record_for_branch(repo_root, branch)
+    return Path(worktree['path']) if worktree else None
 
 
 def resolve_git_worktree(repo_root, branch, manifest, worktree=None, auto_worktree=False):
@@ -8737,7 +10766,32 @@ def validate_manifest(repo_root, manifest):
     unmapped_commits = []
     absorbed_patch_commits = []
     control_commits = []
+    derived_commits = []
+    narrowed_derived_commits = []
     integration_merge_commits = []
+    provenance, diverged_provenance = (
+        derived_provenance_snapshot(repo_root, manifest)
+        if manifest.get('version') == MANIFEST_VERSION_CHANNELS
+        else ([], [])
+    )
+    if diverged_provenance:
+        diverged_detail = '; '.join(
+            json.dumps(item['paths'], ensure_ascii=True)
+            + f": clone-local {item['local_commit'] or 'none'}"
+            + f" vs snapshot {item['snapshot_commit'] or 'none'}"
+            for item in diverged_provenance
+        )
+        warnings.append(
+            'derived-provenance-diverged: the published coordination snapshot supersedes '
+            f'clone-local derived provenance and is used instead: {diverged_detail}; '
+            + derived_provenance_reset_remedy()
+        )
+    narrowed_derived = narrowed_derived_provenance_records(
+        repo_root, manifest, provenance
+    )
+    narrowed_record_keys = {
+        (item['operation_id'], item['commit']) for item in narrowed_derived
+    }
     if integration_exists and ref_exists(repo_root, integration['base']):
         integration_commits = rev_list(repo_root, f"{integration['base']}..{integration_branch}")
         base_patch_ids = patch_ids_reachable_from_ref(repo_root, integration['base'])
@@ -8748,6 +10802,19 @@ def validate_manifest(repo_root, manifest):
                 continue
             if is_manifest_only_commit(repo_root, commit):
                 control_commits.append(full_sha)
+                continue
+            if is_derived_projection_commit(
+                repo_root, manifest, commit, provenance=provenance
+            ):
+                derived_commits.append(full_sha)
+                continue
+            if (
+                any(full_sha == item['commit'] for item in narrowed_derived)
+                and is_provenance_bound_derived_projection_commit(
+                    repo_root, full_sha, provenance
+                )
+            ):
+                narrowed_derived_commits.append(full_sha)
                 continue
             patch_id = commit_patch_id(repo_root, commit)
             if patch_id and patch_id in base_patch_ids:
@@ -8761,6 +10828,36 @@ def validate_manifest(repo_root, manifest):
                 'not declared in any stack'
             )
 
+    if narrowed_derived:
+        narrowed_by_commit = {}
+        for item in narrowed_derived:
+            narrowed_by_commit.setdefault(item['commit'], []).append(item['path'])
+        narrowed_detail = '; '.join(
+            f'{commit}: '
+            + json.dumps(sorted(set(paths)), ensure_ascii=True)
+            for commit, paths in sorted(narrowed_by_commit.items())
+        )
+        errors.append(
+            'derived-paths-narrowed: retained derived provenance is outside '
+            f'integration.derived_paths: {narrowed_detail}; '
+            + derived_paths_rebuild_remedy()
+        )
+
+    retained_provenance = [
+        record for record in provenance
+        if (record['operation_id'], record['commit']) not in narrowed_record_keys
+    ]
+    stale_derived = stale_derived_projection_records(
+        repo_root, manifest, integration_branch, retained_provenance
+    )
+    if stale_derived:
+        stale_paths = ', '.join(item['path'] for item in stale_derived)
+        errors.append(
+            'derived-projection-stale: derived projection path(s) are no longer '
+            f'present on {integration_branch}: {stale_paths}; '
+            'run a new Agentwheel update'
+        )
+
     details['integration'] = {
         'branch': integration_branch,
         'exists': integration_exists,
@@ -8772,6 +10869,11 @@ def validate_manifest(repo_root, manifest):
         'unmapped_commits': unmapped_commits,
         'absorbed_patch_commits': absorbed_patch_commits,
         'control_commits': control_commits,
+        'derived_commits': derived_commits,
+        'narrowed_derived_commits': narrowed_derived_commits,
+        'derived_paths_narrowed': narrowed_derived,
+        'derived_provenance_diverged': diverged_provenance,
+        'derived_projection_stale': stale_derived,
         'merge_commits': integration_merge_commits,
     }
     return {'errors': errors, 'warnings': warnings, 'details': details}
@@ -8840,6 +10942,29 @@ def build_plan(repo_root, manifest, validation):
                 'replay_mode': integration_replay_mode,
                 'meta': item.get('meta', {}),
             })
+    if details['integration'].get('derived_paths_narrowed'):
+        narrowed = details['integration']['derived_paths_narrowed']
+        actions.append({
+            'type': 'derived-paths-narrowed',
+            'branch': integration['branch'],
+            'commits': sorted({item['commit'] for item in narrowed}),
+            'paths': sorted({item['path'] for item in narrowed}),
+            'remedy': derived_paths_rebuild_remedy(),
+        })
+    if details['integration'].get('derived_provenance_diverged'):
+        diverged = details['integration']['derived_provenance_diverged']
+        actions.append({
+            'type': 'derived-provenance-diverged',
+            'branch': integration['branch'],
+            'paths': sorted({path for item in diverged for path in item['paths']}),
+            'local_commits': sorted(
+                {item['local_commit'] for item in diverged if item['local_commit']}
+            ),
+            'snapshot_commits': sorted(
+                {item['snapshot_commit'] for item in diverged if item['snapshot_commit']}
+            ),
+            'remedy': derived_provenance_reset_remedy(),
+        })
     if details['integration'].get('unmapped_commits'):
         commits = details['integration']['unmapped_commits']
         actions.append({
@@ -8855,6 +10980,16 @@ def build_plan(repo_root, manifest, validation):
                     + ' '.join(commit_short_sha(repo_root, commit) for commit in commits),
                 ],
             },
+        })
+    if details['integration'].get('derived_projection_stale'):
+        actions.append({
+            'type': 'derived-projection-stale',
+            'branch': integration['branch'],
+            'paths': [
+                item['path']
+                for item in details['integration']['derived_projection_stale']
+            ],
+            'remedy': 'run a new Agentwheel update',
         })
     return actions
 
@@ -9929,6 +12064,65 @@ def command_coordination_disable(args):
     return 0
 
 
+def command_coordination_provenance_reset(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    reason = (getattr(args, 'reason', None) or '').strip()
+    if not reason:
+        raise SyncwheelError(
+            'coordination provenance reset requires --reason; use: '
+            + derived_provenance_reset_remedy(whole_store=args.all)
+        )
+    with derived_provenance_store_lock(repo_root):
+        if args.all:
+            discarded = None
+            store = default_derived_provenance_store()
+        else:
+            store = load_derived_provenance_store(repo_root)
+            _effective, diverged = resolve_derived_provenance_overrides(
+                shared_derived_provenance_records(repo_root, manifest),
+                store,
+                coordinated=coordination_is_active(manifest),
+            )
+            keys = {tuple(item['paths']) for item in diverged}
+            if not keys:
+                print(
+                    'coordination provenance reset: no clone-local record is superseded '
+                    'by the coordination snapshot'
+                )
+                return 0
+            discarded = diverged
+            store = {
+                'version': DERIVED_PROVENANCE_STORE_VERSION,
+                'overrides': [
+                    item for item in store['overrides']
+                    if tuple(item['paths']) not in keys
+                ],
+            }
+        save_derived_provenance_store(repo_root, store)
+        append_ledger_event(
+            repo_root,
+            'derived_provenance_reset',
+            {
+                'reason': reason,
+                'scope': 'store' if args.all else 'diverged',
+                'discarded': discarded,
+            },
+            manifest_path,
+        )
+    if args.all:
+        print('coordination provenance reset: clone-local derived provenance store cleared')
+    else:
+        for item in discarded:
+            print(
+                'coordination provenance reset: discarded '
+                + json.dumps(item['paths'], ensure_ascii=True)
+            )
+    return 0
+
+
 def command_coordination_repair(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -10038,7 +12232,7 @@ def command_worktree_unlock(args):
 
 def command_worktree_open(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     lane_id = safe_ref_segment(args.lane)
     if args.into:
         require_stack(manifest, args.into)
@@ -10049,6 +12243,13 @@ def command_worktree_open(args):
         raise SyncwheelError('configured worktree path escapes syncwheel_worktree_root')
     with governed_worktree_registry_lock(repo_root):
         registry, registry_path = load_governed_worktree_registry(repo_root)
+        persist = governed_worktree_registry_cas_persister(repo_root, registry)
+        recover_governed_worktree_registry_from_ledger(
+            repo_root,
+            registry,
+            persist,
+            manifest_path,
+        )
         active = [
             item for item in registry['lanes']
             if item['state'] in {'active', 'captured_pending_cleanup'}
@@ -10082,6 +12283,7 @@ def command_worktree_open(args):
             'target': args.into,
             'state': 'active',
             'full': bool(args.full),
+            'generation_token': uuid.uuid4().hex,
             'created_at': now.isoformat(),
             'lease_expires_at': (now + datetime.timedelta(
                 seconds=GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS
@@ -10090,7 +12292,7 @@ def command_worktree_open(args):
         run(['git', 'worktree', 'add', '-b', branch, str(path), base], cwd=repo_root)
         try:
             registry['lanes'].append(lane)
-            save_governed_worktree_registry(repo_root, registry)
+            persist()
         except Exception:
             run(['git', 'worktree', 'remove', '--force', str(path)], cwd=repo_root, check=False)
             git(repo_root, 'branch', '-D', branch, check=False)
@@ -10108,17 +12310,222 @@ def command_worktree_open(args):
     return 0
 
 
+def command_worktree_release(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    lane_id = safe_ref_segment(args.lane)
+    reason = args.reason.strip() if isinstance(args.reason, str) else ''
+    if not reason:
+        raise SyncwheelError('worktree release requires a non-empty --reason')
+    with governed_worktree_registry_lock(repo_root):
+        registry, registry_path = load_governed_worktree_registry(repo_root)
+        persist = governed_worktree_registry_cas_persister(repo_root, registry)
+        recover_governed_worktree_registry_from_ledger(
+            repo_root,
+            registry,
+            persist,
+            manifest_path,
+        )
+        lane = next((item for item in registry['lanes'] if item['id'] == lane_id), None)
+        if lane is None:
+            terminal = governed_worktree_release_terminal(repo_root, lane_id, manifest_path)
+            if terminal is None:
+                raise SyncwheelError(f'unknown governed worktree lane: {lane_id}')
+            payload = terminal.get('payload') or {}
+            terminal_type = terminal.get('type')
+            terminal_reason = payload.get('reason')
+            note = None
+            already_recorded = (
+                terminal_type == 'governed_worktree_released'
+                and terminal_reason == reason
+            )
+            if args.apply and not already_recorded:
+                note = append_governed_worktree_release_note(
+                    repo_root,
+                    lane_id,
+                    reason,
+                    terminal,
+                    manifest_path,
+                )
+            terminal_lane = {
+                'id': lane_id,
+                'branch': payload.get('branch'),
+                'path': payload.get('path'),
+                'recovery_ref': payload.get('recovery_ref'),
+                'generation_token': payload.get('generation_token'),
+            }
+            output = {
+                'lane': terminal_lane,
+                'reason': reason,
+                'registry_path': str(registry_path),
+                'applied': bool(args.apply),
+                'idempotent': True,
+                'terminal': terminal,
+                'terminal_type': terminal_type,
+                'terminal_reason': terminal_reason,
+            }
+            if note is not None:
+                output['note'] = note
+            if args.json:
+                print(json.dumps(output, indent=2, sort_keys=True))
+            elif already_recorded:
+                print(
+                    f'already released governed worktree {lane_id}; '
+                    f"terminal ledger event {terminal.get('seq')}"
+                )
+            else:
+                print(
+                    f'governed worktree {lane_id} was already cleaned up as '
+                    f'{terminal_type} ({terminal_reason}); '
+                    f"terminal ledger event {terminal.get('seq')}"
+                )
+                if note is not None:
+                    print(f'  recorded release reason: {reason}')
+            return 0
+        if lane['state'] not in {'active', 'captured_pending_cleanup', 'reaped'}:
+            raise SyncwheelError(
+                f"governed worktree lane {lane_id!r} is already {lane['state']}; it cannot be released"
+            )
+        pending_event_type = lane.get('cleanup_event_type')
+        pending_event_reason = lane.get('cleanup_event_reason')
+        pending_reap = pending_event_type == 'governed_worktree_reaped'
+        converting_advanced_reap = bool(
+            pending_reap and lane.get('pending_reason') == 'branch_advanced'
+        )
+        completing_pending_reap = bool(
+            pending_reap
+            and not converting_advanced_reap
+            and lane.get('pending_reason') in GOVERNED_WORKTREE_REAP_PENDING_REASONS
+        )
+        if (
+            pending_event_type
+            and pending_event_type != 'governed_worktree_released'
+            and not converting_advanced_reap
+            and not completing_pending_reap
+        ):
+            raise SyncwheelError(
+                f"governed worktree lane {lane_id!r} is already pending as {pending_event_type}; "
+                'retry with syncwheel gc --apply'
+            )
+        if pending_event_type == 'governed_worktree_released' and pending_event_reason != reason:
+            raise SyncwheelError(
+                f"governed worktree lane {lane_id!r} must retry its original --reason "
+                f'{pending_event_reason!r}'
+            )
+        status = governed_worktree_lane_status(repo_root, manifest, lane)
+        if args.apply and status.get('path_moved'):
+            lane['path'] = status['path']
+            persist()
+            status = governed_worktree_lane_status(repo_root, manifest, lane)
+        missing_abandoned_path = (
+            status['code'] == 'unregistered_worktree'
+            and not Path(lane['path']).resolve(strict=False).exists()
+            and find_worktree_record_for_branch(repo_root, lane['branch']) is None
+        )
+        if status['code'] not in {
+            None,
+            'expired',
+            'captured_pending_cleanup',
+            'reaping',
+            'worktree_remove_failed',
+            'branch_delete_failed',
+            'branch_advanced',
+            'ledger_pending',
+            'recovery_ref_moved',
+        } and not missing_abandoned_path:
+            raise SyncwheelError(
+                f"cannot release governed worktree lane {lane_id!r}: {status['code']}; {status['remedy']}"
+            )
+        if not args.apply:
+            output = {
+                'lane': lane,
+                'reason': reason,
+                'registry_path': str(registry_path),
+                'applied': False,
+            }
+            if args.json:
+                print(json.dumps(output, indent=2, sort_keys=True))
+            else:
+                print(f"would release governed worktree {lane_id}: {lane['path']}")
+                print('  rerun with --apply to create any recovery ref and remove the lane record')
+            return 0
+        released, detail = reap_governed_worktree_lane(
+            repo_root,
+            manifest,
+            lane,
+            persist=persist,
+            manifest_path=manifest_path,
+            event_type=(
+                'governed_worktree_reaped' if completing_pending_reap
+                else 'governed_worktree_released'
+            ),
+            event_reason=(
+                (pending_event_reason or 'expired') if completing_pending_reap else reason
+            ),
+        )
+        if not released:
+            raise SyncwheelError(
+                f"cannot release governed worktree lane {lane_id!r}: {detail['code']}; {detail['remedy']}"
+            )
+        terminal_type = lane.get('cleanup_event_type') or 'governed_worktree_reaped'
+        terminal_reason = lane.get('cleanup_event_reason') or 'expired'
+        try:
+            governed_worktree_cleanup_checkpoint('before_terminal_ledger')
+            terminal = append_governed_worktree_cleanup_event(repo_root, lane, manifest_path)
+            if terminal_type != 'governed_worktree_released' or terminal_reason != reason:
+                append_governed_worktree_release_note(
+                    repo_root,
+                    lane_id,
+                    reason,
+                    terminal,
+                    manifest_path,
+                )
+            governed_worktree_cleanup_checkpoint('after_terminal_ledger')
+        except Exception:
+            lane['state'] = 'reaped'
+            lane['pending_reason'] = 'ledger_pending'
+            persist()
+            raise
+        registry['lanes'] = [item for item in registry['lanes'] if item['id'] != lane_id]
+        persist()
+        governed_worktree_cleanup_checkpoint('after_cleanup_record_removed')
+    output = {
+        'lane': completed_governed_worktree_lane(lane),
+        'reason': reason,
+        'registry_path': str(registry_path),
+        'applied': True,
+        'terminal_type': terminal_type,
+        'terminal_reason': terminal_reason,
+    }
+    if args.json:
+        print(json.dumps(output, indent=2, sort_keys=True))
+    else:
+        print(f"released governed worktree {lane_id}: {lane['path']}")
+        if terminal_type != 'governed_worktree_released':
+            print(f'  completed the pending {terminal_type} ({terminal_reason})')
+        if lane.get('recovery_ref'):
+            print(f"  recovery ref: {lane['recovery_ref']}")
+    return 0
+
+
 def governed_worktree_commit_set(repo_root, lane):
     if not branch_exists(repo_root, lane['branch']):
         return set()
     return set(rev_list(repo_root, f"{lane['base']}..{lane['branch']}"))
 
 
-def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id):
+def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest_path=None):
     stack = require_stack(manifest, stack_id)
     owned = {commit_full_sha(repo_root, commit) for commit in stack['commits']}
     with governed_worktree_registry_lock(repo_root):
         registry, _ = load_governed_worktree_registry(repo_root)
+        persist = governed_worktree_registry_cas_persister(repo_root, registry)
+        recover_governed_worktree_registry_from_ledger(
+            repo_root,
+            registry,
+            persist,
+            manifest_path,
+        )
         captured = []
         for lane in registry['lanes']:
             if lane['state'] != 'active' or lane.get('target') not in {None, stack_id}:
@@ -10128,12 +12535,18 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id):
                 continue
             lane['state'] = 'captured_pending_cleanup'
             lane['captured_at'] = iso_utc_now()
-            reaped, detail = reap_governed_worktree_lane(repo_root, manifest, lane)
+            reaped, detail = reap_governed_worktree_lane(
+                repo_root,
+                manifest,
+                lane,
+                persist=persist,
+                manifest_path=manifest_path,
+            )
             captured.append({
                 'id': lane['id'], 'state': lane['state'], 'detail': detail['code'], 'reaped': reaped,
             })
         if captured:
-            save_governed_worktree_registry(repo_root, registry)
+            persist()
         return captured
 
 
@@ -12771,6 +15184,16 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
     validation = validate_manifest(repo_root, manifest)
     if validation['errors']:
         raise SyncwheelError('stack land STOP: manifest validation failed: ' + '; '.join(validation['errors']))
+    derived_source = [
+        commit_full_sha(repo_root, commit)
+        for commit in rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+        if is_derived_projection_commit(repo_root, manifest, commit)
+    ]
+    if derived_source:
+        raise SyncwheelError(
+            'stack land STOP: source contains derived projection commit(s): '
+            + ', '.join(derived_source)
+        )
     worktrees = landing_require_clean_worktrees(repo_root)
     declared = landing_stack_projection_is_exact(repo_root, stack)
     integration = manifest['integration']
@@ -12782,7 +15205,13 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
         if not branch_contains(repo_root, integration['branch'], commit):
             raise SyncwheelError('stack land STOP: stack is not validated on main-integration')
     expected_integration_tree = materialize_integration_projection(repo_root, manifest)
-    if ref_tree(repo_root, integration['branch']) != expected_integration_tree:
+    actual_integration_tree = ref_tree(repo_root, integration['branch'])
+    if (
+        actual_integration_tree != expected_integration_tree
+        and not trees_differ_only_by_manifest(
+            repo_root, actual_integration_tree, expected_integration_tree
+        )
+    ):
         raise SyncwheelError('stack land STOP: main-integration does not match the declared combined projection')
     remote, target_ref, delivery_revision = landing_target_observation(repo_root, manifest, stack)
     for dependency_id in stack.get('depends_on', []):
@@ -13175,7 +15604,12 @@ def command_stack_create(args):
         'stack_create',
         {'stack': args.stack, 'branch': branch},
     )
-    capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+    capture_governed_worktrees_for_stack(
+        repo_root,
+        manifest,
+        args.stack,
+        manifest_path=manifest_path,
+    )
     print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
     return 0
 
@@ -13703,7 +16137,12 @@ def command_stack_add(args):
         'stack_add',
         {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
     )
-    capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+    capture_governed_worktrees_for_stack(
+        repo_root,
+        manifest,
+        args.stack,
+        manifest_path=manifest_path,
+    )
     print(f"{args.stack}: now has {len(stack['commits'])} commits")
     return 0
 
@@ -13812,7 +16251,12 @@ def command_stack_capture_integration(args):
         'stack_capture_integration',
         {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
     )
-    capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+    capture_governed_worktrees_for_stack(
+        repo_root,
+        manifest,
+        args.stack,
+        manifest_path=manifest_path,
+    )
     print(f"{args.stack}: captured {len(added_commits)} integration commit(s)")
     return 0
 
@@ -13940,9 +16384,11 @@ def trees_differ_only_by_manifest(repo_root, left_tree, right_tree):
         '--no-commit-id',
         '--name-only',
         '-r',
+        '-z',
         left_tree,
         right_tree,
-    ).stdout.splitlines()
+    ).stdout.split('\0')
+    changed = [path for path in changed if path]
     return bool(changed) and set(changed) == {'.syncwheel/manifest.json'}
 
 
@@ -14947,6 +17393,20 @@ def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     integration = manifest['integration']
+    validation = validate_manifest(repo_root, manifest)
+    narrowed = validation['details']['integration'].get(
+        'derived_paths_narrowed'
+    ) or []
+    reason = getattr(args, 'reason', None)
+    if narrowed and (
+        not isinstance(reason, str) or not reason.strip()
+    ):
+        raise SyncwheelError(
+            'derived-paths-narrowed reconciliation requires --reason; use: '
+            + derived_paths_rebuild_remedy()
+        )
+    if isinstance(reason, str):
+        reason = reason.strip()
     mode, worktree = select_replay_mode(
         repo_root,
         manifest,
@@ -14977,6 +17437,23 @@ def command_int_rebuild(args):
     )
     require_replay_success(result)
     if not args.dry_run:
+        reconciled = []
+        unique_narrowed = {
+            (item['operation_id'], item['commit'], tuple(item['paths'])): item
+            for item in narrowed
+        }
+        for item in unique_narrowed.values():
+            if resolve_common_derived_provenance(
+                repo_root,
+                manifest,
+                item['paths'],
+                expected_commit=item['commit'],
+            ):
+                reconciled.append({
+                    'operation_id': item['operation_id'],
+                    'commit': item['commit'],
+                    'paths': list(item['paths']),
+                })
         append_ledger_event(
             repo_root,
             'integration_rebuilt',
@@ -14986,6 +17463,8 @@ def command_int_rebuild(args):
                 'after_tip': result['after_tip'],
                 'stacks': list(manifest['integration'].get('stacks', [])),
                 'replay_mode': result['mode'],
+                'reason': reason,
+                'derived_provenance_reconciled': reconciled,
             },
             manifest_path,
         )
@@ -15667,9 +18146,12 @@ class SyncwheelRevisionBackend:
         listing = git(repo_root, 'ls-tree', '-z', head, '--', relative, check=False)
         if listing.returncode != 0:
             self._fail(f'could not inspect {relative} at expectedHead {head}')
-        if not listing.stdout:
+        entries = [entry for entry in listing.stdout.split('\0') if entry]
+        if not entries:
             return None
-        entry = listing.stdout.rstrip('\0')
+        if len(entries) != 1:
+            self._fail(f'ambiguous tree entry for product path: {relative}')
+        entry = entries[0]
         metadata, separator, listed_path = entry.partition('\t')
         if not separator or listed_path != relative:
             self._fail(f'ambiguous tree entry for product path: {relative}')
@@ -15723,13 +18205,14 @@ class SyncwheelRevisionBackend:
         if status.strip():
             self._fail('revision provider preflight requires a completely clean worktree and index')
 
-    def _ensure_after_scope(self, repo_root, request):
+    def _ensure_after_scope(self, repo_root, request, *, allowed_outside=()):
         if self._index_conflicts(repo_root):
             self._fail('revision provider refuses an index with conflicts')
         if not self._index_is_clean(repo_root):
             self._fail('revision provider refuses pre-staged changes')
         self._validate_hashes(repo_root, request, 'after')
         allowed = {item.path for item in request.paths}
+        allowed.update(allowed_outside)
         outside = sorted(self._dirty_paths(repo_root) - allowed)
         if outside:
             self._fail('mutation changed paths outside the declared allowlist: ' + ', '.join(outside))
@@ -16091,8 +18574,38 @@ class SyncwheelRevisionBackend:
             manifest, base_ref, base_ref_full_name
         )
         validation = validate_manifest(repo_root, manifest)
-        if validation['errors']:
-            self._fail('Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        stale_paths = {
+            item['path']
+            for item in validation['details']['integration'].get(
+                'derived_projection_stale'
+            ) or []
+        }
+        declared_paths = {item.path for item in request.paths}
+        repairs_all_stale_paths = bool(stale_paths) and (
+            request.action == 'check' or stale_paths <= declared_paths
+        )
+        blocking_errors = [
+            error for error in validation['errors']
+            if not (
+                repairs_all_stale_paths
+                and error.startswith('derived-projection-stale:')
+            )
+        ]
+        if blocking_errors:
+            self._fail('Syncwheel validation failed: ' + '; '.join(blocking_errors))
+        missing_declared = [
+            item for item in validation['details']['stacks']
+            if item['id'] in manifest['integration'].get('stacks', [])
+            and item.get('missing_from_integration')
+        ]
+        if missing_declared:
+            self._fail(
+                'integration declared stack(s) are missing from integration: '
+                + '; '.join(
+                    f"{item['id']}=" + ','.join(item['missing_from_integration'])
+                    for item in missing_declared
+                )
+            )
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
             self._fail(
@@ -16132,6 +18645,9 @@ class SyncwheelRevisionBackend:
             'baseRefSha': base_ref_sha,
             'baseRefObjectSha': base_ref_object_sha,
             'baseRefObservation': base_ref_observation,
+            'projectionBaseSha': base_ref_sha,
+            'projectionBaseKind': 'manifest-base',
+            'integrationCompositionDigest': integration_composition_digest(manifest),
             'indexSha256': self._index_sha256(repo_root),
             'unmappedIntegrationCommits': unmapped,
             'coordination': coordination,
@@ -16148,9 +18664,9 @@ class SyncwheelRevisionBackend:
     def operation_lock(self, request):
         if fcntl is None:
             self._fail(f'revision-provider locking is unsupported on {sys.platform}')
-        directory = self._journal_directory(request)
+        directory = self._journal_directory(request).parent
         directory.mkdir(parents=True, exist_ok=True)
-        lock_path = directory / 'provider.lock'
+        lock_path = directory / 'revision-provider.lock'
         with lock_path.open('a+') as handle:
             try:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -16205,6 +18721,131 @@ class SyncwheelRevisionBackend:
         if path.parent.exists():
             self._fsync_directory(path.parent)
 
+    def _derived_paths_digest(self, paths):
+        return canonical_json_digest(list(paths or []))
+
+    def _manifest_lease_digest(self, journal):
+        if journal.get('manifestReplaced'):
+            return journal.get('manifestDigest')
+        return journal.get('observedManifestDigest')
+
+    def _pending_operation_manifest_matches(self, request, journal, manifest):
+        """Recognize the provider's own manifest write before its journal catches up."""
+        if (
+            journal.get('projectionRoute') != 'manifest-base'
+            or journal.get('phase') != 'product_committed'
+            or not journal.get('productCommitSha')
+        ):
+            return False
+        existing = stack_map(manifest).get(request.draft_stack_id)
+        if existing != self._desired_stack(request, journal, manifest):
+            return False
+        stripped = self._manifest_without_operation_stack(manifest, request)
+        return manifest_digest(stripped) == journal.get('observedManifestDigest')
+
+    def _expiration_digest_pair(self, request, journal, manifest):
+        if journal.get('projectionRoute') == 'derived':
+            observed_composition = journal.get('integrationCompositionDigest')
+            current_composition = integration_composition_digest(manifest)
+            if observed_composition != current_composition:
+                return observed_composition, current_composition
+            observed_paths = journal.get('derivedPathsDigest')
+            current_paths = self._derived_paths_digest(
+                manifest['integration'].get('derived_paths') or []
+            )
+            return observed_paths, current_paths
+        return self._manifest_lease_digest(journal), manifest_digest(manifest)
+
+    def _expire_if_operation_lease_changed(self, request, journal, manifest):
+        if journal.get('phase') in {'verified', 'expired'}:
+            return
+        route = journal.get('projectionRoute')
+        if route == 'derived':
+            current_composition = integration_composition_digest(manifest)
+            if current_composition != journal.get('integrationCompositionDigest'):
+                self.expire_manifest_invalidated(
+                    request,
+                    journal,
+                    'integration composition changed while derived projection was pending',
+                )
+            current_paths = list(manifest['integration'].get('derived_paths') or [])
+            if (
+                current_paths != list(journal.get('derivedPaths') or [])
+                or self._derived_paths_digest(current_paths)
+                != journal.get('derivedPathsDigest')
+            ):
+                self.expire_manifest_invalidated(
+                    request,
+                    journal,
+                    'integration.derived_paths changed while derived projection was pending',
+                )
+            return
+        current_digest = manifest_digest(manifest)
+        if current_digest == self._manifest_lease_digest(journal):
+            return
+        if self._pending_operation_manifest_matches(
+            request, journal, manifest
+        ):
+            return
+        reason = (
+            'manifest changed after preflight'
+            if route is None
+            else 'manifest changed while revision-provider operation was pending'
+        )
+        self.expire_manifest_invalidated(request, journal, reason)
+
+    def expire_manifest_invalidated(self, request, journal, reason):
+        """Terminally expire a receipt whose manifest lease can no longer recover.
+
+        This deliberately changes only local provider state.  The caller must
+        start a new Agentwheel update, which obtains a fresh manifest lease.
+        """
+        remedy = 'run a new Agentwheel update'
+        repo_root = self._repo_root(request)
+        manifest, manifest_path = self._manifest(repo_root)
+        observed_digest, current_digest = self._expiration_digest_pair(
+            request, journal, manifest
+        )
+        expiration = journal.get('expiration') or {
+            'reason': reason,
+            'remedy': remedy,
+            'observedDigest': observed_digest,
+            'currentDigest': current_digest,
+            'decidedAt': iso_utc_now(),
+        }
+        event_payload = {
+            'operation_id': request.operation_id,
+            'reason': expiration['reason'],
+            'remedy': expiration['remedy'],
+            'observed_digest': expiration['observedDigest'],
+            'current_digest': expiration['currentDigest'],
+            'decided_at': expiration['decidedAt'],
+        }
+        if journal.get('phase') != 'expired':
+            journal['phase'] = 'expired'
+            journal['expiration'] = expiration
+            self.save_journal(request, journal)
+            self.checkpoint('receipt_expired')
+        recover_ledger_tail(repo_root, manifest_path)
+        matches = [
+            event for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'revision_provider_expired'
+            and (event.get('payload') or {}).get('operation_id') == request.operation_id
+        ]
+        if matches and (len(matches) != 1 or matches[0].get('payload') != event_payload):
+            self._fail(
+                f'ledger collision while expiring revision-provider operation '
+                f'{request.operation_id}'
+            )
+        if not matches:
+            append_ledger_event(
+                repo_root, 'revision_provider_expired', event_payload, manifest_path
+            )
+            self.checkpoint('expiration_ledger_event_written')
+        self._fail(
+            f'operation {request.operation_id} expired: {expiration["reason"]}; {expiration["remedy"]}'
+        )
+
     def check(self, request):
         observation = self._validate_repository(
             self._repo_root(request), request, require_clean=True
@@ -16242,14 +18883,9 @@ class SyncwheelRevisionBackend:
             self._fail('integration branch changed after preflight')
         if ref_tip(repo_root, 'HEAD') != request.expected_head:
             self._fail('integration HEAD changed after preflight')
-        current_digest = manifest_digest(manifest)
         journal = self.load_journal(request)
-        expected_digest = (
-            journal.get('observedManifestDigest') if journal else request.expected_manifest_digest
-        )
-        if expected_digest and current_digest != expected_digest:
-            self._fail('manifest changed after preflight')
         if journal:
+            self._expire_if_operation_lease_changed(request, journal, manifest)
             expected_refs = dict(journal['managedLocalRefs'])
             expected_refs.update(journal['baselineRemoteRefs'])
             if journal.get('baseRefFullName'):
@@ -16333,28 +18969,164 @@ class SyncwheelRevisionBackend:
             'productPathObjects': prepared['pathObjects'],
         }
 
+    def _projection_reproduces_product_blobs(self, repo_root, projection, path_objects):
+        if projection.get('status') != 'projected':
+            return False
+        for path, expected in path_objects.items():
+            actual = self._tree_entry(repo_root, projection['tip'], path)
+            actual_blob = actual['blob'] if actual is not None else None
+            if actual_blob != expected['blob']:
+                return False
+        return True
+
+    def _journal_product_path_objects(self, request, journal):
+        path_objects = journal.get('productPathObjects')
+        expected_paths = sorted(item.path for item in request.paths)
+        valid = (
+            isinstance(path_objects, dict)
+            and sorted(path_objects) == expected_paths
+            and bool(path_objects)
+        )
+        if valid:
+            for value in path_objects.values():
+                if not isinstance(value, dict) or set(value) != {
+                    'sha256', 'blob', 'mode'
+                }:
+                    valid = False
+                    break
+                sha256 = value.get('sha256')
+                blob = value.get('blob')
+                mode = value.get('mode')
+                deletion = sha256 is None and blob is None and mode is None
+                regular = (
+                    isinstance(sha256, str)
+                    and re.fullmatch(r'[0-9a-f]{64}', sha256)
+                    and isinstance(blob, str)
+                    and re.fullmatch(r'[0-9a-f]{40,64}', blob)
+                    and mode in {'100644', '100755'}
+                )
+                if not deletion and not regular:
+                    valid = False
+                    break
+        if not valid:
+            self._fail(
+                'journaled productPathObjects is missing or invalid; release the '
+                'prepared operation, restore the declared paths if needed, then run '
+                'a new Agentwheel update'
+            )
+        return path_objects
+
     def prepare_draft_projection(self, request, journal):
         repo_root = self._repo_root(request)
         manifest, _ = self._manifest(repo_root)
         if manifest_digest(manifest) != journal['observedManifestDigest']:
-            self._fail('manifest changed before draft object preparation')
+            self.expire_manifest_invalidated(
+                request,
+                journal,
+                'manifest changed before draft object preparation',
+            )
         projection = deterministic_stack_projection(
             repo_root,
             journal['baseRefSha'],
             [journal['candidateProductCommitSha']],
         )
-        if projection['status'] == 'conflict':
+        reproduces_product = self._projection_reproduces_product_blobs(
+            repo_root,
+            projection,
+            journal['productPathObjects'],
+        )
+        if reproduces_product:
+            return {
+                'projectionRoute': 'manifest-base',
+                'candidateDraftCommitSha': projection['tip'],
+                'candidateDraftTreeSha': projection['tree'],
+            }
+        prefixes = manifest['integration'].get('derived_paths') or []
+        paths = sorted(journal['productPathObjects'])
+        if not prefixes or not all(any(path.startswith(prefix) for prefix in prefixes) for path in paths):
+            conflicts = ', '.join(projection.get('paths') or []) or 'unknown path(s)'
             self._fail(
-                'product commit has a conflicting draft projection; no managed ref was moved'
+                'product commit has a conflicting draft projection; conflicts: '
+                f'{conflicts}; base {projection.get("base", journal["baseRefSha"])}; '
+                'derived route refuses paths outside integration.derived_paths'
             )
-        if projection['status'] == 'empty':
-            self._fail(
-                'product commit has an empty draft projection; no managed ref was moved'
-            )
+        content_digest = derived_projection_paths_digest({
+            path: journal['productPathObjects'][path]['blob']
+            for path in paths
+        })
+        prepared = self._prepare_exact_commit(
+            repo_root,
+            request.expected_head,
+            journal['productPathObjects'],
+            self.provider.product_commit_message(request)
+            + f'Syncwheel-Derived-Projection: {request.operation_id}\n'
+            + f'Syncwheel-Derived-Paths: {content_digest}\n',
+        )
+        if prepared is None:
+            self._fail('derived projection unexpectedly has no product delta')
         return {
-            'candidateDraftCommitSha': projection['tip'],
-            'candidateDraftTreeSha': projection['tree'],
+            'projectionRoute': 'derived',
+            'candidateProductCommitSha': prepared['commit'],
+            'candidateProductTreeSha': prepared['tree'],
+            'integrationCompositionDigest': integration_composition_digest(manifest),
+            'derivedPaths': list(prefixes),
+            'derivedPathsDigest': self._derived_paths_digest(prefixes),
+            'derivedContentDigest': content_digest,
         }
+
+    def verify_projection_route(self, request, journal):
+        """Recompute the persisted route without replacing its candidate objects."""
+        repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
+        path_objects = self._journal_product_path_objects(request, journal)
+        projection = deterministic_stack_projection(
+            repo_root,
+            journal['baseRefSha'],
+            [journal['candidateProductCommitSha']],
+        )
+        reproduces_product = self._projection_reproduces_product_blobs(
+            repo_root,
+            projection,
+            path_objects,
+        )
+        recomputed_route = 'manifest-base' if reproduces_product else 'derived'
+        if recomputed_route != journal.get('projectionRoute'):
+            self._fail(
+                'journaled projection route no longer matches its immutable candidate'
+            )
+        if recomputed_route == 'manifest-base':
+            if (
+                projection.get('tip') != journal.get('candidateDraftCommitSha')
+                or projection.get('tree') != journal.get('candidateDraftTreeSha')
+            ):
+                self._fail('journaled draft projection object changed')
+            return
+        if journal.get('candidateDraftCommitSha') is not None:
+            self._fail('journaled derived route unexpectedly owns a draft candidate')
+        paths = sorted(path_objects)
+        content_digest = derived_projection_paths_digest({
+            path: path_objects[path]['blob']
+            for path in paths
+        })
+        if content_digest != journal.get('derivedContentDigest'):
+            self._fail('journaled derived path/content digest changed')
+        candidate_provenance = [{
+            'operation_id': request.operation_id,
+            'commit': journal['candidateProductCommitSha'],
+            'paths': paths,
+            'paths_digest': content_digest,
+            'composition_digest': journal['integrationCompositionDigest'],
+        }]
+        if not is_derived_projection_commit(
+            repo_root,
+            manifest,
+            journal['candidateProductCommitSha'],
+            provenance=candidate_provenance,
+        ):
+            self._fail(
+                'journaled derived candidate is missing its path or trailer ownership proof'
+            )
 
     def current_head(self, request):
         return ref_tip(self._repo_root(request), 'HEAD')
@@ -16363,9 +19135,12 @@ class SyncwheelRevisionBackend:
         listing = git(repo_root, 'ls-tree', '-z', commit, '--', relative, check=False)
         if listing.returncode != 0:
             self._fail(f'could not inspect candidate tree path: {relative}')
-        if not listing.stdout:
+        entries = [entry for entry in listing.stdout.split('\0') if entry]
+        if not entries:
             return None
-        entry = listing.stdout.rstrip('\0')
+        if len(entries) != 1:
+            self._fail(f'ambiguous candidate tree entry: {relative}')
+        entry = entries[0]
         metadata, separator, listed_path = entry.partition('\t')
         if not separator or listed_path != relative:
             self._fail(f'ambiguous candidate tree entry: {relative}')
@@ -16445,9 +19220,18 @@ class SyncwheelRevisionBackend:
     def _assert_operation_worktree(self, repo_root, request, journal, kind):
         manifest, _ = self._manifest(repo_root)
         if kind == 'product':
-            if manifest_digest(manifest) != journal['observedManifestDigest']:
-                self._fail('manifest changed before product ref ownership')
-            self._ensure_after_scope(repo_root, request)
+            self._expire_if_operation_lease_changed(
+                request, journal, manifest
+            )
+            self._ensure_after_scope(
+                repo_root,
+                request,
+                allowed_outside=(
+                    (self.MANIFEST_PRODUCT_PATH,)
+                    if journal.get('projectionRoute') == 'derived'
+                    else ()
+                ),
+            )
             return
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control ref update requires a clean, conflict-free index')
@@ -16457,8 +19241,7 @@ class SyncwheelRevisionBackend:
                 'control ref update requires only .syncwheel/manifest.json; found: '
                 + ', '.join(sorted(dirty))
             )
-        if manifest_digest(manifest) != journal['manifestDigest']:
-            self._fail('manifest changed before control ref update')
+        self._expire_if_operation_lease_changed(request, journal, manifest)
 
     def _assert_ref_leases(self, repo_root, expected):
         drift = []
@@ -16625,6 +19408,8 @@ class SyncwheelRevisionBackend:
 
     def verify_recovery_gate(self, request, journal):
         repo_root = self._repo_root(request)
+        manifest, _ = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
         expected = self._journal_ref_transaction_refs(request, journal)
         self._assert_no_ref_transaction_locks(repo_root, expected)
 
@@ -16760,7 +19545,7 @@ class SyncwheelRevisionBackend:
     def _verify_draft_candidate(self, repo_root, request, journal):
         projection = deterministic_stack_projection(
             repo_root,
-            journal['baseRefSha'],
+            journal.get('projectionBaseSha', journal['baseRefSha']),
             [journal['candidateProductCommitSha']],
         )
         if projection.get('status') != 'projected':
@@ -16924,7 +19709,7 @@ class SyncwheelRevisionBackend:
             repo_root, commit, tree, parent, path_objects
         )
         self._verify_worktree_objects(repo_root, path_objects)
-        if kind == 'product':
+        if kind == 'product' and journal.get('projectionRoute') != 'derived':
             self._verify_draft_candidate(repo_root, request, journal)
         expected_refs = self._expected_managed_refs(
             request, journal, integration_tip, draft_owned=draft_owned
@@ -16979,10 +19764,11 @@ class SyncwheelRevisionBackend:
         if get_current_branch(repo_root) != branch:
             self._fail('primary checkout left the integration branch')
         if expected_parent == request.expected_head:
+            derived = journal.get('projectionRoute') == 'derived'
             expected_index = journal['baselineIndexSha256']
             if not journal.get('productHooksValidated'):
                 self._fail('product hooks were not durably validated before draft ownership')
-            if ref_tip(repo_root, request.draft_branch) != journal.get(
+            if not derived and ref_tip(repo_root, request.draft_branch) != journal.get(
                 'candidateDraftCommitSha'
             ):
                 self._fail('draft ownership is missing before integration publication')
@@ -16995,9 +19781,10 @@ class SyncwheelRevisionBackend:
                 journal['productPathObjects'],
             )
             self._verify_worktree_objects(repo_root, journal['productPathObjects'])
-            self._verify_draft_candidate(repo_root, request, journal)
+            if not derived:
+                self._verify_draft_candidate(repo_root, request, journal)
             expected_refs = self._expected_managed_refs(
-                request, journal, expected_parent, draft_owned=True
+                request, journal, expected_parent, draft_owned=not derived
             )
         else:
             expected_index = journal.get('productIndexSha256')
@@ -17036,7 +19823,7 @@ class SyncwheelRevisionBackend:
         )
         return commit
 
-    def _deterministic_index(self, repo_root, commit):
+    def _deterministic_index(self, repo_root, commit, *, allowed_worktree_paths=()):
         descriptor, temporary_name = tempfile.mkstemp(
             prefix='syncwheel-revision-aligned-index-'
         )
@@ -17054,10 +19841,22 @@ class SyncwheelRevisionBackend:
                 env=environment,
             )
             if refreshed.returncode != 0:
-                self._fail(
-                    'working tree does not match the commit during index preparation: '
-                    + (refreshed.stderr.strip() or refreshed.stdout.strip())
-                )
+                mismatched = {
+                    item
+                    for item in git(
+                        repo_root,
+                        'diff-files',
+                        '--name-only',
+                        '-z',
+                        env=environment,
+                    ).stdout.split('\0')
+                    if item
+                }
+                if mismatched - set(allowed_worktree_paths):
+                    self._fail(
+                        'working tree does not match the commit during index preparation: '
+                        + (refreshed.stderr.strip() or refreshed.stdout.strip())
+                    )
             tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
             expected_tree = ref_tree(repo_root, commit)
             if tree != expected_tree:
@@ -17250,7 +20049,15 @@ class SyncwheelRevisionBackend:
         if not expected_sha:
             self._fail(f'{kind} index alignment has no predecessor lease')
 
-        desired_payload, desired_sha = self._deterministic_index(repo_root, commit)
+        desired_payload, desired_sha = self._deterministic_index(
+            repo_root,
+            commit,
+            allowed_worktree_paths=(
+                (self.MANIFEST_PRODUCT_PATH,)
+                if kind == 'product' and journal.get('projectionRoute') == 'derived'
+                else ()
+            ),
+        )
         current_sha = self._index_sha256(repo_root)
         if current_sha not in {expected_sha, desired_sha}:
             self._fail(
@@ -17333,10 +20140,10 @@ class SyncwheelRevisionBackend:
         return desired_sha
 
     def _desired_stack(self, request, journal, manifest):
-        return {
+        desired = {
             'id': request.draft_stack_id,
             'branch': request.draft_branch,
-            'base': journal['baseRefSha'],
+            'base': journal.get('projectionBaseSha', journal['baseRefSha']),
             'target_remote': manifest['defaults']['canonical_remote'],
             'target_branch': manifest['defaults']['base_branch'],
             'integration_branch': manifest['integration']['branch'],
@@ -17349,6 +20156,12 @@ class SyncwheelRevisionBackend:
                 'agentwheel_plan_digest': request.plan_digest,
             },
         }
+        if journal.get('projectionBaseKind') == 'integration-tip':
+            desired['meta']['revision_provider_projection_base'] = {
+                'kind': 'integration-tip',
+                'sha': journal['projectionBaseSha'],
+            }
+        return desired
 
     def _manifest_without_operation_stack(self, manifest, request):
         stripped = copy.deepcopy(manifest)
@@ -17365,7 +20178,9 @@ class SyncwheelRevisionBackend:
     def _assert_draft_branch(self, repo_root, desired, journal):
         journal_tip = ref_tip(repo_root, desired['branch'])
         expected_tip = deterministic_stack_replay_tip(
-            repo_root, journal['baseRefSha'], desired['commits']
+            repo_root,
+            journal.get('projectionBaseSha', journal['baseRefSha']),
+            desired['commits'],
         )
         if not expected_tip:
             self._fail('owned draft projection is no longer reproducible')
@@ -17394,7 +20209,11 @@ class SyncwheelRevisionBackend:
                     self._fail(f'draft stack collision: {request.draft_stack_id}')
                 stripped = self._manifest_without_operation_stack(manifest, request)
                 if manifest_digest(stripped) != journal['observedManifestDigest']:
-                    self._fail('manifest contains changes beyond this operation draft stack')
+                    self.expire_manifest_invalidated(
+                        request,
+                        journal,
+                        'manifest contains changes beyond this operation draft stack',
+                    )
                 if not branch_exists(repo_root, request.draft_branch):
                     self._fail('owned draft stack branch is missing')
                 if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
@@ -17410,6 +20229,7 @@ class SyncwheelRevisionBackend:
                     'stack': request.draft_stack_id,
                     'branch': request.draft_branch,
                     'product_commit': journal['productCommitSha'],
+                    'paths': sorted(journal['productPathObjects']),
                 }
                 if not journal.get('manifestReplaced'):
                     journal['manifestDigest'] = manifest_digest(manifest)
@@ -17422,7 +20242,9 @@ class SyncwheelRevisionBackend:
                 return {'manifestDigest': manifest_digest(manifest)}
 
             if manifest_digest(manifest) != journal['observedManifestDigest']:
-                self._fail('manifest changed before draft ownership')
+                self.expire_manifest_invalidated(
+                    request, journal, 'manifest changed before draft ownership'
+                )
             self._ensure_clean(repo_root)
             if any(stack['branch'] == request.draft_branch for stack in manifest['stacks']):
                 self._fail(f'draft branch is owned by another stack: {request.draft_branch}')
@@ -17445,6 +20267,7 @@ class SyncwheelRevisionBackend:
                 'stack': request.draft_stack_id,
                 'branch': request.draft_branch,
                 'product_commit': journal['productCommitSha'],
+                'paths': sorted(journal['productPathObjects']),
             }
             require_manifest_transaction_current(manifest_path)
             save_manifest(manifest_path, manifest)
@@ -17479,7 +20302,10 @@ class SyncwheelRevisionBackend:
                 self._fail(
                     f'ledger collision for revision-provider operation {request.operation_id}'
                 )
-        else:
+        resolve_common_derived_provenance(
+            repo_root, manifest, sorted(context['paths'])
+        )
+        if not matching:
             append_ledger_event(
                 repo_root, 'manifest_saved', desired_payload, manifest_path
             )
@@ -17525,19 +20351,36 @@ class SyncwheelRevisionBackend:
         self.verify_recovery_gate(request, journal)
         if ref_tip(repo_root, 'HEAD') != expected_head:
             self._fail('integration HEAD does not match the operation receipt')
-        status = git(
-            repo_root,
-            'status',
-            '--porcelain',
-            '--untracked-files=all',
-            env={'GIT_OPTIONAL_LOCKS': '0'},
-        ).stdout
-        if status.strip():
-            self._fail('revision-provider operation left repository changes behind')
+        if journal.get('projectionRoute') == 'derived':
+            if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+                self._fail('derived revision-provider operation left index changes behind')
+            outside = self._dirty_paths(repo_root) - {self.MANIFEST_PRODUCT_PATH}
+            if outside:
+                self._fail(
+                    'derived revision-provider operation left product changes behind: '
+                    + ', '.join(sorted(outside))
+                )
+        else:
+            status = git(
+                repo_root,
+                'status',
+                '--porcelain',
+                '--untracked-files=all',
+                env={'GIT_OPTIONAL_LOCKS': '0'},
+            ).stdout
+            if status.strip():
+                self._fail('revision-provider operation left repository changes behind')
         manifest, _ = self._manifest(repo_root)
         digest = manifest_digest(manifest)
-        if digest != journal['manifestDigest']:
-            self._fail('manifest digest does not match the operation receipt')
+        if (
+            journal.get('projectionRoute') != 'derived'
+            and digest != journal['manifestDigest']
+        ):
+            self.expire_manifest_invalidated(
+                request,
+                journal,
+                'manifest digest changed before terminal verification',
+            )
         validation = validate_manifest(repo_root, manifest)
         if validation['errors']:
             self._fail('post-operation Syncwheel validation failed: ' + '; '.join(validation['errors']))
@@ -17550,7 +20393,8 @@ class SyncwheelRevisionBackend:
             self._fail('operation changed a remote-tracking ref; publication is forbidden')
         if journal.get('productCommitSha'):
             expected_refs = self._expected_managed_refs(
-                request, journal, expected_head, draft_owned=True
+                request, journal, expected_head,
+                draft_owned=journal.get('projectionRoute') != 'derived',
             )
         else:
             expected_refs = self._expected_managed_refs(
@@ -17558,7 +20402,7 @@ class SyncwheelRevisionBackend:
             )
         self._assert_ref_leases(repo_root, expected_refs)
         expected_index = (
-            journal.get('controlIndexSha256')
+            (journal.get('controlIndexSha256') or journal.get('productIndexSha256'))
             if journal.get('productCommitSha')
             else journal['baselineIndexSha256']
         )
@@ -17587,6 +20431,34 @@ class SyncwheelRevisionBackend:
             self._fail('operation draft branch differs from its journaled object')
         return self._verify_invariants(
             repo_root, request, journal, journal['controlCommitSha']
+        )
+
+    def verify_derived_final(self, request, journal):
+        repo_root = self._repo_root(request)
+        manifest, manifest_path = self._manifest(repo_root)
+        self._expire_if_operation_lease_changed(request, journal, manifest)
+        if branch_exists(repo_root, request.draft_branch) or request.draft_stack_id in stack_map(manifest):
+            self._fail('derived projection must not create a draft ref or stack')
+        journal['manifestDigest'] = manifest_digest(manifest)
+        payload = {
+            'operation_id': request.operation_id,
+            'commit': journal['productCommitSha'],
+            'paths': sorted(journal['productPathObjects']),
+            'paths_digest': journal['derivedContentDigest'],
+            'composition_digest': journal['integrationCompositionDigest'],
+        }
+        matching = [
+            event for event in load_ledger_events(repo_root, manifest_path)
+            if event.get('type') == 'revision_provider_derived_commit'
+            and (event.get('payload') or {}).get('operation_id') == request.operation_id
+        ]
+        if matching and (len(matching) != 1 or matching[0].get('payload') != payload):
+            self._fail(f'ledger collision for derived revision-provider operation {request.operation_id}')
+        record_common_derived_provenance(repo_root, manifest, payload)
+        if not matching:
+            append_ledger_event(repo_root, 'revision_provider_derived_commit', payload, manifest_path)
+        return self._verify_invariants(
+            repo_root, request, journal, journal['productCommitSha']
         )
 
     def verify_no_repository_delta(self, request, journal):
@@ -17919,6 +20791,30 @@ def build_parser():
     coordination_disable_p.add_argument('-a', '--apply', action='store_true')
     coordination_disable_p.set_defaults(func=command_coordination_disable)
 
+    coordination_provenance_p = coordination_sub.add_parser(
+        'provenance',
+        help='manage the clone-local derived provenance store under the git common dir',
+    )
+    coordination_provenance_sub = coordination_provenance_p.add_subparsers(
+        dest='coordination_provenance_command', required=True
+    )
+    coordination_provenance_reset_p = coordination_provenance_sub.add_parser(
+        'reset',
+        parents=[common],
+        help='discard clone-local derived provenance the coordination snapshot supersedes',
+    )
+    coordination_provenance_reset_p.add_argument(
+        '--reason', required=True, help='recorded reason for discarding clone-local records'
+    )
+    coordination_provenance_reset_p.add_argument(
+        '--all',
+        action='store_true',
+        help='clear the whole store, including an unreadable one',
+    )
+    coordination_provenance_reset_p.set_defaults(
+        func=command_coordination_provenance_reset
+    )
+
     coordination_repair_p = coordination_sub.add_parser(
         'repair',
         parents=[common],
@@ -17997,6 +20893,13 @@ def build_parser():
     worktree_open_p.add_argument('--full', action='store_true', help='mark this explicitly requested lane as eligible for dependency, build, test, and debug work')
     worktree_open_p.add_argument('-j', '--json', action='store_true')
     worktree_open_p.set_defaults(func=command_worktree_open)
+
+    worktree_release_p = worktree_sub.add_parser('release', parents=[common])
+    worktree_release_p.add_argument('lane')
+    worktree_release_p.add_argument('--reason', required=True, help='why this dead or abandoned lane is being released')
+    worktree_release_p.add_argument('-a', '--apply', action='store_true', help='create any recovery ref and remove the released lane record')
+    worktree_release_p.add_argument('-j', '--json', action='store_true')
+    worktree_release_p.set_defaults(func=command_worktree_release)
 
     worktree_lock_p = worktree_sub.add_parser('lock', parents=[common])
     worktree_lock_p.add_argument('stack')
@@ -18465,6 +21368,10 @@ def build_parser():
 
     int_rebuild_p = int_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
     add_rebuild_args(int_rebuild_p)
+    int_rebuild_p.add_argument(
+        '--reason',
+        help='required explanation when reconciling derived_paths narrowing',
+    )
     int_rebuild_p.set_defaults(func=command_int_rebuild)
 
     int_push_p = int_sub.add_parser('push', parents=[common])
@@ -18877,6 +21784,7 @@ def entrypoint_behavior_table():
         command_repo_rm,
         command_worktree_lock,
         command_worktree_unlock,
+        command_coordination_provenance_reset,
     ), mutates='always')
     register((command_worktree_open,), mutates='always', remedy=True)
     register((
@@ -18926,6 +21834,7 @@ def entrypoint_behavior_table():
         command_gc,
         command_journal_snapshot,
         command_journal_publish,
+        command_worktree_release,
     ), mutates='apply')
     register((command_hooks_install, command_hooks_remove), mutates='apply', remedy=True)
     register((
@@ -19110,6 +22019,39 @@ def converge_default_repository_hooks(args):
     return ensure_managed_repository_hooks(repo_root, manifest)
 
 
+def governed_worktree_reaping_requested(args):
+    always_mutating = {
+        command_worktree_open, command_worktree_lock, command_worktree_unlock,
+        command_sync, command_publish,
+        command_stack_absorb, command_stack_add, command_stack_capture_integration,
+        command_stack_close, command_stack_create,
+        command_stack_demote, command_stack_promote,
+        command_stack_resolve_integration, command_stack_set, command_stack_sync,
+    }
+    apply_gated = {
+        command_reconcile,
+        command_resume,
+        command_stack_classify_integration,
+        command_stack_land,
+    }
+    dry_run_gated = {
+        command_stack_push,
+        command_stack_rebuild,
+        command_int_align_remote,
+        command_int_push,
+        command_int_rebuild,
+    }
+    if args.func in always_mutating:
+        return True
+    if args.func in apply_gated:
+        return bool(getattr(args, 'apply', False))
+    if args.func in dry_run_gated:
+        return not bool(getattr(args, 'dry_run', False))
+    if args.func in {command_stack_git, command_int_git}:
+        return bool(getattr(args, 'auto_worktree', False) or getattr(args, 'worktree', None))
+    return False
+
+
 def governed_worktree_preflight(args):
     if not hasattr(args, 'repo'):
         return
@@ -19121,18 +22063,18 @@ def governed_worktree_preflight(args):
     if manifest is None:
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
-    reaping = args.func == command_worktree_open or (
-        args.func == command_gc and bool(getattr(args, 'apply', False))
-    ) or args.func in {command_sync, command_publish} or (
-        args.func in {command_reconcile, command_resume, command_stack_land}
-        and bool(getattr(args, 'apply', False))
-    ) or (
-        args.func in {command_stack_rebuild, command_stack_push, command_int_push}
-        and not bool(getattr(args, 'dry_run', False))
-    ) or args.func == command_stack_close
-    if not reaping:
+    if not governed_worktree_reaping_requested(args):
         return
-    reconcile_governed_worktrees(repo_root, manifest)
+    cleanup = reconcile_governed_worktrees(repo_root, manifest, manifest_path)
+    if cleanup['failures']:
+        details = ', '.join(
+            f"{item['id']} [{item['code']}]" for item in cleanup['failures']
+        )
+        raise SyncwheelError(
+            'governed worktree recovery is required before this mutation: '
+            + details
+            + '; cleanup failed closed, retry the named remedy'
+        )
     dangerous = {
         command_stack_rebuild, command_stack_push, command_int_push, command_reconcile,
         command_resume, command_sync, command_publish, command_stack_land, command_stack_close,
@@ -19144,7 +22086,9 @@ def governed_worktree_preflight(args):
         if lane['code'] in {
             'dirty', 'outside_root', 'unregistered_worktree', 'unavailable',
             'invalid_lease', 'current_directory', 'branch_delete_failed',
-            'branch_advanced',
+            'branch_advanced', 'locked', 'worktree_remove_failed', 'reaping',
+            'ledger_pending', 'recovery_ref_moved', 'lane_in_use',
+            'registration_mismatch', 'path_reappeared',
         }
     ]
     if blocked:

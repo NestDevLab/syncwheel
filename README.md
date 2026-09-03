@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.40.2`
+Current version: `0.42.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -239,8 +239,86 @@ destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
 the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
-worktree and local lane branch. A dirty, unavailable, outside-root, or current
-directory lane is retained and reported; it is never removed automatically.
+worktree and local lane branch. A dirty, unavailable, or current-directory lane
+is retained and reported; it is never removed automatically. A missing lane
+whose lease expired, or whose local owner PID is known to be dead, is reaped on
+the next applicable mutation even when an old registry path is outside the
+current configured root. If Git reports that the branch's worktree moved,
+Syncwheel resolves and checks the current path before deciding whether the lane
+is eligible, and retains moved dirty or externally locked worktrees.
+
+The clone-local registry mutex records its PID, process start time, and a unique
+token. A successor first obtains the old inode's non-blocking `flock`, then
+atomically renames and logs it when the metadata proves owner death, PID reuse,
+or an unreaped zombie. An empty or truncated lock is recovered only after a
+brief initialization grace, so a plain retry can resume even when `SIGKILL`
+lands between exclusive creation and metadata fsync. The creator verifies that
+its inode still owns the lock path before entering the critical section, so a
+stolen uninitialized lock never puts two processes inside it. That recovery is
+reported as an uninitialized lock rather than a dead owner, because its creator
+may be alive and merely descheduled, and the renamed inode is pruned by the next
+cleanup once nobody holds it; the durable recovery log keeps the evidence. While
+holding that mutex, cleanup takes a Git worktree lock with a deterministic
+Syncwheel token before classifying the lane or changing a ref. A lock failure is
+reported as a lane in use and stops the operation.
+
+Under both locks, Syncwheel verifies the exact Git admin directory and its
+`gitdir`, fsyncs a ledger `governed_worktree_cleanup_intent`, and saves the
+pending registry state through a temp-file and parent-directory fsync guarded by
+the observed pre-image digest. Stack create, add, and capture keep that intent
+and its terminal event in the ledger selected by the effective shared,
+personal, or external manifest. Only then may cleanup create the recovery ref
+and commit one expected-old ref transaction that verifies the recovery ref
+while deleting the lane branch. A restart rebuilds missing or rolled-back
+registry state from the durable intent. A final tracked/untracked probe precedes
+removal of the exact verified registration; cleanup never uses a global `git
+worktree prune`.
+
+A reappearing path, changed registration, or moved recovery ref fails closed
+with a retryable record. If a clean lane branch advanced after its first anchor,
+the recorded `gc --apply` remedy anchors the new tip and completes while
+retaining the earlier recovery ref. The locks cover concurrent Syncwheel cleanup
+and ordinary non-forced Git worktree operations. Raw mutation of
+Syncwheel-owned refs, double-force worktree operations, and direct non-owner
+writes into a lane during cleanup are outside the supported concurrency model
+and fail closed when their effects are detectable.
+
+To retire a known dead or abandoned lane deliberately, preview the operation
+first and provide a durable reason:
+
+```bash
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example"
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --apply
+```
+
+`release` is dry-run by default. With `--apply`, it creates a recovery ref for
+an existing lane-branch tip, removes the registry record, and appends a ledger
+event. An explicitly abandoned record whose path is already missing can still
+be released; any remaining Git worktree registration is removed before the
+registry record. It refuses an existing dirty lane and names the recovery
+remedy instead of removing it. Pending cleanup, including a branch that advanced
+before its expected-old transaction, and ledger writes are retryable and
+idempotent. An explicit release may supersede the automatic `branch_advanced`
+intent, retain its earlier recovery ref, anchor the new tip, and close with the
+operator's release reason; a release-originated retry retains its original
+reason. A release also completes any other pending reap state, including one
+left by `SIGKILL`, terminalizing it under the intent already fsynced for it. If
+another Syncwheel command already terminalized the lane, or the first release
+completed but its response was lost, the release reports that terminal ledger
+event instead of an unknown lane. Whenever the recorded terminal is not this
+operator's own release reason, `--apply` records that reason as a
+`governed_worktree_release_noted` ledger event, once per terminal; the dry run
+records nothing. `gc` reselects eligible lanes while holding the registry lock,
+avoids stale lane-id reuse, and also works when active-active coordination is
+disabled.
+
+Automatic lane reaping runs only before an explicitly mutating lifecycle
+operation. Status, check, handoff, `gc` without `--apply`, `reconcile` or
+`resume` without `--apply`, and every other preview leave the registry,
+branches, recovery refs, and ledger unchanged. `stack git` and `int git` join
+that mutation allowlist only when `--auto-worktree` or `--worktree` explicitly
+authorizes worktree creation; passthrough Git commands in an existing worktree
+do not implicitly trigger lane reaping.
 
 `status`, `check`, `handoff`, and `gc` include structured governed-worktree
 diagnostics in JSON. Repo-aware terminal commands show actionable yellow
@@ -910,7 +988,6 @@ Inspect or explicitly manage the repository-local, composable hook bundle:
 syncwheel hooks status
 syncwheel hooks install
 syncwheel hooks install --apply
-syncwheel hooks install --personal laptop --reason "retarget this clone" --apply
 syncwheel hooks remove
 syncwheel hooks remove --disable --reason "external contribution clone"
 syncwheel hooks remove --disable --reason "external contribution clone" --apply
@@ -921,75 +998,27 @@ including integration, stack and draft sources, channels, coordination state, an
 owned journal branch, and the delivery branches that only `stack land` may publish.
 It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes,
 then names the corresponding Syncwheel publisher. Existing
-hooks are chained and restored on removal; `core.hooksPath` is honored. The
-Syncwheel guard always runs before a chained user hook, both hooks run even when
-one fails, and any failure rejects the Git operation.
-For a git-tracked repository, `hooks status` reports the bundle as required when
-it is absent, stale, or tampered, but Syncwheel never installs it implicitly.
-Run `syncwheel hooks install --apply` explicitly. An installed hook that cannot
-resolve its stable CLI fails closed. Missing, partially installed, stale, or
-tampered hooks are reported as degraded with their causes; a repository without
-the bundle remains unguarded until it is installed.
+hooks are chained and restored on removal; `core.hooksPath` is honored.
 
 The same bundle installs `post-checkout` and `pre-commit` guards for the primary
-checkout. It is the shared integration projection, not an authoring desk: a manual
-commit there is blocked even when it remains on the manifest integration branch.
-Syncwheel's own control and in-place rebuild commits carry a per-child authorization;
-dedicated feature worktrees remain valid. The refusal names `syncwheel worktree open
-<lane> --into <stack>` for new work and `syncwheel stack capture-integration <stack>
-HEAD` for already committed primary work. A switch away from integration still fails
-visibly after Git completes it, so restore a mismatch losslessly rather than resetting
-dirty work.
+checkout. A switch away from the manifest integration branch returns a visible
+failure after Git completes the switch; the following commit is blocked. Dedicated
+feature worktrees remain valid. The checkout hook cannot undo Git's completed branch
+switch, so restore a mismatched checkout losslessly rather than resetting dirty work.
 
-The clone-local authority state has one source of truth:
-`guard.json` under the Git common directory. Syncwheel replaces that file
-atomically. Re-enabling writes enabled state before installing hooks, so any
-partial hook failure remains fail-closed and visible as degraded. Disabling first
-appends a `primary_guard_disabled` intent with actor and reason to the ledger,
-then removes the managed hooks, and writes disabled state last. If the audit
-append fails, the guard and hooks remain intact.
-
-There is one effective guard target per clone. `hooks install --apply` records the
-integration branch from the selected shared, `--personal`, or `--manifest` profile;
-changing an existing target requires `--reason` and appends a
-`primary_guard_retargeted` intent with actor, old target, new target, and reason to
-that profile's ledger before changing the guard. `hooks remove` audits to the same
-ledger. `hooks status` compares the selected manifest with the recorded target.
-Inspecting a different profile, or renaming its integration branch, reports
-`degraded` and names `hooks install --apply` with the same selector and a reason as
-the repair. A missing, malformed, non-UTF-8, incomplete, or unaudited-disabled
-`guard.json` is never accepted: installed hooks fail closed and status reports the
-schema or readability cause instead of claiming readiness. Explicit installation
-repairs unreadable guard state.
-
-Before a built-in mutation, Syncwheel refuses a dirty primary before side effects (except
-the explicit recovery remedies `worktree open`, `stack capture-integration`, and reasoned
-hook lifecycle commands) and
-names those same remedies. Read-only commands continue and show a yellow TTY warning
-with the dirty-file count; the primary is shared and its changes are treated as not
-owned by the invoking user. Mutation behavior comes from the authoritative entrypoint
-registry, including `--apply` gating, so previews such as `stack classify-integration`
-remain read-only. Its command-only projection drives CLI preflight, while internal
-state writers stay in the same registry. `stack push`, `int rebuild`, and `int push`
-use the stricter execute-time manifest classification so future control-manifest
-persistence remains inside the same transaction boundary.
-Generated hooks use an executable installed CLI outside the repository, Git common
-directory, configured/default lane roots, and every registered worktree. They never
-pin a transient worktree shim and fail closed if the stable executable is unavailable.
-
-For `git-tracked` repositories the bundle is required by default, but normal commands
-do not install or rewrite it. Explicit `hooks status|install|remove` lifecycle
-commands remain observational or plan-first so they can inspect and administer an
-absent bundle; generated hook callbacks are excluded to prevent recursion.
-`local-only` contribution clones remain opt-in. The only escape hatch is
-`hooks remove --disable --reason ... --apply`; omitting the reason is rejected before
-anything is removed, and the audited disabled state remains visible in validation.
+For `git-tracked` repositories the bundle is required by default. Every normal
+repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
+`status`, checks and converges the bundle before continuing. Initialization and a
+transition to `git-tracked` converge it in the same command. Explicit `hooks
+status|install|remove` lifecycle commands remain observational or plan-first so they
+can inspect and administer an absent bundle; the generated hook callbacks are also
+excluded to prevent recursion. Existing non-Syncwheel hooks are chained and restored
+on removal. `local-only` contribution clones remain opt-in. The only escape hatch is
+a persisted clone-local disable with a non-empty reason, which stays visible in
+validation.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
-remote and allowed destination refset. Each authorization binds both the PID and
-its process-start identity, preventing PID reuse from reviving it. Cleanup preserves
-other live owners; stale malformed authorization files are removed only after a
-durable common-Git audit event is written.
+remote and allowed destination refset.
 
 These hooks are local safety rails, not a security boundary. `--no-verify`, deleting
 the hooks, or operating from a clone before its first normal Syncwheel command can
@@ -1042,7 +1071,12 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/workflow.md`: concise workflow model
 - `docs/core-procedure.md`: deterministic recovery procedure
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
-- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract
+- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract,
+  including blob-exact manifest-base/derived routing, NUL-safe Git paths,
+  Git-common-dir and coordinated content-bound provenance, snapshot precedence
+  over the clone-local cache, stale/narrowed projection repair, the single-clone
+  limit of uncoordinated `derived_paths`, and the accepted derived-route
+  delivery cost
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
