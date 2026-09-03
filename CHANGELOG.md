@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.42.4 - 2026-09-03
+## 0.42.5 - 2026-09-03
 
 - Add a private, clone-local GitHub PR merge policy with strict provenance
   filters, dry-run/apply/clear CLI commands, and preservation of unrelated
