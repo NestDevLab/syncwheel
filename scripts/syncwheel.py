@@ -42,6 +42,10 @@ class DerivedProvenanceDurabilityError(SyncwheelError):
     """The provenance store was replaced, but directory durability is unknown."""
 
 
+class CoordinationRemoteRejection(SyncwheelError):
+    """The coordination remote refused the atomic push and nothing moved."""
+
+
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
@@ -8965,17 +8969,45 @@ def pending_coordination_publications(repo_root, manifest_path):
     return pending
 
 
+def coordination_scope_remedy(scope):
+    scope = str(scope or '')
+    prefix, separator, identifier = scope.partition(':')
+    if separator and identifier:
+        return {
+            'stack': f'stack push {identifier}',
+            'promote': f'stack promote {identifier}',
+            'demote': f'stack demote {identifier}',
+            'close': f'stack close {identifier} --force',
+        }.get(prefix)
+    if scope == 'integration':
+        return 'int push'
+    if scope in {'full', 'partial'}:
+        return 'reconcile --apply --push'
+    return None
+
+
+def pending_coordination_publication_remedy(scopes):
+    remedies = list(dict.fromkeys(
+        remedy for remedy in (coordination_scope_remedy(scope) for scope in scopes)
+        if remedy
+    ))
+    lines = ['another coordinated publication intent is pending: ' + ', '.join(scopes)]
+    if remedies:
+        lines.append('complete it first:')
+        lines.extend(f'  syncwheel {remedy}' for remedy in remedies)
+    else:
+        lines.append('retry or reconcile that exact command first')
+    return SyncwheelError('\n'.join(lines))
+
+
 def pending_coordination_publication(repo_root, manifest_path, fingerprint):
     pending = pending_coordination_publications(repo_root, manifest_path)
     matching = [item for item in pending if item.get('fingerprint') == fingerprint]
     if matching:
         return matching[-1]
     if pending:
-        scopes = sorted({str(item.get('scope')) for item in pending})
-        raise SyncwheelError(
-            'another coordinated publication intent is pending: '
-            + ', '.join(scopes)
-            + '; retry or reconcile that exact command first'
+        raise pending_coordination_publication_remedy(
+            sorted({str(item.get('scope')) for item in pending})
         )
     return None
 
@@ -9008,40 +9040,75 @@ def coordinated_publish_remote_failure(remedy):
     )
 
 
-def coordination_intent_touched_refs(intent):
-    refs = list(intent.get('changed_refs') or {})
-    closed_ref = coordination_tombstone_ref(intent.get('tombstone'))
-    if closed_ref:
-        refs.append(closed_ref)
-    return list(dict.fromkeys(refs))
+def coordinated_publish_command_failure(repo_root, config, exc, remedy):
+    """Turn a raw publication failure into an operator error, or None to reraise."""
+    if isinstance(exc, CoordinationRemoteRejection):
+        return SyncwheelError(
+            f'{exc}\nNothing was published. Resolve the rejection on the remote, '
+            f'then retry:\n  syncwheel {remedy}'
+        )
+    if not config or coordination_remote_is_reachable(repo_root, config['remote']):
+        return None
+    return coordinated_publish_remote_failure(remedy)
+
+
+def coordination_state_commits_since(repo_root, tip, since_tip):
+    if not tip:
+        return []
+    if not since_tip:
+        rev_range = tip
+    elif git(
+        repo_root, 'merge-base', '--is-ancestor', since_tip, tip, check=False
+    ).returncode == 0:
+        rev_range = f'{since_tip}..{tip}'
+    else:
+        return []
+    result = git(repo_root, 'rev-list', rev_range, check=False)
+    if result.returncode != 0:
+        return []
+    return result.stdout.split()
+
+
+def coordination_commit_operation_token(repo_root, commit):
+    result = git(
+        repo_root, 'show', f'{commit}:{COORDINATION_STATE_FILE}', check=False
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    token = payload.get('operation_token')
+    return token if isinstance(token, str) else None
 
 
 def coordinated_operation_landed(
-    repo_root, config, state, changed_refs, touched_refs, operation_token
+    repo_root, config, observed, expected_state_tip, operation_token
 ):
-    if not operation_token or not touched_refs:
+    """Whether this exact operation reached the remote.
+
+    The atomic push advances the state ref with its refs and claims, so a state
+    commit carrying the operation token is the proof. Ref tips are not: another
+    clone can legitimately move a published ref, or push the same tip without
+    this operation ever landing.
+    """
+    if not operation_token:
         return False
-    observed = remote_ref_tips(repo_root, config['remote'], list(changed_refs))
-    for ref, sha in changed_refs.items():
-        if not sha or observed.get(ref) != sha:
-            return False
-    claims = (state or {}).get('claims') or {}
-    claim_refs = {ref: coordination_claim_ref(ref) for ref in touched_refs}
-    claim_tips = remote_ref_tips(repo_root, config['remote'], claim_refs.values())
-    for source_ref, claim_ref in claim_refs.items():
-        claim_tip = claim_tips[claim_ref]
-        if not claim_tip or claims.get(source_ref) != claim_tip:
-            return False
-        claim = fetch_coordination_claim(
-            repo_root, config['remote'], claim_ref, claim_tip
-        ) or {}
-        if (
-            claim.get('coordination_id') != config['id']
-            or claim.get('source_ref') != source_ref
-            or claim.get('operation_token') != operation_token
-        ):
-            return False
-    return True
+    tip = (observed or {}).get('tip')
+    if not tip:
+        return False
+    state = (observed or {}).get('state') or {}
+    if state.get('operation_token') == operation_token:
+        return True
+    return any(
+        coordination_commit_operation_token(repo_root, commit) == operation_token
+        for commit in coordination_state_commits_since(
+            repo_root, tip, expected_state_tip
+        )
+    )
 
 
 def publication_intent_owner_recovers(intent):
@@ -9065,11 +9132,12 @@ def resolve_pending_coordination_publications(
 ):
     """Terminalize publish intents that can no longer complete as recorded.
 
-    An intent whose own refs and claims are already on the remote is completed
-    as ``already_published``; one whose reviewed state tip has been overtaken
-    can never satisfy its own leases again and is abandoned. Tokens in
-    ``adopt_tokens`` are left pending when they landed, so the command that
-    owns them can finish from its own recovery path.
+    An intent whose token is already in the published state chain completes as
+    ``already_published``. One that never reached the remote is abandoned even
+    when nothing else published meanwhile: it can never satisfy its own leases
+    again, and leaving it pending freezes every later publication. Tokens in
+    ``adopt_tokens`` belong to the running command, which finishes or renews
+    them itself.
     """
     config = coordination_config(manifest)
     if not config:
@@ -9082,13 +9150,9 @@ def resolve_pending_coordination_publications(
     )
     for intent in pending:
         token = intent.get('operation_token')
+        expected_tip = intent.get('expected_coordination_state_tip')
         if coordinated_operation_landed(
-            repo_root,
-            config,
-            observed.get('state'),
-            intent.get('changed_refs') or {},
-            coordination_intent_touched_refs(intent),
-            token,
+            repo_root, config, observed, expected_tip, token
         ):
             if token in adopt_tokens or publication_intent_owner_recovers(intent):
                 continue
@@ -9106,21 +9170,26 @@ def resolve_pending_coordination_publications(
                 manifest_path,
             )
             continue
-        if observed['tip'] != intent.get('expected_coordination_state_tip'):
-            restore_abandoned_publication_rename(repo_root, intent)
-            append_ledger_event(
-                repo_root,
-                'coordination_publish_abandoned',
-                {
-                    'operation_token': token,
-                    'fingerprint': intent.get('fingerprint'),
-                    'scope': intent.get('scope'),
-                    'reason': 'superseded',
-                    'status': 'superseded',
-                    'coordination_state': observed['tip'],
-                },
-                manifest_path,
-            )
+        if observed['tip'] != expected_tip:
+            reason = 'superseded'
+        elif token in adopt_tokens:
+            continue
+        else:
+            reason = 'not_landed'
+        restore_abandoned_publication_rename(repo_root, intent)
+        append_ledger_event(
+            repo_root,
+            'coordination_publish_abandoned',
+            {
+                'operation_token': token,
+                'fingerprint': intent.get('fingerprint'),
+                'scope': intent.get('scope'),
+                'reason': reason,
+                'status': reason,
+                'coordination_state': observed['tip'],
+            },
+            manifest_path,
+        )
     return observed
 
 
@@ -9141,9 +9210,8 @@ def renew_coordination_publication(repo_root, manifest, manifest_path, pending):
     if coordinated_operation_landed(
         repo_root,
         config,
-        observed.get('state'),
-        pending.get('changed_refs') or {},
-        coordination_intent_touched_refs(pending),
+        observed,
+        pending.get('expected_coordination_state_tip'),
         pending.get('operation_token'),
     ):
         return pending
@@ -9373,9 +9441,12 @@ def coordinated_publish(
     if operation_token and coordinated_operation_landed(
         repo_root,
         config,
-        expected.get('state'),
-        changed_refs,
-        touched_refs,
+        expected,
+        (
+            None
+            if expected_coordination_state_tip is EXPECTED_COORDINATION_STATE_UNSET
+            else expected_coordination_state_tip
+        ),
         operation_token,
     ):
         report_advisory_unclaimed_owned_refs(config, expected['state'])
@@ -9533,6 +9604,18 @@ def coordinated_publish(
                 raise SyncwheelError(
                     'coordinated publish stopped after a claim lease loss; '
                     'run syncwheel handoff, inspect the named source ref claim, then retry'
+                )
+            leased_now = remote_ref_tips(
+                repo_root, config['remote'], list(expected_tips)
+            )
+            if leased_now == expected_tips:
+                raise CoordinationRemoteRejection(
+                    'the coordination remote refused the atomic publication: '
+                    + (
+                        result.stderr.strip()
+                        or result.stdout.strip()
+                        or 'no detail returned'
+                    )
                 )
             race = classify_coordination_race(
                 repo_root,
@@ -15925,6 +16008,9 @@ def recover_pending_stack_close(repo_root, manifest, manifest_path, pending):
 def command_stack_close(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+    )
     original_manifest = copy.deepcopy(manifest)
     pending_close = pending_stack_close_operation(repo_root, manifest_path, args.stack)
     stack = stack_map(manifest).get(args.stack)
@@ -16458,6 +16544,7 @@ def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
 def command_stack_create(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stacks = stack_map(manifest)
     if args.stack in stacks:
         existing = stacks[args.stack]
@@ -16773,27 +16860,82 @@ def materialize_new_stack_branch(
             temporary.cleanup()
 
 
+def realign_promoted_local_branches(
+    repo_root, config, stack_id, from_branch, to_branch, promoted_tip
+):
+    """Restore the branch layout an interrupted promotion had already reached.
+
+    A promotion can land long before this recovery runs, and an ordinary command
+    can rematerialize the draft branch from the manifest in between. Neither is
+    evidence against the recorded intent.
+    """
+    if not to_branch or from_branch == to_branch:
+        return
+    if not branch_exists(repo_root, to_branch):
+        if branch_exists(repo_root, from_branch):
+            git(repo_root, 'branch', '-m', from_branch, to_branch)
+            return
+        if not promoted_tip:
+            raise SyncwheelError(
+                f'{stack_id}: pending promote intent has no published tip to restore '
+                f'{to_branch} from'
+            )
+        if not commit_exists(repo_root, promoted_tip):
+            git(
+                repo_root, 'fetch', '--quiet', config['remote'],
+                f'refs/heads/{to_branch}', check=False,
+            )
+        if not commit_exists(repo_root, promoted_tip):
+            raise SyncwheelError(
+                f'{stack_id}: cannot restore {to_branch} at {promoted_tip} from '
+                f"{config['remote']}"
+            )
+        created = git(
+            repo_root, 'update-ref', f'refs/heads/{to_branch}', promoted_tip,
+            ZERO_OBJECT_ID, check=False,
+        )
+        if created.returncode != 0:
+            raise SyncwheelError(
+                f'{stack_id}: {to_branch} appeared concurrently while recovering '
+                'the promotion'
+            )
+        return
+    if not branch_exists(repo_root, from_branch):
+        return
+    draft_tip = ref_tip(repo_root, from_branch)
+    if git(
+        repo_root, 'merge-base', '--is-ancestor', draft_tip, to_branch, check=False
+    ).returncode != 0:
+        raise SyncwheelError(
+            f'{stack_id}: the draft branch {from_branch} carries commits that the '
+            f'promoted branch {to_branch} does not; inspect it and delete it, then '
+            f'retry:\n  syncwheel stack promote {stack_id}'
+        )
+    git(repo_root, 'update-ref', '-d', f'refs/heads/{from_branch}', draft_tip)
+
+
 def recover_pending_stack_promote(
     repo_root, manifest, manifest_path, stack, pending
 ):
     rename = pending.get('rename')
     state_transition = pending.get('state_transition')
     if rename:
+        to_branch = rename.get('to_branch')
         if (
             rename.get('stack') != stack['id']
-            or rename.get('from_branch') != stack['branch']
+            or stack['branch'] not in {rename.get('from_branch'), to_branch}
         ):
             raise SyncwheelError(
                 f"{stack['id']}: pending promote intent does not match the local stack generation"
             )
-        to_branch = rename.get('to_branch')
-        if not to_branch or not branch_exists(repo_root, to_branch) or branch_exists(
-            repo_root, stack['branch']
-        ):
-            raise SyncwheelError(
-                f"{stack['id']}: pending promote intent requires the already-renamed "
-                f'local branch {to_branch}'
-            )
+        realign_promoted_local_branches(
+            repo_root,
+            coordination_config(manifest),
+            stack['id'],
+            rename.get('from_branch'),
+            to_branch,
+            (pending.get('changed_refs') or {}).get(f'refs/heads/{to_branch}'),
+        )
         stack['branch'] = to_branch
     elif state_transition != {
         'stack': stack['id'],
@@ -16844,17 +16986,77 @@ def recover_pending_stack_promote(
     return 0
 
 
+def complete_pending_promote_intents(
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+):
+    """Finish promotions that landed before their manifest was saved.
+
+    Only the manifest is behind the published state, and any command that
+    rebuilds managed branches from it would resurrect the draft the promotion
+    already replaced.
+    """
+    if not coordination_is_active(manifest):
+        return
+    pending = [
+        intent for intent in pending_coordination_publications(repo_root, manifest_path)
+        if str(intent.get('scope') or '').startswith('promote:')
+        and str(intent.get('scope'))[len('promote:'):] not in set(skip_stacks)
+    ]
+    if not pending:
+        return
+    config = coordination_config(manifest)
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    for intent in pending:
+        stack_id = str(intent.get('scope'))[len('promote:'):]
+        stack = next(
+            (item for item in manifest['stacks'] if item['id'] == stack_id), None
+        )
+        if stack is None or not coordinated_operation_landed(
+            repo_root,
+            config,
+            observed,
+            intent.get('expected_coordination_state_tip'),
+            intent.get('operation_token'),
+        ):
+            continue
+        if not apply:
+            print(
+                f'{stack_id}: a landed promotion is still pending; complete it with:'
+                f'\n  syncwheel stack promote {stack_id}'
+            )
+            continue
+        recover_pending_stack_promote(
+            repo_root, manifest, manifest_path, stack, intent
+        )
+
+
 def command_stack_promote(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+    )
     stack = require_stack(manifest, args.stack)
     pending_promotion = pending_coordination_publication_for_scope(
         repo_root, manifest_path, f'promote:{args.stack}'
     )
     if pending_promotion:
-        return recover_pending_stack_promote(
-            repo_root, manifest, manifest_path, stack, pending_promotion
-        )
+        try:
+            return recover_pending_stack_promote(
+                repo_root, manifest, manifest_path, stack, pending_promotion
+            )
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root,
+                coordination_config(manifest) if coordination_is_active(manifest) else None,
+                exc,
+                f'stack promote {args.stack}',
+            )
+            if failure is None:
+                raise
+            raise failure from exc
     if stack.get('state', 'published') != 'draft':
         raise SyncwheelError(f"{args.stack}: promote requires state draft (found {stack.get('state', 'published')})")
     from_branch = stack['branch']
@@ -16969,9 +17171,18 @@ def command_stack_promote(args):
                     ],
                     operation_token=publication_operation['operation_token'],
                 )
-    except Exception:
+    except Exception as exc:
         if renamed and branch_exists(repo_root, to_branch) and not branch_exists(repo_root, from_branch):
             git(repo_root, 'branch', '-m', to_branch, from_branch, check=False)
+        if isinstance(exc, SyncwheelError):
+            failure = coordinated_publish_command_failure(
+                repo_root,
+                coordination_config(manifest) if coordination_is_active(manifest) else None,
+                exc,
+                f'stack promote {args.stack}',
+            )
+            if failure is not None:
+                raise failure from exc
         raise
 
     save_manifest(manifest_path, manifest)
@@ -17558,6 +17769,7 @@ def command_stack_rebuild(args):
 def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stack = require_stack(manifest, args.stack)
     refusal = draft_push_refusal(manifest, stack, stack_push_remote(manifest, stack, args.remote))
     if refusal:
@@ -17598,11 +17810,12 @@ def command_stack_push(args):
                 ),
             )
         except SyncwheelError as exc:
-            if coordination_remote_is_reachable(repo_root, config['remote']):
+            failure = coordinated_publish_command_failure(
+                repo_root, config, exc, f"stack push {stack['id']}"
+            )
+            if failure is None:
                 raise
-            raise coordinated_publish_remote_failure(
-                f"stack push {stack['id']}"
-            ) from exc
+            raise failure from exc
         if not args.dry_run:
             append_ledger_event(
                 repo_root,
@@ -18231,6 +18444,22 @@ def command_reconcile(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    reconcile_remedy = (
+        'publish' if getattr(args, 'command', None) == 'publish'
+        else 'reconcile --apply --push'
+    )
+    reconcile_remote = (coordination_config(manifest) or {}).get('remote')
+    if (
+        getattr(args, 'push', False)
+        and coordination_is_active(manifest)
+        and reconcile_remote
+        and not coordination_remote_is_reachable(repo_root, reconcile_remote)
+    ):
+        raise coordinated_publish_remote_failure(reconcile_remedy)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path,
+        apply=bool(getattr(args, 'apply', False)),
+    )
     pending_merge_manifest = None
     pending_merge_preview = None
     if getattr(args, 'accept_merge', False):
@@ -18644,19 +18873,27 @@ def command_reconcile(args):
                 publication_scope,
                 projection_status,
             )
-        coordination_result = coordinated_publish(
-            repo_root,
-            manifest,
-            manifest_path,
-            coordinated_refs,
-            publication_scope,
-            projection_status,
-            expected_coordination_state_tip=publication_operation[
-                'expected_coordination_state_tip'
-            ],
-            operation_token=publication_operation['operation_token'],
-        )
         config = coordination_config(manifest)
+        try:
+            coordination_result = coordinated_publish(
+                repo_root,
+                manifest,
+                manifest_path,
+                coordinated_refs,
+                publication_scope,
+                projection_status,
+                expected_coordination_state_tip=publication_operation[
+                    'expected_coordination_state_tip'
+                ],
+                operation_token=publication_operation['operation_token'],
+            )
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root, config, exc, reconcile_remedy
+            )
+            if failure is None:
+                raise
+            raise failure from exc
         for event in coordinated_events:
             payload = {
                 **event,
@@ -18874,6 +19111,7 @@ def command_int_rebuild(args):
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(repo_root, manifest, manifest_path)
     integration = manifest['integration']
     if coordination_is_active(manifest):
         config = coordination_config(manifest)
@@ -18912,9 +19150,12 @@ def command_int_push(args):
                 ),
             )
         except SyncwheelError as exc:
-            if coordination_remote_is_reachable(repo_root, config['remote']):
+            failure = coordinated_publish_command_failure(
+                repo_root, config, exc, 'int push'
+            )
+            if failure is None:
                 raise
-            raise coordinated_publish_remote_failure('int push') from exc
+            raise failure from exc
         if not args.dry_run:
             append_ledger_event(
                 repo_root,

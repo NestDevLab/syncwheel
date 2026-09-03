@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.42.0`
+Current version: `0.43.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -138,8 +138,9 @@ Backfill uses create-only leases and never overwrites a foreign claim.
 Syncwheel covers concurrent Syncwheel commands, process death, ordinary Git on
 unowned refs, and arbitrary readers. It fails closed on a detectable CAS,
 ordering, intent, or recovery violation, and it never leaves state that a retry
-of the recorded operation cannot resolve; forced/raw mutation of
-Syncwheel-owned refs and hostile remotes or hooks remain outside that guarantee.
+of the recorded operation, or the next coordinated command, cannot resolve;
+forced/raw mutation of Syncwheel-owned refs and hostile remotes remain outside
+that guarantee.
 
 Every mutating coordinated publisher records a durable operation token before
 the atomic push. If process death occurs after remote success, the retry accepts
@@ -148,14 +149,21 @@ including when later publications have moved the shared state on. Draft create
 uses the same token in its create intent and remote claim, and cleans up its
 token-derived temporary worktree registration on retry.
 
-A publication intent is always terminal. When the state tip it reviewed has been
-overtaken and its own claims are not on the remote, it can never satisfy its
-leases again: the next publication, `reconcile`, or `resume` records
-`coordination_publish_abandoned` for it and continues, and `stack promote`
-re-observes the state and republishes under a renewed plan. So a clone that lost
-a publication race, or died before its push, keeps publishing after a plain
-retry. An unreachable coordination remote during `stack push` or `int push`
-fails closed and names the retry command.
+A publication intent is always terminal. Landing is proved by the operation's
+own token in the published state chain, never by current ref tips, so another
+clone legitimately advancing the same ref cannot turn a landed operation into an
+abandoned one. An intent that is absent from that chain never reached the remote
+and is recorded as `coordination_publish_abandoned` by the next publication,
+`reconcile`, or `resume`, with reason `not_landed` when nothing else published
+meanwhile and `superseded` when the reviewed state tip was overtaken. A promotion
+whose push landed before its manifest save owes only that save: the next
+coordinated command completes it from the published state and rebuilds the
+promoted branch, so an intervening `sync` cannot strand it. A clone that lost a
+publication race, was refused by the remote, or died before its push keeps
+publishing after a plain retry. A coordination remote that is unreachable, or
+that refuses the atomic push without changing anything, fails closed and names
+the retry command for `stack push`, `int push`, `stack promote`, `publish`, and
+`reconcile --apply --push`.
 
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:

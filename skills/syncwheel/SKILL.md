@@ -163,11 +163,14 @@ Existing manifests default to `coordination.claims: advisory`; inspect and then
 apply `syncwheel coordination claims backfill --apply --reason <reason>` before
 an explicitly approved switch to `required`. Never overwrite a foreign claim.
 Every mutating coordinated publish records a durable intent token before its
-atomic push. A retry adopts only claim/state evidence bearing that token and
-must not republish, including after unrelated publications moved the state. An
-intent whose reviewed state tip was overtaken without its claims landing is
-abandoned as `coordination_publish_abandoned` by the next publication,
-`reconcile`, or `resume`, so a lost race never blocks the clone. Draft create
+atomic push. That token in the published state chain is the only proof the
+operation landed; a retry that finds it completes without republishing, even
+after other clones advanced the same refs. An intent absent from that chain
+never landed and is abandoned as `coordination_publish_abandoned` by the next
+publication, `reconcile`, or `resume`, so neither a lost race nor a refused push
+blocks the clone. A promotion whose push landed before its manifest save is
+completed by the next coordinated command, which rebuilds the promoted branch
+from the published state instead of trusting the local branch layout. Draft create
 uses its `stack_create_intent` token in the claim and removes its token-derived
 temporary worktree registration on retry.
 Install the plan-first managed-ref guard in each clone with `syncwheel hooks

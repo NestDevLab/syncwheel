@@ -99,6 +99,13 @@ elif checkpoint.startswith('ledger_event:'):
             os.kill(os.getpid(), signal.SIGKILL)
         return result
     module.append_ledger_event = killed
+elif checkpoint == 'save_manifest':
+    original = module.save_manifest
+    def killed(manifest_path, manifest):
+        result = original(manifest_path, manifest)
+        os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    module.save_manifest = killed
 elif checkpoint == 'publish_intent':
     original = module.begin_coordination_publication
     def killed(*call_args, **call_kwargs):
@@ -4048,7 +4055,7 @@ module.main()
         self.assertIn('could not inspect the coordination remote', failure.stderr)
         self.assertIn('syncwheel stack push unreachable', failure.stderr)
 
-    def test_reconcile_refuses_a_pending_intent_from_another_operation(self):
+    def test_reconcile_terminalizes_a_pending_intent_from_another_operation(self):
         origin = self.create_remote('round7-reconcile-fingerprint')
         repo = self.clone(origin, 'round7-reconcile-fingerprint')
         self.init_coordinated(repo)
@@ -4083,14 +4090,24 @@ module.main()
             'refs/heads/pr/fingerprint'
         ]
 
-        failure = self.run_cli(
+        self.run_cli(
             repo, 'reconcile', '--apply', '--push', '--stack', 'fingerprint',
-            '--skip-integration', '--rebuild', 'none', expected=2,
+            '--skip-integration', '--rebuild', 'none',
         )
 
-        self.assertIn(
-            'no longer matches its pending coordinated publication intent',
-            failure.stderr,
+        abandoned = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_abandoned'
+            and event['payload'].get('operation_token') == 'foreign-reconcile-token'
+        ]
+        self.assertEqual(abandoned[-1]['reason'], 'not_landed')
+        completed = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_completed'
+        ]
+        self.assertNotIn(
+            'foreign-reconcile-token',
+            [item.get('operation_token') for item in completed],
         )
         self.assertEqual(
             self.remote_state(origin)[1]['managed_refs']['refs/heads/pr/fingerprint'],
@@ -4131,3 +4148,217 @@ module.main()
         self.assertTrue(
             module.coordination_claim_from_commit(closer, after)['closed']
         )
+
+    def test_a_rejected_push_never_freezes_the_next_publication(self):
+        origin = self.create_remote('round8-rejected')
+        repo = self.clone(origin, 'round8-rejected')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/rejected', 'rejected.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'rejected', source, '--branch', 'pr/rejected'
+        )
+        hook = origin / 'hooks' / 'pre-receive'
+        hook.write_text(
+            '#!/bin/sh\n'
+            'while read old new ref; do\n'
+            '  case "$ref" in refs/heads/pr/rejected) exit 1;; esac\n'
+            'done\n'
+            'exit 0\n'
+        )
+        hook.chmod(0o755)
+
+        failure = self.run_cli(repo, 'stack', 'push', 'rejected', expected=2)
+
+        self.assertIn('refused the atomic publication', failure.stderr)
+        self.assertIn('syncwheel stack push rejected', failure.stderr)
+        hook.unlink()
+        follow_up = self.commit_on_branch(repo, 'scratch/after-rejection', 'after.txt')
+        self.run_cli(repo, 'stack', 'add', 'rejected', follow_up)
+
+        self.run_cli(repo, 'stack', 'push', 'rejected')
+
+        module = self.load_module()
+        abandoned = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_abandoned'
+            and event['payload'].get('scope') == 'stack:rejected'
+        ]
+        self.assertEqual(abandoned[-1]['reason'], 'not_landed')
+        _, state = self.remote_state(origin)
+        self.assertEqual(
+            state['managed_refs']['refs/heads/pr/rejected'],
+            self.git(repo, 'rev-parse', 'pr/rejected').stdout.strip(),
+        )
+        self.run_cli(repo, 'int', 'push')
+
+    def test_a_landed_promotion_completes_before_sync_rebuilds_its_draft(self):
+        origin = self.create_remote('round8-promote-sync')
+        repo = self.clone(origin, 'round8-promote-sync')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/promote-sync', 'promote-sync.txt')
+        self.run_cli(repo, 'stack', 'create', 'promote-sync', source, '--draft')
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'promote', 'promote-sync'
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref('refs/heads/pr/promote-sync')
+        before = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        self.git(
+            repo, 'branch', 'syncwheel/draft/promote-sync', 'pr/promote-sync'
+        )
+
+        self.run_cli(repo, 'sync')
+
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0], before
+        )
+        self.assertFalse(
+            module.branch_exists(repo, 'syncwheel/draft/promote-sync')
+        )
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(
+            item for item in saved['stacks'] if item['id'] == 'promote-sync'
+        )
+        self.assertEqual(promoted['branch'], 'pr/promote-sync')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+        self.assertFalse(module.pending_coordination_publications(
+            repo, repo / '.syncwheel' / 'manifest.json'
+        ))
+        self.run_cli(repo, 'int', 'push')
+
+    def test_a_promotion_killed_at_its_manifest_save_completes_on_retry(self):
+        origin = self.create_remote('round8-promote-saved')
+        repo = self.clone(origin, 'round8-promote-saved')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'scratch/promote-saved', 'promote-saved.txt'
+        )
+        self.run_cli(repo, 'stack', 'create', 'promote-saved', source, '--draft')
+        self.run_cli_sigkill_after(
+            repo, 'save_manifest', 'stack', 'promote', 'promote-saved'
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref('refs/heads/pr/promote-saved')
+        before = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+
+        self.run_cli(repo, 'stack', 'promote', 'promote-saved')
+
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0], before
+        )
+        self.assertFalse(module.pending_coordination_publications(
+            repo, repo / '.syncwheel' / 'manifest.json'
+        ))
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(
+            item for item in saved['stacks'] if item['id'] == 'promote-saved'
+        )
+        self.assertEqual(promoted['branch'], 'pr/promote-saved')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+        self.run_cli(repo, 'int', 'push')
+
+    def test_a_foreign_push_never_abandons_a_landed_promotion(self):
+        origin = self.create_remote('round8-promote-foreign')
+        repo = self.clone(origin, 'round8-promote-foreign')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'scratch/promote-foreign', 'promote-foreign.txt'
+        )
+        self.run_cli(repo, 'stack', 'create', 'promote-foreign', source, '--draft')
+        self.run_cli_sigkill_after(
+            repo, 'authorized_push', 'stack', 'promote', 'promote-foreign'
+        )
+        module = self.load_module()
+        intent = next(
+            event['payload'] for event in reversed(module.load_ledger_events(repo))
+            if event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('scope') == 'promote:promote-foreign'
+        )
+        other = self.mirror_coordinated_clone(
+            origin, repo, 'round8-promote-foreign-other',
+            ['integration/shared', 'pr/promote-foreign'],
+        )
+        other_manifest, other_path = module.load_manifest(other)
+        module.save_manifest(
+            other_path,
+            module.apply_coordination_snapshot(
+                other_manifest, self.remote_state(origin)[1]['manifest']
+            ),
+        )
+        before_state, _ = self.remote_state(origin)
+        self.run_cli(other, 'stack', 'push', 'promote-foreign')
+        self.assertNotEqual(self.remote_state(origin)[0], before_state)
+
+        self.run_cli(repo, 'int', 'push')
+
+        self.assertFalse([
+            event for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_abandoned'
+            and event['payload'].get('scope') == 'promote:promote-foreign'
+        ])
+        completed = [
+            event['payload'] for event in module.load_ledger_events(repo)
+            if event['type'] == 'coordination_publish_completed'
+            and event['payload'].get('operation_token') == intent['operation_token']
+        ]
+        self.assertTrue(completed)
+        self.assertTrue(module.branch_exists(repo, 'pr/promote-foreign'))
+        self.assertFalse(
+            module.branch_exists(repo, 'syncwheel/draft/promote-foreign')
+        )
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(
+            item for item in saved['stacks'] if item['id'] == 'promote-foreign'
+        )
+        self.assertEqual(promoted['branch'], 'pr/promote-foreign')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+
+    def test_stack_promote_remote_failure_names_a_retry_command(self):
+        origin = self.create_remote('round8-promote-unreachable')
+        repo = self.clone(origin, 'round8-promote-unreachable')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'scratch/promote-unreachable', 'promote-unreachable.txt'
+        )
+        self.run_cli(repo, 'stack', 'create', 'promote-unreachable', source, '--draft')
+        self.run_cli_sigkill_after(
+            repo, 'publish_intent', 'stack', 'promote', 'promote-unreachable'
+        )
+        self.git(
+            repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git')
+        )
+
+        failure = self.run_cli(
+            repo, 'stack', 'promote', 'promote-unreachable', expected=2
+        )
+
+        self.assertIn('could not inspect the coordination remote', failure.stderr)
+        self.assertIn('syncwheel stack promote promote-unreachable', failure.stderr)
+
+    def test_reconcile_remote_failure_names_a_retry_command(self):
+        origin = self.create_remote('round8-reconcile-unreachable')
+        repo = self.clone(origin, 'round8-reconcile-unreachable')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(
+            repo, 'pr/reconcile-unreachable', 'reconcile-unreachable.txt'
+        )
+        self.run_cli(
+            repo, 'stack', 'create', 'reconcile-unreachable', source,
+            '--branch', 'pr/reconcile-unreachable',
+        )
+        self.git(
+            repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git')
+        )
+
+        failure = self.run_cli(
+            repo, 'reconcile', '--apply', '--push', '--rebuild', 'none', expected=2
+        )
+
+        self.assertIn('could not inspect the coordination remote', failure.stderr)
+        self.assertIn('syncwheel reconcile --apply --push', failure.stderr)

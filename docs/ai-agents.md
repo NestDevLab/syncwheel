@@ -57,11 +57,17 @@ do not repeat the push. Create propagates its `stack_create_intent` token into
 the claim and removes only the deterministic temporary worktree owned by that
 generation.
 
-When that evidence does not exist and the reviewed state tip has been overtaken,
-the intent is dead: record `coordination_publish_abandoned` and continue rather
-than freezing on it. Never leave a publish intent that no command can
-terminalize, and never let a foreign pending intent be the reason an unrelated
-publication cannot run.
+Prove landing from the operation token in the published state chain, never from
+current ref tips: in an active-active fleet another clone may legitimately move a
+published ref, and an unrelated clone may push the same tip. When that evidence
+does not exist the intent is dead whether or not the state tip moved: record
+`coordination_publish_abandoned` with reason `not_landed` or `superseded` and
+continue rather than freezing on it. A landed promotion still owes only its
+manifest save; `stack promote`, `stack push`, `int push`, `stack create`,
+`stack close`, and `reconcile --apply` complete it from the published state and
+rebuild the promoted branch instead of requiring a particular local branch
+layout. Never leave a publish intent that no command can terminalize, and never
+let a foreign pending intent be the reason an unrelated publication cannot run.
 
 For draft close, the order is intent, remote tombstone claim plus state CAS,
 local manifest save, terminal event. Do not reintroduce remote observations

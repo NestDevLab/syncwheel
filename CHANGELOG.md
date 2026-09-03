@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.43.0 - 2026-09-03
+
+- Publish each active-active draft's source ref and coordinated state atomically
+  when it is created, so independent drafts cannot strand one another before a
+  normal stack publication or close.
+- Serialize ownership of every managed source ref through an atomically advanced
+  `syncwheel/claim/heads/...` ref. Existing manifests default to advisory claim
+  validation; `coordination claims backfill` prepares an explicit move to
+  required validation without overwriting a foreign claim.
+- Close never-published drafts remote-first: record an intent, atomically publish
+  a tombstone claim and state child, save the manifest, then terminalize the
+  ledger event. A retry completes only from the same tombstone generation; a
+  later claim produces the terminal `close_superseded` outcome instead.
+- Create draft refs with create-only compare-and-swap, reject non-CAS worktree
+  reattachment, and recover interrupted create operations from generation-bound
+  ledger intents. The create claim carries the intent token, and a retry removes
+  its deterministic temporary worktree registration after process death.
+- Journal every coordinated publication intent before its atomic push. A retry
+  whose exact token is already present in claim and state completes locally
+  without advancing either ref again.
+- Prove that a coordinated operation landed from its own operation token in the
+  published state chain instead of from current ref tips, so a legitimate push by
+  another clone on the same ref no longer reports a landed operation as
+  superseded, undoes its local rename, or writes that claim to the ledger.
+- Terminalize coordinated publication intents. An intent whose token is in the
+  published state chain completes as `already_published`; one that never reached
+  the remote is abandoned as `coordination_publish_abandoned` by the next
+  publication, `reconcile`, or `resume`, with reason `not_landed` when nothing
+  else published meanwhile and `superseded` when the reviewed state tip was
+  overtaken. A lost race, a push the remote refuses, or process death before the
+  push no longer blocks further coordinated publication from that clone.
+- Complete a promotion whose push landed before its manifest was saved from the
+  published state: `stack promote`, `stack push`, `int push`, `stack create`,
+  `stack close`, and `reconcile --apply` all finish it, rebuilding the promoted
+  branch and dropping a rematerialized draft instead of requiring an exact local
+  branch layout.
+- Name the pending intent's own remedy command when one blocks a publication.
+- Decide `close_superseded` from the claim of the pending close generation
+  instead of the shared state tip, so an unrelated publication no longer aborts
+  a retry that only had to complete an already-published tombstone.
+- Report an unreachable coordination remote during `stack push`, `int push`,
+  `stack promote`, `publish`, and `reconcile --apply --push` as an operational
+  failure that names the retry command, and report an atomic push the remote
+  refused without moving anything as a rejection with the same retry command.
+- Adopt a pending reconcile publication intent only when it matches the
+  fingerprint of the current operation.
+- Prove `absorbed` against an explicitly fetched delivery SHA by comparing the
+  composed stack result for a non-empty NUL-separated touched-path set,
+  including squash-equivalent deliveries while rejecting odd-path omissions
+  and content removed by a later revert.
+
 ## 0.42.0 - 2026-09-02
 
 - Project Agentwheel revision-provider commits authored on a declared
