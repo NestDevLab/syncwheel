@@ -40,6 +40,9 @@ Syncwheel adds that missing control plane:
 - one manifest declares commit ownership
 - each stack maps to one PR branch
 - integration is a disposable projection of the manifest
+- a rebuild restores and records a deterministic, manifest-only control commit
+  when its projected tree carries an older manifest; `int rebuild --reason` is
+  required for `ai-managed` repositories
 - deployment channels pin selected stack revisions into ordered, rebuildable
   branch compositions
 - `reconcile` compares local branches, remote tips, and manifest projections
@@ -222,6 +225,18 @@ under the same exact state-ref lease. It never updates the managed branch and
 refuses non-descendants, intervals above 1024 commits, plan drift, ownership
 uncertainty, or concurrent ref changes.
 
+A coordination state records the digest of `.syncwheel/manifest.json` on its
+integration tip. States published before 0.42.2 recorded the digest of the
+normalized public snapshot of that same manifest instead, so the guard accepts
+either form and reports which one matched; anything else still fails closed.
+The first publish, push, or compose over a legacy state rewrites the state with
+the control-manifest digest and records a `coordination_state_digest_migrated`
+ledger event. To migrate without publishing anything else, plan and apply with
+`--freeze-backend state-digest-migration`: the plan reports
+`digest-migration-required` instead of `noop`, binds both digests, and apply
+appends a state child that changes only the recorded digest under the same
+exact state-ref lease.
+
 When the remote state and a stale local manifest independently added stacks,
 compose the proposals explicitly instead of weakening `stack push`:
 
@@ -229,7 +244,7 @@ compose the proposals explicitly instead of weakening `stack push`:
 syncwheel coordination compose \
   --stack new-stack \
   --known-base-state <state-sha> \
-  --known-base-snapshot-digest <snapshot-digest> > compose-plan.json
+  --known-base-manifest-digest <integration-control-manifest-digest> > compose-plan.json
 syncwheel coordination compose --apply --plan-file compose-plan.json
 ```
 
@@ -1042,7 +1057,7 @@ python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
 python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
 python3 scripts/syncwheel.py stack push feature-a
 python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
-python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
+python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration --reason "refresh integration projection"
 python3 scripts/syncwheel.py int push
 python3 scripts/syncwheel.py int git --auto-worktree -- status
 python3 scripts/syncwheel.py int sync-status --json

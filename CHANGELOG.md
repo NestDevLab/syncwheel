@@ -106,6 +106,57 @@
 - Name the retry command when a coordinated publish stops because the remote
   state changed after the reviewed plan.
 
+## 0.42.3 - 2026-09-03
+
+- Accept both recorded control-manifest digest forms in coordination state:
+  the digest of `.syncwheel/manifest.json` on the state's integration tip, and
+  the normalized public snapshot of that same manifest recorded before 0.42.2.
+  Verification reports which form matched; any other value still fails closed.
+  Without this, every publish, stack push, and compose from a state published
+  before 0.42.2 stopped with no available publication path.
+- Migrate a legacy state on its first successful publication: the successor
+  carries the control-manifest digest and the ledger records
+  `coordination_state_digest_migrated` with both digests and both forms.
+- Add the `state-digest-migration` repair backend for a legacy state whose
+  managed refs are already coherent. The plan reports
+  `digest-migration-required` instead of `noop` and binds both digests; apply
+  appends a state child that changes only the recorded digest under the same
+  state-only CAS boundary as the other evidence backends.
+
+## 0.42.2 - 2026-09-03
+
+- Preserve the control manifest across integration rebuilds: reject an
+  unexplained pre-rebuild manifest divergence, then restore and commit the
+  manifest when the rebuild itself replaces it. The manifest-only control
+  commit is built deterministically with an isolated index, verified before
+  its integration ref CAS, and recorded with actor, command, and reason.
+- Finish control-manifest persistence idempotently after a crash: align a
+  checked-out integration branch after the ref CAS, rewrite external sources
+  from the same desired manifest, and deduplicate the durable ledger receipt.
+- Publish one manifest digest in coordination state: the canonical digest of
+  `.syncwheel/manifest.json` on the recorded integration tip. Additive compose
+  binds that digest and compares public topology snapshots structurally.
+- Derive the global manifest-write transaction from one statically checked
+  saver registry, including repository authority and coordination compose.
+  Every parser command declares its behavior in that registry, and the
+  command table is a projection of it.
+- Publish the updated control commit from `stack push` as well, so the
+  integration ref advances whenever a stack push changes the manifest.
+- Probe the integration checkout before the control ref CAS: unrelated
+  uncommitted work there now refuses the command, names the checkout, the
+  paths and the command to rerun, and leaves the ref where it was. When the
+  same work appears after the CAS, the operation still finishes, aligns the
+  control manifest alone, and warns instead of leaving a pending intent.
+- Settle a pending control-manifest intent from any manifest writer, not only
+  from `stack push`, `int rebuild` and `int push`, so a later `stack create`
+  can no longer strand the delivery commands. A source that already carries a
+  newer proposal is kept: the interrupted operation is receipted when its
+  control commit is already on the ref, and `int rebuild --reason` abandons it
+  otherwise.
+- Accept a modified `.syncwheel/manifest.json` as rebuild input, so the
+  reviewed-proposal remedy named by a cross-clone divergence refusal can
+  actually run in the checkout that carries the divergence.
+
 ## 0.42.0 - 2026-09-02
 
 - Project Agentwheel revision-provider commits authored on a declared
