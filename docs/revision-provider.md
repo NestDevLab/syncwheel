@@ -257,17 +257,42 @@ and the Git-common-dir location makes every linked worktree observe the same
 classification, landing guard, stale check, and provider `check` result. The
 author ledger receives an audit projection after the common store; it is not a
 reader source and a per-worktree ledger cannot hide provenance from another
-lane. An unreadable or malformed common store fails closed and names restoration
-from a verified coordination snapshot or a new Agentwheel update.
+lane. An unreadable or malformed common store fails closed and names the
+executable remedy:
 
-With active-active coordination, the published snapshot's
-`integration.derived_provenance` list remains the cross-clone shared base. The
-Git-common-dir store carries bounded unpublished overrides until coordinated
-publication absorbs them. Without coordination, the common store is the full
-clone-local source. A new update replaces provenance only for the same complete
-declared path set: a new derived route replaces the record, while a
-manifest-base route resolves it. Conflict diagnostics use Git's NUL-delimited
-name-only output and name both paths and base.
+```bash
+syncwheel coordination provenance reset --all --reason '<why>'
+```
+
+That command clears the clone-local store even when it cannot be parsed and
+records a `derived_provenance_reset` ledger event; it never touches the
+published snapshot.
+
+With active-active coordination the published snapshot's
+`integration.derived_provenance` list is the source, and the Git-common-dir
+store is a bounded local cache of records this clone has not published yet. A
+cache entry applies only while the snapshot still holds the record it was
+written against; once the snapshot moves past it, the snapshot wins, the entry
+is ignored, and `validate`, `status`, and `plan` report
+`derived-provenance-diverged` with the local commit, the snapshot commit, and
+the remedy `syncwheel coordination provenance reset --reason '<why>'`. No read
+path fails on that difference, so two peers publishing the same declared path
+set never leave either of them without a usable command. Without coordination
+the common store is the full clone-local source and no such precedence applies.
+A new update replaces provenance only for the same complete declared path set:
+a new derived route replaces the record and rebinds it to the snapshot observed
+at that moment, while a manifest-base route resolves it. Conflict diagnostics
+use Git's NUL-delimited name-only output and name both paths and base.
+
+The common store lives under the Git common directory, so it is neither cloned
+nor pushed. In a repository that uses `integration.derived_paths` **without**
+coordination, a second clone therefore has no provenance at all: the derived
+commit is unmapped there (a `validate` warning, not an error), `stack land`
+does not recognize it and will not stop, and `revision-provider check` refuses
+that clone with `integration already contains unmapped commits`. Enabling
+active-active coordination is what makes provenance reach other clones, CI
+runners, and other hosts; `derived_paths` without coordination is safe only
+while the repository has a single clone.
 
 An ordinary rebuild still drops derived commits while retaining their
 provenance, so `validate` and `plan` report `derived-projection-stale`, affected

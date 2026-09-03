@@ -192,6 +192,10 @@ DERIVED_PROVENANCE_FIELDS = {
 DERIVED_PROVENANCE_STORE_VERSION = 1
 DERIVED_PROVENANCE_OVERRIDE_FIELDS = {'paths', 'base_commit', 'record'}
 DERIVED_PATHS_REBUILD_REASON = 'reconcile narrowed derived paths'
+DERIVED_PROVENANCE_DISCARD_REASON = (
+    'discard clone-local derived provenance superseded by the coordination snapshot'
+)
+DERIVED_PROVENANCE_RESET_REASON = 'discard an unreadable clone-local derived provenance store'
 JOURNAL_SENSITIVE_PARTS = {
     '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
     'id_rsa', 'id_ed25519', 'credentials', 'credentials.json',
@@ -1951,15 +1955,15 @@ def load_derived_provenance_store(repo_root):
         data = json.loads(path.read_text(encoding='utf-8'))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SyncwheelError(
-            f'invalid derived provenance store {path}: {exc}; restore it from a '
-            'verified coordination snapshot or run a new Agentwheel update'
+            f'invalid derived provenance store {path}: {exc}; discard it with '
+            + derived_provenance_reset_remedy(whole_store=True)
         ) from exc
     try:
         return normalize_derived_provenance_store(data, str(path))
     except SyncwheelError as exc:
         raise SyncwheelError(
-            f'{exc}; restore the derived provenance store from a verified coordination '
-            'snapshot or run a new Agentwheel update'
+            f'{exc}; discard the derived provenance store with '
+            + derived_provenance_reset_remedy(whole_store=True)
         ) from exc
 
 
@@ -1971,8 +1975,11 @@ def save_derived_provenance_store(repo_root, store):
     if not parent_existed:
         fsync_directory_path(path.parent.parent)
     payload = (json.dumps(store, indent=2, sort_keys=True) + '\n').encode('utf-8')
+    temporary_prefix = f'.{path.name}.tmp-'
+    for orphan in path.parent.glob(f'{temporary_prefix}*'):
+        orphan.unlink(missing_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f'.{path.name}.tmp-', dir=str(path.parent)
+        prefix=temporary_prefix, dir=str(path.parent)
     )
     temporary = Path(temporary_name)
     replaced = False
@@ -2074,13 +2081,17 @@ def shared_derived_provenance_records(repo_root, manifest, coordination_state=No
     )
 
 
-def apply_derived_provenance_overrides(shared, store):
-    """Apply bounded clone-local changes over the current shared snapshot."""
+def resolve_derived_provenance_overrides(shared, store, *, coordinated=True):
+    """Return the effective records plus the clone-local entries the snapshot supersedes.
+
+    Under coordination the snapshot wins: a superseded cache entry is dropped, never raised.
+    """
     records = normalize_derived_provenance(
         shared, label='shared derived provenance'
     )
     by_paths = {tuple(item['paths']): item for item in records}
     store = normalize_derived_provenance_store(store)
+    diverged = []
     for override in store['overrides']:
         key = tuple(override['paths'])
         current = by_paths.get(key)
@@ -2088,29 +2099,46 @@ def apply_derived_provenance_overrides(shared, store):
         if current == desired:
             continue
         current_commit = current['commit'] if current else None
-        if current_commit != override['base_commit']:
-            paths = json.dumps(override['paths'], ensure_ascii=True)
-            raise SyncwheelError(
-                'clone-local derived provenance conflicts with the active coordination '
-                f'snapshot for {paths}; run syncwheel handoff and retry'
-            )
+        if coordinated and current_commit != override['base_commit']:
+            diverged.append({
+                'paths': list(override['paths']),
+                'base_commit': override['base_commit'],
+                'local_commit': desired['commit'] if desired else None,
+                'snapshot_commit': current_commit,
+            })
+            continue
         if desired is None:
             by_paths.pop(key, None)
         else:
             by_paths[key] = desired
-    return normalize_derived_provenance(
-        list(by_paths.values()), label='effective derived provenance'
+    return (
+        normalize_derived_provenance(
+            list(by_paths.values()), label='effective derived provenance'
+        ),
+        sorted(diverged, key=lambda item: item['paths']),
     )
 
 
-def derived_provenance_records(repo_root, manifest, coordination_state=None):
+def apply_derived_provenance_overrides(shared, store, *, coordinated=True):
+    return resolve_derived_provenance_overrides(
+        shared, store, coordinated=coordinated
+    )[0]
+
+
+def derived_provenance_snapshot(repo_root, manifest, coordination_state=None):
     """Resolve provenance from the shared snapshot plus Git-common-dir state."""
     shared = shared_derived_provenance_records(
         repo_root, manifest, coordination_state
     )
-    return apply_derived_provenance_overrides(
-        shared, load_derived_provenance_store(repo_root)
+    return resolve_derived_provenance_overrides(
+        shared,
+        load_derived_provenance_store(repo_root),
+        coordinated=coordination_is_active(manifest),
     )
+
+
+def derived_provenance_records(repo_root, manifest, coordination_state=None):
+    return derived_provenance_snapshot(repo_root, manifest, coordination_state)[0]
 
 
 def update_common_derived_provenance(
@@ -2156,7 +2184,9 @@ def update_common_derived_provenance(
             ],
         }
         store = normalize_derived_provenance_store(store)
-        effective = apply_derived_provenance_overrides(shared, store)
+        effective = apply_derived_provenance_overrides(
+            shared, store, coordinated=coordination_is_active(manifest)
+        )
         key = tuple(paths)
         current = {tuple(item['paths']): item for item in effective}.get(key)
         if expected_commit is not None and current is not None and (
@@ -2174,12 +2204,7 @@ def update_common_derived_provenance(
         shared_record = {
             tuple(item['paths']): item for item in shared
         }.get(key)
-        existing = overrides.get(key)
-        base_commit = (
-            existing['base_commit']
-            if existing is not None
-            else (shared_record['commit'] if shared_record else None)
-        )
+        base_commit = shared_record['commit'] if shared_record else None
         if record == shared_record:
             overrides.pop(key, None)
         else:
@@ -2309,6 +2334,19 @@ def narrowed_derived_provenance_records(repo_root, manifest, provenance=None):
     return sorted(
         narrowed,
         key=lambda item: (item['path'], item['commit'], item['operation_id']),
+    )
+
+
+def derived_provenance_reset_remedy(*, whole_store=False):
+    return (
+        'syncwheel coordination provenance reset'
+        + (' --all' if whole_store else '')
+        + ' --reason '
+        + shlex.quote(
+            DERIVED_PROVENANCE_RESET_REASON
+            if whole_store
+            else DERIVED_PROVENANCE_DISCARD_REASON
+        )
     )
 
 
@@ -10157,11 +10195,23 @@ def validate_manifest(repo_root, manifest):
     derived_commits = []
     narrowed_derived_commits = []
     integration_merge_commits = []
-    provenance = (
-        derived_provenance_records(repo_root, manifest)
+    provenance, diverged_provenance = (
+        derived_provenance_snapshot(repo_root, manifest)
         if manifest.get('version') == MANIFEST_VERSION_CHANNELS
-        else []
+        else ([], [])
     )
+    if diverged_provenance:
+        diverged_detail = '; '.join(
+            json.dumps(item['paths'], ensure_ascii=True)
+            + f": clone-local {item['local_commit'] or 'none'}"
+            + f" vs snapshot {item['snapshot_commit'] or 'none'}"
+            for item in diverged_provenance
+        )
+        warnings.append(
+            'derived-provenance-diverged: the published coordination snapshot supersedes '
+            f'clone-local derived provenance and is used instead: {diverged_detail}; '
+            + derived_provenance_reset_remedy()
+        )
     narrowed_derived = narrowed_derived_provenance_records(
         repo_root, manifest, provenance
     )
@@ -10248,6 +10298,7 @@ def validate_manifest(repo_root, manifest):
         'derived_commits': derived_commits,
         'narrowed_derived_commits': narrowed_derived_commits,
         'derived_paths_narrowed': narrowed_derived,
+        'derived_provenance_diverged': diverged_provenance,
         'derived_projection_stale': stale_derived,
         'merge_commits': integration_merge_commits,
     }
@@ -10325,6 +10376,20 @@ def build_plan(repo_root, manifest, validation):
             'commits': sorted({item['commit'] for item in narrowed}),
             'paths': sorted({item['path'] for item in narrowed}),
             'remedy': derived_paths_rebuild_remedy(),
+        })
+    if details['integration'].get('derived_provenance_diverged'):
+        diverged = details['integration']['derived_provenance_diverged']
+        actions.append({
+            'type': 'derived-provenance-diverged',
+            'branch': integration['branch'],
+            'paths': sorted({path for item in diverged for path in item['paths']}),
+            'local_commits': sorted(
+                {item['local_commit'] for item in diverged if item['local_commit']}
+            ),
+            'snapshot_commits': sorted(
+                {item['snapshot_commit'] for item in diverged if item['snapshot_commit']}
+            ),
+            'remedy': derived_provenance_reset_remedy(),
         })
     if details['integration'].get('unmapped_commits'):
         commits = details['integration']['unmapped_commits']
@@ -11431,6 +11496,65 @@ def command_coordination_disable(args):
         {'previous_mode': existing.get('mode', 'legacy')},
     )
     print('coordination disabled; no remote state branch was deleted')
+    return 0
+
+
+def command_coordination_provenance_reset(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    reason = (getattr(args, 'reason', None) or '').strip()
+    if not reason:
+        raise SyncwheelError(
+            'coordination provenance reset requires --reason; use: '
+            + derived_provenance_reset_remedy(whole_store=args.all)
+        )
+    with derived_provenance_store_lock(repo_root):
+        if args.all:
+            discarded = None
+            store = default_derived_provenance_store()
+        else:
+            store = load_derived_provenance_store(repo_root)
+            _effective, diverged = resolve_derived_provenance_overrides(
+                shared_derived_provenance_records(repo_root, manifest),
+                store,
+                coordinated=coordination_is_active(manifest),
+            )
+            keys = {tuple(item['paths']) for item in diverged}
+            if not keys:
+                print(
+                    'coordination provenance reset: no clone-local record is superseded '
+                    'by the coordination snapshot'
+                )
+                return 0
+            discarded = diverged
+            store = {
+                'version': DERIVED_PROVENANCE_STORE_VERSION,
+                'overrides': [
+                    item for item in store['overrides']
+                    if tuple(item['paths']) not in keys
+                ],
+            }
+        save_derived_provenance_store(repo_root, store)
+        append_ledger_event(
+            repo_root,
+            'derived_provenance_reset',
+            {
+                'reason': reason,
+                'scope': 'store' if args.all else 'diverged',
+                'discarded': discarded,
+            },
+            manifest_path,
+        )
+    if args.all:
+        print('coordination provenance reset: clone-local derived provenance store cleared')
+    else:
+        for item in discarded:
+            print(
+                'coordination provenance reset: discarded '
+                + json.dumps(item['paths'], ensure_ascii=True)
+            )
     return 0
 
 
@@ -20097,6 +20221,30 @@ def build_parser():
     coordination_disable_p = coordination_sub.add_parser('disable', parents=[common])
     coordination_disable_p.add_argument('-a', '--apply', action='store_true')
     coordination_disable_p.set_defaults(func=command_coordination_disable)
+
+    coordination_provenance_p = coordination_sub.add_parser(
+        'provenance',
+        help='manage the clone-local derived provenance store under the git common dir',
+    )
+    coordination_provenance_sub = coordination_provenance_p.add_subparsers(
+        dest='coordination_provenance_command', required=True
+    )
+    coordination_provenance_reset_p = coordination_provenance_sub.add_parser(
+        'reset',
+        parents=[common],
+        help='discard clone-local derived provenance the coordination snapshot supersedes',
+    )
+    coordination_provenance_reset_p.add_argument(
+        '--reason', required=True, help='recorded reason for discarding clone-local records'
+    )
+    coordination_provenance_reset_p.add_argument(
+        '--all',
+        action='store_true',
+        help='clear the whole store, including an unreadable one',
+    )
+    coordination_provenance_reset_p.set_defaults(
+        func=command_coordination_provenance_reset
+    )
 
     coordination_repair_p = coordination_sub.add_parser(
         'repair',

@@ -1,5 +1,6 @@
 import copy
 import contextlib
+import fcntl
 import hashlib
 import importlib.util
 import io
@@ -11,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -377,6 +379,56 @@ class RevisionProviderRepository:
             self.git('switch', '-q', 'main-integration')
             self.git('reset', '--hard', 'origin/main')
         return commit
+
+
+def run_cli(cwd, *args):
+    env = os.environ.copy()
+    env['SYNCWHEEL_UPDATE_MODE'] = 'off'
+    return subprocess.run(
+        ['python3', str(CLI), *args],
+        cwd=cwd,
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+
+class CoordinationPeer:
+    """A second clone of the fixture's coordination remote, sharing its helpers."""
+
+    git = RevisionProviderRepository.git
+    cli = RevisionProviderRepository.cli
+    cli_at = RevisionProviderRepository.cli_at
+    manifest_path = RevisionProviderRepository.manifest_path
+    read_manifest = RevisionProviderRepository.read_manifest
+    write_manifest = RevisionProviderRepository.write_manifest
+    staged_derived_digest = RevisionProviderRepository.staged_derived_digest
+    append_derived_provenance = RevisionProviderRepository.append_derived_provenance
+    commit_derived_projection = RevisionProviderRepository.commit_derived_projection
+
+    def __init__(self, fixture, name='peer-b'):
+        self.root = fixture.root
+        self.remote = fixture.remote
+        self.repo = fixture.root / name
+        subprocess.run(
+            ['git', '-C', str(self.remote), 'symbolic-ref', 'HEAD', 'refs/heads/main'],
+            check=True,
+        )
+        subprocess.run(
+            ['git', 'clone', '-q', str(self.remote), str(self.repo)], check=True
+        )
+        self.git('config', 'user.name', f'Revision Provider {name}')
+        self.git('config', 'user.email', f'{name}@example.invalid')
+        self.git(
+            'switch', '-q', '-c', 'main-integration', '--track', 'origin/main-integration'
+        )
+        self.git(
+            'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main'
+        )
+        self.cli(
+            'hooks', 'remove', '--disable',
+            '--reason', 'isolated coordination peer', '--apply',
+        )
 
 
 class RevisionProviderProtocolTest(unittest.TestCase):
@@ -3178,6 +3230,382 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         self.assertEqual(
             published['manifest']['integration']['derived_provenance'], []
         )
+
+    def assert_provenance_commands_stay_executable(self, repo):
+        outcomes = {}
+        probes = (
+            ('validate', ('validate',), True),
+            ('status', ('status',), True),
+            ('plan', ('plan', '--json'), True),
+            ('handoff', ('handoff', '--no-fetch', '--json'), True),
+            ('check', ('check',), True),
+            ('reconcile', ('reconcile', '--json'), True),
+            ('int rebuild', ('int', 'rebuild', '--dry-run', '--reason', 'inspect'), True),
+            ('int push', ('int', 'push', '--dry-run'), False),
+        )
+        for name, argv, bounded in probes:
+            result = run_cli(repo, *argv)
+            outcomes[name] = result
+            output = result.stdout + result.stderr
+            self.assertNotIn('clone-local derived provenance conflicts', output, msg=name)
+            self.assertNotIn('run syncwheel handoff and retry', output, msg=name)
+            if bounded:
+                self.assertIn(
+                    result.returncode,
+                    (0, 1),
+                    msg=f'{name} exited {result.returncode}: {output}',
+                )
+        return outcomes
+
+    def publish_a_competing_peer_record(self):
+        """Leave this clone with a pending record the coordination snapshot has passed."""
+        self.fixture.close()
+        self.fixture = RevisionProviderRepository(coordination_mode='active-active')
+        fixture = self.fixture
+        fixture.enable_derived_paths('locks/', on_base=True)
+        fixture.cli('int', 'push')
+        peer = CoordinationPeer(fixture)
+        path = 'locks/codex.lock'
+        (fixture.repo / 'locks').mkdir()
+        (fixture.repo / path).write_text('peer-a\n')
+        fixture.git('add', '--', path)
+        pending = fixture.commit_derived_projection(
+            'peer-a-derived', [path], subject='test: peer A derived projection'
+        )
+        (peer.repo / 'locks').mkdir()
+        (peer.repo / path).write_text('peer-b\n')
+        peer.git('add', '--', path)
+        published = peer.commit_derived_projection(
+            'peer-b-derived', [path], subject='test: peer B derived projection'
+        )
+        peer.cli('int', 'push')
+        fixture.git('fetch', '-q', 'origin')
+        return path, pending, published
+
+    def test_published_snapshot_supersedes_a_pending_peer_record(self):
+        path, pending, published = self.publish_a_competing_peer_record()
+        fixture = self.fixture
+
+        outcomes = self.assert_provenance_commands_stay_executable(fixture.repo)
+
+        effective, diverged = SYNCWHEEL.derived_provenance_snapshot(
+            fixture.repo, fixture.read_manifest()
+        )
+        self.assertEqual([item['commit'] for item in effective], [published])
+        self.assertEqual(
+            diverged,
+            [{
+                'paths': [path],
+                'base_commit': None,
+                'local_commit': pending,
+                'snapshot_commit': published,
+            }],
+        )
+        self.assertIn('derived-provenance-diverged', outcomes['validate'].stdout)
+        self.assertIn(pending, outcomes['validate'].stdout)
+        self.assertIn(published, outcomes['validate'].stdout)
+        self.assertIn(
+            'syncwheel coordination provenance reset', outcomes['validate'].stdout
+        )
+        planned = next(
+            item for item in json.loads(outcomes['plan'].stdout)
+            if item['type'] == 'derived-provenance-diverged'
+        )
+        self.assertEqual(planned['paths'], [path])
+        self.assertEqual(planned['local_commits'], [pending])
+        self.assertEqual(planned['snapshot_commits'], [published])
+
+        remedy = run_cli(
+            fixture.repo, *shlex.split(planned['remedy'])[1:]
+        )
+
+        self.assertEqual(remedy.returncode, 0, msg=remedy.stdout + remedy.stderr)
+        self.assertEqual(
+            SYNCWHEEL.load_derived_provenance_store(fixture.repo)['overrides'], []
+        )
+        self.assertNotIn(
+            'derived-provenance-diverged', run_cli(fixture.repo, 'validate').stdout
+        )
+
+    def test_a_new_local_record_rebinds_to_the_published_snapshot(self):
+        path, _pending, published = self.publish_a_competing_peer_record()
+        fixture = self.fixture
+        self.assertEqual(
+            len(SYNCWHEEL.derived_provenance_snapshot(
+                fixture.repo, fixture.read_manifest()
+            )[1]),
+            1,
+        )
+
+        (fixture.repo / path).write_text('peer-a-again\n')
+        fixture.git('add', '--', path)
+        replacement = fixture.commit_derived_projection(
+            'peer-a-rebound', [path], subject='test: peer A derived projection again'
+        )
+
+        effective, diverged = SYNCWHEEL.derived_provenance_snapshot(
+            fixture.repo, fixture.read_manifest()
+        )
+        self.assertEqual(diverged, [])
+        self.assertEqual([item['commit'] for item in effective], [replacement])
+        self.assertEqual(
+            [item['base_commit'] for item in SYNCWHEEL.load_derived_provenance_store(
+                fixture.repo
+            )['overrides']],
+            [published],
+        )
+        self.assertNotIn(
+            'derived-provenance-diverged', run_cli(fixture.repo, 'validate').stdout
+        )
+
+    def test_peer_provenance_resolution_keeps_a_pending_record_recoverable(self):
+        self.fixture.close()
+        self.fixture = RevisionProviderRepository(coordination_mode='active-active')
+        fixture = self.fixture
+        fixture.enable_derived_paths('locks/', on_base=True)
+        fixture.cli('int', 'push')
+        path = 'locks/codex.lock'
+        (fixture.repo / 'locks').mkdir()
+        (fixture.repo / path).write_text('published\n')
+        fixture.git('add', '--', path)
+        fixture.commit_derived_projection(
+            'peer-a-published', [path], subject='test: peer A published projection'
+        )
+        fixture.cli('int', 'push')
+        peer = CoordinationPeer(fixture)
+        (fixture.repo / path).write_text('pending\n')
+        fixture.git('add', '--', path)
+        pending = fixture.commit_derived_projection(
+            'peer-a-pending', [path], subject='test: peer A pending projection'
+        )
+
+        peer.git('switch', '-q', 'main')
+        peer_manifest = peer.read_manifest()
+        peer_manifest['integration']['derived_paths'] = []
+        peer.write_manifest(peer_manifest)
+        peer.git('add', '.syncwheel/manifest.json')
+        peer.git('commit', '-q', '-m', 'test: empty derived paths')
+        policy_commit = peer.git('rev-parse', 'HEAD')
+        peer.git('push', '-q', 'origin', 'main')
+        peer.git('switch', '-q', 'main-integration')
+        peer.git('cherry-pick', policy_commit)
+        peer.cli('validate', expected=1)
+        peer.cli('int', 'rebuild', '--reason', SYNCWHEEL.DERIVED_PATHS_REBUILD_REASON)
+        peer.cli('validate')
+        peer.cli('int', 'push')
+        published = SYNCWHEEL.local_coordination_provenance_state(
+            peer.repo, peer.read_manifest()
+        )
+        self.assertEqual(
+            published['manifest']['integration']['derived_provenance'], []
+        )
+        fixture.git('fetch', '-q', 'origin')
+
+        outcomes = self.assert_provenance_commands_stay_executable(fixture.repo)
+
+        effective, diverged = SYNCWHEEL.derived_provenance_snapshot(
+            fixture.repo, fixture.read_manifest()
+        )
+        self.assertEqual(effective, [])
+        self.assertEqual(
+            [(item['paths'], item['local_commit'], item['snapshot_commit'])
+             for item in diverged],
+            [([path], pending, None)],
+        )
+        self.assertIn('derived-provenance-diverged', outcomes['validate'].stdout)
+        self.assertIn(pending, outcomes['validate'].stdout)
+        self.assertIn(
+            'syncwheel coordination provenance reset', outcomes['validate'].stdout
+        )
+
+        remedy = run_cli(
+            fixture.repo,
+            'coordination', 'provenance', 'reset',
+            '--reason', 'peer B resolved the published record',
+        )
+
+        self.assertEqual(remedy.returncode, 0, msg=remedy.stdout + remedy.stderr)
+        self.assertEqual(
+            SYNCWHEEL.load_derived_provenance_store(fixture.repo)['overrides'], []
+        )
+        self.assertEqual(
+            [
+                event['payload']['discarded'][0]['paths']
+                for event in SYNCWHEEL.load_ledger_events(fixture.repo)
+                if event['type'] == 'derived_provenance_reset'
+            ],
+            [[path]],
+        )
+
+    def test_common_provenance_writes_serialize_on_the_exclusive_store_lock(self):
+        self.fixture.enable_derived_paths('locks/')
+        manifest = self.fixture.read_manifest()
+        record = {
+            'operation_id': 'serialized-write',
+            'commit': self.fixture.git('rev-parse', 'HEAD'),
+            'paths': ['locks/codex.lock'],
+            'paths_digest': '11' * 32,
+            'composition_digest': '22' * 32,
+        }
+        lock_path = SYNCWHEEL.derived_provenance_store_lock_path(self.fixture.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        written = threading.Event()
+        failures = []
+
+        def writer():
+            try:
+                SYNCWHEEL.record_common_derived_provenance(
+                    self.fixture.repo, manifest, record
+                )
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                written.set()
+
+        with lock_path.open('a+b') as handle:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            thread = threading.Thread(target=writer)
+            thread.start()
+            serialized = not written.wait(3)
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        thread.join(60)
+
+        self.assertEqual(failures, [])
+        self.assertTrue(written.wait(60))
+        self.assertTrue(serialized, msg='a concurrent write ignored the store lock')
+        self.assertEqual(
+            [
+                item['record']['operation_id']
+                for item in SYNCWHEEL.load_derived_provenance_store(
+                    self.fixture.repo
+                )['overrides']
+            ],
+            ['serialized-write'],
+        )
+
+    def test_common_provenance_store_write_is_atomic_and_durable(self):
+        store_path = SYNCWHEEL.derived_provenance_store_path(self.fixture.repo)
+        first = {
+            'version': SYNCWHEEL.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{
+                'paths': ['locks/codex.lock'],
+                'base_commit': None,
+                'record': {
+                    'operation_id': 'durable-first',
+                    'commit': self.fixture.git('rev-parse', 'HEAD'),
+                    'paths': ['locks/codex.lock'],
+                    'paths_digest': '33' * 32,
+                    'composition_digest': '44' * 32,
+                },
+            }],
+        }
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        orphan = store_path.parent / f'.{store_path.name}.tmp-abandoned'
+        orphan.write_bytes(b'{}')
+        SYNCWHEEL.save_derived_provenance_store(self.fixture.repo, first)
+        self.assertFalse(orphan.exists())
+        original = store_path.read_bytes()
+        real_fsync = os.fsync
+        renames = []
+        fsyncs = []
+
+        def refuse_rename(source, target):
+            renames.append((Path(source), Path(target)))
+            raise OSError('rename refused')
+
+        def record_fsync(descriptor):
+            fsyncs.append(descriptor)
+            return real_fsync(descriptor)
+
+        with (
+            mock.patch.object(SYNCWHEEL.os, 'replace', refuse_rename),
+            mock.patch.object(SYNCWHEEL.os, 'fsync', record_fsync),
+            self.assertRaises(OSError),
+        ):
+            SYNCWHEEL.save_derived_provenance_store(
+                self.fixture.repo,
+                SYNCWHEEL.default_derived_provenance_store(),
+            )
+
+        self.assertEqual(store_path.read_bytes(), original)
+        self.assertEqual(len(renames), 1)
+        source, target = renames[0]
+        self.assertEqual(target, store_path)
+        self.assertEqual(source.parent, store_path.parent)
+        self.assertTrue(source.name.startswith(f'.{store_path.name}.tmp-'))
+        self.assertTrue(fsyncs)
+        self.assertEqual(
+            sorted(store_path.parent.glob(f'.{store_path.name}.tmp-*')), []
+        )
+
+    def test_unreadable_common_provenance_store_names_an_executable_remedy(self):
+        self.fixture.enable_derived_paths('locks/')
+        store_path = SYNCWHEEL.derived_provenance_store_path(self.fixture.repo)
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_text('{"version": 1, "overrides"')
+
+        blocked = run_cli(self.fixture.repo, 'validate')
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn('invalid derived provenance store', blocked.stderr)
+        remedy = shlex.split(
+            blocked.stderr.split('discard it with ', 1)[1].strip()
+        )
+        self.assertEqual(remedy[0], 'syncwheel')
+
+        repaired = run_cli(self.fixture.repo, *remedy[1:])
+
+        self.assertEqual(repaired.returncode, 0, msg=repaired.stdout + repaired.stderr)
+        self.assertEqual(
+            SYNCWHEEL.load_derived_provenance_store(self.fixture.repo),
+            SYNCWHEEL.default_derived_provenance_store(),
+        )
+        self.fixture.cli('validate')
+
+    def test_manifest_base_operation_resolves_a_stale_derived_record_end_to_end(self):
+        self.fixture.enable_derived_paths('locks/')
+        base = self.fixture.git('rev-parse', 'HEAD')
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.fixture.git('add', 'locks/codex.lock')
+        self.fixture.commit_derived_projection(
+            'orphaned-derived',
+            ['locks/codex.lock'],
+            subject='test: orphaned derived projection',
+        )
+        self.fixture.git('reset', '--hard', base)
+        self.fixture.cli('validate', expected=1)
+        request = self.fixture.request(
+            'preflight',
+            operation_id='manifest-base-lock-replacement',
+            path='locks/codex.lock',
+            before=None,
+            after_content='manifest-base\n',
+        )
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'locks').mkdir()
+        (self.fixture.repo / 'locks' / 'codex.lock').write_text('manifest-base\n')
+        self.fixture.protocol_request(request)
+
+        finalized, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+
+        journal = json.loads(
+            (
+                self.fixture.provider_journal_root()
+                / 'manifest-base-lock-replacement.json'
+            ).read_text()
+        )
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(journal['projectionRoute'], 'manifest-base')
+        self.assertEqual(
+            SYNCWHEEL.derived_provenance_records(
+                self.fixture.repo, self.fixture.read_manifest()
+            ),
+            [],
+        )
+        self.fixture.cli('validate')
 
     def test_rebuild_drops_derived_commit_and_reports_stale_blocker(self):
         self.fixture.enable_derived_paths('locks/', on_base=True)

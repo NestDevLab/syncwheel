@@ -45,6 +45,20 @@
   like local manifest loading, and turn a partial revision-provider journal
   without valid `productPathObjects` into a named release-and-update recovery
   error.
+- Treat the published coordination snapshot as the derived-provenance source and
+  the Git-common-dir store as a local cache of unpublished records. A cache entry
+  the snapshot has moved past is reported as `derived-provenance-diverged` by
+  `validate`, `status`, and `plan` and then ignored, instead of failing every
+  command that loads the manifest; two peers publishing the same declared path
+  set no longer leave either of them without a usable command.
+- Add `syncwheel coordination provenance reset --reason`, which discards the
+  superseded clone-local records, and `--all`, which clears an unreadable store,
+  both recording a `derived_provenance_reset` ledger event. Every provenance
+  write now rebinds to the snapshot observed at that moment, and collects the
+  temporary files a crash between write and rename would leave behind.
+- Document that the common store is neither cloned nor pushed: without
+  coordination a second clone sees the derived commit as unmapped, the landing
+  guard does not fire there, and the provider refuses that clone.
 
 ## 0.40.2 - 2026-09-02
 
