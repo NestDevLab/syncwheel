@@ -1,6 +1,9 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
+import shlex
 import signal
 import shutil
 import subprocess
@@ -4258,7 +4261,15 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(updated_commit, self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
-        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '3')
+        module = self.load_syncwheel_module()
+        committed = json.loads(self.git('show', 'integration/reconcile:.syncwheel/manifest.json'))
+        normalized, _ = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(normalized))
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', 'integration/reconcile'),
+            'chore: restore Syncwheel control manifest',
+        )
 
     def prepare_reconcile_apply_worktree_scenario(self, worktree_root=None):
         beta = self.git('rev-parse', 'main')
@@ -4431,12 +4442,24 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             expected=0,
         )
         updated = json.loads(manifest_path.read_text())
+        module = self.load_syncwheel_module()
         ledger_root = self.expected_external_ledger_root(manifest_path)
         ledger_state = self.run_cli('ledger', 'show', '--manifest', str(manifest_path), '--json', expected=0)
+        integration_tip = self.git('rev-parse', 'integration/reconcile')
+        committed_manifest = module.manifest_from_tree(
+            self.repo, integration_tip, self.repo / '.syncwheel' / 'manifest.json'
+        )
 
         self.assertNotIn('git push', result.stdout)
         self.assertEqual(updated['stacks'][0]['commits'][0], self.git('rev-parse', 'pr/feature-b'))
-        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+        # The third commit is the required manifest-only control commit. The old
+        # assertion of two commits encoded the persistence bug fixed here.
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '3')
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', integration_tip),
+            'chore: restore Syncwheel control manifest',
+        )
+        self.assertEqual(module.manifest_digest(committed_manifest), module.manifest_digest(updated))
         self.assertTrue((ledger_root / 'events').exists())
         self.assertFalse((self.repo / '.syncwheel' / 'ledger').exists())
         self.assertNotIn('.syncwheel/', self.repo_exclude_path().read_text())
@@ -5180,8 +5203,19 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.run_cli('resume', '--no-fetch', '--apply', expected=0)
         self.run_cli('reconcile', '--no-fetch', '--apply', expected=0)
-        self.assertEqual(self.git('rev-parse', 'integration/test'), self.git('rev-parse', 'main'))
-        self.assertNotEqual(self.git('rev-parse', 'integration/test'), duplicate)
+        integration_tip = self.git('rev-parse', 'integration/test')
+        # Integration now has a manifest-only control commit above main. Exact
+        # tip equality was the pre-persistence behavior, not the real invariant.
+        self.assertEqual(self.git('rev-parse', f'{integration_tip}^'), self.git('rev-parse', 'main'))
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', integration_tip),
+            'chore: restore Syncwheel control manifest',
+        )
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', integration_tip),
+            '.syncwheel/manifest.json',
+        )
+        self.assertNotEqual(integration_tip, duplicate)
 
     def test_resume_keeps_a_patch_equivalent_closed_stack_for_manual_review(self):
         self.git('switch', '-q', '-c', 'pr/feature-gamma', 'main')
@@ -5289,6 +5323,794 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 manifest,
                 self.git('rev-parse', 'HEAD'),
             )
+
+    def test_int_rebuild_restores_and_commits_the_control_manifest_after_merge_stacks(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        old_manifest = self.read_manifest()
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: track stack manifest')
+        base = self.git('rev-parse', 'HEAD')
+        stack_ids = []
+        for name in ('control-a', 'control-b'):
+            branch = f'pr/{name}'
+            stack_ids.append((name, branch))
+            self.git('branch', branch, base)
+            self.git('switch', '-q', branch)
+            Path(self.repo / f'{name}.txt').write_text(f'{name}\n')
+            self.git('add', f'{name}.txt')
+            self.git('commit', '-q', '-m', f'feat: add {name}')
+        self.git('switch', '-q', 'main')
+
+        control_manifest = json.loads(json.dumps(old_manifest))
+        control_manifest['integration'] = {
+            'branch': 'integration/control-manifest',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': [name for name, _branch in stack_ids],
+        }
+        control_manifest['stacks'] = [
+            {
+                'id': name,
+                'branch': branch,
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/control-manifest',
+                'commits': [self.git('rev-parse', branch)],
+            }
+            for name, branch in stack_ids
+        ]
+        manifest_path.write_text(json.dumps(control_manifest, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: update control manifest')
+        self.git('branch', 'integration/control-manifest', 'main')
+        self.git('switch', '-q', 'integration/control-manifest')
+        module = self.load_syncwheel_module()
+        expected_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        expected_digest = module.manifest_digest(expected_manifest)
+
+        self.run_cli(
+            'int', 'rebuild', '--in-place',
+            '--reason', 'first reviewed projection rebuild',
+            expected=0,
+        )
+
+        restored_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(module.manifest_digest(restored_manifest), expected_digest)
+        self.assertEqual(self.git('show', '-s', '--format=%s', 'HEAD'), 'chore: restore Syncwheel control manifest')
+        first_control_commit = self.git('rev-parse', 'HEAD')
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.tracked_status(), '')
+        events = module.load_ledger_events(self.repo, manifest_path)
+        self.assertIn(
+            'first reviewed projection rebuild',
+            [event['payload'].get('reason') for event in events if event['type'] == 'manifest_saved'],
+        )
+
+        self.run_cli(
+            'int', 'rebuild', '--in-place',
+            '--reason', 'second reviewed projection rebuild',
+            expected=0,
+        )
+        self.assertEqual(self.git('rev-parse', 'HEAD'), first_control_commit)
+        repeated_receipts = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == first_control_commit
+        ]
+        self.assertEqual(len(repeated_receipts), 2)
+        self.assertEqual(
+            {event['payload']['reason'] for event in repeated_receipts},
+            {
+                'first reviewed projection rebuild',
+                'second reviewed projection rebuild',
+            },
+        )
+        self.assertEqual(
+            len({event['payload']['operation_id'] for event in repeated_receipts}),
+            2,
+        )
+
+    def test_control_manifest_preflight_rejects_unexplained_divergence(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        module = self.load_syncwheel_module()
+        control_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        divergent = json.loads(manifest_path.read_text())
+        divergent['stacks'] = divergent['stacks'][:1]
+        manifest_path.write_text(json.dumps(divergent, indent=2) + '\n')
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'control manifest differs before integration rebuild.*missing stacks.*feature-b.*Restore the control manifest',
+        ):
+            module.preflight_control_manifest_digest(
+                self.repo, manifest_path, control_manifest
+            )
+
+    def test_control_manifest_commit_targets_integration_tree_for_external_manifest(self):
+        module = self.load_syncwheel_module()
+        external = self.tmp / 'external-manifest.json'
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        parent = self.git('rev-parse', 'HEAD')
+        control['integration'] = {
+            'branch': 'integration/external-control',
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        control['stacks'] = []
+        external.write_text(json.dumps(control, indent=2) + '\n')
+        self.git('branch', 'integration/external-control', parent)
+
+        with module.manifest_write_transaction(self.repo, external):
+            changed = module.restore_control_manifest_after_integration_rebuild(
+                self.repo, external, control, parent, 'plumbing',
+            )
+
+        commit = self.git('rev-parse', 'integration/external-control')
+        self.assertTrue(changed)
+        self.assertNotEqual(commit, parent)
+        committed = json.loads(self.git('show', f'{commit}:.syncwheel/manifest.json'))
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(control))
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(control))
+
+    def test_control_manifest_commit_never_uses_the_shared_index(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        Path(self.repo / 'alpha.txt').write_text('unrelated staged content\n')
+        self.git('add', 'alpha.txt')
+        parent = self.git('rev-parse', 'HEAD')
+
+        commit = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        self.assertEqual(self.git('show', '--format=', '--name-only', commit), '.syncwheel/manifest.json')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'alpha.txt')
+
+    def test_control_manifest_commit_is_deterministic_from_its_parent_and_manifest(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        reordered = dict(reversed(list(control.items())))
+        parent = self.git('rev-parse', 'HEAD')
+
+        first = module.materialize_control_manifest_commit(self.repo, control, parent)
+        self.git('config', 'user.name', 'Different Fixture Identity')
+        self.git('config', 'user.email', 'different@example.com')
+        second = module.materialize_control_manifest_commit(self.repo, reordered, parent)
+
+        self.assertEqual(module.manifest_digest(control), module.manifest_digest(reordered))
+        self.assertEqual(first, second)
+
+    def test_control_manifest_object_is_verified_before_the_ref_cas(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        control, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        original_manifest_from_tree = module.manifest_from_tree
+        update_ref_calls = []
+        original_git = module.git
+
+        def corrupted_control_object(repo_root, commit, path):
+            observed = original_manifest_from_tree(repo_root, commit, path)
+            if commit != parent and observed is not None:
+                observed['integration']['branch'] = 'corrupted-integration'
+            return observed
+
+        def observed_git(repo_root, *args, **kwargs):
+            if args and args[0] == 'update-ref':
+                update_ref_calls.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        with mock.patch.object(
+            module, 'manifest_from_tree', side_effect=corrupted_control_object,
+        ), mock.patch.object(module, 'git', side_effect=observed_git):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'digest differs in the object prepared',
+            ):
+                module.restore_control_manifest_after_integration_rebuild(
+                    self.repo, manifest_path, control, parent, 'plumbing',
+                )
+
+        self.assertEqual(update_ref_calls, [])
+
+    def test_control_manifest_retry_finishes_ref_checkout_and_external_file(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        desired['integration'] = {
+            'branch': 'integration/control-retry',
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        self.git('branch', 'integration/control-retry', parent)
+        self.git('switch', '-q', 'integration/control-retry')
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-main'
+        external = self.tmp / 'retry-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        internal.unlink()
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place',
+                    )
+
+        control_commit = self.git('rev-parse', 'integration/control-retry')
+        self.assertNotEqual(control_commit, parent)
+        self.assertNotEqual(self.git('status', '--short'), '')
+        observed_stale, _ = module.load_manifest(self.repo, external)
+        self.assertNotEqual(module.manifest_digest(observed_stale), module.manifest_digest(desired))
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, observed_stale
+            )
+
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(desired))
+        self.assertEqual(self.git('status', '--short'), '')
+        events = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'manifest_saved'
+            and (event.get('payload') or {}).get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(events), 1)
+
+    def test_control_manifest_event_retry_is_idempotent_after_fsync(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        event_fsyncs = 0
+
+        def crash_after_fsync(stage):
+            nonlocal event_fsyncs
+            if stage == 'event_fsynced':
+                event_fsyncs += 1
+                if event_fsyncs == 2:
+                    raise RuntimeError('simulated crash after ledger fsync')
+
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            with mock.patch.object(
+                module, 'ledger_io_checkpoint', side_effect=crash_after_fsync,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ledger fsync'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, manifest_path, desired, parent, 'plumbing',
+                    )
+
+        control_commit = self.git('rev-parse', 'main')
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, manifest_path, desired
+            )
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+
+        events = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+            and (event.get('payload') or {}).get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]['idempotency_key'].startswith('control-manifest:'))
+
+    def test_control_manifest_retry_after_checkout_alignment_keeps_external_source(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        desired['integration'] = {
+            'branch': 'integration/control-checkout-retry',
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        self.git('branch', 'integration/control-checkout-retry', parent)
+        self.git('switch', '-q', 'integration/control-checkout-retry')
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-main'
+        external = self.tmp / 'checkout-retry-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        internal.unlink()
+
+        def crash_after_checkout(stage):
+            if stage == 'checkout_aligned':
+                raise RuntimeError('simulated crash after checkout alignment')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module,
+                'control_manifest_io_checkpoint',
+                side_effect=crash_after_checkout,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after checkout alignment'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place',
+                    )
+
+        control_commit = self.git('rev-parse', 'integration/control-checkout-retry')
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(stale))
+        self.assertEqual(self.git('status', '--short'), '')
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, persisted
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(desired))
+        events = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'manifest_saved'
+            and (event.get('payload') or {}).get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(events), 1)
+
+    def test_control_manifest_alignment_never_rewinds_a_concurrent_ref_advance(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/control-cas-race'
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-before-cas-race'
+        external = self.tmp / 'cas-race-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, desired, parent
+        )
+        control_tree = self.git('rev-parse', f'{control_commit}^{{tree}}')
+        concurrent_tip = self.git(
+            'commit-tree', control_tree, '-p', control_commit,
+            '-m', 'test: concurrent integration advance',
+        )
+        before = external.read_bytes()
+
+        def advance_before_alignment(stage):
+            if stage == 'before_checkout_alignment':
+                self.git(
+                    'update-ref', f'refs/heads/{branch}', concurrent_tip, control_commit
+                )
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module,
+                'control_manifest_io_checkpoint',
+                side_effect=advance_before_alignment,
+            ):
+                with self.assertRaisesRegex(
+                    module.ControlManifestAlignmentDrift,
+                    'advanced beyond.*without moving the ref',
+                ):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place'
+                    )
+
+        self.assertEqual(self.git('rev-parse', branch), concurrent_tip)
+        self.assertEqual(external.read_bytes(), before)
+        abandoned = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'control_manifest_persistence_abandoned'
+        ]
+        self.assertEqual(len(abandoned), 1)
+        self.assertEqual(
+            abandoned[0]['payload']['outcome'], 'checkout_alignment_ref_drift'
+        )
+
+    def test_alignment_keeps_a_foreign_manifest_in_the_integration_checkout(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/foreign-checkout-manifest'
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        external = self.tmp / 'foreign-checkout-source.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        foreign = json.loads(json.dumps(desired))
+        foreign['defaults']['base_branch'] = 'foreign-local-proposal'
+        internal.write_text(json.dumps(foreign, indent=2) + '\n')
+        before = internal.read_bytes()
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, desired, parent
+        )
+
+        stderr = io.StringIO()
+        with module.manifest_write_transaction(self.repo, external):
+            with contextlib.redirect_stderr(stderr):
+                persisted = module.restore_control_manifest_after_integration_rebuild(
+                    self.repo, external, desired, parent, 'in-place',
+                    reason='keep a foreign checkout manifest',
+                    command='syncwheel int rebuild',
+                )
+
+        self.assertTrue(persisted)
+        self.assertIn('still carries uncommitted changes', stderr.getvalue())
+        self.assertEqual(internal.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', branch), control_commit)
+        self.assertEqual(
+            module.pending_control_manifest_intents(
+                module.load_ledger_events(self.repo, external)
+            ),
+            [],
+        )
+
+    def test_control_manifest_recovery_requires_local_intent_for_external_proposal(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        baseline, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/external-proposal'
+        remote_control = json.loads(json.dumps(baseline))
+        remote_control['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        remote_control['stacks'] = []
+        remote_control['defaults']['replay_mode'] = 'plumbing'
+        local_proposal = json.loads(json.dumps(remote_control))
+        local_proposal['defaults']['replay_mode'] = 'ephemeral'
+        external = self.tmp / 'proposal-manifest.json'
+        external.write_text(json.dumps(local_proposal, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, remote_control, parent
+        )
+        self.git('update-ref', f'refs/heads/{branch}', control_commit, parent)
+        before = external.read_bytes()
+
+        with module.manifest_write_transaction(self.repo, external):
+            with self.assertRaises(module.SyncwheelError) as raised:
+                module.recover_incomplete_control_manifest_persistence(
+                    self.repo, external, local_proposal
+                )
+
+        message = str(raised.exception)
+        self.assertIn('no local persistence intent', message)
+        self.assertIn('syncwheel int rebuild', message)
+        self.assertIn('--reason', message)
+        self.assertEqual(external.read_bytes(), before)
+        remedy = shlex.split(message.rsplit('run: ', 1)[1])
+        self.run_cli(*remedy[1:], expected=0)
+        persisted, _ = module.load_manifest(self.repo, external)
+        committed = module.manifest_from_tree(
+            self.repo,
+            self.git('rev-parse', branch),
+            module.integration_manifest_path(self.repo),
+        )
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(local_proposal))
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(local_proposal))
+
+    def test_historical_manifest_digest_does_not_authorize_control_divergence(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/historical-proposal'
+        local_proposal = json.loads(json.dumps(baseline))
+        local_proposal['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        local_proposal['stacks'] = []
+        local_proposal['defaults']['replay_mode'] = 'ephemeral'
+        foreign_control = json.loads(json.dumps(local_proposal))
+        foreign_control['defaults']['replay_mode'] = 'plumbing'
+        external = self.tmp / 'historical-proposal-manifest.json'
+        external.write_text(json.dumps(local_proposal, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        with module.manifest_write_transaction(self.repo, external):
+            module.save_manifest_with_ledger(
+                self.repo,
+                external,
+                local_proposal,
+                'record historical local proposal',
+            )
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, foreign_control, parent
+        )
+        self.git('update-ref', f'refs/heads/{branch}', control_commit, parent)
+        before = external.read_bytes()
+
+        with module.manifest_write_transaction(self.repo, external):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'no local persistence intent'
+            ):
+                module.recover_incomplete_control_manifest_persistence(
+                    self.repo, external, local_proposal
+                )
+
+        self.assertEqual(external.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', branch), control_commit)
+
+    def test_control_manifest_retry_accepts_control_index_and_replay_worktree(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        replay, _ = module.load_manifest(self.repo, internal)
+        replay['defaults']['base_branch'] = 'replay-version'
+        internal.write_text(json.dumps(replay, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: track replay manifest')
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/index-control-retry'
+        replay['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        replay['stacks'] = []
+        internal.write_text(json.dumps(replay, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: bind replay integration branch')
+        parent = self.git('rev-parse', 'HEAD')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        desired = json.loads(json.dumps(replay))
+        desired['defaults']['base_branch'] = 'control-version'
+        external = self.tmp / 'index-control-manifest.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place'
+                    )
+
+        control_commit = self.git('rev-parse', branch)
+        self.git('read-tree', control_commit)
+        self.assertEqual(self.git('write-tree'), module.ref_tree(self.repo, control_commit))
+        worktree_manifest = json.loads(internal.read_text())
+        self.assertEqual(
+            module.manifest_digest(worktree_manifest), module.manifest_digest(replay)
+        )
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, desired
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertEqual(self.tracked_status(), '')
+        aligned = json.loads(internal.read_text())
+        self.assertEqual(module.manifest_digest(aligned), module.manifest_digest(desired))
+
+    def test_control_manifest_recovery_repairs_incomplete_ledger_tail_before_read(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/ledger-tail-retry'
+        desired = json.loads(json.dumps(baseline))
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-before-retry'
+        external = self.tmp / 'ledger-tail-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        self.git('branch', branch, parent)
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'plumbing'
+                    )
+
+        segment = sorted(module.ledger_events_dir(self.repo, external).glob('*.jsonl'))[-1]
+        with segment.open('ab') as handle:
+            handle.write(b'{"type":"manifest_saved"')
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, stale
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertTrue(segment.read_bytes().endswith(b'\n'))
+        events = module.load_ledger_events(self.repo, external)
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['control_manifest_persistence_intent', 'manifest_saved'],
+        )
+
+    def test_control_manifest_receipts_distinguish_identical_rebuild_operations(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/repeated-control'
+        desired = json.loads(json.dumps(baseline))
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        external = self.tmp / 'repeated-control-manifest.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+        self.git('branch', branch, parent)
+
+        with module.manifest_write_transaction(self.repo, external):
+            module.restore_control_manifest_after_integration_rebuild(
+                self.repo, external, desired, parent, 'plumbing',
+                reason='first reviewed rebuild', command='syncwheel int rebuild',
+            )
+        control_commit = self.git('rev-parse', branch)
+        self.git('update-ref', f'refs/heads/{branch}', parent, control_commit)
+        with module.manifest_write_transaction(self.repo, external):
+            module.restore_control_manifest_after_integration_rebuild(
+                self.repo, external, desired, parent, 'plumbing',
+                reason='second reviewed rebuild', command='syncwheel int rebuild',
+            )
+        with module.manifest_write_transaction(self.repo, external):
+            module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, desired
+            )
+
+        events = module.load_ledger_events(self.repo, external)
+        receipts = [
+            event for event in events
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(
+            {event['payload']['reason'] for event in receipts},
+            {'first reviewed rebuild', 'second reviewed rebuild'},
+        )
+        self.assertEqual(len({event['payload']['operation_id'] for event in receipts}), 2)
+        self.assertEqual(len({event['idempotency_key'] for event in receipts}), 2)
+
+    def test_every_parser_command_declares_its_entrypoint_behavior(self):
+        module = self.load_syncwheel_module()
+        parser = module.build_parser()
+        table = module.entrypoint_behavior_table()
+        commands = module.command_behavior_table()
+        functions = set()
+        for node in module.command_parser_nodes(parser):
+            function = node.get_default('func')
+            if function is not None:
+                functions.add(function)
+
+        self.assertTrue(functions)
+        self.assertEqual(functions - set(table), set())
+        self.assertEqual(set(commands), functions)
+        for function in functions:
+            with self.subTest(command=function.__qualname__):
+                for rule in ('mutates', 'manifestMutates'):
+                    module.mutation_rule_requested(
+                        table[function][rule], SimpleNamespace()
+                    )
+
+    def test_int_rebuild_is_classified_as_a_manifest_mutation(self):
+        module = self.load_syncwheel_module()
+
+        self.assertTrue(module.manifest_mutation_requested(SimpleNamespace(
+            func=module.command_int_rebuild, dry_run=False,
+        )))
+
+    def test_ai_managed_int_rebuild_requires_an_operator_reason(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['authority'] = {
+            'mode': 'ai-managed',
+            'allow': ['source_change'],
+            'deny': ['destructive_rewrite'],
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli('int', 'rebuild', '--in-place', expected=2)
+
+        self.assertIn('requires --reason for an ai-managed repository', result.stderr)
+
+    def test_control_manifest_event_has_actor_reason_and_command(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+
+        payload = module.control_manifest_event_payload(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json', control,
+            'abc123', 'in-place', 'operator-request', 'int rebuild', None,
+        )
+
+        self.assertEqual(payload['actor'], 'Syncwheel Fixture <syncwheel@example.com>')
+        self.assertEqual(payload['reason'], 'operator-request')
+        self.assertEqual(payload['command'], 'int rebuild')
+        self.assertEqual(payload['control_commit'], 'abc123')
+
+    def test_control_manifest_difference_reports_order_base_commit_and_configuration(self):
+        module = self.load_syncwheel_module()
+        expected, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        observed = json.loads(json.dumps(expected))
+        observed['stacks'].reverse()
+        observed['stacks'][0]['base'] = 'different-base'
+        observed['stacks'][0]['commits'] = ['different-commit']
+        observed['stacks'][0]['state'] = 'draft'
+
+        detail = module.control_manifest_difference(expected, observed)
+
+        self.assertIn('stack order differs', detail)
+        self.assertIn('base differs', detail)
+        self.assertIn('commits differ', detail)
+        self.assertIn('configuration differs', detail)
+
+    def test_control_manifest_preflight_names_an_executable_restore_command(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, manifest_path)
+        divergent = json.loads(manifest_path.read_text())
+        divergent['stacks'].reverse()
+        manifest_path.write_text(json.dumps(divergent, indent=2) + '\n')
+
+        with self.assertRaises(module.SyncwheelError) as raised:
+            module.preflight_control_manifest_digest(self.repo, manifest_path, control)
+
+        message = str(raised.exception)
+        self.assertIn('expected=$(mktemp', message)
+        self.assertIn('diff -u', message)
+        self.assertIn(str(manifest_path), message)
+        self.assertIn(module.manifest_digest(control), message)
+        self.assertNotIn('cp ', message)
 
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'

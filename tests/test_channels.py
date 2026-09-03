@@ -1,7 +1,9 @@
+import ast
 import importlib.util
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -35,6 +37,10 @@ class DeploymentChannelTest(unittest.TestCase):
         self.b = self.make_stack('b', 'b.txt', 'b one\n')
         self.git('switch', '-q', '-c', 'main-integration', 'main')
         self.write_manifest(version=2)
+        # Coordination state now binds the manifest carried by the exact
+        # integration tip, so channel fixtures must start from that invariant.
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: persist integration control manifest')
         self.cli(
             'hooks', 'remove', '--disable',
             '--reason', 'channel fixture uses raw primary branch setup', '--apply',
@@ -44,9 +50,30 @@ class DeploymentChannelTest(unittest.TestCase):
         self.temp.cleanup()
 
     def git(self, *args, check=True):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        preserved_manifest = None
+        if args and args[0] == 'switch' and manifest_path.exists():
+            # Raw branch switches in these fixtures are product-history setup,
+            # not control-manifest operations. Preserve the local control source
+            # while Git changes whether that path is tracked on the target.
+            preserved_manifest = manifest_path.read_bytes()
+            tracked = subprocess.run(
+                ['git', 'ls-files', '--error-unmatch', '--', '.syncwheel/manifest.json'],
+                cwd=self.repo, text=True, capture_output=True,
+            ).returncode == 0
+            if tracked:
+                subprocess.run(
+                    ['git', 'checkout', '--', '.syncwheel/manifest.json'],
+                    cwd=self.repo, check=True, capture_output=True, text=True,
+                )
+            else:
+                manifest_path.unlink()
         result = subprocess.run(
             ['git', *args], cwd=self.repo, text=True, capture_output=True
         )
+        if preserved_manifest is not None:
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            manifest_path.write_bytes(preserved_manifest)
         if check and result.returncode:
             self.fail(result.stderr)
         return result.stdout.strip()
@@ -1313,45 +1340,171 @@ class DeploymentChannelTest(unittest.TestCase):
 
     def test_every_existing_delivery_manifest_writer_joins_global_lock(self):
         module = self.load_module()
-        always = (
-            module.command_stack_close,
-            module.command_stack_create,
-            module.command_stack_promote,
-            module.command_stack_demote,
-            module.command_stack_sync,
-            module.command_stack_absorb,
-            module.command_stack_set,
-            module.command_stack_resolve_integration,
-            module.command_stack_add,
-            module.command_stack_capture_integration,
+        saver_names = {'save_manifest', 'append_ledger_event'}
+
+        def analyze(scripts_root):
+            definitions = {}
+            by_simple_name = {}
+            imports = {}
+
+            class CallCollector(ast.NodeVisitor):
+                def __init__(self):
+                    self.calls = []
+
+                def visit_FunctionDef(self, node):
+                    return None
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_ClassDef(self, node):
+                    return None
+
+                def visit_Call(self, node):
+                    if isinstance(node.func, ast.Name):
+                        self.calls.append(('name', None, node.func.id))
+                    elif isinstance(node.func, ast.Attribute):
+                        value = node.func.value
+                        while isinstance(value, ast.Attribute):
+                            value = value.value
+                        root = value.id if isinstance(value, ast.Name) else None
+                        self.calls.append(('attribute', root, node.func.attr))
+                    self.generic_visit(node)
+
+            class DefinitionCollector(ast.NodeVisitor):
+                def __init__(self, module_name):
+                    self.module_name = module_name
+                    self.scope = []
+
+                def collect_function(self, node):
+                    self.scope.append(node.name)
+                    qualified_name = '.'.join(self.scope)
+                    calls = CallCollector()
+                    for statement in node.body:
+                        calls.visit(statement)
+                    key = (self.module_name, qualified_name)
+                    definitions[key] = calls.calls
+                    by_simple_name.setdefault(node.name, set()).add(key)
+                    for statement in node.body:
+                        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            self.visit(statement)
+                    self.scope.pop()
+
+                def visit_FunctionDef(self, node):
+                    self.collect_function(node)
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_ClassDef(self, node):
+                    self.scope.append(node.name)
+                    for statement in node.body:
+                        self.visit(statement)
+                    self.scope.pop()
+
+            for path in sorted(Path(scripts_root).glob('*.py')):
+                module_name = path.stem
+                tree = ast.parse(path.read_text(), filename=str(path))
+                aliases = {}
+                for node in tree.body:
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            aliases[alias.asname or alias.name.split('.')[0]] = alias.name.split('.')[-1]
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        for alias in node.names:
+                            aliases[alias.asname or alias.name] = node.module.split('.')[-1]
+                imports[module_name] = aliases
+                DefinitionCollector(module_name).visit(tree)
+
+            def callees(key):
+                module_name, qualified_name = key
+                class_scope = qualified_name.rpartition('.')[0]
+                output = set()
+                for kind, root, leaf in definitions[key]:
+                    if kind == 'name':
+                        output.update(
+                            candidate for candidate in by_simple_name.get(leaf, set())
+                            if candidate[0] == module_name
+                        )
+                    elif root == 'self' and class_scope:
+                        candidate = (module_name, f'{class_scope}.{leaf}')
+                        if candidate in definitions:
+                            output.add(candidate)
+                    elif root in imports[module_name]:
+                        imported_module = imports[module_name][root]
+                        output.update(
+                            candidate for candidate in by_simple_name.get(leaf, set())
+                            if candidate[0] == imported_module
+                        )
+                    else:
+                        # Attribute calls on typed collaborators are resolved
+                        # conservatively by method name across script modules.
+                        output.update(by_simple_name.get(leaf, set()))
+                return output
+
+            direct_savers = {
+                key for key, calls in definitions.items()
+                if any(leaf in saver_names for _kind, _root, leaf in calls)
+            }
+
+            def reaches_saver(key, trail=()):
+                if key in trail:
+                    return False
+                if key in direct_savers:
+                    return True
+                return any(
+                    reaches_saver(callee, (*trail, key))
+                    for callee in callees(key)
+                )
+
+            registered = {
+                ('syncwheel', entrypoint.__qualname__)
+                for entrypoint, behavior in module.entrypoint_behavior_table().items()
+                if behavior['manifestMutates'] != 'never'
+            }
+            covered = set()
+            frontier = list(registered)
+            while frontier:
+                key = frontier.pop()
+                if key in covered or key not in definitions:
+                    continue
+                covered.add(key)
+                frontier.extend(callees(key) - covered)
+            derived_commands = {
+                key for key in definitions
+                if key[1].startswith('command_') and reaches_saver(key)
+            }
+            registered_commands = {
+                key for key in registered if key[1].startswith('command_')
+            }
+            return direct_savers - covered, derived_commands, registered_commands
+
+        uncovered, derived_commands, registered_commands = analyze(CLI.parent)
+        self.assertEqual(uncovered, set())
+        self.assertEqual(registered_commands, derived_commands)
+
+        mutant_root = self.root / 'mutant-scripts'
+        shutil.copytree(CLI.parent, mutant_root)
+        with (mutant_root / 'syncwheel_revision_provider.py').open('a') as handle:
+            handle.write(
+                '\nclass UndeclaredManifestSaver:\n'
+                '    def persist(self, backend, path, manifest):\n'
+                '        backend.save_manifest(path, manifest)\n'
+            )
+        mutant_uncovered, _derived, _registered = analyze(mutant_root)
+        self.assertIn(
+            ('syncwheel_revision_provider', 'UndeclaredManifestSaver.persist'),
+            mutant_uncovered,
         )
-        for func in always:
-            with self.subTest(func=func.__name__):
-                self.assertTrue(module.manifest_mutation_requested(mock.Mock(func=func)))
-        gated = (
-            module.command_coordination_init,
-            module.command_coordination_disable,
-            module.command_manifest_require_integration,
-            module.command_repo_tracking_set,
-            module.command_reconcile,
-            module.command_resume,
-            module.command_sync,
-            module.command_publish,
-        )
-        for func in gated:
-            with self.subTest(func=func.__name__):
-                self.assertTrue(module.manifest_mutation_requested(
-                    mock.Mock(func=func, apply=True)
-                ))
-                self.assertFalse(module.manifest_mutation_requested(
-                    mock.Mock(func=func, apply=False)
-                ))
-        self.assertTrue(module.manifest_mutation_requested(
-            mock.Mock(func=module.command_stack_rebuild, update_manifest=True)
-        ))
-        self.assertFalse(module.manifest_mutation_requested(
-            mock.Mock(func=module.command_stack_rebuild, update_manifest=False)
-        ))
+        for command in (
+            module.command_repo_authority_set,
+            module.command_coordination_compose,
+        ):
+            with self.subTest(command=command.__name__):
+                self.assertTrue(module.manifest_mutation_requested(mock.Mock(
+                    func=command, apply=True,
+                )))
+                self.assertFalse(module.manifest_mutation_requested(mock.Mock(
+                    func=command, apply=False,
+                )))
 
     def test_old_git_uses_ephemeral_materialization_fallback(self):
         self.create(stacks=('a',))

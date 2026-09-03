@@ -96,9 +96,13 @@ visible. This is an operational recovery path, not an identity boundary.
 
 Before a built-in mutation starts, Syncwheel also checks the primary working tree.
 Tracked changes stop the operation before side effects and name the same remedies.
-Those remedy commands themselves bypass this preflight so recovery remains possible.
-Read-only commands continue; on a TTY they show a yellow warning with the dirty-file
-count and state that the shared primary changes are not owned by the invoking user.
+Those remedy commands themselves bypass this preflight so recovery remains possible,
+and so does a guard disabled with a recorded reason, because that opt-out is the
+clone's declaration that shared work in the primary is expected. Repo-local
+`.syncwheel/` state never counts: ordinary commands write the manifest there and the
+named remedies cannot move it. Read-only commands continue; on a TTY they show a
+yellow warning with the dirty-file count and state that the shared primary changes
+are not owned by the invoking user.
 The exhaustive entrypoint behavior registry is the single mutation classifier. Its
 command-only projection declares flag-sensitive mutations such as `--apply`, while
 internal state-writer entries remain in the same registry. Previews and read-only

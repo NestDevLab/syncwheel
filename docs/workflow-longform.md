@@ -31,8 +31,15 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 python3 scripts/syncwheel.py stack sync <stack>
 python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
-python3 scripts/syncwheel.py int rebuild --worktree <path>
+python3 scripts/syncwheel.py int rebuild --worktree <path> --reason "refresh integration projection"
 ```
+
+Mutating `stack push`, `int rebuild`, and `int push` all enter the same
+manifest-write classification and recover any pending control-manifest intent
+before loading the manifest. Control persistence is ordered as durable intent,
+ref CAS, checkout alignment without a ref move, manifest save, then receipt.
+When `stack push` creates or recovers that control commit, its coordinated
+atomic publish includes the integration ref together with the stack ref.
 
 ## What becomes deterministic
 

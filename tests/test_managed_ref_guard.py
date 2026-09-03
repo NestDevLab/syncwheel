@@ -755,6 +755,65 @@ class ManagedRefGuardTests(unittest.TestCase):
             ['primary checkout is dirty: 1 tracked file not owned by the current user'],
         )
 
+    def test_manifest_a_command_wrote_does_not_refuse_the_next_mutation(self):
+        subprocess.run(
+            ['git', 'add', '.syncwheel/manifest.json'], cwd=self.repo, check=True
+        )
+        subprocess.run(
+            ['git', 'commit', '-qm', 'track the manifest'], cwd=self.repo, check=True
+        )
+
+        first = self.run_syncwheel(
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(first.returncode, 0, first.stderr)
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'status', '--porcelain', '--', '.syncwheel'], cwd=self.repo,
+                capture_output=True, text=True, check=True,
+            ).stdout,
+            ' M .syncwheel/manifest.json\n',
+        )
+
+        second = self.run_syncwheel(
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(second.returncode, 0, second.stderr)
+
+        (self.repo / 'seed').write_text('changed\n')
+        blocked = self.run_syncwheel(
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn('primary checkout is dirty: 1 tracked file', blocked.stderr)
+
+    def test_reasoned_disable_lifts_the_dirty_primary_refusal(self):
+        self._install_and_branch('main-integration')
+        (self.repo / 'seed').write_text('changed\n')
+
+        blocked = self.run_syncwheel(
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn('primary checkout is dirty', blocked.stderr)
+
+        disabled = self.run_syncwheel(
+            'hooks', 'remove', '--disable', '--reason', 'external contribution clone',
+            '--apply', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+
+        allowed = self.run_syncwheel(
+            'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
+        )
+
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+
     def test_guard_blocks_all_push_forms_targeting_managed_ref(self):
         zero = '0' * 40
         head = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True).strip()
