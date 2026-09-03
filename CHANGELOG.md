@@ -27,6 +27,14 @@
   from Git's actual trailer block. Accepted cost: a derived lock does not reach
   `main` through Syncwheel until a later update qualifies for the
   `manifest-base` route.
+- Route add, edit, and deletion by resulting blob equality, including an empty
+  projection, and read every Git path list as NUL-delimited data without
+  stripping significant line feeds or spaces.
+- Bind each derived commit to a second `Syncwheel-Derived-Paths` content trailer
+  and durable operation/commit/path provenance. Active-active snapshots carry
+  that provenance so fresh peers retain `derived-projection-stale` after a
+  rebuild; repositories without coordination continue to use their local
+  ledger as the sole provenance source.
 
 ## 0.40.2 - 2026-09-02
 

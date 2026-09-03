@@ -547,6 +547,7 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "projectionRoute": None,
         "derivedPaths": None,
         "derivedPathsDigest": None,
+        "derivedContentDigest": None,
         "baselineIndexSha256": observation["indexSha256"],
         "productIndexSha256": None,
         "controlIndexSha256": None,

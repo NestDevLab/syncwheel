@@ -1072,8 +1072,9 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/core-procedure.md`: deterministic recovery procedure
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
 - `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract,
-  including verified manifest-base/derived routing, stale-projection repair,
-  active-active path policy, and the accepted derived-route delivery cost
+  including blob-exact manifest-base/derived routing, NUL-safe Git paths,
+  shared content-bound provenance, stale-projection repair, and the accepted
+  derived-route delivery cost
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol

@@ -33,20 +33,23 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    branch set is rejected before a journal or managed ref can be created. The
    operation-owned stack stores the peeled 40-hex commit as its immutable
    manifest base, never the input shorthand. The provider projects the candidate
-   on that base and compares every declared product blob. Reproducing blobs take
-   the ordinary `manifest-base` draft-stack route. A non-reproducing result can
-   take the `derived` route only in a v3 manifest and only when every path is
-   contained by `integration.derived_paths`; it creates a trailer-marked commit
-   on integration and no draft stack, branch, or manifest mutation.
+   on that base and compares every declared product blob, normalizing a missing
+   path to the same absent value on both sides and deliberately ignoring mode.
+   A `projected` result with matching blobs takes the ordinary `manifest-base`
+   draft-stack route. Every other result, including `empty`, can take the
+   `derived` route only in a v3 manifest and only when every path is contained by
+   `integration.derived_paths`; it creates a provenance-bound commit on
+   integration and no draft stack, branch, or manifest mutation.
    The provider persists `projectionRoute` and the selected object ids before
    any ref moves. Recovery follows that route, treats the candidate as
    immutable, and recomputes the route proof; any route or object mismatch
    fails closed instead of replacing an already hook-validated commit.
 5. `finalize` captures each changed file through descriptor-bound, no-follow
    reads, writes those exact bytes as Git blobs, and constructs both the product
-   commit and its draft projection in the object database. Empty or conflicting
-   projections stop before any managed ref moves; a conflict reports its paths
-   and the exact projection base. Product hooks then run before
+   commit and its draft projection in the object database. A non-reproducing
+   projection outside the derived-path policy stops before any managed ref
+   moves; a conflict reports its exact NUL-delimited Git paths and projection
+   base. Product hooks then run before
    the provider acquires the absent draft ref with compare-and-swap; only proven
    draft ownership permits the integration ref to advance. A separate
    manifest-only control commit completes local ownership. `stack land`
@@ -82,8 +85,10 @@ lock, or publication-lease state exists. Offline revision preparation is not
 supported in active-active mode. A successful preflight records the fresh state
 tip in the local operation journal; later publication remains a separate,
 explicit coordinated operation. Manifest-v3 coordination snapshots include
-`integration.derived_paths`; snapshot application and additive composition
-preserve it so a published derived integration tip remains classified.
+`integration.derived_paths` and bounded `integration.derived_provenance`
+records. Snapshot application and additive composition preserve both, so a
+fresh peer can classify a published derived tip and retain a stale blocker even
+after its own rebuild drops that commit.
 
 ## Protocol version 1
 
@@ -117,6 +122,8 @@ duplicate paths, unknown fields, unknown actions, and unknown protocol versions
 are rejected. Protocol v1 deliberately rejects mode-only changes: identical
 before and after hashes cannot carry an executable-bit lease. When bytes also
 change, the captured `100644` or `100755` mode is bound to the candidate tree.
+Line feeds and leading or trailing spaces remain significant path bytes; every
+Git path list is requested with `-z`, split only on NUL, and never stripped.
 
 Every response contains:
 
@@ -222,15 +229,35 @@ before rename and between rename and journal persistence.
 The draft projection never uses a worktree or `cherry-pick`. Syncwheel applies
 the product delta with `merge-tree` and routes only blob-reproducing results to
 the deterministic draft ref. A non-reproducing allowed lock-only result is a
-derived integration commit carrying a real Git trailer parsed by
+derived integration commit carrying two real Git trailers parsed by
 `git interpret-trailers --parse`:
-`Syncwheel-Derived-Projection: <operation>`. Trailer-like body text does not
-qualify. The commit is deliberately dropped by rebuild. `validate` and
-maintenance planning through `plan` then report `derived-projection-stale`,
-name the affected paths, and require a new Agentwheel update; a later derived
-projection for those paths or a later manifest-base stack ownership for those
-paths reconciles the ledger record.
-Conflict diagnostics use Git's name-only output and name both paths and base.
+
+```text
+Syncwheel-Derived-Projection: <operation-id>
+Syncwheel-Derived-Paths: <sha256>
+```
+
+The digest hashes each declared path in sorted order as
+`path NUL resulting-blob-id NUL`; a deletion uses an empty blob id. A commit is
+derived only when it is non-merge, every exact changed path is under
+`integration.derived_paths`, both trailers match the recalculated content, and
+the same operation, commit, paths, and path digest have a durable provenance
+record, which also retains the integration composition digest. Trailer-like
+body text, a syntactically valid unknown operation id, or path-only
+classification does not qualify.
+
+With active-active coordination, the published snapshot's
+`integration.derived_provenance` list is the shared source. The author ledger
+supplies unpublished local updates and is reduced over that shared base. A
+repository without coordination has one clone and uses only its local ledger;
+there is deliberately no Git-ignored `.syncwheel/derived-provenance.json`.
+Rebuild still drops derived commits. `validate` and maintenance planning through
+`plan` compare retained provenance with integration and report
+`derived-projection-stale`, affected paths, and the remedy to run a new
+Agentwheel update on every peer. A new update replaces provenance only for the
+same complete declared path set: a new derived route replaces the record, while
+a manifest-base route resolves it. Conflict diagnostics use Git's
+NUL-delimited name-only output and name both paths and base.
 
 The accepted cost of the derived route is that its lock never reaches
 `origin/main` through Syncwheel. It can reach `main` only through a later update
@@ -277,8 +304,10 @@ also creates no stack.
 ## Terminal handoff: owned but unpublished
 
 A successful `status: "verified"` result means **owned-but-unpublished**, not
-delivered. The local draft ref, product commit, manifest ownership, and control
-commit are complete; `published` remains `false`, and neither a remote branch nor
+delivered. On `manifest-base`, the local draft ref, product commit, manifest
+ownership, and control commit are complete. On `derived`, only the
+provenance-bound integration commit is owned and all draft/control fields are
+null. In both cases `published` remains `false`, and neither a remote branch nor
 coordination state was updated.
 
 `draftTipSha` is the exact projected tip of `draftBranch`. It is intentionally

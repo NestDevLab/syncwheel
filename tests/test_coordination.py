@@ -564,6 +564,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         )
 
     def test_derived_paths_survive_snapshot_and_compose_classifies_published_derived_tip(self):
+        module = self.load_module()
         origin = self.create_remote('derived-paths-compose')
         repo = self.clone(origin, 'derived-paths-compose')
         self.init_coordinated(repo, integration_membership='required')
@@ -578,17 +579,44 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         (repo / 'locks').mkdir()
         (repo / 'locks' / 'codex.lock').write_text('derived\n')
         self.git(repo, 'add', 'locks/codex.lock')
+        blob = self.git(repo, 'rev-parse', ':locks/codex.lock').stdout.strip()
+        paths_digest = module.derived_projection_paths_digest(
+            {'locks/codex.lock': blob}
+        )
         self.git(
             repo, 'commit', '-q', '-m', 'test: publish derived projection', '-m',
-            'Syncwheel-Derived-Projection: coordination-derived',
+            'Syncwheel-Derived-Projection: coordination-derived\n'
+            f'Syncwheel-Derived-Paths: {paths_digest}',
         )
         derived_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        module.append_ledger_event(
+            repo,
+            'revision_provider_derived_commit',
+            {
+                'operation_id': 'coordination-derived',
+                'commit': derived_tip,
+                'paths': ['locks/codex.lock'],
+                'paths_digest': paths_digest,
+                'composition_digest': module.integration_composition_digest(manifest),
+            },
+            manifest_path,
+        )
         self.run_cli(repo, 'int', 'push')
         base_tip, base_state = self.remote_state(origin)
         base_manifest = json.loads(manifest_path.read_text())
 
         self.assertEqual(
             base_state['manifest']['integration']['derived_paths'], ['locks/']
+        )
+        self.assertEqual(
+            base_state['manifest']['integration']['derived_provenance'],
+            [{
+                'operation_id': 'coordination-derived',
+                'commit': derived_tip,
+                'paths': ['locks/codex.lock'],
+                'paths_digest': paths_digest,
+                'composition_digest': module.integration_composition_digest(manifest),
+            }],
         )
         orphan_tip = self.commit_on_branch(repo, 'pr/derived-orphan', 'orphan.txt')
         self.run_cli(
@@ -602,7 +630,6 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             repo, 'stack', 'create', 'derived-local', new_tip,
             '--branch', 'pr/derived-local',
         )
-        module = self.load_module()
         local_manifest, _ = module.load_manifest(repo, manifest_path)
 
         plan, _proposed, _remote = module.coordination_compose_stack_plan(
@@ -618,6 +645,10 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(plan['unmappedIntegrationCommits'], [])
         self.assertEqual(
             plan['composedSnapshot']['integration']['derived_paths'], ['locks/']
+        )
+        self.assertEqual(
+            plan['composedSnapshot']['integration']['derived_provenance'],
+            base_state['manifest']['integration']['derived_provenance'],
         )
 
     def test_coordination_snapshot_round_trip_preserves_draft_state(self):
