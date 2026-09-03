@@ -6308,6 +6308,40 @@ def github_ci_check_result(check):
     return status if status in {'SUCCESS', 'SKIPPED'} else None
 
 
+def github_required_check_names(rules):
+    """Extract required check names from supported GitHub rule response shapes."""
+    names = []
+    protection = rules.get('branchProtection') if isinstance(rules, dict) else None
+    required = protection.get('required_status_checks') if isinstance(protection, dict) else None
+    if isinstance(required, dict):
+        candidates = [*(required.get('contexts') or []), *(required.get('checks') or [])]
+        for item in candidates:
+            if isinstance(item, str) and item:
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get('context') or item.get('name')
+                if isinstance(name, str) and name:
+                    names.append(name)
+    rulesets = rules.get('rulesets') if isinstance(rules, dict) else None
+    if isinstance(rulesets, dict):
+        rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
+    for rule in rulesets or []:
+        if not isinstance(rule, dict):
+            continue
+        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
+        if rule_type != 'required_status_checks':
+            continue
+        parameters = rule.get('parameters') or {}
+        for item in parameters.get('required_status_checks') or []:
+            if isinstance(item, str) and item:
+                names.append(item)
+            elif isinstance(item, dict):
+                name = item.get('context') or item.get('name')
+                if isinstance(name, str) and name:
+                    names.append(name)
+    return list(dict.fromkeys(names))
+
+
 def github_rule_review_required(rules):
     protection = rules.get('branchProtection') if isinstance(rules, dict) else None
     if isinstance(protection, dict) and protection.get('required_pull_request_reviews'):
@@ -6550,9 +6584,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             for check in checks:
                 if github_ci_check_result(check) is None:
                     github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
-        protection = rules.get('branchProtection') if isinstance(rules, dict) else None
-        required = (protection or {}).get('required_status_checks') if isinstance(protection, dict) else None
-        required_names = (required or {}).get('contexts') if isinstance(required, dict) else []
+        required_names = github_required_check_names(rules)
         if required_names:
             observed_names = {item.get('name') for item in checks if isinstance(item, dict)}
             for name in required_names:

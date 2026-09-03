@@ -190,6 +190,21 @@ class GithubPrMergeTest(unittest.TestCase):
         self.assertEqual(plan['status'], 'blocked')
         self.assertTrue(any(item['code'] == 'check_failed_or_pending' for item in plan['blockers']))
 
+    def test_required_check_context_must_be_present(self):
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = self.policy()
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        observed = self.observation(checks=[{'name': 'other-ci', 'status': 'SUCCESS'}])
+        observed['rules']['branchProtection']['required_status_checks'] = {'contexts': ['required-ci']}
+        with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=observed):
+            plan = SYNCWHEEL.build_github_pr_merge_plan(
+                self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+            )
+        self.assertTrue(any(item['code'] == 'required_check_missing' for item in plan['blockers']))
+
     def test_merge_receipt_reconciles_success_without_second_merge(self):
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
