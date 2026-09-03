@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.43.1 - 2026-09-03
+
+- Fix the claim-proof changed_refs test fixture to match a real ref-set
+  mismatch under A9's control-manifest fold-in instead of a stale ref count.
+
 ## 0.43.0 - 2026-09-03
 
 - Publish each active-active draft's source ref and coordinated state atomically
