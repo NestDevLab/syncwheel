@@ -121,6 +121,25 @@ push support and never falls back to serial pushes. See
 state model, lease handling, explicit merge acceptance, privacy contract, and
 local cleanup safeguards.
 
+Every managed source ref has one CAS authority at
+`refs/heads/syncwheel/claim/heads/...`. Each coordinated publication advances
+that claim in the same atomic push as the source and state refs; an unchanged
+claim is not accepted as lease evidence. Existing manifests normalize
+`coordination.claims` to `advisory`. In that mode Syncwheel still creates claims
+and reports gaps. Prepare an explicit switch to `required` with:
+
+```bash
+syncwheel coordination claims backfill
+syncwheel coordination claims backfill --apply --reason "claim migration"
+```
+
+Backfill uses create-only leases and never overwrites a foreign claim.
+`required` refuses published state that lists an owned source without a claim.
+Syncwheel covers concurrent Syncwheel commands, process death, ordinary Git on
+unowned refs, and arbitrary readers. It fails closed on a detectable CAS,
+ordering, intent, or recovery violation; forced/raw mutation of Syncwheel-owned
+refs and hostile remotes or hooks remain outside that guarantee.
+
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:
 
@@ -355,9 +374,12 @@ preserved and reported instead of replaced. A retry adopts an equivalent complet
 before probing whether a new atomic push is possible. `stack demote` reverses the promotion, and
 refuses when the stack already records an open pull request.
 
-Closing a never-published draft records `stack_close_intent` before changing the manifest and
-`stack_closed` afterwards. A retry therefore completes or cancels an interrupted close instead of
-reporting an unknown stack. `stack close --reason absorbed` first fetches and records the observed
+Closing a never-published draft is remote-first under active coordination. It
+records `stack_close_intent`, atomically publishes a tombstone claim plus state,
+saves the manifest, and only then records `stack_closed`. A retry after a crash
+between push and save recognizes its operation token in the tombstone and
+completes idempotently; an unreachable remote fails closed without changing the
+manifest. `stack close --reason absorbed` first fetches and records the observed
 delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
 path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
 

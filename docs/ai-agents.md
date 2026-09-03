@@ -43,6 +43,19 @@ published state, ownership boundary, local locks, pending merge decision, and
 eligible cleanup. Use `publish` rather than a raw Git push so all managed refs
 and the coordination state receive one atomic, leased publication.
 
+The lease authority for a managed source is its
+`refs/heads/syncwheel/claim/heads/...` claim. A valid publish advances the claim
+in the same atomic refspec; merely observing or leasing an unchanged ref is not
+proof. Treat `coordination.claims: advisory` as a migration state, inspect
+`syncwheel coordination claims backfill`, and never flip to `required` until
+the dry-run reports zero unclaimed owned refs. Backfill with `--apply --reason`
+never replaces a claim owned by another coordination domain.
+
+For draft close, the order is intent, remote tombstone claim plus state CAS,
+local manifest save, terminal event. Do not reintroduce remote observations
+around the filesystem save: they cannot make that boundary atomic. A retry may
+complete only when the remote tombstone contains its exact operation token.
+
 For channels, inspect `channel contract`, `channel list`, `channel show`, and
 `channel diff` first. Every mutation previews a `channelPlan`; repeat the same
 command only with its exact `--plan-digest ... --apply` and optional stable
@@ -107,6 +120,8 @@ active-active channel must use the coordination remote.
   at or after that boundary is `unknown` until reconciliation
 - close expired or obsolete channels explicitly; expiry is not automatic
   branch deletion
+- fail closed when a source claim is absent in required mode, belongs to another
+  domain, or fails to advance; use handoff or claims backfill, never a raw push
 
 ## Manifest tracking
 
