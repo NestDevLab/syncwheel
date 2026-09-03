@@ -31,7 +31,7 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 python3 scripts/syncwheel.py stack sync <stack>
 python3 scripts/syncwheel.py stack rebuild <stack> --worktree <path>
-python3 scripts/syncwheel.py int rebuild --worktree <path>
+python3 scripts/syncwheel.py int rebuild --worktree <path> --reason "refresh integration projection"
 ```
 
 ## What becomes deterministic

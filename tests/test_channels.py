@@ -3,6 +3,7 @@ import importlib.util
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import time
@@ -1335,38 +1336,159 @@ class DeploymentChannelTest(unittest.TestCase):
 
     def test_every_existing_delivery_manifest_writer_joins_global_lock(self):
         module = self.load_module()
-        tree = ast.parse(CLI.read_text())
-        functions = {
-            node.name: node for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        calls = {
-            name: {
-                child.func.id
-                for child in ast.walk(node)
-                if isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
+        saver_names = {'save_manifest', 'append_ledger_event'}
+
+        def analyze(scripts_root):
+            definitions = {}
+            by_simple_name = {}
+            imports = {}
+
+            class CallCollector(ast.NodeVisitor):
+                def __init__(self):
+                    self.calls = []
+
+                def visit_FunctionDef(self, node):
+                    return None
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_ClassDef(self, node):
+                    return None
+
+                def visit_Call(self, node):
+                    if isinstance(node.func, ast.Name):
+                        self.calls.append(('name', None, node.func.id))
+                    elif isinstance(node.func, ast.Attribute):
+                        value = node.func.value
+                        while isinstance(value, ast.Attribute):
+                            value = value.value
+                        root = value.id if isinstance(value, ast.Name) else None
+                        self.calls.append(('attribute', root, node.func.attr))
+                    self.generic_visit(node)
+
+            class DefinitionCollector(ast.NodeVisitor):
+                def __init__(self, module_name):
+                    self.module_name = module_name
+                    self.scope = []
+
+                def collect_function(self, node):
+                    self.scope.append(node.name)
+                    qualified_name = '.'.join(self.scope)
+                    calls = CallCollector()
+                    for statement in node.body:
+                        calls.visit(statement)
+                    key = (self.module_name, qualified_name)
+                    definitions[key] = calls.calls
+                    by_simple_name.setdefault(node.name, set()).add(key)
+                    for statement in node.body:
+                        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                            self.visit(statement)
+                    self.scope.pop()
+
+                def visit_FunctionDef(self, node):
+                    self.collect_function(node)
+
+                visit_AsyncFunctionDef = visit_FunctionDef
+
+                def visit_ClassDef(self, node):
+                    self.scope.append(node.name)
+                    for statement in node.body:
+                        self.visit(statement)
+                    self.scope.pop()
+
+            for path in sorted(Path(scripts_root).glob('*.py')):
+                module_name = path.stem
+                tree = ast.parse(path.read_text(), filename=str(path))
+                aliases = {}
+                for node in tree.body:
+                    if isinstance(node, ast.Import):
+                        for alias in node.names:
+                            aliases[alias.asname or alias.name.split('.')[0]] = alias.name.split('.')[-1]
+                    elif isinstance(node, ast.ImportFrom) and node.module:
+                        for alias in node.names:
+                            aliases[alias.asname or alias.name] = node.module.split('.')[-1]
+                imports[module_name] = aliases
+                DefinitionCollector(module_name).visit(tree)
+
+            def callees(key):
+                module_name, qualified_name = key
+                class_scope = qualified_name.rpartition('.')[0]
+                output = set()
+                for kind, root, leaf in definitions[key]:
+                    if kind == 'name':
+                        output.update(
+                            candidate for candidate in by_simple_name.get(leaf, set())
+                            if candidate[0] == module_name
+                        )
+                    elif root == 'self' and class_scope:
+                        candidate = (module_name, f'{class_scope}.{leaf}')
+                        if candidate in definitions:
+                            output.add(candidate)
+                    elif root in imports[module_name]:
+                        imported_module = imports[module_name][root]
+                        output.update(
+                            candidate for candidate in by_simple_name.get(leaf, set())
+                            if candidate[0] == imported_module
+                        )
+                    else:
+                        # Attribute calls on typed collaborators are resolved
+                        # conservatively by method name across script modules.
+                        output.update(by_simple_name.get(leaf, set()))
+                return output
+
+            direct_savers = {
+                key for key, calls in definitions.items()
+                if any(leaf in saver_names for _kind, _root, leaf in calls)
             }
-            for name, node in functions.items()
-        }
 
-        def reaches_saver(name, trail=()):
-            if name in trail:
-                return False
-            for callee in calls.get(name, set()):
-                if callee in {'save_manifest', 'append_ledger_event'}:
+            def reaches_saver(key, trail=()):
+                if key in trail:
+                    return False
+                if key in direct_savers:
                     return True
-                if callee in functions and reaches_saver(callee, (*trail, name)):
-                    return True
-            return False
+                return any(
+                    reaches_saver(callee, (*trail, key))
+                    for callee in callees(key)
+                )
 
-        statically_derived = {
-            name for name in functions
-            if name.startswith('command_') and reaches_saver(name)
-        }
-        registered = {
-            command.__name__ for command in module.MANIFEST_SAVER_COMMANDS
-        }
-        self.assertEqual(registered, statically_derived)
+            registered = {
+                ('syncwheel', entrypoint.__qualname__)
+                for entrypoint in module.MANIFEST_SAVER_ENTRYPOINTS
+            }
+            covered = set()
+            frontier = list(registered)
+            while frontier:
+                key = frontier.pop()
+                if key in covered or key not in definitions:
+                    continue
+                covered.add(key)
+                frontier.extend(callees(key) - covered)
+            derived_commands = {
+                key for key in definitions
+                if key[1].startswith('command_') and reaches_saver(key)
+            }
+            registered_commands = {
+                key for key in registered if key[1].startswith('command_')
+            }
+            return direct_savers - covered, derived_commands, registered_commands
+
+        uncovered, derived_commands, registered_commands = analyze(CLI.parent)
+        self.assertEqual(uncovered, set())
+        self.assertEqual(registered_commands, derived_commands)
+
+        mutant_root = self.root / 'mutant-scripts'
+        shutil.copytree(CLI.parent, mutant_root)
+        with (mutant_root / 'syncwheel_revision_provider.py').open('a') as handle:
+            handle.write(
+                '\nclass UndeclaredManifestSaver:\n'
+                '    def persist(self, backend, path, manifest):\n'
+                '        backend.save_manifest(path, manifest)\n'
+            )
+        mutant_uncovered, _derived, _registered = analyze(mutant_root)
+        self.assertIn(
+            ('syncwheel_revision_provider', 'UndeclaredManifestSaver.persist'),
+            mutant_uncovered,
+        )
         for command in (
             module.command_repo_authority_set,
             module.command_coordination_compose,

@@ -146,13 +146,21 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
 
     def set_integration_membership(self, repo, integration_membership):
         manifest_path = repo / '.syncwheel' / 'manifest.json'
-        manifest = json.loads(manifest_path.read_text())
         # Coordination fixtures model pre-existing repositories. Keep their
         # historical optional integration behavior explicit, while dedicated
         # initialization coverage exercises the required default.
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo, manifest_path)
         manifest['defaults']['integration_membership'] = integration_membership
-        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
-        return manifest
+        with module.manifest_write_transaction(repo, manifest_path, 'fixture-membership'):
+            module.save_manifest_with_ledger(
+                repo,
+                manifest_path,
+                manifest,
+                'fixture_integration_membership',
+            )
+        persisted, _ = module.load_manifest(repo, manifest_path)
+        return persisted
 
     def remote_state(self, origin, coordination_id='default'):
         ref = f'refs/heads/syncwheel/state/{coordination_id}'
@@ -1022,6 +1030,166 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         self.assertEqual(full['publication_scope'], 'full')
         self.assertEqual(full['projection_status'], 'convergent')
         self.assertEqual(full['managed_refs']['refs/heads/pr/feature-a'], feature_sha)
+
+    def test_stack_push_retry_completes_interrupted_control_manifest_before_publish(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'stack-push-control-retry')
+        self.init_coordinated(repo)
+        feature_sha = self.commit_on_branch(
+            repo, 'pr/feature-a', 'feature-a-control-retry.txt'
+        )
+        self.run_cli(
+            repo,
+            'stack', 'create', 'feature-a', feature_sha,
+            '--branch', 'pr/feature-a',
+        )
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        args = SimpleNamespace(
+            repo=str(repo), manifest=None, personal=None, stack='feature-a',
+            remote=None, dry_run=False, force_with_lease=False,
+            git_args=[], command='stack',
+        )
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(repo, manifest_path):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.command_stack_push(args)
+
+        control_commit = self.git(
+            repo, 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+        interrupted_status = self.git(
+            repo, 'status', '--porcelain', '--untracked-files=no'
+        ).stdout
+        self.assertIn('.syncwheel/manifest.json', interrupted_status)
+        interrupted_events = module.load_ledger_events(repo, manifest_path)
+        self.assertEqual(
+            interrupted_events[-1]['type'], 'control_manifest_persistence_intent'
+        )
+        self.assertFalse(any(
+            event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == control_commit
+            for event in interrupted_events
+        ))
+
+        self.run_cli(repo, 'stack', 'push', 'feature-a')
+
+        self.assertEqual(
+            self.git(repo, 'status', '--porcelain', '--untracked-files=no').stdout,
+            '',
+        )
+        events = module.load_ledger_events(repo, manifest_path)
+        receipts = [
+            event for event in events
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(receipts), 1)
+        _state_tip, state = self.remote_state(origin)
+        self.assertEqual(
+            state['managed_refs']['refs/heads/integration/shared'], control_commit
+        )
+        self.assertEqual(
+            state['managed_refs']['refs/heads/pr/feature-a'], feature_sha
+        )
+
+    def test_coordinated_publish_retry_recovers_control_manifest_before_remote_state(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'coordinated-control-retry')
+        self.init_coordinated(repo)
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(repo, manifest_path):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.coordinated_publish(
+                        repo, manifest, manifest_path, {},
+                        'control-retry', 'partial',
+                    )
+        control_commit = self.git(
+            repo, 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+
+        with module.manifest_write_transaction(repo, manifest_path):
+            result = module.coordinated_publish(
+                repo, manifest, manifest_path, {},
+                'control-retry', 'partial',
+            )
+
+        self.assertEqual(result['status'], 'published')
+        self.assertEqual(
+            self.git(repo, 'status', '--porcelain', '--untracked-files=no').stdout,
+            '',
+        )
+        receipts = [
+            event for event in module.load_ledger_events(repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(receipts), 1)
+        _state_tip, state = self.remote_state(origin)
+        self.assertEqual(
+            state['managed_refs']['refs/heads/integration/shared'], control_commit
+        )
+
+    def test_int_push_retry_recovers_control_manifest_before_publish(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'int-push-control-retry')
+        self.init_coordinated(repo)
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        args = SimpleNamespace(
+            repo=str(repo), manifest=None, personal=None, remote=None,
+            dry_run=False, force_with_lease=False, git_args=[], command='int',
+        )
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(repo, manifest_path):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.command_int_push(args)
+        control_commit = self.git(
+            repo, 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+
+        self.run_cli(repo, 'int', 'push')
+
+        self.assertEqual(
+            self.git(repo, 'status', '--porcelain', '--untracked-files=no').stdout,
+            '',
+        )
+        receipts = [
+            event for event in module.load_ledger_events(repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(receipts), 1)
+        _state_tip, state = self.remote_state(origin)
+        self.assertEqual(
+            state['managed_refs']['refs/heads/integration/shared'], control_commit
+        )
 
     def test_coordinated_promote_transfers_draft_branch_ownership_with_a_tombstone(self):
         origin = self.create_remote()

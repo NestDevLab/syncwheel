@@ -17,15 +17,22 @@ including when `--manifest` names an external file. It creates a
 `.syncwheel/manifest.json` with an isolated temporary index and `commit-tree`.
 The object is verified before an exact ref CAS, so hooks and staged files cannot
 alter it. Its identity and dates are inherited deterministically from the replay
-parent; the same parent and manifest produce the same SHA. After the ref moves,
-the checked-out branch and manifest source are aligned before a keyed ledger
-receipt records the actual SHA, digest, actor, reason, command, and replay mode.
-A retry recognizes an already-moved ref and completes those remaining stages;
-an event already durable at the crash boundary is not duplicated. External
-manifest files are written from the same desired in-memory manifest as the
-control commit. `int rebuild --reason TEXT` is required for an `ai-managed`
-repository. This control commit is part of the integration projection and is
-recreated on later rebuilds; do not treat it as a stack-owned product commit.
+parent; the same parent and manifest produce the same SHA. Before moving the
+ref, Syncwheel fsyncs a local ledger intent containing a fresh operation ID,
+the source preimage digest, and the expected control-commit SHA. After the ref
+moves, the checked-out branch and manifest source are aligned before a keyed
+ledger receipt records the actual SHA, digest, actor, reason, command, and
+replay mode. A retry repairs an incomplete ledger tail under lock and completes
+only an operation proven by that local intent; a control commit learned from
+another clone never authorizes replacing a different local proposal. A receipt
+already durable at the crash boundary is not duplicated, while a later rebuild
+of the same deterministic SHA has a new operation ID and its own receipt.
+External manifest files are written from the same desired in-memory manifest
+as the control commit. `int rebuild --reason TEXT` is required for an
+`ai-managed` repository and is the explicit path for adopting a reviewed local
+proposal after cross-clone divergence. This control commit is part of the
+integration projection and is recreated on later rebuilds; do not treat it as
+a stack-owned product commit.
 
 ## Shape
 
