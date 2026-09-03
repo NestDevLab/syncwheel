@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.42.3 - 2026-09-03
+
+- Accept both recorded control-manifest digest forms in coordination state:
+  the digest of `.syncwheel/manifest.json` on the state's integration tip, and
+  the normalized public snapshot of that same manifest recorded before 0.42.2.
+  Verification reports which form matched; any other value still fails closed.
+  Without this, every publish, stack push, and compose from a state published
+  before 0.42.2 stopped with no available publication path.
+- Migrate a legacy state on its first successful publication: the successor
+  carries the control-manifest digest and the ledger records
+  `coordination_state_digest_migrated` with both digests and both forms.
+- Add the `state-digest-migration` repair backend for a legacy state whose
+  managed refs are already coherent. The plan reports
+  `digest-migration-required` instead of `noop` and binds both digests; apply
+  appends a state child that changes only the recorded digest under the same
+  state-only CAS boundary as the other evidence backends.
+
 ## 0.42.2 - 2026-09-03
 
 - Preserve the control manifest across integration rebuilds: reject an
