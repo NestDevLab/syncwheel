@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.43.2 - 2026-09-04
+
+- Fix `validate_coordination_publication_base` (A14) to run the integration-ref
+  successor check whenever `integration_ref` is in the operation's
+  `changed_refs`, as the amendment specifies, instead of only for `int push`
+  and `reconcile --apply --push`. The narrower scope condition let an ordinary
+  `stack push` from a stale-but-honest clone silently overwrite another
+  clone's already-published integration tip with `rc 0`.
+- Add a direct unit test isolating the claim proof's scope check (L2) from its
+  changed_refs check (L3), covering the gap noted in the round-11 review where
+  the scope check could be removed without failing the existing test.
+
 ## 0.43.1 - 2026-09-03
 
 - Fix the claim-proof changed_refs test fixture to match a real ref-set

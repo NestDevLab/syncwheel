@@ -11680,7 +11680,6 @@ def validate_coordination_publication_base(
     state_transition=None,
     remedy_stack=None,
     creation_remedy=False,
-    scope=None,
 ):
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
@@ -11935,13 +11934,12 @@ def validate_coordination_publication_base(
         return digest_form
 
     remote_tip = state.get('managed_refs', {}).get(integration_ref)
-    # A14: only int push and reconcile own publishing the integration branch.
-    # Any other operation that carries the ref into changed_refs (bootstrap
-    # housekeeping, a foreign clone's A10 onboarding rebuild) is not asking to
-    # replace the published tip with its own, so ancestry is irrelevant to it.
+    # A14: applies whenever integration_ref is in changed_refs, regardless of
+    # scope. A12 keeps this safe for operations that don't touch the ref: they
+    # carry the parent state's recorded tip forward untouched, so a locally
+    # rebuilt integration branch never enters the published state.
     if (
-        coordination_scope_remedy(scope) in {'int push', 'reconcile --apply --push'}
-        and integration_ref in changed_refs
+        integration_ref in changed_refs
         and remote_tip
         and not coordination_ref_is_safe_successor(
             repo_root,
@@ -12982,7 +12980,6 @@ def coordinated_publish_cycle(
         state_transition=state_transition,
         remedy_stack=remedy_stack,
         creation_remedy=creation_remedy,
-        scope=scope,
     )
     for ref, sha in changed_refs.items():
         if not sha:
@@ -20097,7 +20094,6 @@ def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
         {source_ref: planned_tip},
         remedy_stack=stack['id'],
         creation_remedy=True,
-        scope=f"create:{stack['id']}",
     )
     atomic_push_capability_probe(repo_root, config['remote'])
     return {

@@ -6348,6 +6348,43 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.assert_pending_intent_was_abandoned(fixture)
 
+    def test_claim_proof_scope_check_is_not_masked_by_the_ref_set_check(self):
+        """review-B1-final section 2.4: isolate L2 from L3.
+
+        test_claim_proof_requires_the_operation_scope passes even with the L2
+        (publication_scope) comparison removed, because its fixture's
+        changed_refs already differ for an unrelated reason (A9's incidental
+        control-manifest refresh), so L3 alone fails the claim first. Call
+        coordination_claim_proves_operation directly with a claim and an
+        operation whose changed_refs match exactly, so scope is the only
+        variable, and confirm a scope mismatch is caught on its own.
+        """
+        module = self.load_module()
+        config = {'id': 'default'}
+        operation = {
+            'operation_token': 'isolated-scope-token',
+            'scope': 'stack:isolated-scope',
+            'changed_refs': {'refs/heads/pr/isolated-scope': 'a' * 40},
+        }
+        claim = {
+            'coordination_id': 'default',
+            'source_ref': 'refs/heads/pr/isolated-scope',
+            'operation_token': 'isolated-scope-token',
+            'publication_scope': 'stack:isolated-scope',
+            'changed_refs': ['refs/heads/pr/isolated-scope'],
+        }
+        self.assertTrue(
+            module.coordination_claim_proves_operation(
+                claim, config, 'refs/heads/pr/isolated-scope', operation,
+            )
+        )
+        mismatched_scope_claim = dict(claim, publication_scope='stack:isolated-scope-other')
+        self.assertFalse(
+            module.coordination_claim_proves_operation(
+                mismatched_scope_claim, config, 'refs/heads/pr/isolated-scope', operation,
+            )
+        )
+
     def test_claim_proof_requires_the_recorded_changed_refs(self):
         # A9 folds the integration ref into changed_refs here (stale control
         # manifest), so the foreign side must claim both refs to match the
@@ -7016,5 +7053,64 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertIn(
             'cannot publish an empty managed ref: refs/heads/integration/shared',
             failure.stderr,
+        )
+
+    def test_a14_successor_check_fires_for_stack_push_not_only_int_push(self):
+        """Regression for review-B1-final section 1.
+
+        A14 says the ancestry check applies whenever integration_ref is in
+        changed_refs, with no scope condition. Two honest clones, no
+        adversary: clone A bootstraps and publishes s1 (tip X); clone Z
+        onboards, publishes s2 on top (tip Y, a child of X); clone A, still
+        stale at X, then runs an ordinary `stack push s3`, whose own
+        control-manifest refresh folds integration_ref into changed_refs as a
+        sibling of X, not a descendant of Y. That push must be refused, not
+        silently accepted with rc 0 overwriting Y.
+        """
+        origin = self.create_remote('a14-stale-push')
+        repo_a = self.clone(origin, 'a14-stale-push-a')
+        self.init_coordinated(repo_a)
+
+        source_s1 = self.commit_on_branch(repo_a, 'pr/a14-s1', 'a14-s1.txt')
+        self.run_cli(repo_a, 'stack', 'create', 's1', source_s1, '--branch', 'pr/a14-s1')
+        self.run_cli(repo_a, 'stack', 'push', 's1')
+        tip_x = self.git(
+            repo_a, 'ls-remote', 'origin', 'refs/heads/integration/shared'
+        ).stdout.split()[0]
+
+        repo_z = self.mirror_coordinated_clone(
+            origin, repo_a, 'a14-stale-push-z', ['integration/shared', 'pr/a14-s1'],
+        )
+        source_s2 = self.commit_on_branch(repo_z, 'pr/a14-s2', 'a14-s2.txt')
+        self.run_cli(repo_z, 'stack', 'create', 's2', source_s2, '--branch', 'pr/a14-s2')
+        self.run_cli(repo_z, 'stack', 'push', 's2')
+        tip_y = self.git(
+            repo_z, 'ls-remote', 'origin', 'refs/heads/integration/shared'
+        ).stdout.split()[0]
+        self.assertNotEqual(tip_x, tip_y)
+        self.git(repo_z, 'merge-base', '--is-ancestor', tip_x, tip_y)
+
+        # Clone A learns s2 the way a git-tracked manifest is normally
+        # discovered: it adopts Z's manifest content directly, the same
+        # mechanism mirror_coordinated_clone uses for onboarding. It never
+        # rebuilds its own integration/shared branch, which stays at X.
+        (repo_a / '.syncwheel' / 'manifest.json').write_text(
+            (repo_z / '.syncwheel' / 'manifest.json').read_text()
+        )
+
+        source_s3 = self.commit_on_branch(repo_a, 'pr/a14-s3', 'a14-s3.txt')
+        self.run_cli(repo_a, 'stack', 'create', 's3', source_s3, '--branch', 'pr/a14-s3')
+        failure = self.run_cli_unchecked(repo_a, 'stack', 'push', 's3')
+
+        self.assertEqual(failure.returncode, 2, failure.stderr)
+        self.assertIn(
+            'local integration branch is not a safe successor of the published integration ref',
+            failure.stderr,
+        )
+        self.assertEqual(
+            self.git(
+                repo_a, 'ls-remote', 'origin', 'refs/heads/integration/shared'
+            ).stdout.split()[0],
+            tip_y,
         )
         self.assertNotIn('Traceback', failure.stderr)
