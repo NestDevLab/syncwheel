@@ -8,16 +8,21 @@
   the pseudo-refs `git worktree add` writes, tags, notes and stash are no
   longer refused. When `guard.json` is missing or malformed the guard still
   refuses moves of the integration ref and manual commits on it in the primary
-  checkout, reconstructing that ref from the manifests and the primary's own
-  branch; every other branch ref passes with a stderr warning naming
-  `syncwheel hooks install --apply`. A repository whose hooks predate
-  `guard.json` stays usable instead of rejecting every ref transaction.
+  checkout: with no usable configuration it cannot tell which branch is the
+  integration one, so it refuses every branch ref and names
+  `syncwheel hooks install --apply` as the repair. Fetch, worktree creation,
+  tags, notes, stash and `HEAD` keep flowing, so a repository whose hooks
+  predate `guard.json` stays usable instead of rejecting every ref
+  transaction.
 - Stop Syncwheel's child Git processes from inheriting `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_PREFIX` and
   `GIT_NAMESPACE` from the hook environment. A guard running inside a linked
   worktree pointed its `git -C <other worktree> status` at the calling
   worktree's index and rewrote it, after which the merge that triggered the
   hook died with `fatal: stash failed`. An explicit `env=` override still wins.
+  This applies to every Syncwheel invocation, not only to hooks, so
+  `GIT_DIR=... syncwheel <command>` from outside a checkout no longer selects
+  the repository; pass `-r <path>` instead.
 - Skip the workspace-wide preflights for the `hooks guard`,
   `hooks worktree-guard` and `hooks ref-guard` callbacks. They run inside a Git
   process that is mid-operation and must decide about the incoming refs, not

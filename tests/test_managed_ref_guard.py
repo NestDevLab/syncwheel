@@ -332,7 +332,8 @@ class ManagedRefGuardTests(unittest.TestCase):
         old, new = self.descendant_commit('rejected while degraded')
         moved = self._run_git('update-ref', 'refs/heads/main-integration', new, old)
         self.assertNotEqual(moved.returncode, 0)
-        self.assertIn('refusing unauthorized primary integration ref move', moved.stderr)
+        self.assertIn('refs/heads/main-integration', moved.stderr)
+        self.assertIn('syncwheel hooks install --apply', moved.stderr)
         self.assertIn(cause, moved.stderr)
         self.assertEqual(
             subprocess.check_output(
@@ -371,9 +372,8 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(added.returncode, 0, added.stderr)
         self.assertTrue((self.repo / 'var' / 'worktrees' / 'probe').is_dir())
 
-        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
-        moved = self._run_git('branch', '-f', 'scratch', 'HEAD~1')
-        self.assertEqual(moved.returncode, 0, moved.stderr)
+        tagged = self._run_git('tag', 'probe-tag')
+        self.assertEqual(tagged.returncode, 0, tagged.stderr)
 
     def test_fetch_and_worktree_creation_survive_a_missing_guard_configuration(self):
         self._install_and_branch('main-integration')
@@ -400,15 +400,156 @@ class ManagedRefGuardTests(unittest.TestCase):
                 self._assert_unguarded_transactions_pass()
                 self._assert_guard_still_protects_its_surface(cause)
 
-    def test_degraded_guard_names_its_remedy_without_rejecting_other_branches(self):
+    def test_armed_guard_leaves_fetch_and_worktree_creation_alone(self):
+        # The regression this module exists for, asserted in the armed state the
+        # repositories actually run in.
         self._install_and_branch('main-integration')
-        syncwheel.primary_guard_path(self.repo).unlink()
+        self._seed_remote()
+
+        self._assert_unguarded_transactions_pass()
+
         subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+        moved = self._run_git('branch', '-f', 'scratch', 'HEAD~1')
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+
+        old, new = self.descendant_commit('still refused while armed')
+        refused = self._run_git('update-ref', 'refs/heads/main-integration', new, old)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('refusing unauthorized primary integration ref move', refused.stderr)
+
+    def test_degraded_guard_refuses_other_branches_and_names_the_repair(self):
+        # Nothing left distinguishes the integration ref from any other branch,
+        # so every branch ref is refused; the refusal has to say how to fix it.
+        self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+        syncwheel.primary_guard_path(self.repo).unlink()
 
         moved = self._run_git('branch', '-f', 'scratch', 'HEAD~1')
 
-        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertIn('configuration is missing', moved.stderr)
         self.assertIn('syncwheel hooks install --apply', moved.stderr)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', 'scratch'], cwd=self.repo, text=True
+            ).strip(),
+            subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True
+            ).strip(),
+        )
+
+    def _park_primary_off_integration(self):
+        subprocess.run(
+            ['git', '-c', 'core.hooksPath=/dev/null', 'checkout', '-q', '-b', 'parked'],
+            cwd=self.repo, check=True,
+        )
+        subprocess.run(
+            ['git', '-c', 'core.hooksPath=/dev/null', 'branch', '-f',
+             'main-integration', 'HEAD~1'],
+            cwd=self.repo, check=True,
+        )
+
+    def _assert_integration_ref_still_refused(self):
+        before = subprocess.check_output(
+            ['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True
+        ).strip()
+        head = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=self.repo, text=True
+        ).strip()
+        moved = self._run_git('update-ref', 'refs/heads/main-integration', head, before)
+
+        self.assertNotEqual(moved.returncode, 0, moved.stdout)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True
+            ).strip(),
+            before,
+        )
+
+    def _make_journal_manifest(self):
+        manifest = json.loads(json.dumps(self.manifest))
+        manifest.pop('integration', None)
+        manifest['repository_mode'] = 'journal'
+        manifest['stacks'] = []
+        manifest['journal'] = {
+            'branch': 'journal', 'remote': 'origin',
+            'include': ['**'], 'exclude': ['.git/**'],
+            'max_file_bytes': 10485760, 'interval': '30m',
+        }
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+
+    def test_degraded_guard_protects_a_journal_repository_integration_ref(self):
+        # A journal manifest declares no integration branch at all, so nothing
+        # in the tree can name the ref guard.json was protecting.
+        self._install_and_branch('main-integration')
+        self._make_journal_manifest()
+        subprocess.run(
+            ['git', '-c', 'core.hooksPath=/dev/null', 'checkout', '-q', '-b', 'journal'],
+            cwd=self.repo, check=True,
+        )
+        subprocess.run(
+            ['git', '-c', 'core.hooksPath=/dev/null', 'branch', '-f',
+             'main-integration', 'HEAD~1'],
+            cwd=self.repo, check=True,
+        )
+        syncwheel.primary_guard_path(self.repo).unlink()
+
+        self._assert_integration_ref_still_refused()
+
+    def test_degraded_guard_protects_the_integration_ref_without_a_manifest(self):
+        # The manifest normally lives on the integration branch; park the primary
+        # elsewhere and there is nothing left to read.
+        self._install_and_branch('main-integration')
+        self._park_primary_off_integration()
+        shutil.rmtree(self.repo / '.syncwheel')
+        syncwheel.primary_guard_path(self.repo).unlink()
+
+        self._assert_integration_ref_still_refused()
+
+    def test_degraded_guard_protects_the_integration_ref_with_a_broken_manifest(self):
+        self._install_and_branch('main-integration')
+        self._park_primary_off_integration()
+        (self.repo / '.syncwheel' / 'manifest.json').write_text('{ <<<<<<< HEAD\n')
+        syncwheel.primary_guard_path(self.repo).unlink()
+
+        self._assert_integration_ref_still_refused()
+
+    def test_degraded_primary_refuses_a_manual_commit_off_the_integration_branch(self):
+        # The primary is the shared projection whatever branch it is parked on,
+        # and a degraded guard cannot prove otherwise.
+        self._install_and_branch('main-integration')
+        self._park_primary_off_integration()
+        shutil.rmtree(self.repo / '.syncwheel')
+        syncwheel.primary_guard_path(self.repo).unlink()
+        (self.repo / 'manual').write_text('manual\n')
+        subprocess.run(['git', 'add', 'manual'], cwd=self.repo, check=True)
+
+        blocked = self._run_git('commit', '-qm', 'manual')
+
+        self.assertNotEqual(blocked.returncode, 0)
+        self.assertIn('primary checkout commit blocked', blocked.stderr)
+        self.assertIn('syncwheel hooks install --apply', blocked.stderr)
+        authorized = subprocess.run(
+            ['git', 'commit', '-qm', 'syncwheel control'], cwd=self.repo,
+            env=self._syncwheel_authorized_env(), capture_output=True, text=True,
+        )
+        self.assertEqual(authorized.returncode, 0, authorized.stderr)
+
+    def test_ref_authorization_directory_ignores_the_ambient_repository(self):
+        # It decides where the nonce that permits a ref move is written, so it
+        # has to resolve the same repository every other guard lookup does.
+        other = self.temp_root / 'other'
+        subprocess.run(['git', 'init', '-q', str(other)], check=True)
+        expected = syncwheel.ref_auth_dir(self.repo)
+
+        with mock.patch.dict(
+            os.environ,
+            {'GIT_DIR': str(other / '.git'), 'GIT_COMMON_DIR': str(other / '.git')},
+            clear=False,
+        ):
+            self.assertEqual(syncwheel.ref_auth_dir(self.repo), expected)
 
     def test_guard_children_do_not_inherit_the_ambient_repository_environment(self):
         # Git exports these to its hooks. A child Git that inherits them ignores

@@ -319,19 +319,19 @@ AMBIENT_GIT_LOCATION_ENV = (
 )
 
 
-def managed_process_env(extra=None):
+def managed_process_env(extra=None, authorize=True):
     process_env = os.environ.copy()
     for name in AMBIENT_GIT_LOCATION_ENV:
         process_env.pop(name, None)
-    if SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
+    if authorize and SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
         process_env[MANAGED_REF_MOVE_AUTH_ENV] = authorize_ref_move(SYNCWHEEL_REF_AUTH_REPO)
     if extra:
         process_env.update(extra)
     return process_env
 
 
-def run(cmd, cwd=None, check=True, input_text=None, env=None):
-    process_env = managed_process_env(env)
+def run(cmd, cwd=None, check=True, input_text=None, env=None, authorize=True):
+    process_env = managed_process_env(env, authorize=authorize)
     result = subprocess.run(
         cmd,
         cwd=cwd,
@@ -844,48 +844,6 @@ def guardable_branch_ref(ref):
     )
 
 
-def manifest_integration_branches(root):
-    """Integration branches declared by the manifests visible at root."""
-    directory = Path(root) / '.syncwheel'
-    candidates = [directory / 'manifest.json']
-    try:
-        candidates.extend(sorted((directory / 'manifests').glob('*.json')))
-    except OSError:
-        pass
-    branches = set()
-    for path in candidates:
-        try:
-            payload = json.loads(path.read_text())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(payload, dict):
-            continue
-        integration = payload.get('integration')
-        branch = integration.get('branch') if isinstance(integration, dict) else None
-        if isinstance(branch, str) and branch.strip():
-            branches.add(branch.strip())
-    return branches
-
-
-def degraded_primary_guard_refs(repo_root):
-    """Guarded refs to fall back on when guard.json cannot be read.
-
-    The authoritative integration branch is unavailable, so reconstruct the
-    guarded surface from the manifests and from whatever the primary checkout
-    has out. Anything this cannot name was never the guarded surface and must
-    keep moving rather than taking the whole repository down with it.
-    """
-    worktrees = get_worktrees(repo_root)
-    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root)
-    branches = set()
-    for root in dict.fromkeys((primary_root, Path(repo_root).resolve())):
-        branches.update(manifest_integration_branches(root))
-    current = get_current_branch(primary_root)
-    if current and current != 'DETACHED':
-        branches.add(current)
-    return {f'{GUARDED_BRANCH_REF_PREFIX}{branch}' for branch in branches}
-
-
 def primary_guard_repair_remedy(error):
     return (
         f'{error}; run syncwheel hooks install --apply with the intended '
@@ -947,9 +905,11 @@ def save_primary_guard(repo_root, manifest, *, enabled=True, reason=None):
 
 
 def ref_auth_dir(repo_root):
-    result = subprocess.run(
-        ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root,
-        text=True, capture_output=True, check=False,
+    # authorize=False breaks the cycle: issuing an authorization needs this
+    # directory, and managed_process_env() issues one for every other command.
+    result = run(
+        ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root, check=False,
+        authorize=False,
     )
     if result.returncode != 0:
         raise SyncwheelError('cannot resolve git common directory for ref authorization')
@@ -27237,36 +27197,36 @@ def command_hooks_worktree_guard(args):
     branch = get_current_branch(primary_root)
     manifest_path = resolve_manifest_path(primary_root, str(primary_root), args.manifest, args.personal)
     manifest, _ = load_manifest(primary_root, manifest_path)
-    if guard_error:
-        # The authoritative integration branch is gone, so fall back to the one
-        # the selected manifest declares. With no manifest there is nothing left
-        # to compare the primary against.
-        print(
-            f'syncwheel guard degraded: {primary_guard_repair_remedy(guard_error)}',
-            file=sys.stderr,
-        )
-        expected = ((manifest or {}).get('integration') or {}).get('branch')
-        if not expected:
-            return 0
-    else:
-        if not guard['enabled']:
-            return 0
-        expected = guard.get('integrationBranch')
     remedies = primary_checkout_remedy_commands(manifest) if manifest else [
         'syncwheel worktree open <lane> --into <stack>',
         'syncwheel stack capture-integration <stack> HEAD',
     ]
+    commit_blocked = (
+        f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
+        'Only a Syncwheel-authorized control commit may be created there'
+        + format_remedy_suffix(remedies)
+        + '. This local hook is a safety guard, not a security boundary; '
+        'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
+    )
+    if guard_error:
+        # Nothing left names the integration branch, so the primary cannot be
+        # checked against it. A checkout only gets a warning, because the guard
+        # has no branch to claim it should have been on; a manual commit is
+        # still refused, because the primary is the shared projection either way.
+        print(
+            f'syncwheel guard degraded: {primary_guard_repair_remedy(guard_error)}',
+            file=sys.stderr,
+        )
+        if args.event != 'pre-commit' or ref_move_authorized(repo_root, 'pre-commit'):
+            return 0
+        raise SyncwheelError(f'{primary_guard_repair_remedy(guard_error)}. {commit_blocked}')
+    if not guard['enabled']:
+        return 0
+    expected = guard.get('integrationBranch')
     if args.event == 'pre-commit' and branch == expected:
         if ref_move_authorized(repo_root, 'pre-commit'):
             return 0
-        cause = f'{primary_guard_repair_remedy(guard_error)}. ' if guard_error else ''
-        raise SyncwheelError(
-            f'{cause}primary checkout commit blocked: {primary_root} is the shared integration projection. '
-            'Only a Syncwheel-authorized control commit may be created there'
-            + format_remedy_suffix(remedies)
-            + '. This local hook is a safety guard, not a security boundary; '
-            'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
-        )
+        raise SyncwheelError(commit_blocked)
     if branch == expected:
         return 0
     action = 'commit blocked' if args.event == 'pre-commit' else 'branch mismatch detected after checkout'
@@ -27299,27 +27259,34 @@ def command_hooks_ref_guard(args):
     repo_root = resolve_repo_root(args.repo)
     guard, guard_error = inspect_primary_guard(repo_root)
     if guard_error:
-        protected_refs = degraded_primary_guard_refs(repo_root)
+        # guard.json is the only thing that names the integration branch, and
+        # nothing in the working tree stands in for it: a journal manifest
+        # declares no integration branch, the manifest need not be on the
+        # checked-out branch, and the selected manifest can live outside the
+        # repository. Degraded therefore keeps every branch ref.
+        protected = [(ref, old, new) for old, new, ref in candidates]
     else:
         if not guard['enabled']:
             return 0
-        protected_refs = {f"refs/heads/{guard['integrationBranch']}"}
-    protected = [
-        (ref, old, new) for old, new, ref in candidates if ref in protected_refs
-    ]
+        integration_ref = f"refs/heads/{guard['integrationBranch']}"
+        protected = [
+            (ref, old, new) for old, new, ref in candidates if ref == integration_ref
+        ]
     if not protected:
-        if guard_error:
-            print(
-                f'syncwheel guard degraded: {primary_guard_repair_remedy(guard_error)}',
-                file=sys.stderr,
-            )
         return 0
     if ref_move_authorized(repo_root, 'reference-transaction'):
         return 0
     detail = ', '.join(f'{ref} {old[:7]} -> {new[:7]}' for ref, old, new in protected)
-    cause = f'{primary_guard_repair_remedy(guard_error)}. ' if guard_error else ''
+    if guard_error:
+        raise SyncwheelError(
+            f'{primary_guard_repair_remedy(guard_error)}. Until it is repaired the '
+            f'guard cannot tell the integration ref from any other branch, so it '
+            f'refuses every branch ref: {detail}. '
+            'This local hook is a safety guard, not a security boundary; '
+            'core.hooksPath and --no-verify can bypass it.'
+        )
     raise SyncwheelError(
-        f'{cause}refusing unauthorized primary integration ref move(s): {detail}. '
+        f'refusing unauthorized primary integration ref move(s): {detail}. '
         'Use a Syncwheel-owned rebuild or a governed worktree. '
         'This local hook is a safety guard, not a security boundary; '
         'core.hooksPath and --no-verify can bypass it.'
