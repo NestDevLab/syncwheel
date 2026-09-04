@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.43.3 - 2026-09-04
+
+- Narrow the managed ref guard to the surface it protects. `hooks ref-guard`
+  now classifies the incoming transaction first and leaves before any Git call
+  when it carries no branch ref, so remote-tracking updates from `git fetch`,
+  the pseudo-refs `git worktree add` writes, tags, notes and stash are no
+  longer refused. When `guard.json` is missing or malformed the guard still
+  refuses moves of the integration ref and manual commits on it in the primary
+  checkout, reconstructing that ref from the manifests and the primary's own
+  branch; every other branch ref passes with a stderr warning naming
+  `syncwheel hooks install --apply`. A repository whose hooks predate
+  `guard.json` stays usable instead of rejecting every ref transaction.
+- Stop Syncwheel's child Git processes from inheriting `GIT_DIR`,
+  `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_PREFIX` and
+  `GIT_NAMESPACE` from the hook environment. A guard running inside a linked
+  worktree pointed its `git -C <other worktree> status` at the calling
+  worktree's index and rewrote it, after which the merge that triggered the
+  hook died with `fatal: stash failed`. An explicit `env=` override still wins.
+- Skip the workspace-wide preflights for the `hooks guard`,
+  `hooks worktree-guard` and `hooks ref-guard` callbacks. They run inside a Git
+  process that is mid-operation and must decide about the incoming refs, not
+  scan other worktrees.
+
 ## 0.43.2 - 2026-09-04
 
 - Fix `validate_coordination_publication_base` (A14) to run the integration-ref

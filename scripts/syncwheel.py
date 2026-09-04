@@ -306,8 +306,23 @@ def resolve_runtime_version(root=None):
 VERSION = resolve_runtime_version()
 
 
+# Git exports these to its hooks. Syncwheel always names the repository it means
+# through cwd or -C, so inheriting them would point a child Git at another
+# worktree's git dir or index and rewrite it; an explicit env= override wins.
+AMBIENT_GIT_LOCATION_ENV = (
+    'GIT_DIR',
+    'GIT_COMMON_DIR',
+    'GIT_WORK_TREE',
+    'GIT_INDEX_FILE',
+    'GIT_PREFIX',
+    'GIT_NAMESPACE',
+)
+
+
 def managed_process_env(extra=None):
     process_env = os.environ.copy()
+    for name in AMBIENT_GIT_LOCATION_ENV:
+        process_env.pop(name, None)
     if SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
         process_env[MANAGED_REF_MOVE_AUTH_ENV] = authorize_ref_move(SYNCWHEEL_REF_AUTH_REPO)
     if extra:
@@ -812,13 +827,76 @@ def load_primary_guard(repo_root):
     return guard
 
 
+GUARDED_BRANCH_REF_PREFIX = 'refs/heads/'
+
+
+def guardable_branch_ref(ref):
+    """The guard only ever protects a branch ref.
+
+    Remote-tracking refs, tags, notes, stash and the per-worktree pseudo-refs
+    git writes during fetch, merge, rebase or worktree creation can never be the
+    integration ref, so they stay outside the guard even when its configuration
+    cannot be read.
+    """
+    return (
+        ref.startswith(GUARDED_BRANCH_REF_PREFIX)
+        and len(ref) > len(GUARDED_BRANCH_REF_PREFIX)
+    )
+
+
+def manifest_integration_branches(root):
+    """Integration branches declared by the manifests visible at root."""
+    directory = Path(root) / '.syncwheel'
+    candidates = [directory / 'manifest.json']
+    try:
+        candidates.extend(sorted((directory / 'manifests').glob('*.json')))
+    except OSError:
+        pass
+    branches = set()
+    for path in candidates:
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        integration = payload.get('integration')
+        branch = integration.get('branch') if isinstance(integration, dict) else None
+        if isinstance(branch, str) and branch.strip():
+            branches.add(branch.strip())
+    return branches
+
+
+def degraded_primary_guard_refs(repo_root):
+    """Guarded refs to fall back on when guard.json cannot be read.
+
+    The authoritative integration branch is unavailable, so reconstruct the
+    guarded surface from the manifests and from whatever the primary checkout
+    has out. Anything this cannot name was never the guarded surface and must
+    keep moving rather than taking the whole repository down with it.
+    """
+    worktrees = get_worktrees(repo_root)
+    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root)
+    branches = set()
+    for root in dict.fromkeys((primary_root, Path(repo_root).resolve())):
+        branches.update(manifest_integration_branches(root))
+    current = get_current_branch(primary_root)
+    if current and current != 'DETACHED':
+        branches.add(current)
+    return {f'{GUARDED_BRANCH_REF_PREFIX}{branch}' for branch in branches}
+
+
+def primary_guard_repair_remedy(error):
+    return (
+        f'{error}; run syncwheel hooks install --apply with the intended '
+        '--personal/--manifest selection'
+    )
+
+
 def require_primary_guard(repo_root):
     guard, error = inspect_primary_guard(repo_root)
     if error:
-        raise SyncwheelError(
-            f'{error}; run syncwheel hooks install --apply with the intended '
-            '--personal/--manifest selection'
-        )
+        raise SyncwheelError(primary_guard_repair_remedy(error))
     return guard
 
 
@@ -27155,13 +27233,25 @@ def command_hooks_worktree_guard(args):
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
     if current_path != primary_root:
         return 0
-    guard = require_primary_guard(repo_root)
-    if not guard['enabled']:
-        return 0
+    guard, guard_error = inspect_primary_guard(repo_root)
     branch = get_current_branch(primary_root)
-    expected = guard.get('integrationBranch')
     manifest_path = resolve_manifest_path(primary_root, str(primary_root), args.manifest, args.personal)
     manifest, _ = load_manifest(primary_root, manifest_path)
+    if guard_error:
+        # The authoritative integration branch is gone, so fall back to the one
+        # the selected manifest declares. With no manifest there is nothing left
+        # to compare the primary against.
+        print(
+            f'syncwheel guard degraded: {primary_guard_repair_remedy(guard_error)}',
+            file=sys.stderr,
+        )
+        expected = ((manifest or {}).get('integration') or {}).get('branch')
+        if not expected:
+            return 0
+    else:
+        if not guard['enabled']:
+            return 0
+        expected = guard.get('integrationBranch')
     remedies = primary_checkout_remedy_commands(manifest) if manifest else [
         'syncwheel worktree open <lane> --into <stack>',
         'syncwheel stack capture-integration <stack> HEAD',
@@ -27169,8 +27259,9 @@ def command_hooks_worktree_guard(args):
     if args.event == 'pre-commit' and branch == expected:
         if ref_move_authorized(repo_root, 'pre-commit'):
             return 0
+        cause = f'{primary_guard_repair_remedy(guard_error)}. ' if guard_error else ''
         raise SyncwheelError(
-            f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
+            f'{cause}primary checkout commit blocked: {primary_root} is the shared integration projection. '
             'Only a Syncwheel-authorized control commit may be created there'
             + format_remedy_suffix(remedies)
             + '. This local hook is a safety guard, not a security boundary; '
@@ -27192,8 +27283,9 @@ def command_hooks_worktree_guard(args):
 
 def command_hooks_ref_guard(args):
     # Git runs this for every ref transaction. Only the "prepared" phase can
-    # veto. The integration ref is guarded regardless of move direction;
-    # non-managed refs remain outside this hook's scope.
+    # veto, and only a branch ref can be the integration ref, so a transaction
+    # that carries none leaves before this touches Git at all: fetch, worktree
+    # creation and git's own internal ref writes are not the guarded surface.
     if args.phase != 'prepared':
         return 0
     updates = []
@@ -27201,26 +27293,33 @@ def command_hooks_ref_guard(args):
         parts = line.split()
         if len(parts) == 3:
             updates.append(parts)
-    if not updates:
+    candidates = [item for item in updates if guardable_branch_ref(item[2])]
+    if not candidates:
         return 0
     repo_root = resolve_repo_root(args.repo)
-    worktrees = get_worktrees(repo_root)
-    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-    guard = require_primary_guard(repo_root)
-    if not guard['enabled']:
-        return 0
-    integration_ref = f"refs/heads/{guard['integrationBranch']}"
-    protected = []
-    for old, new, ref in updates:
-        if ref == integration_ref:
-            protected.append((ref, old, new))
+    guard, guard_error = inspect_primary_guard(repo_root)
+    if guard_error:
+        protected_refs = degraded_primary_guard_refs(repo_root)
+    else:
+        if not guard['enabled']:
+            return 0
+        protected_refs = {f"refs/heads/{guard['integrationBranch']}"}
+    protected = [
+        (ref, old, new) for old, new, ref in candidates if ref in protected_refs
+    ]
     if not protected:
+        if guard_error:
+            print(
+                f'syncwheel guard degraded: {primary_guard_repair_remedy(guard_error)}',
+                file=sys.stderr,
+            )
         return 0
     if ref_move_authorized(repo_root, 'reference-transaction'):
         return 0
     detail = ', '.join(f'{ref} {old[:7]} -> {new[:7]}' for ref, old, new in protected)
+    cause = f'{primary_guard_repair_remedy(guard_error)}. ' if guard_error else ''
     raise SyncwheelError(
-        f'refusing unauthorized primary integration ref move(s): {detail}. '
+        f'{cause}refusing unauthorized primary integration ref move(s): {detail}. '
         'Use a Syncwheel-owned rebuild or a governed worktree. '
         'This local hook is a safety guard, not a security boundary; '
         'core.hooksPath and --no-verify can bypass it.'
@@ -27766,28 +27865,23 @@ def main():
     args.git_args = passthrough
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
-    if args.func not in {
+    guard_callback = args.func in {
         command_hooks_guard,
         command_hooks_worktree_guard,
         command_hooks_ref_guard,
-    }:
+    }
+    if not guard_callback:
         global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
         SYNCWHEEL_OWNS_REF_MOVES = True
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
-        if args.command != 'revision-provider':
+        # A guard callback runs inside a Git process that is mid-operation, so it
+        # stays a decision about the incoming refs and skips the workspace-wide
+        # preflights: those inspect other worktrees and must not run there.
+        if args.command != 'revision-provider' and not guard_callback:
             primary_checkout_preflight(args)
-        if (
-            args.command != 'revision-provider'
-            and args.func not in {
-                command_hooks_guard,
-                command_hooks_worktree_guard,
-                command_hooks_ref_guard,
-            }
-        ):
             maybe_handle_startup_update_policy(args)
-        if args.command != 'revision-provider':
             governed_worktree_preflight(args)
             converge_default_repository_hooks(args)
         with coordination_publication_lock_for_command(args):

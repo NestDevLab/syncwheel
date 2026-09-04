@@ -305,6 +305,204 @@ class ManagedRefGuardTests(unittest.TestCase):
         # would silently disarm the guard for everything else in the process.
         self.assertNotIn(syncwheel.MANAGED_REF_MOVE_AUTH_ENV, os.environ)
 
+    def _seed_remote(self):
+        """A separate repository with its own commit, so a fetch moves refs."""
+        remote = self.temp_root / 'remote'
+        subprocess.run(['git', 'init', '-q', str(remote)], check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Remote'], cwd=remote, check=True)
+        subprocess.run(
+            ['git', 'config', 'user.email', 'remote@example.invalid'], cwd=remote, check=True
+        )
+        (remote / 'upstream').write_text('upstream\n')
+        subprocess.run(['git', 'add', 'upstream'], cwd=remote, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'upstream'], cwd=remote, check=True)
+        subprocess.run(['git', 'branch', '-M', 'upstream-main'], cwd=remote, check=True)
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin', str(remote)], cwd=self.repo, check=True
+        )
+        return remote
+
+    def _run_git(self, *args, cwd=None):
+        return subprocess.run(
+            ['git', *args], cwd=cwd or self.repo, env=self._clean_env(),
+            capture_output=True, text=True,
+        )
+
+    def _assert_guard_still_protects_its_surface(self, cause):
+        old, new = self.descendant_commit('rejected while degraded')
+        moved = self._run_git('update-ref', 'refs/heads/main-integration', new, old)
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertIn('refusing unauthorized primary integration ref move', moved.stderr)
+        self.assertIn(cause, moved.stderr)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-parse', 'main-integration'], cwd=self.repo, text=True
+            ).strip(),
+            old,
+        )
+
+        (self.repo / 'manual').write_text('manual\n')
+        subprocess.run(['git', 'add', 'manual'], cwd=self.repo, check=True)
+        committed = self._run_git('commit', '-qm', 'manual')
+        self.assertNotEqual(committed.returncode, 0)
+        self.assertIn('primary checkout commit blocked', committed.stderr)
+        self.assertIn(cause, committed.stderr)
+
+        authorized = subprocess.run(
+            ['git', 'commit', '-qm', 'syncwheel control'], cwd=self.repo,
+            env=self._syncwheel_authorized_env(), capture_output=True, text=True,
+        )
+        self.assertEqual(authorized.returncode, 0, authorized.stderr)
+
+    def _assert_unguarded_transactions_pass(self):
+        fetched = self._run_git('fetch', 'origin')
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'rev-parse', '--verify', 'refs/remotes/origin/upstream-main'],
+                cwd=self.repo, capture_output=True, text=True,
+            ).returncode,
+            0,
+        )
+
+        # A relative path is the shape that made the guard build a concatenated
+        # path from the not-yet-created worktree.
+        added = self._run_git('worktree', 'add', '--detach', 'var/worktrees/probe', 'HEAD')
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertTrue((self.repo / 'var' / 'worktrees' / 'probe').is_dir())
+
+        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+        moved = self._run_git('branch', '-f', 'scratch', 'HEAD~1')
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+
+    def test_fetch_and_worktree_creation_survive_a_missing_guard_configuration(self):
+        self._install_and_branch('main-integration')
+        self._seed_remote()
+        syncwheel.primary_guard_path(self.repo).unlink()
+
+        self._assert_unguarded_transactions_pass()
+        self._assert_guard_still_protects_its_surface('configuration is missing')
+
+    def test_fetch_and_worktree_creation_survive_a_corrupt_guard_configuration(self):
+        cases = (
+            ('{"enabled": true, "integ', 'invalid JSON'),
+            ('{"version": 1, "enabled": true}\n', 'non-empty integrationBranch'),
+        )
+        for index, (content, cause) in enumerate(cases):
+            with self.subTest(cause=cause):
+                if index:
+                    self.tearDown()
+                    self.setUp()
+                self._install_and_branch('main-integration')
+                self._seed_remote()
+                syncwheel.primary_guard_path(self.repo).write_text(content)
+
+                self._assert_unguarded_transactions_pass()
+                self._assert_guard_still_protects_its_surface(cause)
+
+    def test_degraded_guard_names_its_remedy_without_rejecting_other_branches(self):
+        self._install_and_branch('main-integration')
+        syncwheel.primary_guard_path(self.repo).unlink()
+        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+
+        moved = self._run_git('branch', '-f', 'scratch', 'HEAD~1')
+
+        self.assertEqual(moved.returncode, 0, moved.stderr)
+        self.assertIn('syncwheel hooks install --apply', moved.stderr)
+
+    def test_guard_children_do_not_inherit_the_ambient_repository_environment(self):
+        # Git exports these to its hooks. A child Git that inherits them ignores
+        # the repository the guard named and works on the caller's instead.
+        leaked = {
+            'GIT_DIR': str(self.repo / '.git'),
+            'GIT_WORK_TREE': 'var/worktrees/other',
+            'GIT_INDEX_FILE': str(self.repo / '.git' / 'index'),
+            'GIT_COMMON_DIR': str(self.repo / '.git'),
+            'GIT_PREFIX': 'var/',
+            'GIT_NAMESPACE': 'leaked',
+        }
+        with mock.patch.dict(os.environ, leaked, clear=False):
+            environment = syncwheel.managed_process_env()
+            override = syncwheel.managed_process_env({'GIT_INDEX_FILE': '/tmp/explicit'})
+
+        for name in leaked:
+            self.assertNotIn(name, environment)
+        self.assertEqual(override['GIT_INDEX_FILE'], '/tmp/explicit')
+
+    def test_merge_inside_a_linked_worktree_is_left_alone_by_the_guard(self):
+        self._install_and_branch('main-integration')
+        subprocess.run(
+            ['git', 'add', '-f', '.syncwheel/manifest.json'], cwd=self.repo, check=True
+        )
+        subprocess.run(
+            ['git', 'commit', '-qm', 'syncwheel manifest'], cwd=self.repo,
+            env=self._syncwheel_authorized_env(), check=True,
+        )
+        opened = self.run_syncwheel(
+            'worktree', 'open', 'lane1', '--into', 'feature', '--repo', str(self.repo)
+        )
+        self.assertEqual(opened.returncode, 0, opened.stderr)
+
+        worktree = self.temp_root / 'linked'
+        added = self._run_git('worktree', 'add', '--detach', str(worktree), 'HEAD')
+        self.assertEqual(added.returncode, 0, added.stderr)
+        for branch, name in (
+            ('left-one', 'left-one.txt'),
+            ('left-two', 'left-two.txt'),
+            ('right', 'right.txt'),
+        ):
+            switched = self._run_git(
+                'checkout', '-q', '-B', branch, 'main-integration', cwd=worktree
+            )
+            self.assertEqual(switched.returncode, 0, switched.stderr)
+            (worktree / name).write_text(name + '\n')
+            subprocess.run(['git', 'add', name], cwd=worktree, check=True)
+            committed = self._run_git('commit', '-qm', name, cwd=worktree)
+            self.assertEqual(committed.returncode, 0, committed.stderr)
+        # save_state() only runs when the tree is not clean, and it is the step
+        # that failed once the guard had rewritten this worktree's index.
+        (worktree / 'untracked.txt').write_text('untracked\n')
+
+        for branch in ('left-one', 'left-two'):
+            merged = self._run_git('merge', '--no-edit', branch, cwd=worktree)
+            self.assertEqual(merged.returncode, 0, merged.stderr)
+            self.assertNotIn('stash failed', merged.stderr)
+
+        # ORIG_HEAD is one of the transactions a merge makes on its own, and
+        # "git stash create" is the step whose failure the merge reports as
+        # "fatal: stash failed".
+        refreshed = self._run_git('update-ref', 'ORIG_HEAD', 'HEAD', cwd=worktree)
+        self.assertEqual(refreshed.returncode, 0, refreshed.stderr)
+        stash = self._run_git('stash', 'create', cwd=worktree)
+
+        self.assertEqual(stash.returncode, 0, stash.stderr)
+
+    def test_ref_guard_leaves_transactions_outside_its_surface_alone(self):
+        self._install_and_branch('main-integration')
+        syncwheel.primary_guard_path(self.repo).unlink()
+        payload = ''.join(
+            f"{'a' * 40} {'b' * 40} {ref}\n" for ref in (
+                'refs/remotes/origin/main',
+                'refs/tags/v1',
+                'refs/notes/commits',
+                'HEAD',
+                'ORIG_HEAD',
+                'refs/stash',
+                'refs/bisect/bad',
+            )
+        )
+        warnings = io.StringIO()
+        with mock.patch('sys.stdin', io.StringIO(payload)):
+            with mock.patch('sys.stderr', warnings):
+                self.assertEqual(
+                    syncwheel.command_hooks_ref_guard(
+                        types.SimpleNamespace(repo=self.repo, phase='prepared')
+                    ),
+                    0,
+                )
+
+        self.assertEqual(warnings.getvalue(), '')
+
     def test_unmanaged_branch_rewind_is_untouched(self):
         # Moved with "git branch -f" so the primary-checkout guard, which owns
         # which branch may be checked out, stays out of this assertion.
