@@ -1,5 +1,137 @@
 # Changelog
 
+## 0.43.2 - 2026-09-04
+
+- Fix `validate_coordination_publication_base` (A14) to run the integration-ref
+  successor check whenever `integration_ref` is in the operation's
+  `changed_refs`, as the amendment specifies, instead of only for `int push`
+  and `reconcile --apply --push`. The narrower scope condition let an ordinary
+  `stack push` from a stale-but-honest clone silently overwrite another
+  clone's already-published integration tip with `rc 0`.
+- Add a direct unit test isolating the claim proof's scope check (L2) from its
+  changed_refs check (L3), covering the gap noted in the round-11 review where
+  the scope check could be removed without failing the existing test.
+
+## 0.43.1 - 2026-09-03
+
+- Fix the claim-proof changed_refs test fixture to match a real ref-set
+  mismatch under A9's control-manifest fold-in instead of a stale ref count.
+
+## 0.43.0 - 2026-09-03
+
+- Publish each active-active draft's source ref and coordinated state atomically
+  when it is created, so independent drafts cannot strand one another before a
+  normal stack publication or close.
+- Serialize ownership of every managed source ref through an atomically advanced
+  `syncwheel/claim/heads/...` ref. Existing manifests default to advisory claim
+  validation; `coordination claims backfill` prepares an explicit move to
+  required validation without overwriting a foreign claim.
+- Close never-published drafts remote-first: record an intent, atomically publish
+  a tombstone claim and state child, save the manifest, then terminalize the
+  ledger event. A retry completes only from the same tombstone generation; a
+  later claim produces the terminal `close_superseded` outcome instead.
+- Create draft refs with create-only compare-and-swap, reject non-CAS worktree
+  reattachment, and recover interrupted create operations from generation-bound
+  ledger intents. The create claim carries the intent token, and a retry removes
+  its deterministic temporary worktree registration after process death.
+- Journal every coordinated publication intent before its atomic push. A retry
+  whose exact token is already present in claim and state completes locally
+  without advancing either ref again.
+- Prove that a coordinated operation landed from its own operation token in the
+  published state chain instead of from current ref tips, so a legitimate push by
+  another clone on the same ref no longer reports a landed operation as
+  superseded, undoes its local rename, or writes that claim to the ledger.
+- Terminalize coordinated publication intents. An intent whose token is in the
+  published state chain completes as `already_published`; one that never reached
+  the remote is abandoned as `coordination_publish_abandoned` by the next
+  publication, `reconcile`, or `resume`, with reason `not_landed` when nothing
+  else published meanwhile and `superseded` when the reviewed state tip was
+  overtaken. A lost race, a push the remote refuses, or process death before the
+  push no longer blocks further coordinated publication from that clone.
+- Complete a promotion whose push landed before its manifest was saved from the
+  published state: `stack promote`, `stack push`, `int push`, `stack create`,
+  `stack close`, and `reconcile --apply` all finish it, rebuilding the promoted
+  branch and dropping a rematerialized draft instead of requiring an exact local
+  branch layout.
+- Name the pending intent's own remedy command when one blocks a publication.
+- Decide `close_superseded` from the claim of the pending close generation
+  instead of the shared state tip, so an unrelated publication no longer aborts
+  a retry that only had to complete an already-published tombstone.
+- Report an unreachable coordination remote during `stack push`, `int push`,
+  `stack promote`, `publish`, and `reconcile --apply --push` as an operational
+  failure that names the retry command, and report an atomic push the remote
+  refused without moving anything as a rejection with the same retry command.
+- Adopt a pending reconcile publication intent only when it matches the
+  fingerprint of the current operation.
+- Prove `absorbed` against an explicitly fetched delivery SHA by comparing the
+  composed stack result for a non-empty NUL-separated touched-path set,
+  including squash-equivalent deliveries while rejecting odd-path omissions
+  and content removed by a later revert.
+- Serialize every coordinated publication cycle in a clone behind
+  `<git-common-dir>/syncwheel/coordination-publication.lock`, held from the
+  intent through the push, the local remainder and the terminal event. A second
+  command exits 2 naming the live owner's pid instead of terminalizing an intent
+  that is still in flight, and a plain retry after it finishes succeeds. Process
+  death releases the lock, so the next command still recovers a dead owner's
+  intent; dry runs and `handoff` take no lock.
+- Record the owner (installation, host, pid, process start time, lock token) in
+  every publication intent and name it in the abandonment event. Intents written
+  by earlier versions stay terminalizable and are marked `legacy_intent`.
+- Refuse a second terminal ledger record for one operation token.
+- Prove that a coordinated operation landed from a state commit inside the
+  intent's own window that declares its token, scope, changed refs, projection
+  status and manifest digest, and from a claim carrying that token for every
+  touched source ref. A token reused for a different operation, a state chain
+  scanned before the recorded expected tip, and an intent with no recorded
+  expected tip no longer prove a landing, and a claim still carrying the token
+  proves one the state chain no longer carries.
+- Undo the local rename of an abandoned promotion only when the remote carries
+  neither the promoted ref nor a claim bearing that operation token.
+- Derive the coordination token of a channel publish or close from the operation
+  itself instead of the caller's `--operation-id`, which stays the clone-local
+  idempotency key, and record it in the channel operation events so a retry
+  recovers the same token.
+- Record and terminalize a publication intent for
+  `coordination claims backfill --apply`, whose claims now carry that operation
+  token, and name the retry command when the coordination remote is unreachable
+  during it or during `stack create --draft`.
+- Complete a landed promotion at the head of `stack rebuild`, `stack sync` and
+  `stack add` as well, and anchor a diverged rematerialized draft branch under
+  `refs/syncwheel/recovery/drafts/` before dropping it, so a promotion that
+  landed before its manifest save can no longer block unrelated stacks or name a
+  remedy that refuses itself.
+- Record the publication scope and the operation's whole ref set in every
+  coordination claim, and require both from the claim evidence a recovery
+  accepts. A claim that carries the operation token under another scope or
+  another ref set proves a different operation, so the pending intent is
+  abandoned instead of completed. Claim evidence stays confined to the recovery
+  paths: a publication still decides from the state chain alone.
+- Fingerprint a coordinated operation over the public manifest snapshot without
+  `integration.derived_provenance`, which the intent and the published state
+  resolve from different sources by design. On a manifest v3 clone whose
+  remote-tracking state is behind, a retry of the interrupted command now
+  completes from the published state instead of publishing it a second time.
+- Take no exclusive publication lock on the planning and dry-run paths, so
+  `reconcile`, `resume`, `stack push --dry-run`, `int push --dry-run` and
+  `stack rebuild --dry-run` report the state instead of being refused for the
+  duration of another command's network push.
+- Refuse a second terminal ledger record when it is written rather than when the
+  ledger is read, and name `ledger show` as the command that inspects one, so a
+  ledger that already carries two stays readable.
+- Prune the publication lock's retained stale inodes with the governed worktree
+  registry's, instead of leaving one behind for every recovered dead owner.
+- Name the retry command when a coordinated publish stops because the remote
+  state changed after the reviewed plan.
+- Stop the coordinated-publish control-manifest bootstrap from saving the
+  caller's in-progress manifest to disk before the caller's own network push,
+  so a remote-first close still reaches the remote before anything local is
+  written even on a clone whose integration branch has never been published.
+- Compute a published coordination state's `manifest_digest` from the control
+  manifest committed at its own `managed_refs[integration_ref]`, carrying the
+  value over from the parent state when the operation does not touch the
+  integration ref, so the digest a clone writes always matches what
+  `classify_coordination_state_manifest_digest` recomputes on read.
+
 ## 0.42.7 - 2026-09-03
 
 - Add the `state-digest-heal` coordination repair class for a manifest_digest

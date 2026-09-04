@@ -1826,7 +1826,7 @@
       <div class="hero-stage" id="top">
         <section class="hero" aria-labelledby="hero-heading">
           <div class="hero-copy">
-          <span class="eyebrow"><span class="ai-sigil" aria-hidden="true"></span>AI-ready Git coordination <span class="hero-version">v<!-- syncwheel-version:start -->0.42.7<!-- syncwheel-version:end --></span></span>
+          <span class="eyebrow"><span class="ai-sigil" aria-hidden="true"></span>AI-ready Git coordination <span class="hero-version">v<!-- syncwheel-version:start -->0.43.2<!-- syncwheel-version:end --></span></span>
           <h1 id="hero-heading"><span class="title-line">Move at</span><span class="title-line">machine speed.</span><span class="title-line accent">Stay in control.</span></h1>
           <p class="subhead">Syncwheel coordinates every Git lane used by humans, AI agents, CI and delivery systems—without sacrificing review, safety or recovery.</p>
           <div class="actions">
@@ -2285,7 +2285,7 @@
           <div role="tabpanel" id="panel-declare" aria-labelledby="tab-declare">
             <code class="cmd"><span class="prompt">$</span> syncwheel stack sync feature-a</code>
             <code class="cmd"><span class="prompt">$</span> syncwheel stack create feature-c</code>
-            <p>Two PRs existed already — declare them in the manifest. The third is born managed.</p>
+            <p>Two PRs existed already — declare them in the manifest. The third is born managed, with create-only ref CAS and recoverable ledger intent.</p>
           </div>
           <div role="tabpanel" id="panel-integrate" aria-labelledby="tab-integrate">
             <code class="cmd"><span class="prompt">$</span> syncwheel int rebuild --reason "refresh integration projection"</code>
@@ -2418,7 +2418,7 @@
               <path d="M158 52 L130 52" stroke="rgba(148,163,184,0.5)" stroke-width="1.5" stroke-dasharray="3 4"/>
             </svg>
             <h3>Journal</h3>
-            <p>Safe state snapshots let a human or agent resume exactly where work stopped.</p>
+            <p>Generation-bound create and close intents let a human or agent recover exactly where work stopped. Absorbed closes bind their proof to a fetched delivery SHA and the composed final content.</p>
             <span class="capability-state">state protected</span>
           </article>
         </div>
@@ -2601,7 +2601,7 @@
     </main>
 
     <footer>
-      <span>syncwheel v<!-- syncwheel-version:start -->0.42.7<!-- syncwheel-version:end --> · MIT · a NestDevLab project</span>
+      <span>syncwheel v<!-- syncwheel-version:start -->0.43.2<!-- syncwheel-version:end --> · MIT · a NestDevLab project</span>
       <a class="logo-link" href="https://www.nestdev.it/" aria-label="NestDevLab">
         <img src="https://www.nestdev.it/assets/logo-nestdev.png" width="22" height="22" alt="">
       </a>

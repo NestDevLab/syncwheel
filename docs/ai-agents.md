@@ -82,6 +82,72 @@ published state, ownership boundary, local locks, pending merge decision, and
 eligible cleanup. Use `publish` rather than a raw Git push so all managed refs
 and the coordination state receive one atomic, leased publication.
 
+The lease authority for a managed source is its
+`refs/heads/syncwheel/claim/heads/...` claim. A valid publish advances the claim
+in the same atomic refspec; merely observing or leasing an unchanged ref is not
+proof. Treat `coordination.claims: advisory` as a migration state, inspect
+`syncwheel coordination claims backfill`, and never flip to `required` until
+the dry-run reports zero unclaimed owned refs. Backfill with `--apply --reason`
+never replaces a claim owned by another coordination domain.
+
+Every coordinated remote mutation must have a fsynced caller intent and stable
+operation token. On retry, exact token-bearing claim/state evidence is adopted;
+do not repeat the push. Create propagates its `stack_create_intent` token into
+the claim and removes only the deterministic temporary worktree owned by that
+generation.
+
+Take the clone's publication lock around the whole intent, push, local
+remainder and terminal event. The lock, not the intent payload, says what is in
+flight: a command that cannot take it exits 2 naming the live owner and touches
+nothing, and one that takes it knows no other cycle is running here, because
+process death releases the lock. The owner record in the intent names a dead
+owner in the abandonment event; it never authorizes a transition.
+
+Landing has two proofs, and every caller declares which it accepts. The state
+proof is a state commit inside the intent's recorded window carrying its token,
+scope, changed refs, projection status and manifest digest, plus a claim
+carrying that token for every touched source ref; it is the only form a fresh
+publication may use to decide it needs no push. The claim proof belongs to the
+recovery paths alone and only after the state proof failed: every changed ref,
+and no other, carries a claim declaring this operation's token, scope and whole
+ref set. It has no window, which is why it survives a state ref rewritten
+backwards, and it excludes the manifest digest, which no claim records; a claim
+written before 0.43 records no scope or ref set and therefore proves nothing.
+Only the most recent 500 claims of a source ref are read. Neither proof reads
+current ref tips: in an active-active fleet another clone may legitimately move
+a published ref, push the same tip, or reuse a caller-supplied identifier. When
+no evidence holds, record `coordination_publish_abandoned` with reason
+`not_landed` or `superseded` and continue rather than freezing on it, and undo
+the local rename only when the remote carries neither the promoted ref nor a
+claim bearing that token.
+
+The manifest digest that identifies an operation is computed over the public
+manifest snapshot without `integration.derived_provenance`: the intent and the
+published state resolve that projection from different sources by design, so it
+cannot be part of an identity. An intent recorded before 0.43.0 carries the
+older digest, is therefore never proved landed by the state proof, and is
+terminalized under the same rule as any other intent whose evidence is absent.
+
+Write exactly one terminal record per operation token, refusing a second when it
+is written rather than when the ledger is read. A landed promotion still owes
+only its manifest save; `stack promote`, `stack push`, `int push`,
+`stack create`, `stack close`, `stack rebuild`, `stack sync`, `stack add`, and
+`reconcile --apply` complete it from the published state and rebuild the
+promoted branch instead of requiring a particular local branch layout, anchoring
+a diverged draft branch under `refs/syncwheel/recovery/drafts/` before dropping
+it. Never leave a publish intent that no command can terminalize, and never let
+a foreign pending intent be the reason an unrelated publication cannot run.
+
+For draft close, the order is intent, remote tombstone claim plus state CAS,
+local manifest save, terminal event. Do not reintroduce remote observations
+around the filesystem save: they cannot make that boundary atomic. A retry may
+complete only when the remote tombstone contains its exact operation token.
+If the claim has advanced, record `close_superseded` and stop without applying
+the old close to the current generation; decide that from the claim of that
+generation, never from a state tip that unrelated publications also move.
+Remote failure during either the first attempt or recovery must name the same
+remote-first retry command.
+
 For channels, inspect `channel contract`, `channel list`, `channel show`, and
 `channel diff` first. Every mutation previews a `channelPlan`; repeat the same
 command only with its exact `--plan-digest ... --apply` and optional stable
@@ -149,6 +215,8 @@ active-active channel must use the coordination remote.
   at or after that boundary is `unknown` until reconciliation
 - close expired or obsolete channels explicitly; expiry is not automatic
   branch deletion
+- fail closed when a source claim is absent in required mode, belongs to another
+  domain, or fails to advance; use handoff or claims backfill, never a raw push
 
 ## Manifest tracking
 

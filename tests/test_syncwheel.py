@@ -3674,7 +3674,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--worktree', str(worktree), '--dry-run', expected=0)
         self.assertIn('git fetch --all --prune', result.stdout)
         self.assertIn('git branch backup/pr/feature-a-before-syncwheel-', result.stdout)
-        self.assertIn('git worktree add -B pr/feature-a', result.stdout)
+        self.assertIn('git update-ref refs/heads/pr/feature-a main', result.stdout)
+        self.assertIn(f'git worktree add {worktree} pr/feature-a', result.stdout)
         self.assertIn('git -C', result.stdout)
 
     def test_stack_rebuild_reuses_existing_stack_worktree(self):
@@ -3707,7 +3708,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertIn('git fetch --all --prune', result.stdout)
         self.assertIn('git branch backup/integration/test-before-syncwheel-', result.stdout)
-        self.assertIn('git worktree add -B integration/test', result.stdout)
+        self.assertIn('git update-ref refs/heads/integration/test main', result.stdout)
+        self.assertIn(f'git worktree add {worktree} integration/test', result.stdout)
         self.assertIn("git -C", result.stdout)
         self.assertIn("merge --no-ff pr/feature-a -m 'Merge stack '", result.stdout)
         self.assertIn("merge --no-ff pr/feature-b -m 'Merge stack '", result.stdout)

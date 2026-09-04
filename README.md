@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.42.7`
+Current version: `0.43.2`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -123,6 +123,76 @@ push support and never falls back to serial pushes. See
 [the active-active protocol](docs/design/active-active-coordination.md) for the
 state model, lease handling, explicit merge acceptance, privacy contract, and
 local cleanup safeguards.
+
+Every managed source ref has one CAS authority at
+`refs/heads/syncwheel/claim/heads/...`. Each coordinated publication advances
+that claim in the same atomic push as the source and state refs; an unchanged
+claim is not accepted as lease evidence. Existing manifests normalize
+`coordination.claims` to `advisory`. In that mode Syncwheel still creates claims
+and reports gaps. Prepare an explicit switch to `required` with:
+
+```bash
+syncwheel coordination claims backfill
+syncwheel coordination claims backfill --apply --reason "claim migration"
+```
+
+Backfill uses create-only leases and never overwrites a foreign claim.
+`required` refuses published state that lists an owned source without a claim.
+Syncwheel covers concurrent Syncwheel commands, process death, ordinary Git on
+unowned refs, and arbitrary readers. It fails closed on a detectable CAS,
+ordering, intent, or recovery violation, and it never leaves state that a retry
+of the recorded operation, or the next coordinated command, cannot resolve;
+forced/raw mutation of Syncwheel-owned refs and hostile remotes remain outside
+that guarantee.
+
+Every mutating coordinated publisher records a durable operation token before
+the atomic push. If process death occurs after remote success, the retry accepts
+only state and claims carrying that token and completes without republishing,
+including when later publications have moved the shared state on. Draft create
+uses the same token in its create intent and remote claim, and cleans up its
+token-derived temporary worktree registration on retry.
+
+One publication cycle runs at a time in a clone. Every coordinated command takes
+`<git-common-dir>/syncwheel/coordination-publication.lock` around its whole
+intent, push, local remainder and terminal event, and a second command refuses
+with the live owner's pid rather than deciding anything about its intent; a
+plain retry after it finishes succeeds. Process death releases the lock, so a
+dead owner's intent is recovered by the next command. Dry runs and `handoff`
+take no lock and are never refused.
+
+A publication intent is always terminal, and a token has exactly one terminal
+record; a second terminal is refused when it is written, never when the ledger
+is read. Landing is proved by a state commit inside the intent's own window that
+declares this operation's token, scope, changed refs, projection status and
+manifest digest, together with a claim carrying that token for every touched
+source ref; never by current ref tips, so another clone legitimately advancing
+the same ref cannot turn a landed operation into an abandoned one, and a token
+reused for another operation cannot prove this one. An intent with no recorded
+expected state tip is never proved landed by the chain. Recovery, and only
+recovery, accepts a second form after that one fails: every changed ref, and no
+other, carrying a claim that declares this operation's token, scope and whole
+ref set. That form has no window and no manifest digest, so it still holds when
+a state ref is rewritten backwards, and a claim carrying the token under another
+scope or another ref set proves a different operation, not this one. The digest
+in both forms ignores `integration.derived_provenance`, which the two sides
+resolve from different sources by design. An intent absent from that evidence
+never reached the remote and is recorded as
+`coordination_publish_abandoned` by the next publication, `reconcile`, or
+`resume`, with reason `not_landed` when nothing else published meanwhile and
+`superseded` when the reviewed state tip was overtaken; the local rename of an
+abandoned promotion is undone only when the remote carries neither the promoted
+ref nor a claim bearing its token. A promotion whose push landed before its
+manifest save owes only that save: the next coordinated command, `stack
+rebuild`, `stack sync` and `stack add` included, completes it from the published
+state and rebuilds the promoted branch, so an intervening `sync` cannot strand
+it, and a draft branch that came back with commits of its own is anchored under
+`refs/syncwheel/recovery/drafts/` before it is dropped. A clone that lost a
+publication race, was refused by the remote, or died before its push keeps
+publishing after a plain retry. A coordination remote that is unreachable, or
+that refuses the atomic push without changing anything, fails closed and names
+the retry command for `stack push`, `int push`, `stack promote`, `stack create
+--draft`, `publish`, `reconcile --apply --push`, and `coordination claims
+backfill`.
 
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:
@@ -364,8 +434,24 @@ syncwheel stack promote caching-experiment --branch pr/caching
 
 A draft refuses `stack push` to the target remote and names its state as the reason. Under
 active-active coordination its source ref does publish to the coordination remote, so another clone
-can rebuild the draft from the manifest alone. `stack demote` reverses the promotion, and refuses when
-the stack already records an open pull request.
+can rebuild the draft from the manifest alone. Draft creation uses a create-only ref CAS and rechecks
+cross-domain ownership at publication, so a concurrently created local ref or coordination claim is
+preserved and reported instead of replaced. A retry adopts an equivalent completed remote create
+before probing whether a new atomic push is possible. `stack demote` reverses the promotion, and
+refuses when the stack already records an open pull request.
+
+Closing a never-published draft is remote-first under active coordination. It
+records `stack_close_intent`, atomically publishes a tombstone claim plus state,
+saves the manifest, and only then records `stack_closed`. A retry after a crash
+between push and save recognizes its operation token in the tombstone and
+completes idempotently; an unreachable remote fails closed without changing the
+manifest, including during recovery. If a later create has advanced the claim,
+the old close is terminalized as `close_superseded` and cannot close the new
+generation. A close whose tombstone already landed completes from its intent
+even when unrelated publications have advanced the state, instead of publishing
+a second tombstone. `stack close --reason absorbed` first fetches and records
+the observed delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
+path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
 
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.

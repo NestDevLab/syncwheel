@@ -5,6 +5,7 @@ import contextlib
 import datetime
 import errno
 import fnmatch
+import functools
 import hashlib
 import importlib.metadata
 import json
@@ -41,6 +42,10 @@ class ManifestDurabilityError(SyncwheelError):
 
 class DerivedProvenanceDurabilityError(SyncwheelError):
     """The provenance store was replaced, but directory durability is unknown."""
+
+
+class CoordinationRemoteRejection(SyncwheelError):
+    """The coordination remote refused the atomic push and nothing moved."""
 
 
 class ControlManifestAlignmentDrift(SyncwheelError):
@@ -82,6 +87,10 @@ COORDINATION_STATE_SCHEMA_VERSION = 2
 COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_STATE_PREFIX = 'syncwheel/state/'
+COORDINATION_CLAIM_FILE = 'claim.json'
+COORDINATION_CLAIM_PREFIX = 'syncwheel/claim/'
+COORDINATION_CLAIM_MODES = {'advisory', 'required'}
+EXPECTED_COORDINATION_STATE_UNSET = object()
 COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
 COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
 COORDINATION_LEASE_SECONDS = 5 * 60
@@ -202,6 +211,13 @@ GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
 GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
+COORDINATION_PUBLICATION_LOCK_TIMEOUT_SECONDS = 5
+COORDINATION_PUBLICATION_LOCK_STALE_SECONDS = 300
+COORDINATION_CLAIM_HISTORY_SCAN_LIMIT = 500
+COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES = (
+    'coordination_publish_completed',
+    'coordination_publish_abandoned',
+)
 GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES = (
     'governed_worktree_released',
     'governed_worktree_reaped',
@@ -1637,6 +1653,7 @@ def remove_managed_push_hook(
 
 def managed_push_refs(repo_root, manifest):
     refs = set(managed_ref_names(manifest))
+    refs.update(coordination_claim_ref(ref) for ref in list(refs))
     refs.update(delivery_ref_names(manifest))
     config = coordination_config(manifest)
     if config and config.get('mode') == 'active-active':
@@ -1646,6 +1663,10 @@ def managed_push_refs(repo_root, manifest):
         )
         if previous.get('state'):
             refs.update(previous['state'].get('managed_refs') or {})
+            refs.update(
+                coordination_claim_ref(ref)
+                for ref in previous['state'].get('managed_refs') or {}
+            )
     if manifest.get('repository_mode') == 'journal':
         refs.add(f"refs/heads/{manifest['journal']['branch']}")
     return refs
@@ -2266,6 +2287,71 @@ def patch_ids_reachable_from_ref(repo_root, ref):
         for commit in rev_list(repo_root, ref)
         if (patch_id := commit_patch_id(repo_root, commit))
     }
+
+
+def fetch_observed_delivery_tip(repo_root, remote, branch):
+    """Fetch one delivery ref and bind the proof to its observed remote SHA."""
+    delivery_ref = f'refs/heads/{branch}'
+    observed = remote_ref_tips(repo_root, remote, [delivery_ref])[delivery_ref]
+    if not observed:
+        raise SyncwheelError(
+            f'cannot prove absorbed content: delivery ref {remote}/{branch} is absent'
+        )
+    fetched = git(repo_root, 'fetch', '--quiet', remote, delivery_ref, check=False)
+    fetched_tip = ref_tip(repo_root, 'FETCH_HEAD') if fetched.returncode == 0 else None
+    if fetched.returncode != 0 or fetched_tip != observed:
+        raise SyncwheelError(
+            f'cannot prove absorbed content: delivery ref {remote}/{branch} changed or '
+            'could not be fetched; fetch the delivery ref successfully, then retry'
+        )
+    return observed
+
+
+def stack_content_is_present_at_delivery_tip(
+    repo_root, stack, delivery_tip, projected_tip=None
+):
+    """Compare the composed stack result with delivery for every touched path."""
+    projected_tip = projected_tip or deterministic_stack_replay_tip(
+        repo_root, stack['base'], stack.get('commits') or []
+    )
+    if not projected_tip:
+        return False
+    paths = list(dict.fromkeys(
+        path
+        for commit in stack.get('commits') or []
+        for path in commit_changed_files(repo_root, commit)
+    ))
+    if not paths:
+        return False
+    comparison = git(
+        repo_root,
+        'diff',
+        '--quiet',
+        projected_tip,
+        delivery_tip,
+        '--',
+        *paths,
+        check=False,
+    )
+    return comparison.returncode == 0
+
+
+def composed_stack_projection_tip(repo_root, stack):
+    """Replay the declared chain from the materialized branch's pinned base."""
+    materialized_tip = ref_tip(repo_root, stack['branch'])
+    if not materialized_tip:
+        return None
+    projection_base = materialized_tip
+    for _commit in stack.get('commits') or []:
+        projection_base = commit_first_parent(repo_root, projection_base)
+        if not projection_base:
+            return None
+    projected_tip = deterministic_stack_replay_tip(
+        repo_root, projection_base, stack.get('commits') or []
+    )
+    if not projected_tip or ref_tree(repo_root, projected_tip) != ref_tree(repo_root, materialized_tip):
+        return None
+    return projected_tip
 
 
 def commit_short_sha(repo_root, commit):
@@ -3258,7 +3344,12 @@ def normalize_coordination(value, manifest_path='manifest'):
         'state_branch': state_branch,
         'gc': normalize_coordination_gc(value.get('gc')),
     }
-    unknown = sorted(set(value) - {'mode', 'id', 'remote', 'state_branch', 'gc'})
+    claims = value.get('claims')
+    if claims is not None:
+        if claims not in COORDINATION_CLAIM_MODES:
+            raise SyncwheelError('coordination.claims must be one of: advisory, required')
+        normalized['claims'] = claims
+    unknown = sorted(set(value) - {'mode', 'id', 'remote', 'state_branch', 'gc', 'claims'})
     if unknown:
         raise SyncwheelError(f'coordination has unknown keys: {", ".join(unknown)}')
     return normalized
@@ -3276,7 +3367,10 @@ def normalize_integration_membership(value, path='defaults.integration_membershi
 def coordination_config(manifest):
     if manifest.get('version') not in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS}:
         return None
-    return manifest.get('coordination')
+    config = manifest.get('coordination')
+    if not isinstance(config, dict):
+        return config
+    return {**config, 'claims': config.get('claims', 'advisory')}
 
 
 def coordination_is_active(manifest):
@@ -3305,6 +3399,14 @@ def coordination_state_ref(config):
     return f"refs/heads/{config['state_branch']}"
 
 
+def coordination_claim_ref(source_ref):
+    if not isinstance(source_ref, str) or not source_ref.startswith('refs/heads/'):
+        raise SyncwheelError(
+            f'coordination claim requires a full refs/heads source ref: {source_ref!r}'
+        )
+    return f"refs/heads/{COORDINATION_CLAIM_PREFIX}{source_ref[len('refs/'):]}"
+
+
 def active_coordination_config(manifest_path, remote, coordination_id=None):
     coordination_id = normalize_coordination_id(
         coordination_id or default_coordination_id(manifest_path)
@@ -3315,6 +3417,7 @@ def active_coordination_config(manifest_path, remote, coordination_id=None):
         'remote': remote,
         'state_branch': default_coordination_state_branch(coordination_id),
         'gc': dict(DEFAULT_COORDINATION_GC),
+        'claims': 'advisory',
     }
 
 
@@ -3330,6 +3433,7 @@ def disabled_coordination_config(manifest_path, remote, coordination_id=None):
         'remote': remote.strip(),
         'state_branch': default_coordination_state_branch(coordination_id),
         'gc': dict(DEFAULT_COORDINATION_GC),
+        'claims': 'advisory',
     }
 
 
@@ -4660,6 +4764,7 @@ def default_ledger_state():
         'integration': {},
         'stacks': {},
         'channels': {},
+        'coordination_publications': {},
         'recent_events': [],
     }
 
@@ -4811,6 +4916,37 @@ def apply_ledger_event(state, event):
         })
         return state
 
+    if event['type'] == 'coordination_publish_intent':
+        token = payload.get('operation_token')
+        if token:
+            record = state.setdefault('coordination_publications', {}).setdefault(
+                token, {'operation_token': token}
+            )
+            record.update({
+                'scope': payload.get('scope'),
+                'intent_seq': event['seq'],
+                'owner': payload.get('owner'),
+            })
+        return state
+
+    if event['type'] in COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES:
+        token = payload.get('operation_token')
+        if token:
+            record = state.setdefault('coordination_publications', {}).setdefault(
+                token, {'operation_token': token}
+            )
+            if record.get('terminal'):
+                record.setdefault('duplicate_terminals', []).append(event['type'])
+                return state
+            record.update({
+                'terminal': event['type'],
+                'terminal_seq': event['seq'],
+                'terminal_status': (
+                    payload.get('status') or payload.get('coordination_status')
+                ),
+            })
+        return state
+
     if event['type'] == 'stack_closed':
         stack_id = payload.get('stack')
         if stack_id:
@@ -4908,6 +5044,29 @@ def next_ledger_segment_path(repo_root, manifest_path=None):
     return directory / f'{next_index:06d}.jsonl'
 
 
+def refuse_duplicate_terminal_publication_event(state, event_type, payload):
+    """Keep exactly one terminal event per operation token.
+
+    The refusal belongs to the write: a ledger that already carries two must
+    stay readable, or the command an operator would inspect it with is the one
+    that fails.
+    """
+    if event_type not in COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES:
+        return
+    token = (payload or {}).get('operation_token')
+    if not token:
+        return
+    record = (state.get('coordination_publications') or {}).get(token) or {}
+    if not record.get('terminal'):
+        return
+    raise SyncwheelError(
+        'coordinated publication ledger refuses a second terminal event for '
+        f'operation token {token}: {record["terminal"]} at seq '
+        f'{record.get("terminal_seq")} already stands\n'
+        'inspect the recorded terminal with:\n  syncwheel ledger show'
+    )
+
+
 def append_ledger_event(
     repo_root, event_type, payload, manifest_path=None, idempotency_key=None,
 ):
@@ -4939,6 +5098,7 @@ def append_ledger_event(
                     )
                 return matching[0]
         current = reduce_ledger_state(events)
+        refuse_duplicate_terminal_publication_event(current, event_type, payload)
         event = {
             'schema_version': LEDGER_SCHEMA_VERSION,
             'seq': current['last_seq'] + 1,
@@ -4972,6 +5132,17 @@ def append_ledger_event(
 
 
 def save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, context=None, event_type='manifest_saved'):
+    if reason == 'stack_create' and context and context.get('operation_token'):
+        stack = stack_map(manifest).get(context.get('stack'))
+        if stack:
+            require_current_stack_create_operation(
+                repo_root,
+                manifest_path,
+                stack['id'],
+                stack['branch'],
+                ref_tip(repo_root, stack['branch']),
+                context['operation_token'],
+            )
     save_manifest(manifest_path, manifest)
     append_ledger_event(repo_root, event_type, manifest_event_payload(manifest_path, manifest, reason, context), manifest_path)
 
@@ -5489,6 +5660,7 @@ def align_control_manifest_worktree(
     obstruction = control_manifest_checkout_obstruction(
         repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
     )
+    manifest_file_aligned = False
     if obstruction is None:
         # read-tree updates only this worktree's index and files. Unlike reset it
         # cannot move the checked-out branch ref and therefore cannot undo a CAS.
@@ -5496,6 +5668,7 @@ def align_control_manifest_worktree(
             repo_root, '-C', str(integration_worktree),
             'read-tree', '--reset', '-u', control_commit,
         )
+        manifest_file_aligned = True
     else:
         # The ref already carries the control commit, so the operation must end
         # rather than stall: align the control manifest alone and leave every
@@ -5507,6 +5680,7 @@ def align_control_manifest_worktree(
                 'checkout', control_commit, '--',
                 control_manifest_relative_path(repo_root),
             )
+            manifest_file_aligned = True
         if obstruction_state is not None:
             obstruction_state.update(obstruction)
     observed_after = ref_tip(repo_root, integration_ref)
@@ -5525,7 +5699,9 @@ def align_control_manifest_worktree(
         repo_root
     ).relative_to(Path(repo_root).resolve())
     transaction = active_manifest_write_transaction(source_path)
-    if transaction is not None:
+    if transaction is not None and manifest_file_aligned:
+        # A kept foreign manifest never gets rewritten here; only claim the
+        # baseline when the worktree file was actually made to match it.
         transaction['expectedDigest'] = expected_digest
     return integration_worktree
 
@@ -5533,7 +5709,7 @@ def align_control_manifest_worktree(
 def restore_control_manifest_after_integration_rebuild(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
-    operation_id=None,
+    operation_id=None, persist_source=True,
 ):
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
@@ -5546,13 +5722,14 @@ def restore_control_manifest_after_integration_rebuild(
             reason=reason,
             command=command,
             operation_id=operation_id,
+            persist_source=persist_source,
         )
 
 
 def _restore_control_manifest_after_integration_rebuild_locked(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
-    operation_id=None,
+    operation_id=None, persist_source=True,
 ):
     """Publish an isolated manifest-only commit above a rebuilt integration tip.
 
@@ -5735,7 +5912,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     source_file_digest = (
         manifest_digest(source_file_manifest) if source_file_manifest is not None else None
     )
-    if source_file_digest != expected_digest:
+    if persist_source and source_file_digest != expected_digest:
         save_manifest(manifest_path, manifest)
     control_manifest_io_checkpoint('manifest_saved')
     payload = control_manifest_event_payload(
@@ -7541,8 +7718,9 @@ def governed_worktree_stale_lock_reason(metadata, *, lock_available=False, lock_
     return None
 
 
-def log_governed_worktree_lock_recovery(lock_path, stale_path, metadata, reason, token):
-    log_path = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+def log_metadata_lock_recovery(
+    log_path, label, stale_path, metadata, reason, token
+):
     existed = log_path.exists()
     entry = {
         'recovered_at': iso_utc_now(),
@@ -7562,18 +7740,18 @@ def log_governed_worktree_lock_recovery(lock_path, stale_path, metadata, reason,
     if reason == 'incomplete_metadata':
         # Nothing here proves the creator died; it may be alive and descheduled.
         message = (
-            'recovered an uninitialized governed worktree registry lock '
+            f'recovered an uninitialized {label} lock '
             f'({reason}); its creator, if still running, retries'
         )
     else:
         message = (
-            'recovered stale governed worktree registry lock from pid '
+            f'recovered stale {label} lock from pid '
             f"{metadata.get('pid', 'unknown')} ({reason})"
         )
     print(f'WARNING: {message}; retained {stale_path.name}', file=sys.stderr)
 
 
-def governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
+def metadata_lock_descriptor_matches_path(lock_path, descriptor):
     try:
         descriptor_stat = os.fstat(descriptor)
         path_stat = lock_path.stat()
@@ -7586,17 +7764,25 @@ def governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
 
 
 @contextlib.contextmanager
-def governed_worktree_registry_lock(repo_root):
-    """Serialize clone-local lane state and recover a provably dead owner."""
+def exclusive_metadata_lock(
+    lock_path,
+    *,
+    label,
+    recovery_log_path,
+    timeout_seconds,
+    stale_seconds,
+    busy_error,
+    metadata=None,
+):
+    """Hold an fsynced, owner-describing lock and recover a provably dead owner."""
     if fcntl is None:
         raise SyncwheelError(
-            'crash-safe governed worktree registry locking requires POSIX file locking support'
+            f'crash-safe {label} locking requires POSIX file locking support'
         )
-    lock_path = governed_worktree_lock_path(repo_root)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    deadline = time.monotonic() + GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
     descriptor = None
-    metadata = governed_worktree_lock_metadata()
+    metadata = metadata or governed_worktree_lock_metadata()
     encoded_metadata = (json.dumps(metadata, sort_keys=True) + '\n').encode('utf-8')
     while descriptor is None:
         try:
@@ -7609,11 +7795,11 @@ def governed_worktree_registry_lock(repo_root):
                 # A contender may recover an empty file if this creator was
                 # descheduled beyond the initialization grace before flock.
                 # Never enter the critical section through the renamed inode.
-                if not governed_worktree_lock_descriptor_matches_path(lock_path, candidate):
+                if not metadata_lock_descriptor_matches_path(lock_path, candidate):
                     os.close(candidate)
                     continue
             except BaseException:
-                owns_path = governed_worktree_lock_descriptor_matches_path(lock_path, candidate)
+                owns_path = metadata_lock_descriptor_matches_path(lock_path, candidate)
                 os.close(candidate)
                 if owns_path:
                     try:
@@ -7662,8 +7848,9 @@ def governed_worktree_registry_lock(repo_root):
                         # path inode again and retries rather than moving a new lock.
                         os.replace(lock_path, stale_path)
                         fsync_directory_path(lock_path.parent)
-                        log_governed_worktree_lock_recovery(
-                            lock_path,
+                        log_metadata_lock_recovery(
+                            recovery_log_path,
+                            label,
                             stale_path,
                             stale_metadata,
                             stale_reason,
@@ -7679,19 +7866,20 @@ def governed_worktree_registry_lock(repo_root):
             except OSError:
                 continue
             if time.monotonic() >= deadline:
-                stale = (
-                    ' (the lock metadata could not prove that its owner died; inspect it manually)'
-                    if age > GOVERNED_WORKTREE_LOCK_STALE_SECONDS else ''
-                )
-                raise SyncwheelError(
-                    'governed worktree registry is busy; retry after the other local operation finishes' + stale
-                )
+                try:
+                    with open(str(lock_path), 'rb') as handle:
+                        live_metadata = parse_governed_worktree_lock_metadata(
+                            handle.read(65536)
+                        )
+                except OSError:
+                    live_metadata = {}
+                raise busy_error(live_metadata, age > stale_seconds)
             time.sleep(0.05)
     try:
-        yield lock_path
+        yield lock_path, metadata
     finally:
         try:
-            if governed_worktree_lock_descriptor_matches_path(lock_path, descriptor):
+            if metadata_lock_descriptor_matches_path(lock_path, descriptor):
                 lock_path.unlink()
                 fsync_directory_path(lock_path.parent)
         except FileNotFoundError:
@@ -7701,14 +7889,43 @@ def governed_worktree_registry_lock(repo_root):
             os.close(descriptor)
 
 
+def governed_worktree_registry_busy_error(metadata, stale):
+    suffix = (
+        ' (the lock metadata could not prove that its owner died; inspect it manually)'
+        if stale else ''
+    )
+    return SyncwheelError(
+        'governed worktree registry is busy; retry after the other local operation finishes'
+        + suffix
+    )
+
+
+@contextlib.contextmanager
+def governed_worktree_registry_lock(repo_root):
+    """Serialize clone-local lane state and recover a provably dead owner."""
+    lock_path = governed_worktree_lock_path(repo_root)
+    with exclusive_metadata_lock(
+        lock_path,
+        label='governed worktree registry',
+        recovery_log_path=lock_path.with_name('governed-worktrees-lock-recovery.jsonl'),
+        timeout_seconds=GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS,
+        stale_seconds=GOVERNED_WORKTREE_LOCK_STALE_SECONDS,
+        busy_error=governed_worktree_registry_busy_error,
+    ) as (held_path, _metadata):
+        yield held_path
+
+
 def prune_governed_worktree_stale_locks(repo_root, manifest_path=None):
     """Drop retained stale lock inodes nobody holds; the recovery log keeps the evidence."""
     if fcntl is None:
         return []
     lock_path = governed_worktree_lock_path(repo_root)
     directory = lock_path.parent
+    candidates = []
+    for owner in (lock_path, coordination_publication_lock_path(repo_root)):
+        candidates.extend(owner.parent.glob(f'{owner.name}.stale-*'))
     pruned = []
-    for candidate in sorted(directory.glob(f'{lock_path.name}.stale-*')):
+    for candidate in sorted(set(candidates)):
         try:
             descriptor = os.open(str(candidate), os.O_RDWR)
         except OSError:
@@ -9246,6 +9463,35 @@ def record_coordination_state_digest_heal(repo_root, manifest_path, config, plan
     )
 
 
+def coordination_identity_snapshot(snapshot):
+    """Strip the projection both sides of a publication resolve differently.
+
+    ``integration.derived_provenance`` comes from this clone's last-seen state on
+    the intent side and from the state just read from the remote on the
+    publication side, so it cannot belong to an operation's identity.
+    """
+    identity = copy.deepcopy(snapshot)
+    integration = identity.get('integration')
+    if isinstance(integration, dict):
+        integration.pop('derived_provenance', None)
+    return identity
+
+
+def coordination_operation_manifest_digest(manifest, repo_root=None):
+    return canonical_json_digest(
+        coordination_identity_snapshot(
+            coordination_manifest_snapshot(manifest, repo_root)
+        )
+    )
+
+
+def coordination_state_operation_manifest_digest(state):
+    snapshot = (state or {}).get('manifest')
+    if not isinstance(snapshot, dict):
+        return None
+    return canonical_json_digest(coordination_identity_snapshot(snapshot))
+
+
 def managed_ref_names(manifest):
     names = []
     for stack in manifest['stacks']:
@@ -9406,7 +9652,7 @@ def validate_coordination_snapshot_refs(snapshot):
             normalize_channel_timestamp(expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt')
 
 
-def validate_coordination_state(state, expected_id=None):
+def validate_coordination_state(state, expected_id=None, claims_mode='advisory'):
     if not isinstance(state, dict):
         raise SyncwheelError('coordination state must be an object')
     if state.get('schema_version') not in {
@@ -9452,12 +9698,34 @@ def validate_coordination_state(state, expected_id=None):
         raise SyncwheelError('coordination state is missing manifest_digest')
     if not isinstance(state.get('managed_refs'), dict):
         raise SyncwheelError('coordination state is missing managed_refs')
+    claims = state.get('claims', {})
+    if not isinstance(claims, dict):
+        raise SyncwheelError('coordination state claims must be an object')
+    invalid_claims = sorted(set(claims) - set(state['managed_refs']))
+    if invalid_claims:
+        raise SyncwheelError(
+            'coordination state claims contain unmanaged refs: ' + ', '.join(invalid_claims)
+        )
+    if claims_mode == 'required':
+        unclaimed = sorted(set(state['managed_refs']) - set(claims))
+        if unclaimed:
+            raise SyncwheelError(
+                'coordination claims required mode refuses unclaimed managed refs: '
+                + ', '.join(unclaimed)
+            )
+    operation_token = state.get('operation_token')
+    if operation_token is not None and (
+        not isinstance(operation_token, str) or not operation_token
+    ):
+        raise SyncwheelError('coordination state operation_token must be a non-empty string')
     if not isinstance(state.get('tombstones', []), list):
         raise SyncwheelError('coordination state tombstones must be an array')
     return state
 
 
-def coordination_state_from_commit(repo_root, commit, expected_id=None):
+def coordination_state_from_commit(
+    repo_root, commit, expected_id=None, claims_mode='advisory'
+):
     result = git(repo_root, 'show', f'{commit}:{COORDINATION_STATE_FILE}', check=False)
     if result.returncode != 0:
         raise SyncwheelError(
@@ -9468,7 +9736,7 @@ def coordination_state_from_commit(repo_root, commit, expected_id=None):
         state = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise SyncwheelError(f'invalid coordination state JSON at {commit}: {exc}') from exc
-    return validate_coordination_state(state, expected_id)
+    return validate_coordination_state(state, expected_id, claims_mode)
 
 
 def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest_version=None):
@@ -9485,7 +9753,9 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
         commit = 'FETCH_HEAD'
     else:
         commit = tip
-    state = coordination_state_from_commit(repo_root, commit, config['id'])
+    state = coordination_state_from_commit(
+        repo_root, commit, config['id'], config.get('claims', 'advisory')
+    )
     remote_manifest_version = state['manifest'].get('version')
     compatible_upgrade = (
         local_manifest_version == MANIFEST_VERSION_CHANNELS
@@ -9535,10 +9805,10 @@ def read_remote_coordination_states(repo_root, config):
     return states
 
 
-def coordination_ownership_conflicts(repo_root, config, managed_refs):
+def coordination_ownership_conflicts(repo_root, config, managed_refs, states=None):
     claimed = set(managed_refs)
     conflicts = []
-    for item in read_remote_coordination_states(repo_root, config):
+    for item in (states if states is not None else read_remote_coordination_states(repo_root, config)):
         state = item['state']
         if state['coordination_id'] == config['id']:
             continue
@@ -9552,8 +9822,21 @@ def coordination_ownership_conflicts(repo_root, config, managed_refs):
     return conflicts
 
 
-def require_exclusive_coordination_ownership(repo_root, config, managed_refs):
-    conflicts = coordination_ownership_conflicts(repo_root, config, managed_refs)
+def require_exclusive_coordination_ownership(
+    repo_root,
+    config,
+    managed_refs,
+    expected_state_refs=None,
+):
+    states = read_remote_coordination_states(repo_root, config)
+    observed_state_refs = {item['ref']: item['tip'] for item in states}
+    if expected_state_refs is not None and observed_state_refs != expected_state_refs:
+        raise SyncwheelError(
+            'coordinated publish STOP: coordination state refs changed after the reviewed plan'
+        )
+    conflicts = coordination_ownership_conflicts(
+        repo_root, config, managed_refs, states=states
+    )
     if conflicts:
         details = '; '.join(
             f"{item['coordination_id']}: {', '.join(item['refs'])}" for item in conflicts
@@ -9561,7 +9844,7 @@ def require_exclusive_coordination_ownership(repo_root, config, managed_refs):
         raise SyncwheelError(
             'managed refs are already owned by another coordination domain: ' + details
         )
-    return conflicts
+    return observed_state_refs
 
 
 def coordination_tombstone_ref(tombstone):
@@ -9595,7 +9878,20 @@ def coordination_tombstones(previous_state, manifest, additional=None):
     return tombstones
 
 
-def build_coordination_state(repo_root, manifest, config, previous, observed_refs, changed_refs, scope, projection_status, installation, tombstone=None):
+def coordination_state_managed_manifest_digest(repo_root, manifest, managed, integration_ref):
+    """Digest the control manifest committed at the ref tip the state itself records."""
+    tip = managed.get(integration_ref)
+    if not tip:
+        return manifest_digest(manifest)
+    committed = manifest_from_tree(repo_root, tip, integration_manifest_path(repo_root))
+    return manifest_digest(committed) if committed is not None else manifest_digest(manifest)
+
+
+def build_coordination_state(
+    repo_root, manifest, config, previous, observed_refs, changed_refs, scope,
+    projection_status, installation, tombstone=None, claim_commits=None,
+    operation_token=None,
+):
     previous_state = previous.get('state') if previous else None
     managed = {}
     if previous_state:
@@ -9611,6 +9907,17 @@ def build_coordination_state(repo_root, manifest, config, previous, observed_ref
         repo_root,
         previous_state,
     )
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+    if (
+        integration_ref in changed_refs
+        or previous_state is None
+        or previous_state.get('manifest_digest') is None
+    ):
+        published_manifest_digest = coordination_state_managed_manifest_digest(
+            repo_root, manifest, managed, integration_ref
+        )
+    else:
+        published_manifest_digest = previous_state['manifest_digest']
     return {
         'schema_version': (
             COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
@@ -9624,10 +9931,15 @@ def build_coordination_state(repo_root, manifest, config, previous, observed_ref
         'syncwheel_version': VERSION,
         'installation_id': installation,
         'manifest': snapshot,
-        'manifest_digest': coordination_manifest_digest(manifest, repo_root),
+        'manifest_digest': published_manifest_digest,
         'managed_refs': dict(sorted(managed.items())),
+        'claims': dict(sorted({
+            **((previous_state or {}).get('claims', {})),
+            **(claim_commits or {}),
+        }.items())),
         'changed_refs': dict(sorted(changed_refs.items())),
         'publication_scope': scope,
+        'operation_token': operation_token,
         'projection_status': projection_status,
         'tombstones': coordination_tombstones(previous_state, manifest, tombstone),
     }
@@ -10520,16 +10832,63 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         raise SyncwheelError('unsupported coordination compose plan schema')
     if plan.get('operation') != 'coordination-compose-stack':
         raise SyncwheelError('coordination compose plan has the wrong operation')
-    current, proposed_manifest, latest = coordination_compose_stack_plan(
-        repo_root,
-        manifest,
-        plan.get('stack'),
-        plan.get('knownBaseStateTip'),
-        plan.get('knownBaseManifestDigest'),
+    proposed_manifest = apply_coordination_snapshot(
+        manifest, plan.get('composedSnapshot') or {}
     )
+    _identity, retry_fingerprint = coordination_publication_identity(
+        repo_root,
+        proposed_manifest,
+        {plan['sourceRef']: plan['sourceTip']},
+        f"compose-stack:{plan['stack']}",
+        plan['projectionStatus'],
+    )
+    publication_operation = pending_coordination_publication_after_resolution(
+        repo_root, proposed_manifest, manifest_path, retry_fingerprint
+    )
+    if publication_operation:
+        current = plan
+        latest = {
+            'tip': plan['expectedRemoteStateTip'],
+            'state': coordination_state_from_commit(
+                repo_root,
+                plan['expectedRemoteStateTip'],
+                plan['coordinationId'],
+            ),
+        }
+    else:
+        current, proposed_manifest, latest = coordination_compose_stack_plan(
+            repo_root,
+            manifest,
+            plan.get('stack'),
+            plan.get('knownBaseStateTip'),
+            plan.get('knownBaseManifestDigest'),
+        )
     if current != plan:
         raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
-    if plan['status'] == 'publish-required':
+    if publication_operation and plan['status'] == 'adopt-only':
+        result = coordinated_publish(
+            repo_root,
+            proposed_manifest,
+            manifest_path,
+            {plan['sourceRef']: plan['sourceTip']},
+            f"compose-stack:{plan['stack']}",
+            plan['projectionStatus'],
+            expected_coordination_state_tip=publication_operation[
+                'expected_coordination_state_tip'
+            ],
+            operation_token=publication_operation['operation_token'],
+        )
+    elif plan['status'] == 'publish-required':
+        if publication_operation is None:
+            publication_operation = begin_coordination_publication(
+                repo_root,
+                proposed_manifest,
+                manifest_path,
+                {plan['sourceRef']: plan['sourceTip']},
+                f"compose-stack:{plan['stack']}",
+                plan['projectionStatus'],
+                expected_state_tip=plan['expectedRemoteStateTip'],
+            )
         result = coordinated_publish(
             repo_root,
             proposed_manifest,
@@ -10539,8 +10898,9 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             plan['projectionStatus'],
             expected_coordination_state_tip=plan['expectedRemoteStateTip'],
             expected_observed_refs=plan['guardedRefs'],
+            operation_token=publication_operation['operation_token'],
         )
-        if result.get('status') != 'published':
+        if result.get('status') not in {'published', 'recovered'}:
             raise SyncwheelError('coordination compose publication outcome requires a fresh plan')
         config = coordination_config(proposed_manifest)
         accepted = read_remote_coordination_state(
@@ -10590,6 +10950,10 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
     verified_manifest, _ = load_manifest(repo_root, manifest_path)
     if not verified_manifest or manifest_digest(verified_manifest) != plan['proposedManifestDigest']:
         raise SyncwheelError('coordination compose local adoption verification failed')
+    if publication_operation:
+        complete_coordination_publication(
+            repo_root, manifest_path, publication_operation, result
+        )
     return {
         'status': 'composed' if plan['status'] == 'publish-required' else 'adopted',
         'plan_digest': supplied_digest,
@@ -10645,6 +11009,103 @@ def create_coordination_state_commit(repo_root, state, parent_tip=None):
             os.unlink(index_path)
         except OSError:
             pass
+
+
+def coordination_claim_from_commit(repo_root, commit):
+    result = git(repo_root, 'show', f'{commit}:{COORDINATION_CLAIM_FILE}', check=False)
+    if result.returncode != 0:
+        raise SyncwheelError(
+            result.stderr.strip()
+            or f'coordination claim {commit} does not contain {COORDINATION_CLAIM_FILE}'
+        )
+    try:
+        claim = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise SyncwheelError(f'invalid coordination claim JSON at {commit}: {exc}') from exc
+    required = ('coordination_id', 'source_ref', 'operation_token', 'claimed_at', 'syncwheel_version')
+    if not isinstance(claim, dict) or any(
+        not isinstance(claim.get(key), str) or not claim[key] for key in required
+    ):
+        raise SyncwheelError(f'invalid coordination claim payload at {commit}')
+    coordination_claim_ref(claim['source_ref'])
+    if 'publication_scope' in claim and not isinstance(claim['publication_scope'], str):
+        raise SyncwheelError(f'invalid coordination claim publication scope at {commit}')
+    if 'changed_refs' in claim and (
+        not isinstance(claim['changed_refs'], list)
+        or any(not isinstance(value, str) for value in claim['changed_refs'])
+    ):
+        raise SyncwheelError(f'invalid coordination claim changed refs at {commit}')
+    if 'closed' in claim and not isinstance(claim['closed'], bool):
+        raise SyncwheelError(f'invalid coordination claim closed flag at {commit}')
+    return claim
+
+
+def create_coordination_claim_commit(
+    repo_root,
+    source_ref,
+    coordination_id,
+    operation_token,
+    parent_tip=None,
+    *,
+    closed=False,
+    reason=None,
+    publication_scope=None,
+    changed_refs=(),
+):
+    claim = {
+        'coordination_id': normalize_coordination_id(coordination_id),
+        'source_ref': source_ref,
+        'operation_token': operation_token,
+        'claimed_at': iso_utc_now(),
+        'syncwheel_version': VERSION,
+        'publication_scope': publication_scope or '',
+        'changed_refs': sorted(changed_refs),
+    }
+    if closed:
+        claim['closed'] = True
+        claim['reason'] = reason or 'closed'
+    encoded = json.dumps(claim, indent=2, sort_keys=True) + '\n'
+    blob = run(
+        ['git', 'hash-object', '-w', '--stdin'], cwd=repo_root, input_text=encoded
+    ).stdout.strip()
+    descriptor, index_path = tempfile.mkstemp(prefix='syncwheel-claim-index-')
+    os.close(descriptor)
+    os.unlink(index_path)
+    environment = {
+        'GIT_INDEX_FILE': index_path,
+        **COORDINATION_GIT_IDENTITY_ENV,
+        'GIT_AUTHOR_DATE': claim['claimed_at'],
+        'GIT_COMMITTER_DATE': claim['claimed_at'],
+    }
+    try:
+        if parent_tip:
+            git(repo_root, 'read-tree', f'{parent_tip}^{{tree}}', env=environment)
+        else:
+            git(repo_root, 'read-tree', '--empty', env=environment)
+        git(
+            repo_root, 'update-index', '--add', '--cacheinfo',
+            f'100644,{blob},{COORDINATION_CLAIM_FILE}', env=environment,
+        )
+        tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
+        command = ['git', *COORDINATION_GIT_IDENTITY_CONFIG, 'commit-tree', tree]
+        if parent_tip:
+            command.extend(['-p', parent_tip])
+        command.extend(['-m', f'syncwheel claim: {source_ref}'])
+        return run(command, cwd=repo_root).stdout.strip()
+    finally:
+        try:
+            os.unlink(index_path)
+        except OSError:
+            pass
+
+
+def fetch_coordination_claim(repo_root, remote, claim_ref, tip):
+    if not tip:
+        return None
+    result = git(repo_root, 'fetch', '--quiet', remote, claim_ref, check=False)
+    if result.returncode != 0 or ref_tip(repo_root, 'FETCH_HEAD') != tip:
+        raise SyncwheelError(f'coordination claim changed while fetching: {claim_ref}')
+    return coordination_claim_from_commit(repo_root, 'FETCH_HEAD')
 
 
 def atomic_push_capability_probe(repo_root, remote):
@@ -10972,6 +11433,24 @@ def coordination_state_matches_remote(repo_root, config, state):
     return all(observed.get(ref) == tip for ref, tip in expected.items())
 
 
+def coordination_unclaimed_owned_refs(config, state):
+    if config.get('claims', 'advisory') != 'advisory':
+        return []
+    return sorted(
+        set(state.get('managed_refs') or {}) - set(state.get('claims') or {})
+    )
+
+
+def report_advisory_unclaimed_owned_refs(config, state):
+    unclaimed = coordination_unclaimed_owned_refs(config, state)
+    if unclaimed:
+        print(
+            'coordination claims advisory: unclaimed owned refs: '
+            + ', '.join(unclaimed)
+            + '; run syncwheel coordination claims backfill'
+        )
+
+
 def coordination_branch_worktrees(repo_root, branch):
     return [
         Path(item['path'])
@@ -11199,6 +11678,8 @@ def validate_coordination_publication_base(
     tombstone=None,
     rename=None,
     state_transition=None,
+    remedy_stack=None,
+    creation_remedy=False,
 ):
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
@@ -11376,9 +11857,27 @@ def validate_coordination_publication_base(
         stack_id for stack_id in added if stack_id not in changed_stack_refs
     )
     if missing_added_refs:
+        remedy = ''
+        if creation_remedy:
+            first_missing = missing_added_refs[0]
+            remedy = (
+                f'; close or publish {", ".join(missing_added_refs)} first. '
+                'For an unpublished local draft, run:\n  '
+                f'syncwheel stack close {first_missing} --force\n'
+                'Then retry the stack create command.'
+            )
+        elif remedy_stack and expected.get('tip') and state.get('manifest_digest'):
+            remedy = (
+                f'; publish or close {", ".join(missing_added_refs)} first. '
+                'Then coordinate the remaining local proposal with:\n  '
+                f'syncwheel coordination compose --stack {remedy_stack} '
+                f'--known-base-state {expected["tip"]} '
+                f'--known-base-snapshot-digest {state["manifest_digest"]}'
+            )
         raise SyncwheelError(
             'new stack(s) require their managed branch in the coordinated publication: '
             + ', '.join(missing_added_refs)
+            + remedy
         )
 
     for stack_id in sorted(remote_ids & local_ids):
@@ -11435,12 +11934,20 @@ def validate_coordination_publication_base(
         return digest_form
 
     remote_tip = state.get('managed_refs', {}).get(integration_ref)
-    if integration_ref in changed_refs and remote_tip and not coordination_ref_is_safe_successor(
-        repo_root,
-        config,
-        integration_ref,
-        remote_tip,
-        manifest['integration']['branch'],
+    # A14: applies whenever integration_ref is in changed_refs, regardless of
+    # scope. A12 keeps this safe for operations that don't touch the ref: they
+    # carry the parent state's recorded tip forward untouched, so a locally
+    # rebuilt integration branch never enters the published state.
+    if (
+        integration_ref in changed_refs
+        and remote_tip
+        and not coordination_ref_is_safe_successor(
+            repo_root,
+            config,
+            integration_ref,
+            remote_tip,
+            manifest['integration']['branch'],
+        )
     ):
         raise SyncwheelError(
             'local integration branch is not a safe successor of the published integration ref; '
@@ -11449,7 +11956,788 @@ def validate_coordination_publication_base(
     return digest_form
 
 
-def coordinated_publish(
+def coordination_publication_lock_path(repo_root):
+    return git_common_dir(repo_root) / 'syncwheel' / 'coordination-publication.lock'
+
+
+_COORDINATION_PUBLICATION_LOCK_STATE = threading.local()
+
+
+def coordination_publication_lock_holders():
+    holders = getattr(_COORDINATION_PUBLICATION_LOCK_STATE, 'holders', None)
+    if holders is None:
+        holders = {}
+        _COORDINATION_PUBLICATION_LOCK_STATE.holders = holders
+    return holders
+
+
+def coordination_publication_busy_error(metadata, stale):
+    pid = metadata.get('pid', 'unknown')
+    since = metadata.get('acquired_at', 'an unknown time')
+    suffix = (
+        ' (the lock metadata could not prove that its owner died; inspect it manually)'
+        if stale else ''
+    )
+    return SyncwheelError(
+        f'a coordinated publication is in flight in this clone (pid {pid}, since {since}); '
+        'retry when the in-flight publication finishes' + suffix
+    )
+
+
+@contextlib.contextmanager
+def coordination_publication_lock(repo_root):
+    """Serialize the whole intent, push, local remainder and terminal-event cycle.
+
+    Held across a network push, so a contender refuses instead of waiting it out.
+    Re-entrant inside one process: the outermost holder owns the release.
+    """
+    lock_path = coordination_publication_lock_path(repo_root)
+    key = str(lock_path)
+    holders = coordination_publication_lock_holders()
+    holder = holders.get(key)
+    if holder is not None:
+        holder['depth'] += 1
+        try:
+            yield holder['metadata']
+        finally:
+            holder['depth'] -= 1
+        return
+    with exclusive_metadata_lock(
+        lock_path,
+        label='coordination publication',
+        recovery_log_path=lock_path.with_name('coordination-publication-lock-recovery.jsonl'),
+        timeout_seconds=COORDINATION_PUBLICATION_LOCK_TIMEOUT_SECONDS,
+        stale_seconds=COORDINATION_PUBLICATION_LOCK_STALE_SECONDS,
+        busy_error=coordination_publication_busy_error,
+    ) as (_held_path, metadata):
+        holders[key] = {'depth': 1, 'metadata': metadata}
+        try:
+            yield metadata
+        finally:
+            holders.pop(key, None)
+
+
+def coordination_publication_lock_required(function):
+    """Run a publication-state transition under this clone's single-writer lock."""
+    @functools.wraps(function)
+    def wrapper(repo_root, *args, **kwargs):
+        with coordination_publication_lock(repo_root):
+            return function(repo_root, *args, **kwargs)
+    return wrapper
+
+
+def coordination_publication_owner(repo_root):
+    """Name the process that recorded an intent; the lock, not this, is the authority."""
+    holder = coordination_publication_lock_holders().get(
+        str(coordination_publication_lock_path(repo_root))
+    )
+    metadata = (holder or {}).get('metadata') or {}
+    pid = metadata.get('pid') or os.getpid()
+    return {
+        'installation_id': installation_id(create=True),
+        'host': socket.gethostname(),
+        'pid': pid,
+        'process_start_time': (
+            metadata.get('process_start_time')
+            or governed_worktree_process_start_time(pid)
+        ),
+        'lock_token': metadata.get('token'),
+        'recorded_at': iso_utc_now(),
+    }
+
+
+def coordination_publication_identity(
+    repo_root,
+    manifest,
+    changed_refs,
+    scope,
+    projection_status,
+    *,
+    tombstone=None,
+    rename=None,
+    state_transition=None,
+    publication_manifest=None,
+    identity_changed_refs=None,
+):
+    """Build the operation identity and its fingerprint.
+
+    ``identity_changed_refs``, when given, replaces ``changed_refs`` in the
+    fingerprint only: a control-manifest refresh that housekeeping may or may
+    not need this attempt is not part of what the operation itself declares
+    it will change, so it must not make the fingerprint differ between a
+    first attempt and its retry. The full ``changed_refs`` is still what gets
+    recorded on the intent (see ``begin_coordination_publication``); the
+    landing proof's L3 keeps comparing that recorded value, unaffected by
+    this narrower fingerprint slice.
+    """
+    published_manifest = publication_manifest or manifest
+    stable_tombstone = copy.deepcopy(tombstone) if tombstone else None
+    if stable_tombstone:
+        stable_tombstone.pop('closed_at', None)
+    fingerprint_refs = (
+        changed_refs if identity_changed_refs is None else identity_changed_refs
+    )
+    identity = {
+        'coordination_id': coordination_config(manifest)['id'],
+        'scope': scope,
+        'projection_status': projection_status,
+        'manifest_digest': coordination_operation_manifest_digest(
+            published_manifest, repo_root
+        ),
+        'changed_refs': dict(sorted(changed_refs.items())),
+        'tombstone': stable_tombstone,
+        'rename': rename,
+        'state_transition': state_transition,
+    }
+    fingerprint_identity = {
+        **identity,
+        'changed_refs': dict(sorted(fingerprint_refs.items())),
+    }
+    return identity, canonical_json_digest(fingerprint_identity)
+
+
+def pending_coordination_publications(repo_root, manifest_path):
+    events = load_ledger_events(repo_root, manifest_path)
+    completed = {
+        (event.get('payload') or {}).get('operation_token')
+        for event in events
+        if event.get('type') in {
+            'coordination_publish_completed',
+            'coordination_publish_abandoned',
+        }
+    }
+    pending = []
+    for event in events:
+        if event.get('type') != 'coordination_publish_intent':
+            continue
+        payload = event.get('payload') or {}
+        if payload.get('operation_token') not in completed:
+            pending.append(payload)
+    return pending
+
+
+def coordination_scope_remedy(scope):
+    scope = str(scope or '')
+    prefix, separator, identifier = scope.partition(':')
+    if separator and identifier:
+        return {
+            'stack': f'stack push {identifier}',
+            'promote': f'stack promote {identifier}',
+            'demote': f'stack demote {identifier}',
+            'close': f'stack close {identifier} --force',
+        }.get(prefix)
+    if scope == 'integration':
+        return 'int push'
+    if scope in {'full', 'partial'}:
+        return 'reconcile --apply --push'
+    return None
+
+
+def pending_coordination_publication_remedy(scopes):
+    remedies = list(dict.fromkeys(
+        remedy for remedy in (coordination_scope_remedy(scope) for scope in scopes)
+        if remedy
+    ))
+    lines = ['another coordinated publication intent is pending: ' + ', '.join(scopes)]
+    if remedies:
+        lines.append('complete it first:')
+        lines.extend(f'  syncwheel {remedy}' for remedy in remedies)
+    else:
+        lines.append('retry or reconcile that exact command first')
+    return SyncwheelError('\n'.join(lines))
+
+
+def pending_coordination_publication(repo_root, manifest_path, fingerprint):
+    pending = pending_coordination_publications(repo_root, manifest_path)
+    matching = [item for item in pending if item.get('fingerprint') == fingerprint]
+    if matching:
+        return matching[-1]
+    if pending:
+        raise pending_coordination_publication_remedy(
+            sorted({str(item.get('scope')) for item in pending})
+        )
+    return None
+
+
+def pending_coordination_publication_for_scope(
+    repo_root, manifest_path, scope
+):
+    matching = [
+        item for item in pending_coordination_publications(repo_root, manifest_path)
+        if item.get('scope') == scope
+    ]
+    if len(matching) > 1:
+        raise SyncwheelError(
+            f'multiple coordinated publication intents are pending for {scope}; '
+            'inspect the ledger before retrying'
+        )
+    return matching[-1] if matching else None
+
+
+def coordination_remote_is_reachable(repo_root, remote):
+    return git(
+        repo_root, 'ls-remote', '--quiet', remote, 'HEAD', check=False
+    ).returncode == 0
+
+
+def coordinated_publish_retry_hint(scope):
+    remedy = coordination_scope_remedy(scope)
+    if not remedy:
+        return '; nothing was published, rerun the interrupted command'
+    return f'\nNothing was published. Retry:\n  syncwheel {remedy}'
+
+
+def coordinated_publish_remote_failure(remedy):
+    return SyncwheelError(
+        'coordinated publish could not inspect the coordination remote; '
+        f'restore remote access, then retry:\n  syncwheel {remedy}'
+    )
+
+
+def coordinated_publish_command_failure(repo_root, config, exc, remedy):
+    """Turn a raw publication failure into an operator error, or None to reraise."""
+    if isinstance(exc, CoordinationRemoteRejection):
+        return SyncwheelError(
+            f'{exc}\nNothing was published. Resolve the rejection on the remote, '
+            f'then retry:\n  syncwheel {remedy}'
+        )
+    if not config or coordination_remote_is_reachable(repo_root, config['remote']):
+        return None
+    return coordinated_publish_remote_failure(remedy)
+
+
+def coordination_state_commits_since(repo_root, tip, since_tip):
+    if not tip:
+        return []
+    if not since_tip:
+        rev_range = tip
+    elif git(
+        repo_root, 'merge-base', '--is-ancestor', since_tip, tip, check=False
+    ).returncode == 0:
+        rev_range = f'{since_tip}..{tip}'
+    else:
+        return []
+    result = git(repo_root, 'rev-list', rev_range, check=False)
+    if result.returncode != 0:
+        return []
+    return result.stdout.split()
+
+
+def coordination_state_document_from_commit(repo_root, commit):
+    result = git(
+        repo_root, 'show', f'{commit}:{COORDINATION_STATE_FILE}', check=False
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def coordination_commit_operation_token(repo_root, commit):
+    token = (coordination_state_document_from_commit(repo_root, commit) or {}).get(
+        'operation_token'
+    )
+    return token if isinstance(token, str) else None
+
+
+def coordination_operation_touched_refs(operation):
+    refs = list(operation.get('changed_refs') or {})
+    tombstone = operation.get('tombstone')
+    if tombstone:
+        refs.append(coordination_tombstone_ref(tombstone))
+    refs.extend(operation.get('claimed_refs') or [])
+    return list(dict.fromkeys(refs))
+
+
+def coordination_claim_history_matches(
+    repo_root, config, claim_tip, source_ref, predicate
+):
+    """Whether any claim in the ancestry of a claim tip satisfies ``predicate``.
+
+    A later publication of the same source ref parents its claim on this one, so
+    an older claim stays reachable even when the claim tip has moved on. Only
+    the most recent COORDINATION_CLAIM_HISTORY_SCAN_LIMIT claims are read.
+    """
+    if not claim_tip:
+        return False
+    if not commit_exists(repo_root, claim_tip):
+        git(
+            repo_root, 'fetch', '--quiet', config['remote'],
+            coordination_claim_ref(source_ref), check=False,
+        )
+    if not commit_exists(repo_root, claim_tip):
+        return False
+    listed = git(
+        repo_root, 'rev-list',
+        f'--max-count={COORDINATION_CLAIM_HISTORY_SCAN_LIMIT}', claim_tip,
+        check=False,
+    )
+    if listed.returncode != 0:
+        return False
+    for commit in listed.stdout.split():
+        try:
+            claim = coordination_claim_from_commit(repo_root, commit)
+        except SyncwheelError:
+            continue
+        if predicate(claim):
+            return True
+    return False
+
+
+def coordination_claim_history_carries_token(
+    repo_root, config, claim_tip, source_ref, operation_token
+):
+    if not operation_token:
+        return False
+    return coordination_claim_history_matches(
+        repo_root,
+        config,
+        claim_tip,
+        source_ref,
+        lambda claim: (
+            claim.get('coordination_id') == config['id']
+            and claim.get('source_ref') == source_ref
+            and claim.get('operation_token') == operation_token
+        ),
+    )
+
+
+def coordination_claim_proves_operation(claim, config, source_ref, operation):
+    """One claim's share of the claim proof: identity, scope, and the ref set.
+
+    A claim written before 0.43 records neither scope nor ref set, so it can
+    never prove an operation on its own.
+    """
+    return (
+        claim.get('coordination_id') == config['id']
+        and claim.get('source_ref') == source_ref
+        and claim.get('operation_token') == operation.get('operation_token')
+        and claim.get('publication_scope') == operation.get('scope')
+        and claim.get('changed_refs') == sorted(operation.get('changed_refs') or {})
+    )
+
+
+def coordination_state_document_matches_operation(state, operation):
+    """The state commit declares this operation's token, scope, refs and digest."""
+    if not isinstance(state, dict):
+        return False
+    token = operation.get('operation_token')
+    if not token:
+        return False
+    return (
+        state.get('operation_token') == token
+        and state.get('publication_scope') == operation.get('scope')
+        and state.get('projection_status') == operation.get('projection_status')
+        and coordination_state_operation_manifest_digest(state)
+        == operation.get('manifest_digest')
+        and state.get('changed_refs') == dict(
+            sorted((operation.get('changed_refs') or {}).items())
+        )
+    )
+
+
+def coordination_state_claims_carry_operation(repo_root, config, state, operation):
+    """Every touched source ref carries this operation's token in its claim history."""
+    claims = state.get('claims') or {}
+    for source_ref in coordination_operation_touched_refs(operation):
+        if not coordination_claim_history_carries_token(
+            repo_root,
+            config,
+            claims.get(source_ref),
+            source_ref,
+            operation.get('operation_token'),
+        ):
+            return False
+    return True
+
+
+def coordination_remote_claims_prove_operation(repo_root, config, operation):
+    """Claim-side landing evidence for a state chain that no longer carries it.
+
+    Every changed ref, and no other, must carry a claim declaring this exact
+    operation: its token, its scope and its whole ref set. A claim that carries
+    the token under another scope or another ref set proves a different
+    operation, so it proves nothing about this one.
+    """
+    changed = sorted(operation.get('changed_refs') or {})
+    if not changed or not operation.get('operation_token'):
+        return False
+    claim_refs = {ref: coordination_claim_ref(ref) for ref in changed}
+    observed = remote_ref_tips(repo_root, config['remote'], claim_refs.values())
+    for source_ref, claim_ref in claim_refs.items():
+        if not coordination_claim_history_matches(
+            repo_root,
+            config,
+            observed.get(claim_ref),
+            source_ref,
+            lambda claim, source_ref=source_ref: coordination_claim_proves_operation(
+                claim, config, source_ref, operation
+            ),
+        ):
+            return False
+    return True
+
+
+def coordinated_operation_landing_evidence(
+    repo_root, config, observed, operation, *, claims_fallback=False
+):
+    """Prove that this exact operation reached the remote, and say how.
+
+    The state proof, the only form a fresh publication may use, needs a state
+    commit inside the recorded window declaring this operation's token, scope,
+    changed refs, projection status and manifest digest, with the claim of every
+    touched source ref carrying the same token. Ref tips are not proof: another
+    clone can legitimately move a published ref, or push the same tip without
+    this operation ever landing.
+
+    The claim proof, available to the recovery paths only, needs every changed
+    ref to carry a claim declaring this operation's token, scope and whole ref
+    set. It has no window, which is why it survives a state ref rewritten
+    backwards, and it excludes the manifest digest, which is not recomputable
+    from a claim.
+    """
+    if not operation.get('operation_token'):
+        return None
+    tip = (observed or {}).get('tip')
+    expected_tip = operation.get('expected_coordination_state_tip')
+    if tip and expected_tip:
+        for commit in coordination_state_commits_since(repo_root, tip, expected_tip):
+            document = coordination_state_document_from_commit(repo_root, commit)
+            if coordination_state_document_matches_operation(
+                document, operation
+            ) and coordination_state_claims_carry_operation(
+                repo_root, config, document, operation
+            ):
+                return 'state'
+    if claims_fallback and coordination_remote_claims_prove_operation(
+        repo_root, config, operation
+    ):
+        return 'claims'
+    return None
+
+
+def coordinated_operation_landed(
+    repo_root, config, observed, operation, *, claims_fallback=False
+):
+    return coordinated_operation_landing_evidence(
+        repo_root, config, observed, operation, claims_fallback=claims_fallback
+    ) is not None
+
+
+def publication_intent_owner_recovers(intent):
+    """Promote finishes its own landed intent: it still owes a manifest save."""
+    return str(intent.get('scope') or '').startswith('promote:')
+
+
+def abandoned_publication_rename_is_restorable(repo_root, config, intent):
+    """A rename is undone only when the remote proves the promotion never landed.
+
+    The destination ref present on the remote, or a claim carrying this token,
+    is evidence of a landed operation whose branch layout must stand.
+    """
+    rename = intent.get('rename') or {}
+    to_branch = rename.get('to_branch')
+    if not to_branch:
+        return False
+    destination_ref = f'refs/heads/{to_branch}'
+    observed = remote_ref_tips(
+        repo_root,
+        config['remote'],
+        [destination_ref, coordination_claim_ref(destination_ref)],
+    )
+    if observed.get(destination_ref):
+        return False
+    return not coordination_claim_history_carries_token(
+        repo_root,
+        config,
+        observed.get(coordination_claim_ref(destination_ref)),
+        destination_ref,
+        intent.get('operation_token'),
+    )
+
+
+def restore_abandoned_publication_rename(repo_root, config, intent):
+    rename = intent.get('rename') or {}
+    from_branch = rename.get('from_branch')
+    to_branch = rename.get('to_branch')
+    if not from_branch or not to_branch or from_branch == to_branch:
+        return
+    if branch_exists(repo_root, from_branch) or not branch_exists(repo_root, to_branch):
+        return
+    if not abandoned_publication_rename_is_restorable(repo_root, config, intent):
+        return
+    git(repo_root, 'branch', '-m', to_branch, from_branch, check=False)
+
+
+def resolve_pending_coordination_publications(
+    repo_root, manifest, manifest_path, *, adopt_tokens=()
+):
+    """Terminalize publish intents no live process in this clone still owns.
+
+    The publication lock, not the intent payload, decides what is in flight: a
+    process that holds it runs no other publication cycle in this clone, and a
+    dead owner released it by kernel action. An intent whose operation is proved
+    landed completes as ``already_published``; one that never reached the remote
+    is abandoned, because it can never satisfy its own leases again and leaving
+    it pending freezes every later publication. Tokens in ``adopt_tokens``
+    belong to the running command, which finishes or renews them itself.
+    """
+    config = coordination_config(manifest)
+    if not config:
+        return None
+    if not pending_coordination_publications(repo_root, manifest_path):
+        return None
+    with coordination_publication_lock(repo_root):
+        pending = pending_coordination_publications(repo_root, manifest_path)
+        if not pending:
+            return None
+        observed = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        for intent in pending:
+            token = intent.get('operation_token')
+            expected_tip = intent.get('expected_coordination_state_tip')
+            if coordinated_operation_landed(
+                repo_root, config, observed, intent, claims_fallback=True
+            ):
+                if token in adopt_tokens or publication_intent_owner_recovers(intent):
+                    continue
+                append_ledger_event(
+                    repo_root,
+                    'coordination_publish_completed',
+                    {
+                        'operation_token': token,
+                        'fingerprint': intent.get('fingerprint'),
+                        'scope': intent.get('scope'),
+                        'coordination_state': observed['tip'],
+                        'coordination_status': 'already_published',
+                        'recovered': True,
+                        'legacy_intent': not expected_tip,
+                    },
+                    manifest_path,
+                )
+                continue
+            if not expected_tip:
+                # A pre-0.43 intent records no reviewed tip, so nothing about it
+                # was overtaken; it is replaced, not superseded.
+                reason = 'not_landed'
+            elif observed['tip'] != expected_tip:
+                reason = 'superseded'
+            elif token in adopt_tokens:
+                continue
+            else:
+                reason = 'not_landed'
+            restore_abandoned_publication_rename(repo_root, config, intent)
+            append_ledger_event(
+                repo_root,
+                'coordination_publish_abandoned',
+                {
+                    'operation_token': token,
+                    'fingerprint': intent.get('fingerprint'),
+                    'scope': intent.get('scope'),
+                    'reason': reason,
+                    'status': reason,
+                    'coordination_state': observed['tip'],
+                    'owner': intent.get('owner'),
+                    'legacy_intent': not intent.get('owner'),
+                },
+                manifest_path,
+            )
+        return observed
+
+
+@coordination_publication_lock_required
+def renew_coordination_publication(repo_root, manifest, manifest_path, pending):
+    """Give a pending intent a reviewable plan again.
+
+    A recorded state tip that has been overtaken can never satisfy its own
+    leases, so the intent is abandoned and replaced by an equivalent one
+    observed against the current state. An intent whose result already landed
+    keeps its token so the publish recovers instead of republishing.
+    """
+    config = coordination_config(manifest)
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    if observed['tip'] == pending.get('expected_coordination_state_tip'):
+        return pending
+    if coordinated_operation_landed(
+        repo_root, config, observed, pending, claims_fallback=True
+    ):
+        return pending
+    append_ledger_event(
+        repo_root,
+        'coordination_publish_abandoned',
+        {
+            'operation_token': pending.get('operation_token'),
+            'fingerprint': pending.get('fingerprint'),
+            'scope': pending.get('scope'),
+            'reason': 'superseded',
+            'status': 'superseded',
+            'coordination_state': observed['tip'],
+        },
+        manifest_path,
+    )
+    payload = {
+        **{key: value for key, value in pending.items() if key != 'retry'},
+        'operation_token': str(uuid.uuid4()),
+        'expected_coordination_state_tip': observed['tip'],
+        'owner': coordination_publication_owner(repo_root),
+    }
+    append_ledger_event(
+        repo_root, 'coordination_publish_intent', payload, manifest_path
+    )
+    return payload
+
+
+def pending_coordination_publication_after_resolution(
+    repo_root, manifest, manifest_path, fingerprint
+):
+    adopt = {
+        intent.get('operation_token')
+        for intent in pending_coordination_publications(repo_root, manifest_path)
+        if intent.get('fingerprint') == fingerprint
+    }
+    resolve_pending_coordination_publications(
+        repo_root, manifest, manifest_path, adopt_tokens=adopt
+    )
+    return pending_coordination_publication(repo_root, manifest_path, fingerprint)
+
+
+def begin_coordination_publication(
+    repo_root,
+    manifest,
+    manifest_path,
+    changed_refs,
+    scope,
+    projection_status,
+    *,
+    tombstone=None,
+    rename=None,
+    state_transition=None,
+    publication_manifest=None,
+    expected_state_tip=EXPECTED_COORDINATION_STATE_UNSET,
+    identity_changed_refs=None,
+):
+    config = coordination_config(manifest)
+    identity, fingerprint = coordination_publication_identity(
+        repo_root,
+        manifest,
+        changed_refs,
+        scope,
+        projection_status,
+        tombstone=tombstone,
+        rename=rename,
+        state_transition=state_transition,
+        publication_manifest=publication_manifest,
+        identity_changed_refs=identity_changed_refs,
+    )
+    with coordination_publication_lock(repo_root):
+        existing = pending_coordination_publication_after_resolution(
+            repo_root, manifest, manifest_path, fingerprint
+        )
+        if existing:
+            return {**existing, 'retry': True}
+        observed = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        if (
+            expected_state_tip is not EXPECTED_COORDINATION_STATE_UNSET
+            and observed['tip'] != expected_state_tip
+        ):
+            raise SyncwheelError(
+                'coordinated publication state changed before its intent could be recorded'
+            )
+        payload = {
+            **identity,
+            'fingerprint': fingerprint,
+            'operation_token': str(uuid.uuid4()),
+            'expected_coordination_state_tip': observed['tip'],
+            'owner': coordination_publication_owner(repo_root),
+        }
+        append_ledger_event(
+            repo_root, 'coordination_publish_intent', payload, manifest_path
+        )
+        return {**payload, 'retry': False}
+
+
+def complete_coordination_publication(
+    repo_root, manifest_path, operation, result
+):
+    append_ledger_event(
+        repo_root,
+        'coordination_publish_completed',
+        {
+            'operation_token': operation['operation_token'],
+            'fingerprint': operation['fingerprint'],
+            'scope': operation['scope'],
+            'coordination_state': result.get('state_tip'),
+            'coordination_status': result.get('status'),
+            'recovered': bool(result.get('recovered')),
+        },
+        manifest_path,
+    )
+
+
+def coordinated_publication_matches_remote(
+    repo_root,
+    config,
+    state,
+    changed_refs,
+    touched_refs,
+    scope,
+    projection_status,
+    manifest_digest_value,
+    operation_token,
+):
+    operation = {
+        'operation_token': operation_token,
+        'scope': scope,
+        'projection_status': projection_status,
+        'manifest_digest': manifest_digest_value,
+        'changed_refs': changed_refs,
+    }
+    if not coordination_state_document_matches_operation(state, operation):
+        return False
+    if not coordination_state_matches_remote(repo_root, config, state):
+        return False
+    claim_refs = {source_ref: coordination_claim_ref(source_ref) for source_ref in touched_refs}
+    observed = remote_ref_tips(repo_root, config['remote'], claim_refs.values())
+    for source_ref, claim_ref in claim_refs.items():
+        claim_tip = observed[claim_ref]
+        if not claim_tip or state.get('claims', {}).get(source_ref) != claim_tip:
+            return False
+        claim = fetch_coordination_claim(
+            repo_root, config['remote'], claim_ref, claim_tip
+        )
+        if (
+            claim.get('coordination_id') != config['id']
+            or claim.get('source_ref') != source_ref
+            or claim.get('operation_token') != operation_token
+        ):
+            return False
+    return True
+
+
+def coordinated_publish(repo_root, *args, **kwargs):
+    """Run one publication cycle under this clone's single-writer lock.
+
+    A dry run inspects and prints only, so it never takes the lock and is never
+    refused by a live publication.
+    """
+    dry_run = kwargs.get('dry_run') if 'dry_run' in kwargs else (
+        len(args) > 5 and bool(args[5])
+    )
+    if dry_run:
+        return coordinated_publish_cycle(repo_root, *args, **kwargs)
+    with coordination_publication_lock(repo_root):
+        return coordinated_publish_cycle(repo_root, *args, **kwargs)
+
+
+def coordinated_publish_cycle(
     repo_root,
     manifest,
     manifest_path,
@@ -11460,8 +12748,14 @@ def coordinated_publish(
     tombstone=None,
     rename=None,
     state_transition=None,
-    expected_coordination_state_tip=None,
+    expected_coordination_state_tip=EXPECTED_COORDINATION_STATE_UNSET,
     expected_observed_refs=None,
+    expected_coordination_state_refs=None,
+    preflight_complete=False,
+    remedy_stack=None,
+    creation_remedy=False,
+    operation_token=None,
+    publication_manifest=None,
 ):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
@@ -11478,6 +12772,7 @@ def coordinated_publish(
                 manifest_path,
                 source_manifest,
                 recovery_state=recovery_state,
+                intents_only=True,
             )
             if recovery_state.get('recovered'):
                 if manifest_digest(manifest) != source_digest_before:
@@ -11487,15 +12782,28 @@ def coordinated_publish(
                     )
                 manifest = recovered_source
     changed_refs = dict(changed_refs)
+    publication_manifest = publication_manifest or manifest
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     if recovery_state.get('recovered'):
         changed_refs[integration_ref] = ref_tip(
             repo_root, manifest['integration']['branch']
         )
     integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
+    # A13: the trigger consults the published state, not only the local tree.
+    # A clone whose integration branch is merely stale (never synced, not
+    # diverged) must not re-bootstrap over a control manifest another clone
+    # already published; that expands claim_refs/observation_refs after this
+    # plan was reviewed and trips the "managed refs changed" guard below.
+    expected = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    integration_ref_published = (
+        (expected.get('state') or {}).get('managed_refs') or {}
+    ).get(integration_ref) is not None
     if (
         not dry_run
         and integration_tip
+        and not integration_ref_published
         and manifest_from_tree(
             repo_root, integration_tip, integration_manifest_path(repo_root)
         ) is None
@@ -11508,38 +12816,103 @@ def coordinated_publish(
             'control',
             reason='bootstrap coordinated control manifest',
             command='syncwheel coordinated publish',
+            persist_source=False,
         )
         changed_refs[integration_ref] = ref_tip(
             repo_root, manifest['integration']['branch']
         )
-    managed = managed_ref_names(manifest)
+    touched_refs = list(changed_refs)
+    managed = managed_ref_names(publication_manifest)
     if tombstone:
+        closed_ref = tombstone.get('ref') or f"refs/heads/{tombstone['branch']}"
+        touched_refs = list(dict.fromkeys([*touched_refs, closed_ref]))
         managed = list(dict.fromkeys([
             *managed,
-            tombstone.get('ref') or f"refs/heads/{tombstone['branch']}",
+            closed_ref,
         ]))
     if rename:
         managed = list(dict.fromkeys([
             *managed,
             f"refs/heads/{rename['from_branch']}",
         ]))
+    if not dry_run and not operation_token:
+        raise SyncwheelError(
+            'coordinated publish requires a durable caller operation token'
+        )
     invalid = sorted(set(changed_refs) - set(managed))
     if invalid:
         raise SyncwheelError('coordinated publish received unmanaged refs: ' + ', '.join(invalid))
-    expected = read_remote_coordination_state(
-        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    desired_manifest_digest = coordination_operation_manifest_digest(
+        publication_manifest, repo_root
     )
     if (
-        expected_coordination_state_tip is not None
+        operation_token
+        and expected.get('state')
+        and coordinated_publication_matches_remote(
+            repo_root,
+            config,
+            expected['state'],
+            changed_refs,
+            touched_refs,
+            scope,
+            projection_status,
+            desired_manifest_digest,
+            operation_token,
+        )
+    ):
+        report_advisory_unclaimed_owned_refs(config, expected['state'])
+        print('coordinated publish: recovered the exact published operation intent')
+        return {
+            'status': 'recovered',
+            'state_tip': expected['tip'],
+            'recovered': True,
+        }
+    if operation_token and coordinated_operation_landed(
+        repo_root,
+        config,
+        expected,
+        {
+            'operation_token': operation_token,
+            'scope': scope,
+            'projection_status': projection_status,
+            'manifest_digest': desired_manifest_digest,
+            'changed_refs': changed_refs,
+            'tombstone': tombstone,
+            'expected_coordination_state_tip': (
+                None
+                if expected_coordination_state_tip is EXPECTED_COORDINATION_STATE_UNSET
+                else expected_coordination_state_tip
+            ),
+        },
+    ):
+        report_advisory_unclaimed_owned_refs(config, expected['state'])
+        print(
+            'coordinated publish: this operation is already published; '
+            'completing without republishing'
+        )
+        return {
+            'status': 'already_published',
+            'state_tip': expected['tip'],
+            'recovered': True,
+        }
+    if (
+        expected_coordination_state_tip is not EXPECTED_COORDINATION_STATE_UNSET
         and expected['tip'] != expected_coordination_state_tip
     ):
         raise SyncwheelError(
             'coordinated publish STOP: remote state changed after the reviewed plan'
+            + coordinated_publish_retry_hint(scope)
         )
-    require_exclusive_coordination_ownership(repo_root, config, managed)
-    observed_refs = remote_ref_tips(repo_root, config['remote'], managed)
-    if observed_refs.get(integration_ref) is None and integration_ref not in changed_refs:
-        integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
+    require_exclusive_coordination_ownership(
+        repo_root,
+        config,
+        managed,
+        expected_state_refs=expected_coordination_state_refs,
+    )
+    claim_refs = {ref: coordination_claim_ref(ref) for ref in touched_refs}
+    observation_refs = list(dict.fromkeys([*managed, *claim_refs.values()]))
+    full_observation = remote_ref_tips(repo_root, config['remote'], observation_refs)
+    if full_observation.get(integration_ref) is None and integration_ref not in changed_refs:
         if not integration_tip:
             raise SyncwheelError(
                 'cannot bootstrap coordination state without a local integration tip'
@@ -11553,25 +12926,60 @@ def coordinated_publish(
             )
         # A state cannot bind a control-manifest digest to an absent tip.  The
         # first coordinated publication therefore carries the already-local
-        # integration tip in the same atomic push.
+        # integration tip in the same atomic push, and the ref it carries owes
+        # a claim like every other touched source ref.
         changed_refs[integration_ref] = integration_tip
+        touched_refs = list(dict.fromkeys([*touched_refs, integration_ref]))
+        claim_refs[integration_ref] = coordination_claim_ref(integration_ref)
+        observation_refs = list(dict.fromkeys([*managed, *claim_refs.values()]))
+        full_observation = remote_ref_tips(repo_root, config['remote'], observation_refs)
+    observed_refs = {ref: full_observation.get(ref) for ref in managed}
+    observed_claims = {
+        source_ref: full_observation.get(claim_ref)
+        for source_ref, claim_ref in claim_refs.items()
+    }
     if expected_observed_refs is not None:
         planned_observations = {
-            ref: expected_observed_refs.get(ref) for ref in managed
+            ref: expected_observed_refs.get(ref) for ref in observation_refs
         }
-        if observed_refs != planned_observations:
+        if full_observation != planned_observations:
             raise SyncwheelError(
                 'coordinated publish STOP: managed refs changed after the reviewed plan'
             )
+        # The lease belongs to the reviewed observation, not to the later
+        # verification read. Equality above proves the latter did not replace
+        # the former as the publication authority.
+        observed_refs = {ref: planned_observations.get(ref) for ref in managed}
+        observed_claims = {
+            source_ref: planned_observations.get(claim_ref)
+            for source_ref, claim_ref in claim_refs.items()
+        }
+    for source_ref, claim_tip in observed_claims.items():
+        if not claim_tip:
+            continue
+        claim = fetch_coordination_claim(
+            repo_root, config['remote'], claim_refs[source_ref], claim_tip
+        )
+        if claim['source_ref'] != source_ref:
+            raise SyncwheelError(
+                f'coordination claim {claim_refs[source_ref]} names a different source ref'
+            )
+        if claim['coordination_id'] != config['id']:
+            raise SyncwheelError(
+                f'{source_ref} is claimed by coordination domain '
+                f'{claim["coordination_id"]}; refusing publication'
+            )
     base_digest_form = validate_coordination_publication_base(
         repo_root,
-        manifest,
+        publication_manifest,
         config,
         expected,
         changed_refs,
         tombstone=tombstone,
         rename=rename,
         state_transition=state_transition,
+        remedy_stack=remedy_stack,
+        creation_remedy=creation_remedy,
     )
     for ref, sha in changed_refs.items():
         if not sha:
@@ -11584,13 +12992,27 @@ def coordinated_publish(
             'scope': scope,
             'projection_status': projection_status,
             'expected_state': expected['tip'],
+            'claim_refs': claim_refs,
         }
         print(json.dumps(payload, indent=2, sort_keys=True))
         return {'status': 'dry_run', 'state_tip': None}
     installation = installation_id(create=True)
+    claim_commits = {}
+    for source_ref, claim_ref in claim_refs.items():
+        claim_commits[source_ref] = create_coordination_claim_commit(
+            repo_root,
+            source_ref,
+            config['id'],
+            operation_token,
+            observed_claims[source_ref],
+            closed=bool(tombstone and source_ref == coordination_tombstone_ref(tombstone)),
+            reason=(tombstone or {}).get('reason'),
+            publication_scope=scope,
+            changed_refs=changed_refs,
+        )
     state = build_coordination_state(
         repo_root,
-        manifest,
+        publication_manifest,
         config,
         expected,
         observed_refs,
@@ -11599,26 +13021,62 @@ def coordinated_publish(
         projection_status,
         installation,
         tombstone=tombstone,
+        claim_commits=claim_commits,
+        operation_token=operation_token,
     )
+    validate_coordination_state(state, config['id'], config.get('claims', 'advisory'))
     state_commit = create_coordination_state_commit(repo_root, state, expected['tip'])
     state_ref = coordination_state_ref(config)
-    lease_refs = [*changed_refs, state_ref]
+    lease_refs = [*changed_refs, *claim_refs.values(), state_ref]
     expected_tips = dict(observed_refs)
+    expected_tips.update({
+        claim_refs[source_ref]: tip for source_ref, tip in observed_claims.items()
+    })
     expected_tips[state_ref] = expected['tip']
     lease_args = [
         f"--force-with-lease={ref}:{expected_tips.get(ref) or ''}"
         for ref in sorted(lease_refs)
     ]
     refspecs = [f'{changed_refs[ref]}:{ref}' for ref in sorted(changed_refs)]
+    refspecs.extend(
+        f'{claim_commits[source_ref]}:{claim_refs[source_ref]}'
+        for source_ref in sorted(claim_refs)
+    )
     refspecs.append(f'{state_commit}:{state_ref}')
     token = acquire_local_coordination_lease(repo_root, config, installation)
     try:
-        atomic_push_capability_probe(repo_root, config['remote'])
+        if not preflight_complete:
+            atomic_push_capability_probe(repo_root, config['remote'])
         command = ['git', 'push', '--atomic', *lease_args, config['remote'], *refspecs]
         result = run_authorized_push(
-            repo_root, command, config['remote'], [*changed_refs, state_ref], check=False
+            repo_root, command, config['remote'],
+            [*changed_refs, *claim_refs.values(), state_ref], check=False,
         )
         if result.returncode != 0:
+            latest_claims = remote_ref_tips(
+                repo_root, config['remote'], claim_refs.values()
+            )
+            expected_claim_refs = {
+                claim_refs[source_ref]: tip
+                for source_ref, tip in observed_claims.items()
+            }
+            if latest_claims != expected_claim_refs:
+                raise SyncwheelError(
+                    'coordinated publish stopped after a claim lease loss; '
+                    'run syncwheel handoff, inspect the named source ref claim, then retry'
+                )
+            leased_now = remote_ref_tips(
+                repo_root, config['remote'], list(expected_tips)
+            )
+            if leased_now == expected_tips:
+                raise CoordinationRemoteRejection(
+                    'the coordination remote refused the atomic publication: '
+                    + (
+                        result.stderr.strip()
+                        or result.stdout.strip()
+                        or 'no detail returned'
+                    )
+                )
             race = classify_coordination_race(
                 repo_root,
                 manifest,
@@ -11643,6 +13101,7 @@ def coordinated_publish(
                         {'state_tip': race['latest']['tip'], 'refs': aligned},
                         manifest_path,
                     )
+                report_advisory_unclaimed_owned_refs(config, race['latest']['state'])
                 print('coordinated publish: equivalent state was already published by another device')
                 return {
                     'status': 'equivalent',
@@ -11661,6 +13120,7 @@ def coordinated_publish(
             )
         clear_pending_coordination_merge(repo_root, config)
         record_coordination_state_seen(repo_root, config, state_commit)
+        report_advisory_unclaimed_owned_refs(config, state)
         print(quoted(command))
         published = {'status': 'published', 'state_tip': state_commit}
         if base_digest_form:
@@ -12158,11 +13618,11 @@ def resolve_git_worktree(repo_root, branch, manifest, worktree=None, auto_worktr
         return found
     if worktree:
         path = Path(worktree).expanduser().resolve()
-        run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+        run(['git', 'worktree', 'add', str(path), branch], cwd=repo_root)
         return path
     if auto_worktree:
         path = configured_worktree_path(repo_root, branch, effective_worktree_root(manifest))
-        run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+        run(['git', 'worktree', 'add', str(path), branch], cwd=repo_root)
         return path
     raise SyncwheelError(
         f"no worktree found for branch: {branch}; pass --worktree <path> "
@@ -13987,7 +15447,11 @@ def replay_plan(repo_root, manifest, target, mode):
         elif worktree_matches_branch(repo_root, branch, worktree):
             steps.append(replay_exec_step(['git', '-C', str(worktree), 'reset', '--hard', base]))
         elif worktree is not None:
-            steps.append(replay_exec_step(['git', 'worktree', 'add', '-B', branch, str(worktree), base]))
+            expected_tip = ref_tip(repo_root, branch) or ZERO_OBJECT_ID
+            steps.append(replay_exec_step([
+                'git', 'update-ref', f'refs/heads/{branch}', base, expected_tip,
+            ]))
+            steps.append(replay_exec_step(['git', 'worktree', 'add', str(worktree), branch]))
         else:
             raise SyncwheelError('desk replay requires a worktree path')
 
@@ -14244,7 +15708,9 @@ def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=No
     if worktree_matches_branch(repo_root, branch, worktree):
         commands.append(['git', '-C', str(worktree), 'reset', '--hard', remote_ref])
         return commands
-    commands.append(['git', 'worktree', 'add', '-B', branch, str(worktree), remote_ref])
+    expected_tip = ref_tip(repo_root, branch) or ZERO_OBJECT_ID
+    commands.append(['git', 'update-ref', f'refs/heads/{branch}', remote_ref, expected_tip])
+    commands.append(['git', 'worktree', 'add', str(worktree), branch])
     return commands
 
 
@@ -14390,6 +15856,8 @@ def command_coordination_init(args):
     proposed['coordination'] = active_coordination_config(manifest_path, remote, coordination_id)
     if existing.get('gc'):
         proposed['coordination']['gc'] = normalize_coordination_gc(existing['gc'])
+    if existing.get('claims'):
+        proposed['coordination']['claims'] = existing['claims']
     if not args.apply:
         print(json.dumps({
             'manifest_path': str(manifest_path),
@@ -14423,6 +15891,8 @@ def command_coordination_disable(args):
     )
     if existing.get('gc'):
         disabled['gc'] = normalize_coordination_gc(existing['gc'])
+    if existing.get('claims'):
+        disabled['claims'] = existing['claims']
     proposed['version'] = max(manifest['version'], MANIFEST_VERSION_COORDINATED)
     proposed['coordination'] = disabled
     if not args.apply:
@@ -14500,6 +15970,168 @@ def command_coordination_provenance_reset(args):
                 'coordination provenance reset: discarded '
                 + json.dumps(item['paths'], ensure_ascii=True)
             )
+    return 0
+
+
+def begin_coordination_claims_backfill(
+    repo_root, manifest, manifest_path, state, claimed_refs, expected_state_tip
+):
+    """Record the terminalizable intent a claims backfill pushes under."""
+    identity = {
+        'coordination_id': coordination_config(manifest)['id'],
+        'scope': 'claims-backfill',
+        'projection_status': state.get('projection_status'),
+        'manifest_digest': coordination_state_operation_manifest_digest(state),
+        'changed_refs': {},
+        'claimed_refs': list(claimed_refs),
+        'tombstone': None,
+        'rename': None,
+        'state_transition': None,
+    }
+    fingerprint = canonical_json_digest(identity)
+    existing = pending_coordination_publication_after_resolution(
+        repo_root, manifest, manifest_path, fingerprint
+    )
+    if existing:
+        return {**existing, 'retry': True}
+    payload = {
+        **identity,
+        'fingerprint': fingerprint,
+        'operation_token': str(uuid.uuid4()),
+        'expected_coordination_state_tip': expected_state_tip,
+        'owner': coordination_publication_owner(repo_root),
+    }
+    append_ledger_event(
+        repo_root, 'coordination_publish_intent', payload, manifest_path
+    )
+    return {**payload, 'retry': False}
+
+
+def command_coordination_claims_backfill(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        raise SyncwheelError('coordination claims backfill requires active-active coordination')
+    if args.apply and (not isinstance(args.reason, str) or not args.reason.strip()):
+        raise SyncwheelError('coordination claims backfill --apply requires --reason')
+    if not coordination_remote_is_reachable(repo_root, config['remote']):
+        raise coordinated_publish_remote_failure(
+            'coordination claims backfill --apply --reason <reason>'
+            if args.apply else 'coordination claims backfill'
+        )
+    if args.apply:
+        resolve_pending_coordination_publications(repo_root, manifest, manifest_path)
+    published = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    if not published.get('state'):
+        raise SyncwheelError('coordination claims backfill requires a published state')
+    state = published['state']
+    source_refs = sorted(state['managed_refs'])
+    claim_refs = {source_ref: coordination_claim_ref(source_ref) for source_ref in source_refs}
+    observations = remote_ref_tips(
+        repo_root, config['remote'], [*source_refs, *claim_refs.values()]
+    )
+    claims = {}
+    create = {}
+    foreign = []
+    for source_ref in source_refs:
+        if observations[source_ref] != state['managed_refs'][source_ref]:
+            raise SyncwheelError(
+                f'claims backfill refuses drifted source ref {source_ref}; '
+                'run syncwheel handoff and repair transport evidence first'
+            )
+        claim_ref = claim_refs[source_ref]
+        claim_tip = observations[claim_ref]
+        if claim_tip:
+            claim = fetch_coordination_claim(
+                repo_root, config['remote'], claim_ref, claim_tip
+            )
+            if claim['coordination_id'] != config['id']:
+                foreign.append(f'{source_ref} ({claim["coordination_id"]})')
+                continue
+            claims[source_ref] = claim_tip
+            continue
+        if args.apply:
+            create[source_ref] = None
+            claims[source_ref] = None
+    if foreign:
+        raise SyncwheelError(
+            'claims backfill found foreign claim(s), none were overwritten: '
+            + ', '.join(foreign)
+        )
+    missing = sorted(set(source_refs) - set(claims))
+    if not args.apply:
+        print(json.dumps({
+            'coordination_id': config['id'],
+            'unclaimed_owned_refs': missing,
+            'apply': False,
+        }, indent=2, sort_keys=True))
+        return 0
+    if not create and dict(sorted(claims.items())) == dict(
+        sorted((state.get('claims') or {}).items())
+    ):
+        print(json.dumps({
+            'coordination_id': config['id'], 'state_tip': published['tip'],
+            'created_claims': [], 'unclaimed_owned_refs': [],
+        }, indent=2, sort_keys=True))
+        return 0
+    with coordination_publication_lock(repo_root):
+        operation = begin_coordination_claims_backfill(
+            repo_root, manifest, manifest_path, state, sorted(create), published['tip']
+        )
+        operation_token = operation['operation_token']
+        for source_ref in sorted(create):
+            create[source_ref] = create_coordination_claim_commit(
+                repo_root, source_ref, config['id'], operation_token, None,
+                publication_scope='claims-backfill',
+            )
+            claims[source_ref] = create[source_ref]
+        child = copy.deepcopy(state)
+        child['publication_id'] = str(uuid.uuid4())
+        child['parent_state'] = published['tip']
+        child['created_at'] = iso_utc_now()
+        child['syncwheel_version'] = VERSION
+        child['installation_id'] = installation_id(create=True)
+        child['claims'] = dict(sorted(claims.items()))
+        child['changed_refs'] = {}
+        child['publication_scope'] = 'claims-backfill'
+        child['operation_token'] = operation_token
+        child['projection_status'] = state.get('projection_status')
+        state_commit = create_coordination_state_commit(repo_root, child, published['tip'])
+        state_ref = coordination_state_ref(config)
+        lease_args = [f'--force-with-lease={state_ref}:{published["tip"]}']
+        refspecs = []
+        for source_ref, claim_commit in sorted(create.items()):
+            claim_ref = claim_refs[source_ref]
+            lease_args.append(f'--force-with-lease={claim_ref}:')
+            refspecs.append(f'{claim_commit}:{claim_ref}')
+        refspecs.append(f'{state_commit}:{state_ref}')
+        command = ['git', 'push', '--atomic', *lease_args, config['remote'], *refspecs]
+        result = run_authorized_push(
+            repo_root, command, config['remote'],
+            [*(claim_refs[source_ref] for source_ref in create), state_ref], check=False,
+        )
+        if result.returncode != 0:
+            raise SyncwheelError(
+                'claims backfill lost its create-only CAS; run syncwheel handoff and retry'
+            )
+        append_ledger_event(repo_root, 'coordination_claims_backfilled', {
+            'coordination_id': config['id'], 'state_tip': state_commit,
+            'refs': sorted(create), 'reason': args.reason.strip(),
+            'operation_token': operation_token,
+        }, manifest_path)
+        complete_coordination_publication(
+            repo_root, manifest_path, operation,
+            {'state_tip': state_commit, 'status': 'published'},
+        )
+    print(json.dumps({
+        'coordination_id': config['id'], 'state_tip': state_commit,
+        'created_claims': sorted(create), 'unclaimed_owned_refs': [],
+    }, indent=2, sort_keys=True))
     return 0
 
 
@@ -14673,7 +16305,7 @@ def command_worktree_open(args):
         try:
             registry['lanes'].append(lane)
             persist()
-        except Exception:
+        except BaseException:
             run(['git', 'worktree', 'remove', '--force', str(path)], cwd=repo_root, check=False)
             git(repo_root, 'branch', '-D', branch, check=False)
             raise
@@ -15322,6 +16954,22 @@ def verify_channel_mutation_plan(args, plan):
         )
 
 
+def channel_coordination_operation_token(repo_root, manifest_path, plan):
+    """Mint or recover the coordination token of one channel operation.
+
+    ``operationId`` is the caller's clone-local idempotency key and may be
+    reused by another clone for another plan, so it can never be the token that
+    proves a publication landed.
+    """
+    for event in channel_operation_events(
+        repo_root, manifest_path, plan['operationId']
+    ):
+        recorded = (event.get('payload') or {}).get('coordinationOperationToken')
+        if isinstance(recorded, str) and recorded:
+            return recorded
+    return str(uuid.uuid4())
+
+
 def channel_operation_payload(plan, channel=None, mutation=None):
     plan_channel = plan.get('channel')
     plan_channel_id = (
@@ -15329,6 +16977,7 @@ def channel_operation_payload(plan, channel=None, mutation=None):
     )
     payload = {
         'operationId': plan['operationId'],
+        'coordinationOperationToken': plan.get('coordinationOperationToken'),
         'planDigest': plan['planDigest'],
         'operation': plan['operation'],
         'channel': channel['id'] if channel else plan_channel_id,
@@ -16621,6 +18270,9 @@ def command_channel_publish(args):
             raise SyncwheelError('channel local branch lacks current plan-bound apply evidence')
         ref = f"refs/heads/{channel['branch']}"
         coordination_state = None
+        plan['coordinationOperationToken'] = channel_coordination_operation_token(
+            repo_root, manifest_path, plan
+        )
         record_channel_operation_prepared(
             repo_root, manifest_path, plan, channel,
             {
@@ -16655,6 +18307,7 @@ def command_channel_publish(args):
                     result = coordinated_publish(
                         repo_root, manifest, manifest_path, {ref: current},
                         f"channel:{channel['id']}", 'channel-pinned-composition',
+                        operation_token=plan['coordinationOperationToken'],
                     )
                 coordination_state = result.get('state_tip')
             else:
@@ -16980,6 +18633,9 @@ def command_channel_close(args):
                 raise SyncwheelError(
                     'channel close plan is stale: coordination state changed under mutation lock'
                 )
+        output['coordinationOperationToken'] = channel_coordination_operation_token(
+            repo_root, manifest_path, output
+        )
         record_channel_operation_prepared(
             repo_root, manifest_path, output, channel,
             {
@@ -17028,6 +18684,7 @@ def command_channel_close(args):
                             'channel': channel['id'], 'branch': branch, 'ref': ref,
                             'reason': args.reason, 'closed_at': iso_utc_now(), 'remote_tip': remote_tip,
                         },
+                        operation_token=output['coordinationOperationToken'],
                     )
                 coordination_state = result.get('state_tip')
             manifest_attempted = True
@@ -17815,10 +19472,130 @@ def command_stack_land(args):
                 release_local_coordination_lease(repo_root, lease_token)
 
 
+def pending_stack_close_operation(repo_root, manifest_path, stack_id):
+    events = load_ledger_events(repo_root, manifest_path)
+    terminal_tokens = {
+        (event.get('payload') or {}).get('operation_token')
+        for event in events
+        if event.get('type') in {'stack_closed', 'stack_close_abandoned'}
+    }
+    for event in reversed(events):
+        if event.get('type') != 'stack_close_intent':
+            continue
+        payload = event.get('payload') or {}
+        token = payload.get('operation_token')
+        if payload.get('stack') == stack_id and token and token not in terminal_tokens:
+            return payload
+    return None
+
+
+def stack_closed_payload(intent, coordination_state=None, recovered=False):
+    return {
+        'stack': intent['stack'],
+        'branch': intent['branch'],
+        'reason': intent['reason'],
+        'operation_token': intent['operation_token'],
+        'coordination_state': coordination_state,
+        'delivery_tip': intent.get('delivery_tip'),
+        'recovered': recovered,
+    }
+
+
+def remote_first_close_failure(stack_id, exc):
+    return SyncwheelError(
+        f'{stack_id}: remote-first close could not inspect the coordination remote; '
+        f'restore remote access, then retry:\n  '
+        f'syncwheel stack close {stack_id} --force'
+    )
+
+
+def abandon_superseded_stack_close(repo_root, manifest_path, pending):
+    append_ledger_event(
+        repo_root,
+        'stack_close_abandoned',
+        {
+            'stack': pending['stack'],
+            'branch': pending.get('branch'),
+            'operation_token': pending['operation_token'],
+            'reason': 'close_superseded',
+            'status': 'close_superseded',
+        },
+        manifest_path,
+    )
+
+
+def published_close_tombstone(repo_root, manifest, pending):
+    config = coordination_config(manifest)
+    if not config or not pending.get('remote_first'):
+        return None
+    closed_ref = pending.get('closed_ref')
+    if not closed_ref:
+        return None
+    claim_ref = coordination_claim_ref(closed_ref)
+    published = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    claim_tip = remote_ref_tips(repo_root, config['remote'], [claim_ref])[claim_ref]
+    state = published.get('state') or {}
+    if not claim_tip or state.get('claims', {}).get(closed_ref) != claim_tip:
+        return None
+    claim = fetch_coordination_claim(
+        repo_root, config['remote'], claim_ref, claim_tip
+    )
+    if (
+        claim.get('coordination_id') != config['id']
+        or claim.get('source_ref') != closed_ref
+        or claim.get('operation_token') != pending.get('operation_token')
+        or claim.get('closed') is not True
+    ):
+        return None
+    return {'state_tip': published['tip'], 'claim_tip': claim_tip}
+
+
+def recover_pending_stack_close(repo_root, manifest, manifest_path, pending):
+    if manifest_digest(manifest) != pending.get('manifest_digest_after'):
+        return False
+    published = published_close_tombstone(repo_root, manifest, pending)
+    if pending.get('remote_first') and not published:
+        return False
+    append_ledger_event(
+        repo_root,
+        'stack_closed',
+        stack_closed_payload(
+            pending,
+            coordination_state=(published or {}).get('state_tip') or pending.get('coordination_state'),
+            recovered=True,
+        ),
+        manifest_path,
+    )
+    return True
+
+
 def command_stack_close(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    stack = require_stack(manifest, args.stack)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+    )
+    original_manifest = copy.deepcopy(manifest)
+    pending_close = pending_stack_close_operation(repo_root, manifest_path, args.stack)
+    stack = stack_map(manifest).get(args.stack)
+    if stack is None:
+        if pending_close:
+            try:
+                if recover_pending_stack_close(
+                    repo_root, manifest, manifest_path, pending_close
+                ):
+                    print(f'{args.stack}: recovered interrupted stack close')
+                    return 0
+            except SyncwheelError as exc:
+                raise remote_first_close_failure(args.stack, exc) from exc
+            raise SyncwheelError(
+                f'{args.stack}: interrupted stack close found, but the manifest no longer '
+                'matches its intended result; inspect the stack_close_intent ledger event '
+                'and reconcile the manifest before retrying'
+            )
+        raise SyncwheelError(f'unknown stack: {args.stack}')
     branch = stack['branch']
     base_ref = stack.get('base') or manifest['defaults']['base_ref']
 
@@ -17841,6 +19618,104 @@ def command_stack_close(args):
             + '; close or update those dependent stacks first'
         )
 
+    reason = (
+        pending_close.get('reason')
+        if pending_close else (args.reason or 'closed')
+    )
+    pending_remote_state = None
+    if (
+        pending_close
+        and coordination_is_active(manifest)
+        and stack.get('state', 'published') == 'draft'
+        and pending_close.get('remote_first')
+    ):
+        recovered_manifest = copy.deepcopy(manifest)
+        recovered_manifest['stacks'] = [
+            item for item in recovered_manifest['stacks'] if item['id'] != args.stack
+        ]
+        recovered_manifest['integration']['stacks'] = [
+            item for item in recovered_manifest['integration'].get('stacks', [])
+            if item != args.stack
+        ]
+        try:
+            published = (
+                published_close_tombstone(
+                    repo_root, recovered_manifest, pending_close
+                )
+                if manifest_digest(recovered_manifest)
+                == pending_close.get('manifest_digest_after')
+                else None
+            )
+        except SyncwheelError as exc:
+            raise remote_first_close_failure(args.stack, exc) from exc
+        if published:
+            require_manifest_transaction_current(manifest_path)
+            save_manifest(manifest_path, recovered_manifest)
+            append_ledger_event(
+                repo_root,
+                'stack_closed',
+                stack_closed_payload(
+                    pending_close,
+                    coordination_state=published['state_tip'],
+                    recovered=True,
+                ),
+                manifest_path,
+            )
+            abandon_pending_stack_creates(
+                repo_root, manifest_path, args.stack, 'stack_closed'
+            )
+            print(f'{args.stack}: recovered interrupted remote-first stack close')
+            return 0
+        config = coordination_config(manifest)
+        claim_ref = coordination_claim_ref(pending_close['closed_ref'])
+        observed_at_intent = pending_close.get('expected_observed_refs') or {}
+        generation_refs = {
+            pending_close['closed_ref']: observed_at_intent.get(
+                pending_close['closed_ref'], pending_close.get('expected_ref_tip')
+            ),
+            claim_ref: observed_at_intent.get(
+                claim_ref, pending_close.get('expected_claim_tip')
+            ),
+        }
+        try:
+            pending_remote_state = read_remote_coordination_state(
+                repo_root, config, fetch=True,
+                local_manifest_version=manifest['version'],
+            )
+            current_refs = remote_ref_tips(
+                repo_root, config['remote'], generation_refs
+            )
+        except SyncwheelError as exc:
+            raise remote_first_close_failure(args.stack, exc) from exc
+        if current_refs != generation_refs:
+            abandon_superseded_stack_close(
+                repo_root, manifest_path, pending_close
+            )
+            raise SyncwheelError(
+                f'{args.stack}: close_superseded; the pending close generation is '
+                'no longer current and was abandoned; this retry changed neither '
+                'the manifest nor the remote'
+            )
+    delivery_tip = None
+    if reason == 'absorbed':
+        delivery_base = f"{stack['target_remote']}/{stack['target_branch']}"
+        projected_tip = composed_stack_projection_tip(repo_root, stack)
+        delivery_tip = fetch_observed_delivery_tip(
+            repo_root, stack['target_remote'], stack['target_branch']
+        )
+        if not projected_tip or not stack_content_is_present_at_delivery_tip(
+            repo_root,
+            stack,
+            delivery_tip,
+            projected_tip=projected_tip,
+        ):
+            raise SyncwheelError(
+                f"{args.stack}: cannot close as absorbed: content is not reachable from delivery base "
+                f"{delivery_base} at {delivery_tip}; rebuilding integration projection "
+                f"{manifest['integration']['branch']} "
+                'would drop it. Deliver or preserve the stack first, then use a different close reason.'
+            )
+
     # Check whether every commit in the stack is already reachable from base_ref.
     unmerged = []
     for sha in stack.get('commits') or []:
@@ -17848,6 +19723,8 @@ def command_stack_close(args):
         if result.returncode != 0:
             unmerged.append(sha)
 
+    if reason == 'absorbed':
+        unmerged = []
     if unmerged and not args.force:
         short = [commit_short_sha(repo_root, sha) for sha in unmerged[:5]]
         extra = f' (and {len(unmerged) - 5} more)' if len(unmerged) > 5 else ''
@@ -17867,40 +19744,136 @@ def command_stack_close(args):
             s for s in manifest['integration']['stacks'] if s != args.stack
         ]
 
-    reason = args.reason or ('merged' if not unmerged else 'closed')
+    if pending_close is None and args.reason is None:
+        reason = 'merged' if not unmerged else 'closed'
     coordination_result = None
+    config = None
+    closed_ref = f'refs/heads/{branch}'
+    remote_first_close = (
+        coordination_is_active(manifest)
+        and stack.get('state', 'published') == 'draft'
+    )
+    expected_state = None
+    expected_observation = None
+    remote_tip = None
+    claim_tip = None
+    publication_manifest = manifest
+    if remote_first_close:
+        config = coordination_config(manifest)
+        try:
+            expected_state = pending_remote_state or read_remote_coordination_state(
+                repo_root, config, fetch=True,
+                local_manifest_version=manifest['version'],
+            )
+            published_state = expected_state.get('state') or {}
+            published_stacks = stack_snapshot_map(published_state.get('manifest') or {})
+            if args.stack not in published_stacks:
+                if published_state.get('manifest'):
+                    publication_manifest = apply_coordination_snapshot(
+                        manifest, published_state['manifest']
+                    )
+                else:
+                    publication_manifest = copy.deepcopy(manifest)
+                    publication_manifest['stacks'] = []
+                    publication_manifest['integration']['stacks'] = []
+            managed = list(dict.fromkeys([
+                *managed_ref_names(publication_manifest), closed_ref,
+            ]))
+            claim_ref = coordination_claim_ref(closed_ref)
+            expected_observation = remote_ref_tips(
+                repo_root, config['remote'], [*managed, claim_ref]
+            )
+            remote_tip = expected_observation[closed_ref]
+            claim_tip = expected_observation[claim_ref]
+            if claim_tip:
+                claim = fetch_coordination_claim(
+                    repo_root, config['remote'], claim_ref, claim_tip
+                )
+                if claim['coordination_id'] != config['id']:
+                    raise SyncwheelError(
+                        f'{closed_ref} is claimed by coordination domain '
+                        f'{claim["coordination_id"]}; refusing close'
+                    )
+        except SyncwheelError as exc:
+            raise remote_first_close_failure(args.stack, exc) from exc
+    operation_token = (
+        pending_close.get('operation_token') if pending_close else str(uuid.uuid4())
+    )
+    close_intent = {
+        'stack': args.stack,
+        'branch': branch,
+        'reason': reason,
+        'operation_token': operation_token,
+        'remote_first': remote_first_close,
+        'closed_ref': closed_ref,
+        'expected_coordination_state_tip': (
+            expected_state.get('tip') if expected_state else None
+        ),
+        'expected_ref_tip': remote_tip,
+        'expected_claim_tip': claim_tip,
+        'expected_observed_refs': expected_observation,
+        'manifest_digest_before': manifest_digest(original_manifest),
+        'manifest_digest_after': manifest_digest(manifest),
+        'coordination_manifest_digest_after': canonical_json_digest(
+            coordination_manifest_snapshot(publication_manifest, repo_root)
+        ),
+        'delivery_tip': delivery_tip,
+    }
+    if pending_close is None:
+        append_ledger_event(
+            repo_root, 'stack_close_intent', close_intent, manifest_path
+        )
+    else:
+        close_intent = pending_close
     require_manifest_transaction_current(manifest_path)
     if coordination_is_active(manifest):
-        config = coordination_config(manifest)
-        closed_ref = f'refs/heads/{branch}'
-        remote_tip = remote_ref_tips(repo_root, config['remote'], [closed_ref])[closed_ref]
-        coordination_result = coordinated_publish(
-            repo_root,
-            manifest,
-            manifest_path,
-            {},
-            f'close:{args.stack}',
-            'partial',
-            tombstone={
-                'stack': args.stack,
-                'branch': branch,
-                'ref': closed_ref,
-                'reason': reason,
-                'closed_at': iso_utc_now(),
-                'remote_tip': remote_tip,
-            },
-        )
+        config = config or coordination_config(manifest)
+        try:
+            coordination_result = coordinated_publish(
+                repo_root,
+                manifest,
+                manifest_path,
+                {},
+                f'close:{args.stack}',
+                'partial',
+                tombstone={
+                    'stack': args.stack,
+                    'branch': branch,
+                    'ref': closed_ref,
+                    'reason': reason,
+                    'closed_at': iso_utc_now(),
+                    'remote_tip': remote_tip,
+                },
+                expected_coordination_state_tip=(
+                    expected_state.get('tip')
+                    if expected_state is not None
+                    else EXPECTED_COORDINATION_STATE_UNSET
+                ),
+                expected_observed_refs=expected_observation,
+                remedy_stack=args.stack,
+                operation_token=operation_token,
+                publication_manifest=publication_manifest,
+            )
+        except SyncwheelError as exc:
+            raise SyncwheelError(
+                f'{exc}\nRemote-first close did not save the manifest. Retry:\n  '
+                f'syncwheel stack close {args.stack} --force'
+            ) from exc
     save_manifest(manifest_path, manifest)
+    close_intent['coordination_state'] = (
+        coordination_result.get('state_tip') if coordination_result else None
+    )
     append_ledger_event(
         repo_root,
         'stack_closed',
-        {
-            'stack': args.stack,
-            'branch': branch,
-            'reason': reason,
-            'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
-        },
+        stack_closed_payload(
+            close_intent,
+            coordination_state=close_intent.get('coordination_state'),
+        ),
         manifest_path,
+    )
+    abandon_pending_stack_creates(
+        repo_root, manifest_path, args.stack, 'stack_closed'
     )
 
     print(f"{args.stack}: closed{merged_note}")
@@ -17922,11 +19895,261 @@ def command_stack_close(args):
     return 0
 
 
+def stack_create_recorded(repo_root, manifest_path, stack_id):
+    return any(
+        event.get('type') == 'manifest_saved'
+        and (event.get('payload') or {}).get('reason') == 'stack_create'
+        and ((event.get('payload') or {}).get('context') or {}).get('stack') == stack_id
+        for event in load_ledger_events(repo_root, manifest_path)
+    )
+
+
+def unmatched_stack_create_operations(repo_root, manifest_path, stack_id=None):
+    """Return create intents not closed by completion or explicit abandonment."""
+    events = load_ledger_events(repo_root, manifest_path)
+    terminal_tokens = {
+        ((event.get('payload') or {}).get('context') or {}).get('operation_token')
+        for event in events
+        if event.get('type') == 'manifest_saved'
+        and (event.get('payload') or {}).get('reason') == 'stack_create'
+    }
+    terminal_tokens.update(
+        (event.get('payload') or {}).get('operation_token')
+        for event in events
+        if event.get('type') == 'stack_create_abandoned'
+    )
+    last_closed_seq = {}
+    for event in events:
+        if event.get('type') != 'stack_closed':
+            continue
+        payload = event.get('payload') or {}
+        closed_stack = payload.get('stack')
+        if closed_stack:
+            last_closed_seq[closed_stack] = event.get('seq', 0)
+    pending = []
+    for event in reversed(events):
+        if event.get('type') != 'stack_create_intent':
+            continue
+        payload = event.get('payload') or {}
+        if stack_id is not None and payload.get('stack') != stack_id:
+            continue
+        token = payload.get('operation_token')
+        if (
+            token
+            and token not in terminal_tokens
+            and event.get('seq', 0) > last_closed_seq.get(payload.get('stack'), 0)
+        ):
+            pending.append(payload)
+    return pending
+
+
+def pending_stack_create_operation(repo_root, manifest_path, stack_id, branch, tip):
+    """Return the newest unmatched intent token for this exact create lifecycle."""
+    for payload in unmatched_stack_create_operations(
+        repo_root, manifest_path, stack_id
+    ):
+        if payload.get('branch') == branch and payload.get('tip') == tip:
+            return payload.get('operation_token')
+    return None
+
+
+def abandon_pending_stack_creates(repo_root, manifest_path, stack_id, reason):
+    for payload in unmatched_stack_create_operations(repo_root, manifest_path, stack_id):
+        append_ledger_event(
+            repo_root,
+            'stack_create_abandoned',
+            {
+                'stack': stack_id,
+                'branch': payload.get('branch'),
+                'tip': payload.get('tip'),
+                'operation_token': payload.get('operation_token'),
+                'reason': reason,
+            },
+            manifest_path,
+        )
+
+
+def require_current_stack_create_operation(
+    repo_root, manifest_path, stack_id, branch, tip, operation_token
+):
+    if not operation_token:
+        return
+    current = pending_stack_create_operation(
+        repo_root, manifest_path, stack_id, branch, tip
+    )
+    if current != operation_token:
+        raise SyncwheelError(
+            f'{stack_id}: refusing late completion for superseded create operation '
+            f'{operation_token}'
+        )
+
+
+def draft_create_retry_command(args):
+    command = ['syncwheel', 'stack', 'create', args.stack, *args.specs, '--draft']
+    options = (
+        ('--base', args.base),
+        ('--target-remote', args.target_remote),
+        ('--target-branch', args.target_branch),
+        ('--integration-branch', args.integration_branch),
+        ('--purpose', args.purpose),
+    )
+    for flag, value in options:
+        if value:
+            command.extend([flag, value])
+    for dependency in getattr(args, 'depends_on', None) or []:
+        command.extend(['--depends-on', dependency])
+    if args.include_in_integration:
+        command.append('--include-in-integration')
+    return quoted(command)
+
+
+def recover_equivalent_draft_create(
+    repo_root, manifest, manifest_path, stack, operation_token
+):
+    """Adopt a completed atomic draft publication after a local persistence failure."""
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    source_ref = f"refs/heads/{stack['branch']}"
+    local_tip = ref_tip(repo_root, stack['branch'])
+    published = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    state = published.get('state') or {}
+    claim_ref = coordination_claim_ref(source_ref)
+    observed = remote_ref_tips(
+        repo_root, config['remote'], [source_ref, claim_ref]
+    )
+    claim_tip = observed[claim_ref]
+    claim = (
+        fetch_coordination_claim(repo_root, config['remote'], claim_ref, claim_tip)
+        if claim_tip else None
+    )
+    publication_matches = (
+        local_tip
+        and state.get('managed_refs', {}).get(source_ref) == local_tip
+        and observed[source_ref] == local_tip
+        and state.get('claims', {}).get(source_ref) == claim_tip
+        and claim
+        and claim.get('coordination_id') == config['id']
+        and claim.get('source_ref') == source_ref
+        and claim.get('closed') is not True
+        and state.get('manifest_digest') == coordination_manifest_digest(manifest, repo_root)
+    )
+    if publication_matches and (
+        not operation_token or claim.get('operation_token') != operation_token
+    ):
+        raise SyncwheelError(
+            f"{stack['id']}: published create claim token does not match the "
+            'pending stack_create_intent; refusing foreign or superseded recovery'
+        )
+    if not publication_matches:
+        return None
+    return {'status': 'equivalent', 'state_tip': published['tip']}
+
+
+def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
+    """Validate ownership and composition before creating the local source branch."""
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    source_ref = f"refs/heads/{stack['branch']}"
+    planned_tip = deterministic_stack_replay_tip(repo_root, stack['base'], stack['commits'])
+    if not planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: cannot deterministically materialize draft source before coordinated publication"
+        )
+    planned_tip = commit_full_sha(repo_root, planned_tip)
+    expected = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    managed = managed_ref_names(manifest)
+    claim_ref = coordination_claim_ref(source_ref)
+    observed = remote_ref_tips(
+        repo_root, config['remote'], [*managed, claim_ref]
+    )
+    claim_tip = observed[claim_ref]
+    if claim_tip:
+        claim = fetch_coordination_claim(
+            repo_root, config['remote'], claim_ref, claim_tip
+        )
+        if claim['coordination_id'] != config['id']:
+            raise SyncwheelError(
+                f'{source_ref} is claimed by coordination domain '
+                f'{claim["coordination_id"]}; refusing publication'
+            )
+    coordination_state_refs = require_exclusive_coordination_ownership(
+        repo_root, config, managed
+    )
+    if observed[source_ref] is not None and observed[source_ref] != planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: unowned remote draft ref {source_ref} has a different tip; "
+            'refusing to replace it'
+        )
+    validate_coordination_publication_base(
+        repo_root,
+        manifest,
+        config,
+        expected,
+        {source_ref: planned_tip},
+        remedy_stack=stack['id'],
+        creation_remedy=True,
+    )
+    atomic_push_capability_probe(repo_root, config['remote'])
+    return {
+        'source_ref': source_ref,
+        'planned_tip': planned_tip,
+        'expected_coordination_state_tip': expected['tip'],
+        'expected_observed_refs': observed,
+        'expected_coordination_state_refs': coordination_state_refs,
+    }
+
+
 def command_stack_create(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if args.draft and coordination_is_active(manifest):
+        create_remote = coordination_config(manifest)['remote']
+        if not coordination_remote_is_reachable(repo_root, create_remote):
+            raise SyncwheelError(
+                'coordinated publish could not inspect the coordination remote; '
+                'restore remote access, then retry:\n  '
+                f'{draft_create_retry_command(args)}'
+            )
+    complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stacks = stack_map(manifest)
     if args.stack in stacks:
+        existing = stacks[args.stack]
+        existing_tip = ref_tip(repo_root, existing['branch'])
+        pending_operation = pending_stack_create_operation(
+            repo_root,
+            manifest_path,
+            args.stack,
+            existing['branch'],
+            existing_tip,
+        )
+        if (
+            args.draft
+            and existing.get('state', 'published') == 'draft'
+            and branch_exists(repo_root, existing['branch'])
+            and (pending_operation or not stack_create_recorded(repo_root, manifest_path, args.stack))
+        ):
+            append_ledger_event(
+                repo_root,
+                'manifest_saved',
+                manifest_event_payload(
+                    manifest_path, manifest, 'stack_create',
+                    {
+                        'stack': args.stack,
+                        'branch': existing['branch'],
+                        'operation_token': pending_operation,
+                        'recovered': True,
+                    },
+                ),
+                manifest_path,
+            )
+            print(f"{args.stack}: recovered missing stack_create ledger event")
+            return 0
         raise SyncwheelError(f"stack already exists: {args.stack}")
     if args.draft and args.branch:
         raise SyncwheelError('--draft chooses the reserved syncwheel/draft branch name; omit --branch')
@@ -17937,8 +20160,6 @@ def command_stack_create(args):
     )
     if any(stack['branch'] == branch for stack in manifest['stacks']):
         raise SyncwheelError(f'stack branch already exists in manifest: {branch}')
-    if args.draft and branch_exists(repo_root, branch):
-        raise SyncwheelError(f'draft stack branch already exists locally: {branch}')
     commits = []
     for spec in args.specs:
         commits.extend(commit_list_for_spec(repo_root, spec))
@@ -17968,21 +20189,135 @@ def command_stack_create(args):
         manifest['stacks'],
         require_declared_dependencies=manifest['version'] == MANIFEST_VERSION_CHANNELS,
     )
-    if args.draft:
-        require_manifest_transaction_current(manifest_path)
-        materialize_new_stack_branch(repo_root, stack)
     integration_membership = manifest['defaults']['integration_membership']
     if (
         integration_membership == INTEGRATION_MEMBERSHIP_REQUIRED
         or args.include_in_integration
     ) and args.stack not in manifest['integration']['stacks']:
         manifest['integration']['stacks'].append(args.stack)
+    coordination_result = None
+    operation_token = None
+    if args.draft:
+        require_manifest_transaction_current(manifest_path)
+        if branch_exists(repo_root, branch):
+            existing_tip = ref_tip(repo_root, branch)
+            operation_token = pending_stack_create_operation(
+                repo_root, manifest_path, args.stack, branch, existing_tip
+            )
+            coordination_result = recover_equivalent_draft_create(
+                repo_root, manifest, manifest_path, stack, operation_token
+            )
+            if coordination_result is not None:
+                if operation_token is None:
+                    abandon_pending_stack_creates(
+                        repo_root, manifest_path, args.stack, 'superseded_by_recovery'
+                    )
+                    operation_token = str(uuid.uuid4())
+                    append_ledger_event(
+                        repo_root,
+                        'stack_create_intent',
+                        {
+                            'stack': args.stack,
+                            'branch': branch,
+                            'tip': existing_tip,
+                            'operation_token': operation_token,
+                            'expected_coordination_state_tip': coordination_result['state_tip'],
+                            'recovery': True,
+                        },
+                        manifest_path,
+                    )
+                save_manifest_with_ledger(
+                    repo_root,
+                    manifest_path,
+                    manifest,
+                    'stack_create',
+                    {
+                        'stack': args.stack,
+                        'branch': branch,
+                        'operation_token': operation_token,
+                        'coordination_state': coordination_result.get('state_tip'),
+                        'recovered': True,
+                    },
+                )
+                capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
+                print(f"{args.stack}: recovered equivalent published draft create")
+                return 0
+        preflight = preflight_active_draft_create(repo_root, manifest, manifest_path, stack)
+        if preflight:
+            operation_token = pending_stack_create_operation(
+                repo_root, manifest_path, args.stack, branch, preflight['planned_tip']
+            )
+            if operation_token is None:
+                abandon_pending_stack_creates(
+                    repo_root, manifest_path, args.stack, 'superseded_by_new_create'
+                )
+                operation_token = str(uuid.uuid4())
+                append_ledger_event(
+                    repo_root,
+                    'stack_create_intent',
+                    {
+                        'stack': args.stack,
+                        'branch': branch,
+                        'tip': preflight['planned_tip'],
+                        'operation_token': operation_token,
+                        'expected_coordination_state_tip': preflight['expected_coordination_state_tip'],
+                    },
+                    manifest_path,
+                )
+        cleanup_interrupted_draft_materialization(
+            repo_root,
+            stack,
+            preflight['planned_tip'] if preflight else None,
+            operation_token,
+        )
+        if branch_exists(repo_root, branch):
+            if not preflight or ref_tip(repo_root, branch) != preflight['planned_tip']:
+                raise SyncwheelError(f'draft stack branch already exists locally: {branch}')
+        else:
+            materialize_new_stack_branch(
+                repo_root,
+                stack,
+                planned_tip=(preflight['planned_tip'] if preflight else None),
+                operation_token=operation_token,
+            )
+            if preflight and ref_tip(repo_root, branch) != preflight['planned_tip']:
+                raise SyncwheelError(f"{args.stack}: materialized draft tip differs from its reviewed projection")
+        if coordination_is_active(manifest) and coordination_result is None:
+            try:
+                coordination_result = coordinated_publish(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    {f"refs/heads/{branch}": ref_tip(repo_root, branch)},
+                    f'create:{args.stack}',
+                    'partial',
+                    expected_coordination_state_tip=(
+                        preflight['expected_coordination_state_tip'] if preflight else None
+                    ),
+                    expected_observed_refs=(preflight['expected_observed_refs'] if preflight else None),
+                    expected_coordination_state_refs=(
+                        preflight['expected_coordination_state_refs'] if preflight else None
+                    ),
+                    preflight_complete=bool(preflight),
+                    remedy_stack=args.stack,
+                    operation_token=operation_token,
+                )
+            except SyncwheelError as exc:
+                raise SyncwheelError(
+                    f'{exc}\nRetry this exact, idempotent create command after resolving the named condition:\n  '
+                    f'{draft_create_retry_command(args)}'
+                ) from exc
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
         manifest,
         'stack_create',
-        {'stack': args.stack, 'branch': branch},
+        {
+            'stack': args.stack,
+            'branch': branch,
+            'operation_token': operation_token,
+            'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+        },
     )
     capture_governed_worktrees_for_stack(
         repo_root,
@@ -17991,31 +20326,382 @@ def command_stack_create(args):
         manifest_path=manifest_path,
     )
     print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
+    if coordination_result:
+        print(f"  coordination state: {coordination_result['status']}")
     return 0
 
 
-def materialize_new_stack_branch(repo_root, stack):
-    """Create a new stack branch without leaving a persistent worktree behind."""
-    with tempfile.TemporaryDirectory(prefix='syncwheel-stack-create-') as tmp:
-        worktree = Path(tmp)
-        git(repo_root, 'worktree', 'add', '-B', stack['branch'], str(worktree), stack['base'])
+def draft_branch_creation_checkpoint():
+    """Fault-injection seam immediately before atomic draft ref creation."""
+
+
+def draft_materialization_worktree(repo_root, operation_token):
+    if not operation_token:
+        return None
+    token = hashlib.sha256(
+        f'{Path(repo_root).resolve()}:{operation_token}'.encode('utf-8')
+    ).hexdigest()[:24]
+    return Path(tempfile.gettempdir()) / f'syncwheel-stack-create-{token}'
+
+
+def cleanup_interrupted_draft_materialization(
+    repo_root, stack, planned_tip, operation_token
+):
+    path = draft_materialization_worktree(repo_root, operation_token)
+    if path is None:
+        return
+    registrations = [
+        item for item in get_worktrees(repo_root)
+        if Path(item.get('path', '')).resolve() == path.resolve()
+    ]
+    if not registrations:
+        if path.exists():
+            raise SyncwheelError(
+                f"{stack['id']}: deterministic create worktree path exists without "
+                f'a matching Git registration: {path}'
+            )
+        return
+    registration = registrations[0]
+    if (
+        registration.get('branch') != stack['branch']
+        or (planned_tip and registration.get('HEAD') != planned_tip)
+    ):
+        raise SyncwheelError(
+            f"{stack['id']}: deterministic create worktree registration does not "
+            'belong to the pending stack_create_intent'
+        )
+    removed = git(
+        repo_root, 'worktree', 'remove', '--force', str(path), check=False
+    )
+    if removed.returncode != 0:
+        raise SyncwheelError(
+            f"{stack['id']}: could not remove interrupted create worktree {path}"
+        )
+
+
+def materialize_new_stack_branch(
+    repo_root, stack, planned_tip=None, operation_token=None
+):
+    """Create a draft ref with create-only CAS and leave no worktree on failure."""
+    planned_tip = planned_tip or deterministic_stack_replay_tip(
+        repo_root, stack['base'], stack['commits']
+    )
+    if not planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: cannot deterministically materialize draft source branch"
+        )
+    planned_tip = commit_full_sha(repo_root, planned_tip)
+    branch_ref = f"refs/heads/{stack['branch']}"
+    draft_branch_creation_checkpoint()
+    created = git(
+        repo_root,
+        'update-ref',
+        branch_ref,
+        planned_tip,
+        ZERO_OBJECT_ID,
+        check=False,
+    )
+    if created.returncode != 0:
+        raise SyncwheelError(
+            f"{stack['id']}: draft ref {branch_ref} appeared concurrently; "
+            'the existing ref was preserved. Inspect it, then retry with a new stack id.'
+        )
+    deterministic_worktree = draft_materialization_worktree(
+        repo_root, operation_token
+    )
+    temporary = (
+        None if deterministic_worktree
+        else tempfile.TemporaryDirectory(prefix='syncwheel-stack-create-')
+    )
+    worktree = deterministic_worktree or Path(temporary.name)
+    try:
         try:
-            for commit in stack['commits']:
-                if branch_contains(worktree, 'HEAD', commit):
-                    continue
-                run(
-                    ['git', '-C', str(worktree), 'cherry-pick', commit],
-                    cwd=repo_root,
-                    env=replay_commit_env(repo_root, commit),
+            git(repo_root, 'worktree', 'add', str(worktree), stack['branch'])
+            if ref_tip(repo_root, stack['branch']) != planned_tip:
+                raise SyncwheelError(
+                    f"{stack['id']}: materialized draft tip differs from its reviewed projection"
                 )
-        finally:
+        except BaseException:
             git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+            git(repo_root, 'update-ref', '-d', branch_ref, planned_tip, check=False)
+            raise
+        else:
+            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
+    finally:
+        if temporary:
+            temporary.cleanup()
+
+
+def coordination_draft_recovery_ref(stack_id):
+    return (
+        f'refs/syncwheel/recovery/drafts/{safe_ref_segment(stack_id)}-'
+        f'{syncwheel_timestamp()}'
+    )
+
+
+def anchor_diverged_draft_branch(
+    repo_root, manifest_path, stack_id, from_branch, draft_tip
+):
+    """Keep a diverged draft tip reachable, then drop the branch the promotion replaced.
+
+    The anchor and the deletion are one ref transaction, so the tip is never
+    unreachable and a failed anchor leaves the draft branch untouched.
+    """
+    recovery_ref = coordination_draft_recovery_ref(stack_id)
+    transaction = '\n'.join([
+        'start',
+        f'create {recovery_ref} {draft_tip}',
+        f'delete refs/heads/{from_branch} {draft_tip}',
+        'prepare',
+        'commit',
+        '',
+    ])
+    result = git(
+        repo_root, 'update-ref', '--stdin', check=False, input_text=transaction
+    )
+    committed = 'commit: ok' in {line.strip() for line in result.stdout.splitlines()}
+    if (
+        result.returncode != 0
+        or not committed
+        or ref_tip(repo_root, recovery_ref) != draft_tip
+        or branch_exists(repo_root, from_branch)
+    ):
+        detail = result.stderr.strip() or result.stdout.strip() or 'no detail returned'
+        raise SyncwheelError(
+            f'{stack_id}: could not anchor the diverged draft branch {from_branch} '
+            f'under {recovery_ref}: {detail}'
+        )
+    append_ledger_event(
+        repo_root,
+        'coordination_draft_divergence_anchored',
+        {
+            'stack': stack_id,
+            'branch': from_branch,
+            'tip': draft_tip,
+            'recovery_ref': recovery_ref,
+            'reason': 'promotion_completed_with_diverged_draft',
+        },
+        manifest_path,
+    )
+    print(
+        f'{stack_id}: anchored diverged draft {from_branch} at {draft_tip} under '
+        f'{recovery_ref}'
+    )
+    return recovery_ref
+
+
+def realign_promoted_local_branches(
+    repo_root, config, stack_id, from_branch, to_branch, promoted_tip,
+    manifest_path=None,
+):
+    """Restore the branch layout an interrupted promotion had already reached.
+
+    A promotion can land long before this recovery runs, and an ordinary command
+    can rematerialize the draft branch from the manifest in between. Neither is
+    evidence against the recorded intent.
+    """
+    if not to_branch or from_branch == to_branch:
+        return
+    if not branch_exists(repo_root, to_branch):
+        if branch_exists(repo_root, from_branch):
+            git(repo_root, 'branch', '-m', from_branch, to_branch)
+            return
+        if not promoted_tip:
+            raise SyncwheelError(
+                f'{stack_id}: pending promote intent has no published tip to restore '
+                f'{to_branch} from'
+            )
+        if not commit_exists(repo_root, promoted_tip):
+            git(
+                repo_root, 'fetch', '--quiet', config['remote'],
+                f'refs/heads/{to_branch}', check=False,
+            )
+        if not commit_exists(repo_root, promoted_tip):
+            raise SyncwheelError(
+                f'{stack_id}: cannot restore {to_branch} at {promoted_tip} from '
+                f"{config['remote']}"
+            )
+        created = git(
+            repo_root, 'update-ref', f'refs/heads/{to_branch}', promoted_tip,
+            ZERO_OBJECT_ID, check=False,
+        )
+        if created.returncode != 0:
+            raise SyncwheelError(
+                f'{stack_id}: {to_branch} appeared concurrently while recovering '
+                'the promotion'
+            )
+        return
+    if not branch_exists(repo_root, from_branch):
+        return
+    draft_tip = ref_tip(repo_root, from_branch)
+    if git(
+        repo_root, 'merge-base', '--is-ancestor', draft_tip, to_branch, check=False
+    ).returncode != 0:
+        anchor_diverged_draft_branch(
+            repo_root, manifest_path, stack_id, from_branch, draft_tip
+        )
+        return
+    git(repo_root, 'update-ref', '-d', f'refs/heads/{from_branch}', draft_tip)
+
+
+def recover_pending_stack_promote(
+    repo_root, manifest, manifest_path, stack, pending
+):
+    rename = pending.get('rename')
+    state_transition = pending.get('state_transition')
+    if rename:
+        to_branch = rename.get('to_branch')
+        if (
+            rename.get('stack') != stack['id']
+            or stack['branch'] not in {rename.get('from_branch'), to_branch}
+        ):
+            raise SyncwheelError(
+                f"{stack['id']}: pending promote intent does not match the local stack generation"
+            )
+        realign_promoted_local_branches(
+            repo_root,
+            coordination_config(manifest),
+            stack['id'],
+            rename.get('from_branch'),
+            to_branch,
+            (pending.get('changed_refs') or {}).get(f'refs/heads/{to_branch}'),
+            manifest_path=manifest_path,
+        )
+        stack['branch'] = to_branch
+    elif state_transition != {
+        'stack': stack['id'],
+        'from_state': 'draft',
+        'to_state': 'published',
+    }:
+        raise SyncwheelError(
+            f"{stack['id']}: pending promote intent has an invalid state transition"
+        )
+    stack['state'] = 'published'
+    stack['publication'] = {'enabled': True}
+    tombstone = copy.deepcopy(pending.get('tombstone'))
+    if tombstone:
+        tombstone['closed_at'] = iso_utc_now()
+    operation = renew_coordination_publication(
+        repo_root, manifest, manifest_path, pending
+    )
+    result = coordinated_publish(
+        repo_root,
+        manifest,
+        manifest_path,
+        operation.get('changed_refs') or {},
+        operation['scope'],
+        operation['projection_status'],
+        tombstone=tombstone,
+        rename=rename,
+        state_transition=state_transition,
+        expected_coordination_state_tip=operation[
+            'expected_coordination_state_tip'
+        ],
+        operation_token=operation['operation_token'],
+    )
+    save_manifest(manifest_path, manifest)
+    append_ledger_event(
+        repo_root,
+        'stack_promoted',
+        {
+            'stack': stack['id'],
+            'from_branch': rename.get('from_branch') if rename else stack['branch'],
+            'branch': stack['branch'],
+            'coordination_state': result.get('state_tip'),
+            'recovered': True,
+        },
+        manifest_path,
+    )
+    complete_coordination_publication(repo_root, manifest_path, operation, result)
+    print(f"{stack['id']}: recovered interrupted draft promotion")
+    return 0
+
+
+def complete_pending_promote_intents(
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+):
+    """Finish promotions that landed before their manifest was saved.
+
+    Only the manifest is behind the published state, and any command that
+    rebuilds managed branches from it would resurrect the draft the promotion
+    already replaced. Reporting the remedy mutates nothing, so it must not take
+    the publication lock and must not be refused by a live publication.
+    """
+    if not coordination_is_active(manifest):
+        return
+    if not any(
+        str(intent.get('scope') or '').startswith('promote:')
+        for intent in pending_coordination_publications(repo_root, manifest_path)
+    ):
+        return
+    guard = (
+        coordination_publication_lock(repo_root) if apply else contextlib.nullcontext()
+    )
+    with guard:
+        resolve_pending_promote_intents(
+            repo_root, manifest, manifest_path, apply=apply, skip_stacks=skip_stacks
+        )
+
+
+def resolve_pending_promote_intents(
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+):
+    pending = [
+        intent for intent in pending_coordination_publications(repo_root, manifest_path)
+        if str(intent.get('scope') or '').startswith('promote:')
+        and str(intent.get('scope'))[len('promote:'):] not in set(skip_stacks)
+    ]
+    if not pending:
+        return
+    config = coordination_config(manifest)
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    for intent in pending:
+        stack_id = str(intent.get('scope'))[len('promote:'):]
+        stack = next(
+            (item for item in manifest['stacks'] if item['id'] == stack_id), None
+        )
+        if stack is None or not coordinated_operation_landed(
+            repo_root, config, observed, intent, claims_fallback=True
+        ):
+            continue
+        if not apply:
+            print(
+                f'{stack_id}: a landed promotion is still pending; complete it with:'
+                f'\n  syncwheel stack promote {stack_id}'
+            )
+            continue
+        recover_pending_stack_promote(
+            repo_root, manifest, manifest_path, stack, intent
+        )
 
 
 def command_stack_promote(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+    )
     stack = require_stack(manifest, args.stack)
+    pending_promotion = pending_coordination_publication_for_scope(
+        repo_root, manifest_path, f'promote:{args.stack}'
+    )
+    if pending_promotion:
+        try:
+            return recover_pending_stack_promote(
+                repo_root, manifest, manifest_path, stack, pending_promotion
+            )
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root,
+                coordination_config(manifest) if coordination_is_active(manifest) else None,
+                exc,
+                f'stack promote {args.stack}',
+            )
+            if failure is None:
+                raise
+            raise failure from exc
     if stack.get('state', 'published') != 'draft':
         raise SyncwheelError(f"{args.stack}: promote requires state draft (found {stack.get('state', 'published')})")
     from_branch = stack['branch']
@@ -18050,6 +20736,7 @@ def command_stack_promote(args):
     stack['publication'] = {'enabled': True}
     renamed = False
     coordination_result = None
+    publication_operation = None
     try:
         require_manifest_transaction_current(manifest_path)
         if to_branch != from_branch:
@@ -18077,7 +20764,7 @@ def command_stack_promote(args):
                         'closed_at': iso_utc_now(),
                         'remote_tip': from_ref_tip,
                     }
-                coordination_result = coordinated_publish(
+                publication_operation = begin_coordination_publication(
                     repo_root,
                     manifest,
                     manifest_path,
@@ -18087,7 +20774,35 @@ def command_stack_promote(args):
                     tombstone=tombstone,
                     rename=rename,
                 )
+                coordination_result = coordinated_publish(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    {f'refs/heads/{to_branch}': ref_tip(repo_root, to_branch)},
+                    f'promote:{args.stack}',
+                    'partial',
+                    tombstone=tombstone,
+                    rename=rename,
+                    expected_coordination_state_tip=publication_operation[
+                        'expected_coordination_state_tip'
+                    ],
+                    operation_token=publication_operation['operation_token'],
+                )
             else:
+                state_transition = {
+                    'stack': args.stack,
+                    'from_state': 'draft',
+                    'to_state': 'published',
+                }
+                publication_operation = begin_coordination_publication(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    {},
+                    f'promote:{args.stack}',
+                    'partial',
+                    state_transition=state_transition,
+                )
                 coordination_result = coordinated_publish(
                     repo_root,
                     manifest,
@@ -18095,15 +20810,24 @@ def command_stack_promote(args):
                     {},
                     f'promote:{args.stack}',
                     'partial',
-                    state_transition={
-                        'stack': args.stack,
-                        'from_state': 'draft',
-                        'to_state': 'published',
-                    },
+                    state_transition=state_transition,
+                    expected_coordination_state_tip=publication_operation[
+                        'expected_coordination_state_tip'
+                    ],
+                    operation_token=publication_operation['operation_token'],
                 )
-    except Exception:
+    except Exception as exc:
         if renamed and branch_exists(repo_root, to_branch) and not branch_exists(repo_root, from_branch):
             git(repo_root, 'branch', '-m', to_branch, from_branch, check=False)
+        if isinstance(exc, SyncwheelError):
+            failure = coordinated_publish_command_failure(
+                repo_root,
+                coordination_config(manifest) if coordination_is_active(manifest) else None,
+                exc,
+                f'stack promote {args.stack}',
+            )
+            if failure is not None:
+                raise failure from exc
         raise
 
     save_manifest(manifest_path, manifest)
@@ -18118,6 +20842,10 @@ def command_stack_promote(args):
         },
         manifest_path,
     )
+    if publication_operation:
+        complete_coordination_publication(
+            repo_root, manifest_path, publication_operation, coordination_result
+        )
     print(f'{args.stack}: promoted draft -> published')
     if to_branch != from_branch:
         print(f'  branch: {from_branch} -> {to_branch}')
@@ -18157,8 +20885,23 @@ def command_stack_demote(args):
     stack['state'] = 'draft'
     stack['publication'] = {'enabled': False}
     coordination_result = None
+    publication_operation = None
     require_manifest_transaction_current(manifest_path)
     if coordination_is_active(manifest):
+        state_transition = {
+            'stack': args.stack,
+            'from_state': 'published',
+            'to_state': 'draft',
+        }
+        publication_operation = begin_coordination_publication(
+            repo_root,
+            manifest,
+            manifest_path,
+            {},
+            f'demote:{args.stack}',
+            'partial',
+            state_transition=state_transition,
+        )
         coordination_result = coordinated_publish(
             repo_root,
             manifest,
@@ -18166,11 +20909,11 @@ def command_stack_demote(args):
             {},
             f'demote:{args.stack}',
             'partial',
-            state_transition={
-                'stack': args.stack,
-                'from_state': 'published',
-                'to_state': 'draft',
-            },
+            state_transition=state_transition,
+            expected_coordination_state_tip=publication_operation[
+                'expected_coordination_state_tip'
+            ],
+            operation_token=publication_operation['operation_token'],
         )
     save_manifest(manifest_path, manifest)
     append_ledger_event(
@@ -18183,6 +20926,10 @@ def command_stack_demote(args):
         },
         manifest_path,
     )
+    if publication_operation:
+        complete_coordination_publication(
+            repo_root, manifest_path, publication_operation, coordination_result
+        )
     print(f'{args.stack}: demoted published -> draft')
     print(f"  branch: {stack['branch']} (unchanged)")
     if coordination_result:
@@ -18193,6 +20940,7 @@ def command_stack_demote(args):
 def command_stack_sync(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stack = require_stack(manifest, args.stack)
     commits = rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
     stack['commits'] = commits
@@ -18276,7 +21024,7 @@ def resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, arg
                 'reuse that worktree or pass its path with --worktree'
             )
         if not existing:
-            run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+            run(['git', 'worktree', 'add', str(path), branch], cwd=repo_root)
         return path
     if existing:
         return existing
@@ -18286,7 +21034,7 @@ def resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, arg
         ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
     else:
         ensure_syncwheel_metadata_excluded(repo_root, manifest.get('syncwheel_tracking'), worktree_root)
-    run(['git', 'worktree', 'add', '-B', branch, str(path), branch], cwd=repo_root)
+    run(['git', 'worktree', 'add', str(path), branch], cwd=repo_root)
     return path
 
 
@@ -18497,6 +21245,7 @@ def validate_integration_first_base(repo_root, manifest, added_commits):
 def command_stack_add(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stack = require_stack(manifest, args.stack)
     previous_commits = list(stack['commits'])
     commits = list(previous_commits)
@@ -18644,6 +21393,9 @@ def command_stack_capture_integration(args):
 def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, apply=not args.dry_run
+    )
     stack = require_stack(manifest, args.stack)
     mode, worktree = select_replay_mode(
         repo_root,
@@ -18667,6 +21419,9 @@ def command_stack_rebuild(args):
 def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, apply=not args.dry_run
+    )
     if coordination_is_active(manifest):
         recovery_state = getattr(args, '_control_manifest_recovery_state', None)
         if recovery_state is None:
@@ -18698,22 +21453,56 @@ def command_stack_push(args):
                 reason=f"publish {stack['id']} control manifest",
                 command='syncwheel stack push',
             )
-        changed_refs = {
+        # Keep the incidental control-manifest ref out of the fingerprint so a
+        # retry still matches the pending intent even when housekeeping only
+        # needed it on the first attempt.
+        identity_changed_refs = {
             f"refs/heads/{stack['branch']}": ref_tip(repo_root, stack['branch'])
         }
+        changed_refs = dict(identity_changed_refs)
         if recovery_state.get('recovered') or control_updated:
             changed_refs[f"refs/heads/{manifest['integration']['branch']}"] = ref_tip(
                 repo_root, manifest['integration']['branch']
             )
-        result = coordinated_publish(
-            repo_root,
-            manifest,
-            manifest_path,
-            changed_refs,
-            f"stack:{stack['id']}",
-            'partial',
-            dry_run=args.dry_run,
-        )
+        try:
+            publication_operation = (
+                None if args.dry_run else begin_coordination_publication(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    changed_refs,
+                    f"stack:{stack['id']}",
+                    'partial',
+                    identity_changed_refs=identity_changed_refs,
+                )
+            )
+            if publication_operation:
+                changed_refs = publication_operation['changed_refs']
+            result = coordinated_publish(
+                repo_root,
+                manifest,
+                manifest_path,
+                changed_refs,
+                f"stack:{stack['id']}",
+                'partial',
+                dry_run=args.dry_run,
+                remedy_stack=stack['id'],
+                expected_coordination_state_tip=(
+                    publication_operation['expected_coordination_state_tip']
+                    if publication_operation else EXPECTED_COORDINATION_STATE_UNSET
+                ),
+                operation_token=(
+                    publication_operation['operation_token']
+                    if publication_operation else None
+                ),
+            )
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root, config, exc, f"stack push {stack['id']}"
+            )
+            if failure is None:
+                raise
+            raise failure from exc
         if not args.dry_run:
             append_ledger_event(
                 repo_root,
@@ -18725,8 +21514,13 @@ def command_stack_push(args):
                     'tip': ref_tip(repo_root, stack['branch']),
                     'coordination_state': result.get('state_tip'),
                     'coordination_status': result['status'],
+                    'operation_token': publication_operation['operation_token'],
+                    'recovered': bool(result.get('recovered')),
                 },
                 manifest_path,
+            )
+            complete_coordination_publication(
+                repo_root, manifest_path, publication_operation, result
             )
         return 0
     stack = require_stack(manifest, args.stack)
@@ -19341,6 +22135,22 @@ def command_reconcile(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    reconcile_remedy = (
+        'publish' if getattr(args, 'command', None) == 'publish'
+        else 'reconcile --apply --push'
+    )
+    reconcile_remote = (coordination_config(manifest) or {}).get('remote')
+    if (
+        getattr(args, 'push', False)
+        and coordination_is_active(manifest)
+        and reconcile_remote
+        and not coordination_remote_is_reachable(repo_root, reconcile_remote)
+    ):
+        raise coordinated_publish_remote_failure(reconcile_remedy)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path,
+        apply=bool(getattr(args, 'apply', False)),
+    )
     if args.apply:
         manifest = recover_incomplete_control_manifest_persistence(
             repo_root, manifest_path, manifest
@@ -19369,6 +22179,22 @@ def command_reconcile(args):
         )
         manifest = effective_manifest
         resume_manifest_changed = manifest != original_manifest
+    if getattr(args, 'apply', False) and coordination_is_active(manifest):
+        own_scope = (
+            'full'
+            if not args.stack and not getattr(args, 'skip_integration', False)
+            else 'partial'
+        )
+        resolve_pending_coordination_publications(
+            repo_root,
+            manifest,
+            manifest_path,
+            adopt_tokens={
+                intent.get('operation_token')
+                for intent in pending_coordination_publications(repo_root, manifest_path)
+                if intent.get('scope') == own_scope
+            },
+        )
     if args.stack:
         known = stack_map(manifest)
         for stack_id in args.stack:
@@ -19455,6 +22281,8 @@ def command_reconcile(args):
         )
     coordinated_refs = {}
     coordinated_events = []
+    publication_operation = None
+    coordination_result = None
     deferred_manifest_updates = []
     control_manifest_restored = False
     for action in actions:
@@ -19694,21 +22522,100 @@ def command_reconcile(args):
                 'full coordinated publish requires every managed local ref to match the manifest projection'
             )
         require_manifest_transaction_current(manifest_path)
-        coordination_result = coordinated_publish(
-            repo_root,
-            manifest,
-            manifest_path,
-            coordinated_refs,
-            'full' if full_scope else 'partial',
-            'convergent' if full_scope else 'partial',
+        publication_scope = 'full' if full_scope else 'partial'
+        projection_status = 'convergent' if full_scope else 'partial'
+        adoptable = {
+            intent.get('operation_token')
+            for intent in pending_coordination_publications(repo_root, manifest_path)
+            if intent.get('scope') == publication_scope
+            and intent.get('fingerprint') == coordination_publication_identity(
+                repo_root,
+                manifest,
+                intent.get('changed_refs') or {},
+                publication_scope,
+                projection_status,
+            )[1]
+        }
+        resolve_pending_coordination_publications(
+            repo_root, manifest, manifest_path, adopt_tokens=adoptable
         )
+        publication_operation = pending_coordination_publication_for_scope(
+            repo_root, manifest_path, publication_scope
+        )
+        if publication_operation:
+            if publication_operation.get('operation_token') not in adoptable:
+                raise SyncwheelError(
+                    'reconcile retry no longer matches its pending coordinated publication intent'
+                )
+            pending_refs = publication_operation.get('changed_refs') or {}
+            if coordinated_refs and coordinated_refs != pending_refs:
+                raise SyncwheelError(
+                    'reconcile retry no longer matches its pending coordinated publication intent'
+                )
+            coordinated_refs = pending_refs
+            if not coordinated_events:
+                by_ref = {
+                    f"refs/heads/{stack['branch']}": stack
+                    for stack in manifest['stacks']
+                }
+                integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+                for ref, tip in coordinated_refs.items():
+                    if ref in by_ref:
+                        stack = by_ref[ref]
+                        coordinated_events.append({
+                            'type': 'stack_pushed',
+                            'stack': stack['id'],
+                            'branch': stack['branch'],
+                            'tip': tip,
+                        })
+                    elif ref == integration_ref:
+                        coordinated_events.append({
+                            'type': 'integration_pushed',
+                            'branch': manifest['integration']['branch'],
+                            'tip': tip,
+                        })
+                    else:
+                        raise SyncwheelError(
+                            f'reconcile pending publication contains unknown ref: {ref}'
+                        )
+        else:
+            publication_operation = begin_coordination_publication(
+                repo_root,
+                manifest,
+                manifest_path,
+                coordinated_refs,
+                publication_scope,
+                projection_status,
+            )
         config = coordination_config(manifest)
+        try:
+            coordination_result = coordinated_publish(
+                repo_root,
+                manifest,
+                manifest_path,
+                coordinated_refs,
+                publication_scope,
+                projection_status,
+                expected_coordination_state_tip=publication_operation[
+                    'expected_coordination_state_tip'
+                ],
+                operation_token=publication_operation['operation_token'],
+            )
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root, config, exc, reconcile_remedy
+            )
+            if failure is None:
+                raise
+            raise failure from exc
         for event in coordinated_events:
             payload = {
                 **event,
                 'remote': config['remote'],
                 'coordination_state': coordination_result.get('state_tip'),
                 'coordination_status': coordination_result['status'],
+                'operation_token': publication_operation['operation_token'],
+                'recovered': bool(coordination_result.get('recovered')),
             }
             append_ledger_event(repo_root, event['type'], payload, manifest_path)
         if not coordinated_events:
@@ -19720,6 +22627,8 @@ def command_reconcile(args):
                     'coordination_state': coordination_result.get('state_tip'),
                     'coordination_status': coordination_result['status'],
                     'scope': 'full' if full_scope else 'partial',
+                    'operation_token': publication_operation['operation_token'],
+                    'recovered': bool(coordination_result.get('recovered')),
                 },
                 manifest_path,
             )
@@ -19733,6 +22642,10 @@ def command_reconcile(args):
         gc_plan = run_coordination_gc(repo_root, manifest, apply=True, fetch=True)
         if gc_plan.get('applied_candidates'):
             print(f"automatic gc: processed {len(gc_plan['applied_candidates'])} eligible local artifact(s)")
+    if publication_operation:
+        complete_coordination_publication(
+            repo_root, manifest_path, publication_operation, coordination_result
+        )
     return 0
 
 
@@ -19948,6 +22861,9 @@ def command_int_rebuild(args):
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, apply=not args.dry_run
+    )
     if coordination_is_active(manifest):
         if not args.dry_run:
             manifest = recover_incomplete_control_manifest_persistence(
@@ -19967,15 +22883,46 @@ def command_int_push(args):
         integration = manifest['integration']
         config = coordination_config(manifest)
         coordinated_push_remote(args, config)
-        result = coordinated_publish(
-            repo_root,
-            manifest,
-            manifest_path,
-            {f"refs/heads/{integration['branch']}": ref_tip(repo_root, integration['branch'])},
-            'integration',
-            'partial',
-            dry_run=args.dry_run,
-        )
+        changed_refs = {
+            f"refs/heads/{integration['branch']}": ref_tip(
+                repo_root, integration['branch']
+            )
+        }
+        try:
+            publication_operation = (
+                None if args.dry_run else begin_coordination_publication(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    changed_refs,
+                    'integration',
+                    'partial',
+                )
+            )
+            result = coordinated_publish(
+                repo_root,
+                manifest,
+                manifest_path,
+                changed_refs,
+                'integration',
+                'partial',
+                dry_run=args.dry_run,
+                expected_coordination_state_tip=(
+                    publication_operation['expected_coordination_state_tip']
+                    if publication_operation else EXPECTED_COORDINATION_STATE_UNSET
+                ),
+                operation_token=(
+                    publication_operation['operation_token']
+                    if publication_operation else None
+                ),
+            )
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root, config, exc, 'int push'
+            )
+            if failure is None:
+                raise
+            raise failure from exc
         if not args.dry_run:
             append_ledger_event(
                 repo_root,
@@ -19986,8 +22933,13 @@ def command_int_push(args):
                     'tip': ref_tip(repo_root, integration['branch']),
                     'coordination_state': result.get('state_tip'),
                     'coordination_status': result['status'],
+                    'operation_token': publication_operation['operation_token'],
+                    'recovered': bool(result.get('recovered')),
                 },
                 manifest_path,
+            )
+            complete_coordination_publication(
+                repo_root, manifest_path, publication_operation, result
             )
         return 0
     integration = manifest['integration']
@@ -23299,6 +26251,20 @@ def build_parser():
     )
     coordination_sub = coordination_p.add_subparsers(dest='coordination_command', required=True)
 
+    coordination_claims_p = coordination_sub.add_parser(
+        'claims', help='inspect or backfill per-source coordination claims'
+    )
+    coordination_claims_sub = coordination_claims_p.add_subparsers(
+        dest='coordination_claims_command', required=True
+    )
+    coordination_claims_backfill_p = coordination_claims_sub.add_parser(
+        'backfill', parents=[common],
+        help='create missing per-source claim refs with create-only leases',
+    )
+    coordination_claims_backfill_p.add_argument('-a', '--apply', action='store_true')
+    coordination_claims_backfill_p.add_argument('--reason')
+    coordination_claims_backfill_p.set_defaults(func=command_coordination_claims_backfill)
+
     coordination_init_p = coordination_sub.add_parser('init', parents=[common])
     coordination_init_p.add_argument('-R', '--remote', help='configured publication remote for active-active coordination')
     coordination_init_p.add_argument('--coordination-id', help='public coordination-domain id')
@@ -24380,6 +27346,7 @@ def entrypoint_behavior_table():
         command_worktree_release,
         command_gc,
     ), mutates='apply', manifest_mutates='apply')
+    register((command_coordination_claims_backfill,), mutates='apply', manifest_mutates='apply')
     register((
         command_journal_snapshot,
         command_journal_publish,
@@ -24668,6 +27635,52 @@ def governed_worktree_preflight(args):
         )
 
 
+def coordination_publication_lock_requested(args):
+    """Commands whose whole publication cycle must exclude every other one here."""
+    if not hasattr(args, 'repo'):
+        return False
+    always_mutating = {
+        command_stack_create, command_stack_promote, command_stack_demote,
+        command_stack_close, command_stack_sync, command_stack_add,
+    }
+    dry_run_gated = {
+        command_stack_push, command_int_push, command_stack_rebuild,
+    }
+    apply_gated = {
+        command_reconcile, command_resume, command_sync, command_publish,
+        command_channel_publish, command_channel_close,
+        command_coordination_claims_backfill, command_coordination_repair,
+        command_coordination_compose,
+    }
+    if args.func in always_mutating:
+        return True
+    if args.func in dry_run_gated:
+        return not bool(getattr(args, 'dry_run', False))
+    if args.func in apply_gated:
+        return bool(getattr(args, 'apply', False))
+    return False
+
+
+@contextlib.contextmanager
+def coordination_publication_lock_for_command(args):
+    if not coordination_publication_lock_requested(args):
+        yield None
+        return
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None),
+        getattr(args, 'personal', None),
+    )
+    manifest, _ = (
+        load_manifest(repo_root, manifest_path) if manifest_path.exists() else (None, None)
+    )
+    if manifest is None or not coordination_is_active(manifest):
+        yield None
+        return
+    with coordination_publication_lock(repo_root) as owner:
+        yield owner
+
+
 CONTROL_MANIFEST_RECOVERY_ENTRYPOINTS = {
     command_stack_push,
     command_int_rebuild,
@@ -24777,18 +27790,19 @@ def main():
         if args.command != 'revision-provider':
             governed_worktree_preflight(args)
             converge_default_repository_hooks(args)
-        if manifest_mutation_requested(args) and hasattr(args, 'repo'):
-            repo_root = resolve_repo_root(args.repo)
-            manifest_path = resolve_manifest_path(
-                repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
-            )
-            if args.func != command_init and manifest_path.exists():
-                existing_manifest, _ = load_manifest(repo_root, manifest_path)
-                if existing_manifest:
-                    ensure_managed_repository_hooks(repo_root, existing_manifest)
-            with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
-                return execute_parsed_command(args)
-        return execute_parsed_command(args)
+        with coordination_publication_lock_for_command(args):
+            if manifest_mutation_requested(args) and hasattr(args, 'repo'):
+                repo_root = resolve_repo_root(args.repo)
+                manifest_path = resolve_manifest_path(
+                    repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+                )
+                if args.func != command_init and manifest_path.exists():
+                    existing_manifest, _ = load_manifest(repo_root, manifest_path)
+                    if existing_manifest:
+                        ensure_managed_repository_hooks(repo_root, existing_manifest)
+                with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
+                    return execute_parsed_command(args)
+            return execute_parsed_command(args)
     except SyncwheelError as exc:
         print(f'error: {exc}', file=sys.stderr)
         return 2

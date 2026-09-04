@@ -244,6 +244,23 @@ syncwheel handoff
 
 Use `publish`, `stack push`, or `int push` for that manifest's managed refs.
 They publish atomic state with exact leases; do not substitute a raw `git push`.
+The source ref's `refs/heads/syncwheel/claim/heads/...` claim is the cross-domain
+CAS authority and must advance in every publication that touches that source.
+An unchanged claim or a lease on a ref absent from the refspec proves nothing.
+Existing manifests default to `coordination.claims: advisory`; inspect and then
+apply `syncwheel coordination claims backfill --apply --reason <reason>` before
+an explicitly approved switch to `required`. Never overwrite a foreign claim.
+Every mutating coordinated publish records a durable intent token before its
+atomic push. That token in the published state chain is the only proof the
+operation landed; a retry that finds it completes without republishing, even
+after other clones advanced the same refs. An intent absent from that chain
+never landed and is abandoned as `coordination_publish_abandoned` by the next
+publication, `reconcile`, or `resume`, so neither a lost race nor a refused push
+blocks the clone. A promotion whose push landed before its manifest save is
+completed by the next coordinated command, which rebuilds the promoted branch
+from the published state instead of trusting the local branch layout. Draft create
+uses its `stack_create_intent` token in the claim and removes its token-derived
+temporary worktree registration on retry.
 Install the plan-first managed-ref guard in each clone with `syncwheel hooks
 install`, review the reported hook/chaining path and digest, then apply with
 `syncwheel hooks install --apply`. The guard is composable and catches accidental
@@ -419,7 +436,14 @@ syncwheel stack promote caching-experiment --branch pr/caching   # now it is a r
 
 A draft refuses `stack push` to the target remote and names its state as the reason. Under
 active-active coordination its *source* ref does publish to the coordination remote, so another clone
-can rebuild it from the manifest alone. `syncwheel stack demote <id>` goes back, and refuses when the
+can rebuild it from the manifest alone. Closing an unpublished draft is also a
+remote operation: intent first, atomic tombstone claim plus state, manifest
+save, then terminal event. If the remote is unavailable, stop without saving;
+a retry after a crash completes only from its exact tombstone token, even when
+unrelated publications advanced the state meanwhile. If a newer claim has
+superseded that token, record `close_superseded` and stop without closing the
+newer stack generation.
+`syncwheel stack demote <id>` goes back, and refuses when the
 stack already has an open PR recorded.
 
 If `plan` reports integration commits that belong to no stack, that is exactly this situation: it now

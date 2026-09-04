@@ -2273,6 +2273,46 @@ class DeploymentChannelTest(unittest.TestCase):
                 module.command_channel_publish(args)
         self.assertIsNotNone(manifest_path)
 
+    def test_channel_publish_never_uses_the_caller_operation_id_as_its_coordination_token(self):
+        self.create(stacks=('a',))
+        self.apply_channel()
+        self.enable_active_coordination()
+        plan = self.plan('dev', 'publish')
+        receipt = json.loads(self.cli(
+            'channel', 'publish', 'dev', '--plan-digest', plan['planDigest'],
+            '--operation-id', 'shared-idempotency-key', '--apply',
+        ).stdout)
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(self.repo)
+        config = module.coordination_config(manifest)
+        published = module.read_remote_coordination_state(
+            self.repo, config, fetch=True, local_manifest_version=manifest['version']
+        )
+
+        self.assertEqual(receipt['status'], 'succeeded')
+        self.assertEqual(receipt['operationId'], 'shared-idempotency-key')
+        self.assertEqual(published['state']['publication_scope'], 'channel:dev')
+        self.assertNotEqual(
+            published['state']['operation_token'], 'shared-idempotency-key'
+        )
+        prepared = next(
+            event['payload'] for event in module.channel_operation_events(
+                self.repo, manifest_path, 'shared-idempotency-key'
+            )
+            if event['type'] == 'channel_operation_prepared'
+        )
+        self.assertEqual(
+            prepared['coordinationOperationToken'],
+            published['state']['operation_token'],
+        )
+        claim_ref = module.coordination_claim_ref('refs/heads/channel/dev')
+        claim_tip = self.git('ls-remote', 'origin', claim_ref).split()[0]
+        self.git('fetch', '-q', 'origin', claim_ref)
+        self.assertEqual(
+            module.coordination_claim_from_commit(self.repo, claim_tip)['operation_token'],
+            published['state']['operation_token'],
+        )
+
 
 if __name__ == '__main__':
     unittest.main()
