@@ -53,6 +53,22 @@ Every read validates schema version 1, a non-empty `integrationBranch`, boolean
 or incomplete state makes installed hooks fail closed and makes status report
 `degraded` with the exact repair cause; it never becomes an implicit opt-out.
 
+Failing closed applies to the guarded surface, not to the whole repository. A
+degraded ref guard reconstructs the integration ref from the manifests visible in
+the primary and repo roots and from the branch the primary has checked out; the
+degraded primary-checkout guard falls back to the branch the selected manifest
+declares. Both keep refusing that ref and manual commits on it, and let every other
+branch ref through with one stderr warning naming `syncwheel hooks install --apply`.
+A clone whose hooks predate `guard.json` therefore stays usable; it does not reject
+`git fetch`. With neither state nor a readable manifest nothing identifies the
+integration ref, and the primary-checkout guard has nothing left to compare against.
+
+Guard callbacks run inside a Git process that is mid-operation. They decide about
+the refs they are handed and nothing else: they skip the workspace-wide preflights,
+and their child Git processes drop the `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+`GIT_COMMON_DIR`, `GIT_PREFIX` and `GIT_NAMESPACE` values Git exports to hooks, which
+would otherwise redirect a command aimed at one worktree onto the caller's index.
+
 `guard.json` is written through a same-directory temporary file and atomic rename.
 The file is flushed before replacement, but the containing directory is not fsynced;
 a machine crash can therefore lose the final rename. The next read fails closed and
@@ -85,8 +101,11 @@ reduced precision fails closed. The append-only `ref-auth-events.jsonl` has no
 rotation and may record abandoned atomic-write temporary files as malformed noise
 after process death; those entries do not grant authorization. The
 reference-transaction hook blocks every unauthorized
-integration-ref move, including fast-forward moves. Both guards allow commits in dedicated feature worktrees
-and plumbing-materialized branches.
+integration-ref move, including fast-forward moves. It classifies the transaction
+before anything else and returns without touching Git when it carries no branch
+ref, so remote-tracking updates from a fetch, the pseudo-refs `git worktree add`
+writes, tags, notes and stash never reach the guard. Both guards allow commits in
+dedicated feature worktrees and plumbing-materialized branches.
 
 The refusal names `syncwheel worktree open <lane> --into <stack>` for new work and
 `syncwheel stack capture-integration <stack> HEAD` for work already committed on

@@ -306,17 +306,32 @@ def resolve_runtime_version(root=None):
 VERSION = resolve_runtime_version()
 
 
-def managed_process_env(extra=None):
+# Git exports these to its hooks. Syncwheel always names the repository it means
+# through cwd or -C, so inheriting them would point a child Git at another
+# worktree's git dir or index and rewrite it; an explicit env= override wins.
+AMBIENT_GIT_LOCATION_ENV = (
+    'GIT_DIR',
+    'GIT_COMMON_DIR',
+    'GIT_WORK_TREE',
+    'GIT_INDEX_FILE',
+    'GIT_PREFIX',
+    'GIT_NAMESPACE',
+)
+
+
+def managed_process_env(extra=None, authorize=True):
     process_env = os.environ.copy()
-    if SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
+    for name in AMBIENT_GIT_LOCATION_ENV:
+        process_env.pop(name, None)
+    if authorize and SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
         process_env[MANAGED_REF_MOVE_AUTH_ENV] = authorize_ref_move(SYNCWHEEL_REF_AUTH_REPO)
     if extra:
         process_env.update(extra)
     return process_env
 
 
-def run(cmd, cwd=None, check=True, input_text=None, env=None):
-    process_env = managed_process_env(env)
+def run(cmd, cwd=None, check=True, input_text=None, env=None, authorize=True):
+    process_env = managed_process_env(env, authorize=authorize)
     result = subprocess.run(
         cmd,
         cwd=cwd,
@@ -812,13 +827,34 @@ def load_primary_guard(repo_root):
     return guard
 
 
+GUARDED_BRANCH_REF_PREFIX = 'refs/heads/'
+
+
+def guardable_branch_ref(ref):
+    """The guard only ever protects a branch ref.
+
+    Remote-tracking refs, tags, notes, stash and the per-worktree pseudo-refs
+    git writes during fetch, merge, rebase or worktree creation can never be the
+    integration ref, so they stay outside the guard even when its configuration
+    cannot be read.
+    """
+    return (
+        ref.startswith(GUARDED_BRANCH_REF_PREFIX)
+        and len(ref) > len(GUARDED_BRANCH_REF_PREFIX)
+    )
+
+
+def primary_guard_repair_remedy(error):
+    return (
+        f'{error}; run syncwheel hooks install --apply with the intended '
+        '--personal/--manifest selection'
+    )
+
+
 def require_primary_guard(repo_root):
     guard, error = inspect_primary_guard(repo_root)
     if error:
-        raise SyncwheelError(
-            f'{error}; run syncwheel hooks install --apply with the intended '
-            '--personal/--manifest selection'
-        )
+        raise SyncwheelError(primary_guard_repair_remedy(error))
     return guard
 
 
@@ -869,9 +905,11 @@ def save_primary_guard(repo_root, manifest, *, enabled=True, reason=None):
 
 
 def ref_auth_dir(repo_root):
-    result = subprocess.run(
-        ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root,
-        text=True, capture_output=True, check=False,
+    # authorize=False breaks the cycle: issuing an authorization needs this
+    # directory, and managed_process_env() issues one for every other command.
+    result = run(
+        ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root, check=False,
+        authorize=False,
     )
     if result.returncode != 0:
         raise SyncwheelError('cannot resolve git common directory for ref authorization')
@@ -27155,27 +27193,40 @@ def command_hooks_worktree_guard(args):
     current_path = Path(git(repo_root, 'rev-parse', '--show-toplevel').stdout.strip()).resolve()
     if current_path != primary_root:
         return 0
-    guard = require_primary_guard(repo_root)
-    if not guard['enabled']:
-        return 0
+    guard, guard_error = inspect_primary_guard(repo_root)
     branch = get_current_branch(primary_root)
-    expected = guard.get('integrationBranch')
     manifest_path = resolve_manifest_path(primary_root, str(primary_root), args.manifest, args.personal)
     manifest, _ = load_manifest(primary_root, manifest_path)
     remedies = primary_checkout_remedy_commands(manifest) if manifest else [
         'syncwheel worktree open <lane> --into <stack>',
         'syncwheel stack capture-integration <stack> HEAD',
     ]
+    commit_blocked = (
+        f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
+        'Only a Syncwheel-authorized control commit may be created there'
+        + format_remedy_suffix(remedies)
+        + '. This local hook is a safety guard, not a security boundary; '
+        'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
+    )
+    if guard_error:
+        # Nothing left names the integration branch, so the primary cannot be
+        # checked against it. A checkout only gets a warning, because the guard
+        # has no branch to claim it should have been on; a manual commit is
+        # still refused, because the primary is the shared projection either way.
+        print(
+            f'syncwheel guard degraded: {primary_guard_repair_remedy(guard_error)}',
+            file=sys.stderr,
+        )
+        if args.event != 'pre-commit' or ref_move_authorized(repo_root, 'pre-commit'):
+            return 0
+        raise SyncwheelError(f'{primary_guard_repair_remedy(guard_error)}. {commit_blocked}')
+    if not guard['enabled']:
+        return 0
+    expected = guard.get('integrationBranch')
     if args.event == 'pre-commit' and branch == expected:
         if ref_move_authorized(repo_root, 'pre-commit'):
             return 0
-        raise SyncwheelError(
-            f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
-            'Only a Syncwheel-authorized control commit may be created there'
-            + format_remedy_suffix(remedies)
-            + '. This local hook is a safety guard, not a security boundary; '
-            'syncwheel hooks remove --disable --reason "..." --apply is the explicit opt-out.'
-        )
+        raise SyncwheelError(commit_blocked)
     if branch == expected:
         return 0
     action = 'commit blocked' if args.event == 'pre-commit' else 'branch mismatch detected after checkout'
@@ -27192,8 +27243,9 @@ def command_hooks_worktree_guard(args):
 
 def command_hooks_ref_guard(args):
     # Git runs this for every ref transaction. Only the "prepared" phase can
-    # veto. The integration ref is guarded regardless of move direction;
-    # non-managed refs remain outside this hook's scope.
+    # veto, and only a branch ref can be the integration ref, so a transaction
+    # that carries none leaves before this touches Git at all: fetch, worktree
+    # creation and git's own internal ref writes are not the guarded surface.
     if args.phase != 'prepared':
         return 0
     updates = []
@@ -27201,24 +27253,38 @@ def command_hooks_ref_guard(args):
         parts = line.split()
         if len(parts) == 3:
             updates.append(parts)
-    if not updates:
+    candidates = [item for item in updates if guardable_branch_ref(item[2])]
+    if not candidates:
         return 0
     repo_root = resolve_repo_root(args.repo)
-    worktrees = get_worktrees(repo_root)
-    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-    guard = require_primary_guard(repo_root)
-    if not guard['enabled']:
-        return 0
-    integration_ref = f"refs/heads/{guard['integrationBranch']}"
-    protected = []
-    for old, new, ref in updates:
-        if ref == integration_ref:
-            protected.append((ref, old, new))
+    guard, guard_error = inspect_primary_guard(repo_root)
+    if guard_error:
+        # guard.json is the only thing that names the integration branch, and
+        # nothing in the working tree stands in for it: a journal manifest
+        # declares no integration branch, the manifest need not be on the
+        # checked-out branch, and the selected manifest can live outside the
+        # repository. Degraded therefore keeps every branch ref.
+        protected = [(ref, old, new) for old, new, ref in candidates]
+    else:
+        if not guard['enabled']:
+            return 0
+        integration_ref = f"refs/heads/{guard['integrationBranch']}"
+        protected = [
+            (ref, old, new) for old, new, ref in candidates if ref == integration_ref
+        ]
     if not protected:
         return 0
     if ref_move_authorized(repo_root, 'reference-transaction'):
         return 0
     detail = ', '.join(f'{ref} {old[:7]} -> {new[:7]}' for ref, old, new in protected)
+    if guard_error:
+        raise SyncwheelError(
+            f'{primary_guard_repair_remedy(guard_error)}. Until it is repaired the '
+            f'guard cannot tell the integration ref from any other branch, so it '
+            f'refuses every branch ref: {detail}. '
+            'This local hook is a safety guard, not a security boundary; '
+            'core.hooksPath and --no-verify can bypass it.'
+        )
     raise SyncwheelError(
         f'refusing unauthorized primary integration ref move(s): {detail}. '
         'Use a Syncwheel-owned rebuild or a governed worktree. '
@@ -27766,28 +27832,23 @@ def main():
     args.git_args = passthrough
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
-    if args.func not in {
+    guard_callback = args.func in {
         command_hooks_guard,
         command_hooks_worktree_guard,
         command_hooks_ref_guard,
-    }:
+    }
+    if not guard_callback:
         global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
         SYNCWHEEL_OWNS_REF_MOVES = True
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
-        if args.command != 'revision-provider':
+        # A guard callback runs inside a Git process that is mid-operation, so it
+        # stays a decision about the incoming refs and skips the workspace-wide
+        # preflights: those inspect other worktrees and must not run there.
+        if args.command != 'revision-provider' and not guard_callback:
             primary_checkout_preflight(args)
-        if (
-            args.command != 'revision-provider'
-            and args.func not in {
-                command_hooks_guard,
-                command_hooks_worktree_guard,
-                command_hooks_ref_guard,
-            }
-        ):
             maybe_handle_startup_update_policy(args)
-        if args.command != 'revision-provider':
             governed_worktree_preflight(args)
             converge_default_repository_hooks(args)
         with coordination_publication_lock_for_command(args):
