@@ -3226,12 +3226,17 @@ def status_line_paths(line):
 
 def ensure_clean_worktree(
     path, allowed_status_prefixes=None, remedy_commands=None, allowed_paths=None,
+    allowed_path_prefixes=None,
 ):
     result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
     if result.returncode != 0:
         raise SyncwheelError(f'{path} is not a git worktree')
     allowed_status_prefixes = tuple(allowed_status_prefixes or [])
     allowed_paths = set(allowed_paths or ())
+    allowed_path_prefixes = tuple(
+        str(prefix).replace('\\', '/').rstrip('/') + '/'
+        for prefix in (allowed_path_prefixes or ())
+    )
     remaining = []
     for line in result.stdout.splitlines():
         entry = line.strip()
@@ -3241,6 +3246,11 @@ def ensure_clean_worktree(
             continue
         paths = status_line_paths(line)
         if allowed_paths and paths and paths <= allowed_paths:
+            continue
+        if allowed_path_prefixes and paths and all(
+            any(item.startswith(prefix) for prefix in allowed_path_prefixes)
+            for item in paths
+        ):
             continue
         remaining.append(entry)
     if remaining:
@@ -3500,6 +3510,7 @@ def syncwheel_gitignore_patterns(worktree_root):
         '.syncwheel/ledger/',
         '.syncwheel/profile.local.json',
         '.syncwheel/manifests/*.local.json',
+        '.syncwheel/manifests/*.local-ledger/',
         syncwheel_ignore_pattern(worktree_root),
     ]
 
@@ -4342,6 +4353,7 @@ def save_manifest(path, manifest):
             transaction['expectedDigest'] = (
                 manifest_digest(persisted) if persisted is not None else None
             )
+            transaction['manifestWritten'] = True
         directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
         try:
             directory_fd = os.open(path.parent, directory_flags)
@@ -4560,11 +4572,14 @@ def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command
         transaction = {
             'repoRoot': repo_root,
             'expectedDigest': manifest_digest(observed) if observed is not None else None,
+            'manifestWritten': False,
             'depth': 1,
         }
         transactions[identity] = transaction
         try:
             yield
+            if transaction['manifestWritten']:
+                commit_git_tracked_manifest(repo_root, manifest_path)
         finally:
             transactions.pop(identity, None)
 
@@ -21814,7 +21829,7 @@ def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_
                 if key not in checked:
                     ensure_clean_worktree(
                         path,
-                        allowed_status_prefixes=['?? .syncwheel/'],
+                        allowed_path_prefixes=['.syncwheel/'],
                         remedy_commands=primary_checkout_remedy_commands(manifest),
                     )
                     checked.add(key)
@@ -22427,7 +22442,7 @@ def command_reconcile(args):
                     )
                 ensure_clean_worktree(
                     repo_root,
-                    allowed_status_prefixes=['?? .syncwheel/'],
+                    allowed_path_prefixes=['.syncwheel/'],
                     remedy_commands=primary_checkout_remedy_commands(manifest),
                     allowed_paths=control_manifest_source_allowance(
                         repo_root, manifest_path
@@ -22494,7 +22509,7 @@ def command_reconcile(args):
             if use_primary_checkout:
                 ensure_clean_worktree(
                     repo_root,
-                    allowed_status_prefixes=['?? .syncwheel/'],
+                    allowed_path_prefixes=['.syncwheel/'],
                     remedy_commands=primary_checkout_remedy_commands(manifest),
                 )
                 worktree = None
@@ -23384,6 +23399,36 @@ def git_add_paths(repo_root, paths, force_paths=None):
         git(repo_root, 'add', '--', *normal)
     if force:
         git(repo_root, 'add', '-f', '--', *force)
+
+
+def commit_git_tracked_manifest(repo_root, manifest_path):
+    if is_external_manifest_path(repo_root, manifest_path) or is_personal_manifest_path(
+        repo_root, manifest_path
+    ):
+        return None
+    manifest, _ = load_manifest(repo_root, manifest_path)
+    if not manifest or manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED:
+        return None
+    relative = repo_relative_path(repo_root, manifest_path)
+    if not relative:
+        return None
+    git_add_paths(repo_root, [manifest_path], force_paths=[manifest_path])
+    changed = git(repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', relative, check=False)
+    if changed.returncode == 0:
+        return None
+    if changed.returncode != 1:
+        raise SyncwheelError(
+            changed.stderr.strip() or changed.stdout.strip()
+            or f'could not inspect staged manifest: {relative}'
+        )
+    run(
+        with_git_identity(
+            repo_root,
+            ['git', 'commit', '--only', '-m', 'chore(syncwheel): update manifest', '--', relative],
+        ),
+        cwd=repo_root,
+    )
+    return git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
 
 
 def git_rm_cached_paths(repo_root, paths):
