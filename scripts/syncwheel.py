@@ -3600,13 +3600,16 @@ def ensure_syncwheel_metadata_excluded(repo_root, tracking=None, worktree_root=N
     worktree_root = normalize_syncwheel_worktree_root(worktree_root)
     legacy_patterns = all_syncwheel_managed_patterns(worktree_root)
     if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
-        write_managed_block(
+        gitignore_updated = write_managed_block(
             repo_root / '.gitignore',
             SYNCWHEEL_GITIGNORE_MARKER,
             SYNCWHEEL_GITIGNORE_END_MARKER,
             syncwheel_gitignore_patterns(worktree_root),
             legacy_patterns,
         )
+        transaction = active_manifest_write_transaction_for_repo(repo_root)
+        if gitignore_updated and transaction is not None:
+            transaction['gitignoreWritten'] = True
         path = git_info_exclude_path(repo_root)
         if path:
             write_managed_block(
@@ -4540,6 +4543,16 @@ def active_manifest_write_transaction(manifest_path):
     return transactions.get(str(Path(manifest_path).resolve(strict=False)))
 
 
+def active_manifest_write_transaction_for_repo(repo_root):
+    transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', {})
+    resolved_root = Path(repo_root).resolve()
+    matches = [
+        transaction for transaction in transactions.values()
+        if Path(transaction['repoRoot']).resolve() == resolved_root
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
 def require_manifest_transaction_current(manifest_path):
     transaction = active_manifest_write_transaction(manifest_path)
     if transaction is None:
@@ -4573,13 +4586,19 @@ def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command
             'repoRoot': repo_root,
             'expectedDigest': manifest_digest(observed) if observed is not None else None,
             'manifestWritten': False,
+            'gitignoreWritten': False,
             'depth': 1,
         }
         transactions[identity] = transaction
         try:
             yield
-            if transaction['manifestWritten']:
-                commit_git_tracked_manifest(repo_root, manifest_path)
+            if transaction['manifestWritten'] or transaction['gitignoreWritten']:
+                commit_git_tracked_manifest(
+                    repo_root,
+                    manifest_path,
+                    include_manifest=transaction['manifestWritten'],
+                    include_gitignore=transaction['gitignoreWritten'],
+                )
         finally:
             transactions.pop(identity, None)
 
@@ -23401,7 +23420,9 @@ def git_add_paths(repo_root, paths, force_paths=None):
         git(repo_root, 'add', '-f', '--', *force)
 
 
-def commit_git_tracked_manifest(repo_root, manifest_path):
+def commit_git_tracked_manifest(
+    repo_root, manifest_path, include_manifest=True, include_gitignore=False,
+):
     if is_external_manifest_path(repo_root, manifest_path) or is_personal_manifest_path(
         repo_root, manifest_path
     ):
@@ -23409,22 +23430,33 @@ def commit_git_tracked_manifest(repo_root, manifest_path):
     manifest, _ = load_manifest(repo_root, manifest_path)
     if not manifest or manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED:
         return None
-    relative = repo_relative_path(repo_root, manifest_path)
-    if not relative:
+    paths = [manifest_path] if include_manifest else []
+    if include_gitignore:
+        paths.append(repo_root / '.gitignore')
+    relatives = [
+        relative for path in paths
+        if (relative := repo_relative_path(repo_root, path))
+    ]
+    if not relatives:
         return None
-    git_add_paths(repo_root, [manifest_path], force_paths=[manifest_path])
-    changed = git(repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', relative, check=False)
+    git_add_paths(repo_root, paths, force_paths=[manifest_path])
+    changed = git(
+        repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', *relatives, check=False
+    )
     if changed.returncode == 0:
         return None
     if changed.returncode != 1:
         raise SyncwheelError(
             changed.stderr.strip() or changed.stdout.strip()
-            or f'could not inspect staged manifest: {relative}'
+            or f'could not inspect staged Syncwheel metadata: {", ".join(relatives)}'
         )
     run(
         with_git_identity(
             repo_root,
-            ['git', 'commit', '--only', '-m', 'chore(syncwheel): update manifest', '--', relative],
+            [
+                'git', 'commit', '--only', '-m',
+                'chore(syncwheel): update tracked metadata', '--', *relatives,
+            ],
         ),
         cwd=repo_root,
     )

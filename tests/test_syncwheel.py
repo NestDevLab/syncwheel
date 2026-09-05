@@ -3355,6 +3355,31 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_git_tracked_stack_create_commits_managed_ignore_upgrade_and_stays_clean(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+        gitignore_path = self.repo / '.gitignore'
+        gitignore_path.write_text(
+            gitignore_path.read_text().replace(
+                '.syncwheel/manifests/*.local-ledger/\n',
+                '',
+            )
+        )
+        self.git('add', '.gitignore')
+        self.git('commit', '-qm', 'test: simulate pre-upgrade managed ignore block')
+
+        self.run_cli('stack', 'create', 'tracked-upgrade', '--branch', 'pr/tracked-upgrade')
+
+        self.assertEqual(
+            set(self.git('show', '--format=', '--name-only', 'HEAD').splitlines()),
+            {'.gitignore', '.syncwheel/manifest.json'},
+        )
+        self.assertIn(
+            '.syncwheel/manifests/*.local-ledger/',
+            gitignore_path.read_text(),
+        )
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
     def test_local_only_stack_create_does_not_commit(self):
         self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', expected=0)
         before = self.git('rev-parse', 'HEAD')
