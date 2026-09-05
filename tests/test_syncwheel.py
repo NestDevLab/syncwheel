@@ -3124,7 +3124,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             self.read_manifest()['authority'],
             {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': ['destructive_rewrite']},
         )
-        self.assertIn('M  .syncwheel/manifest.json', self.git('status', '--porcelain'))
+        self.assertNotIn('.syncwheel/manifest.json', self.git('status', '--porcelain'))
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
         tracking = json.loads(self.run_cli('repo', 'tracking', 'status', '--json', expected=0).stdout)
         self.assertEqual(tracking['authority']['mode'], 'ai-managed')
         status = json.loads(self.run_cli('status', '--json').stdout)
@@ -3179,6 +3183,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn('.gitignore', tracked)
         self.assertIn('# syncwheel managed metadata', gitignore)
         self.assertIn('.syncwheel/ledger/', gitignore)
+        self.assertIn('.syncwheel/manifests/*.local-ledger/', gitignore)
         self.assertIn('.syncwheel/wt/', gitignore)
         self.assertNotIn('var/syncwheel/', gitignore)
         self.assertNotIn('.syncwheel/', exclude)
@@ -3335,6 +3340,111 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(ledger['last_seq'], 1)
         self.assertIn('feature-c', ledger['manifest']['active_stacks'])
         self.assertEqual(ledger['stacks']['feature-c']['branch'], 'pr/alice/feature-c')
+
+    def test_git_tracked_stack_create_commits_only_manifest_and_leaves_worktree_clean(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+
+        before = self.git('rev-parse', 'HEAD')
+        self.run_cli('stack', 'create', 'tracked-clean', '--branch', 'pr/tracked-clean')
+
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_local_only_stack_create_does_not_commit(self):
+        self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', expected=0)
+        before = self.git('rev-parse', 'HEAD')
+
+        self.run_cli('stack', 'create', 'local-only', '--branch', 'pr/local-only')
+
+        self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertEqual(self.git('ls-files', '.syncwheel/manifest.json'), '')
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_git_tracked_manifest_commit_never_includes_unrelated_dirty_files(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+        (self.repo / 'alpha.txt').write_text('other unstaged work\n')
+        (self.repo / 'beta.txt').write_text('other staged work\n')
+        self.git('add', 'beta.txt')
+
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'isolated-manifest',
+            'branch': 'pr/isolated-manifest',
+            'base': 'main',
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'main',
+            'commits': [],
+        })
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            module.save_manifest_with_ledger(
+                self.repo,
+                manifest_path,
+                manifest,
+                'stack_create',
+                {'stack': 'isolated-manifest', 'branch': 'pr/isolated-manifest'},
+            )
+
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.git('diff', '--name-only'), 'alpha.txt')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'beta.txt')
+
+    def test_concurrent_git_tracked_stack_creates_converge(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+
+        results = self.run_cli_pair_concurrently(
+            ('stack', 'create', 'concurrent-a', '--branch', 'pr/concurrent-a'),
+            ('stack', 'create', 'concurrent-b', '--branch', 'pr/concurrent-b'),
+        )
+
+        self.assertEqual([result.returncode for result in results], [0, 0])
+        self.assertEqual(
+            {stack['id'] for stack in self.read_manifest()['stacks']},
+            {'feature-a', 'feature-b', 'concurrent-a', 'concurrent-b'},
+        )
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_reconcile_preflight_allows_modified_syncwheel_paths(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-qm', 'test: track syncwheel manifest')
+        manifest['meta'] = {'normal_syncwheel_write': True}
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        module = self.load_syncwheel_module()
+
+        module.preflight_reconcile_mutation_targets(
+            self.repo,
+            manifest,
+            [{'type': 'rebuild_integration'}],
+            None,
+        )
+
+    def test_personal_local_ledger_directories_are_ignored(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        ledger = self.repo / '.syncwheel' / 'manifests' / 'alice.local-ledger' / 'events'
+        ledger.mkdir(parents=True)
+        event = ledger / '0001.jsonl'
+        event.write_text('{}\n')
+
+        self.assertEqual(
+            self.git('check-ignore', event.relative_to(self.repo).as_posix()),
+            '.syncwheel/manifests/alice.local-ledger/events/0001.jsonl',
+        )
 
     def test_stack_create_includes_stack_by_default_when_membership_is_required(self):
         gamma = self.git('rev-parse', 'HEAD')

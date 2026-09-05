@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.43.4 - 2026-09-05
+
+- Commit a `git-tracked` Syncwheel manifest at the successful end of the same
+  locked transaction that writes it. The commit is restricted to the manifest
+  path, leaves unrelated staged and unstaged work untouched, and is skipped for
+  `local-only`, personal, and external manifests. Stack mutations therefore no
+  longer leave their tracked coordination contract dirty, while the existing
+  manifest lock and active-active leases continue to serialize concurrent
+  writers. No command publishes the commit automatically.
+- Allow reconciliation and integration rebuild/alignment preflights to ignore
+  every status under `.syncwheel/`, including tracked modifications, instead of
+  only untracked entries.
+- Ignore personal manifest ledger directories matching
+  `.syncwheel/manifests/*.local-ledger/` in the managed Git ignore block.
+
 ## 0.43.3 - 2026-09-04
 
 - Narrow the managed ref guard to the surface it protects. `hooks ref-guard`
