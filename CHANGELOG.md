@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.43.5 - 2026-09-05
+
+- Include `.gitignore` in the same path-limited transaction commit as the
+  tracked manifest when Syncwheel itself upgrades the managed ignore block.
+  Existing repositories that first learn a new managed metadata pattern no
+  longer remain dirty after an otherwise successful stack mutation, while
+  pre-existing `.gitignore` changes are still rejected by the normal clean
+  checkout guard rather than silently captured.
+- Exercise the complete pre-upgrade flow: `stack create` upgrades the managed
+  ignore block, commits exactly `.gitignore` and `.syncwheel/manifest.json`,
+  and leaves `git status --porcelain` empty.
+
 ## 0.43.4 - 2026-09-05
 
 - Commit a `git-tracked` Syncwheel manifest at the successful end of the same
