@@ -2764,6 +2764,69 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_classified_integration_commit_is_shared_handoff_state(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            fixture.install_existing_stack()
+            fixture.cli('repo', 'tracking', 'set', 'git-tracked', '--apply')
+            fixture.git(
+                'commit', '-q', '-m', 'test: finish tracking fixture metadata',
+                '--', '.syncwheel/manifests/README.md',
+            )
+            fixture.cli('publish')
+
+            metadata = fixture.repo / '.gitignore'
+            metadata.write_text('generated-metadata/\n' + metadata.read_text())
+            fixture.git('add', '.gitignore')
+            fixture.git('commit', '-q', '-m', 'test: integration metadata')
+            classified = fixture.git('rev-parse', 'HEAD')
+            preview = json.loads(fixture.cli(
+                'stack', 'classify-integration', 'existing', classified,
+            ).stdout)
+            fixture.cli(
+                'stack', 'classify-integration', 'existing', classified,
+                '--apply', '--plan-digest', preview['planDigest'],
+            )
+
+            unpublished = json.loads(fixture.cli('handoff', '--json').stdout)
+            self.assertEqual(
+                unpublished['coordination']['manifest_relation'],
+                'local_proposal_differs',
+            )
+            request = fixture.request('preflight', operation_id='classified-unpublished')
+            rejected, _ = fixture.protocol_request(
+                fixture.check_request(request), expected=2,
+            )
+            self.assertIn('manifest is not aligned', rejected['error'])
+
+            fixture.cli('stack', 'push', 'existing')
+            fixture.cli('int', 'push')
+            aligned = json.loads(fixture.cli('handoff', '--json').stdout)
+            self.assertEqual(aligned['coordination']['manifest_relation'], 'aligned')
+            accepted, _ = fixture.protocol_request(fixture.check_request(
+                fixture.request('preflight', operation_id='classified-published')
+            ))
+            self.assertEqual(accepted['status'], 'ready')
+
+            manifest = fixture.read_manifest()
+            manifest['stacks'][0]['integration_only_commits'] = []
+            fixture.write_manifest(manifest)
+            fixture.git('add', '.syncwheel/manifest.json')
+            fixture.git('commit', '-q', '-m', 'test: remove shared classification')
+
+            drifted = json.loads(fixture.cli('handoff', '--json').stdout)
+            self.assertEqual(
+                drifted['coordination']['manifest_relation'],
+                'local_proposal_differs',
+            )
+            mismatch = fixture.request('preflight', operation_id='classified-mismatch')
+            rejected, _ = fixture.protocol_request(
+                fixture.check_request(mismatch), expected=2,
+            )
+            self.assertIn('unmapped commits', rejected['error'])
+        finally:
+            fixture.close()
+
     def test_active_active_handoff_rejects_non_control_commit_ahead(self):
         fixture = RevisionProviderRepository(coordination_mode='active-active')
         try:

@@ -943,6 +943,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 'target_branch': 'main',
                 'integration_branch': 'integration/shared',
                 'commits': ['feature-a'],
+                'integration_only_commits': ['integration-metadata'],
             }],
         }
 
@@ -970,6 +971,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.assertNotIn('target_remote', snapshot['stacks'][0])
         self.assertNotIn('remote', snapshot['coordination'])
+        self.assertEqual(
+            snapshot['stacks'][0]['integration_only_commits'],
+            ['integration-metadata'],
+        )
 
         other_checkout = json.loads(json.dumps(manifest))
         other_checkout['defaults'].update({
@@ -992,6 +997,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(restored['integration']['base'], 'alice-laptop/main')
         self.assertEqual(restored['coordination']['remote'], 'alice-laptop')
         self.assertEqual(restored['stacks'][0]['target_remote'], 'alice-laptop')
+        self.assertEqual(
+            restored['stacks'][0]['integration_only_commits'],
+            ['integration-metadata'],
+        )
 
     def test_coordination_manifest_digest_uses_the_full_control_manifest(self):
         module = self.load_module()
@@ -1072,6 +1081,25 @@ with module.coordination_publication_lock(Path(repo_path)):
             'origin',
             'refs/heads/integration/shared',
             check=False,
+        )
+
+    def test_legacy_digest_uses_the_exact_published_snapshot_shape(self):
+        module = self.load_module()
+        state = {
+            'manifest': {
+                'version': 2,
+                'stacks': [{
+                    'id': 'feature-a',
+                    'integration_only_commits': ['integration-metadata'],
+                }],
+            },
+        }
+
+        self.assertEqual(
+            module.coordination_state_legacy_manifest_digest(
+                self.tmp, {'different': 'control manifest'}, state,
+            ),
+            module.manifest_digest(state['manifest']),
         )
 
     def test_guard_accepts_both_recorded_digest_forms_and_reports_which(self):
