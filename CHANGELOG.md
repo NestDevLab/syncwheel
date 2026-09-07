@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.43.6 - 2026-09-07
+
+- Serialize `integration_only_commits` in the public coordination snapshot so
+  handoff and the Agentwheel revision provider classify the same manifest state.
+  Published classifications are accepted by both checks; unpublished or removed
+  classifications remain fail-closed.
+- Recognize legacy snapshot digests from the exact snapshot stored in the
+  coordination state, preserving compatibility as the snapshot schema gains the
+  integration-only classification field.
+
 ## 0.43.5 - 2026-09-05
 
 - Include `.gitignore` in the same path-limited transaction commit as the

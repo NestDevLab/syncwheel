@@ -9368,6 +9368,10 @@ def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=
             snapshot_stack['state'] = stack['state']
         if stack.get('depends_on'):
             snapshot_stack['depends_on'] = list(stack['depends_on'])
+        if stack.get('integration_only_commits'):
+            snapshot_stack['integration_only_commits'] = list(
+                stack['integration_only_commits']
+            )
         snapshot['stacks'].append(snapshot_stack)
     if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
         snapshot['channels'] = []
@@ -9444,13 +9448,10 @@ def coordination_state_manifest_digest(repo_root, state, remote=None):
     )
 
 
-def coordination_state_legacy_manifest_digest(repo_root, control_manifest, state):
+def coordination_state_legacy_manifest_digest(_repo_root, _control_manifest, state):
     """Return the digest form published before 0.42.2: the normalized snapshot."""
-    try:
-        snapshot = coordination_manifest_snapshot(control_manifest, repo_root, state)
-    except SyncwheelError:
-        return None
-    return manifest_digest(snapshot)
+    snapshot = state.get('manifest')
+    return manifest_digest(snapshot) if isinstance(snapshot, dict) else None
 
 
 def coordination_state_manifest_digest_classification(repo_root, state, remote=None):

@@ -433,7 +433,9 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `integration_only_commits`, when present, contains commits owned by the stack
   only in integration. They are excluded from source-branch rebuilds and are
   replayed after the combined stack projection during integration rebuilds,
-  including after all stack merges under `merge-stacks`.
+  including after all stack merges under `merge-stacks`. The classification is
+  part of the shared coordination snapshot because it changes the deterministic
+  integration projection and its ownership.
 - `integration.strategy` is optional and defaults to `cherry-pick`
 - supported integration strategies are:
   - `cherry-pick`: replay all declared commits into integration as a linear history
