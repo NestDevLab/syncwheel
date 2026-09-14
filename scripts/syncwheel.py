@@ -10965,7 +10965,23 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
     publication_operation = pending_coordination_publication_after_resolution(
         repo_root, proposed_manifest, manifest_path, retry_fingerprint
     )
+    publication_landed = False
     if publication_operation:
+        config = coordination_config(proposed_manifest)
+        observed_publication = read_remote_coordination_state(
+            repo_root,
+            config,
+            fetch=True,
+            local_manifest_version=proposed_manifest['version'],
+        )
+        publication_landed = coordinated_operation_landed(
+            repo_root,
+            config,
+            observed_publication,
+            publication_operation,
+            claims_fallback=True,
+        )
+    if publication_operation and publication_landed:
         current = plan
         latest = {
             'tip': plan['expectedRemoteStateTip'],
