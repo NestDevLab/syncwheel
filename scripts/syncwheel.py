@@ -10853,7 +10853,9 @@ def coordination_compose_stack_plan(
     if base_state['manifest_digest'] != known_base_manifest_digest:
         raise SyncwheelError('coordination compose known base manifest digest does not match state')
     verify_coordination_state_manifest_digest(repo_root, base_state, config['remote'])
-    verify_coordination_state_manifest_digest(repo_root, latest['state'], config['remote'])
+    latest_digest = verify_coordination_state_manifest_digest(
+        repo_root, latest['state'], config['remote']
+    )
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
     composition = compose_additive_coordination_snapshots(
         base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id
@@ -10914,9 +10916,7 @@ def coordination_compose_stack_plan(
         'localProposalDigest': manifest_digest(manifest),
         'composedSnapshot': merged_snapshot,
         'proposedManifestDigest': manifest_digest(proposed_manifest),
-        'integrationManifestDigest': coordination_manifest_digest(
-            proposed_manifest, repo_root
-        ),
+        'integrationManifestDigest': latest_digest['control_manifest_digest'],
         'stack': stack_id,
         'sourceRef': source_ref,
         'sourceTip': source_tip,
