@@ -11016,6 +11016,12 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             ],
             operation_token=publication_operation['operation_token'],
         )
+        if (
+            result.get('status') not in {'recovered', 'already_published'}
+            or result.get('state_tip') != plan['expectedRemoteStateTip']
+            or latest['state'].get('manifest') != plan['composedSnapshot']
+        ):
+            raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
     elif plan['status'] == 'publish-required':
         if publication_operation is None:
             publication_operation = begin_coordination_publication(
