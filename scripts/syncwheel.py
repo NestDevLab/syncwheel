@@ -5811,10 +5811,23 @@ def align_control_manifest_worktree(
     return integration_worktree
 
 
+def capture_checkout_source_lease(repo_root, manifest_path, target):
+    """Expose one exact post-restore source lease without changing bool results."""
+    if target is None:
+        return
+    observed = checkout_source_lease(repo_root, manifest_path)
+    if observed is None:
+        raise SyncwheelError(
+            'cannot capture the source checkout lease after control restoration'
+        )
+    target.clear()
+    target.update(observed)
+
+
 def restore_control_manifest_after_integration_rebuild(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
-    operation_id=None, persist_source=True,
+    operation_id=None, persist_source=True, source_lease_out=None,
 ):
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
@@ -5828,13 +5841,14 @@ def restore_control_manifest_after_integration_rebuild(
             command=command,
             operation_id=operation_id,
             persist_source=persist_source,
+            source_lease_out=source_lease_out,
         )
 
 
 def _restore_control_manifest_after_integration_rebuild_locked(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
-    operation_id=None, persist_source=True,
+    operation_id=None, persist_source=True, source_lease_out=None,
 ):
     """Publish an isolated manifest-only commit above a rebuilt integration tip.
 
@@ -5849,6 +5863,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     current_tip = ref_tip(repo_root, integration_ref)
     if observed_digest == expected_digest and current_tip == replay_tip:
+        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
         return False
     control_commit = materialize_control_manifest_commit(repo_root, manifest, replay_tip)
     transaction = active_manifest_write_transaction(manifest_path)
@@ -5876,6 +5891,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         # A completed local operation is an idempotent retry. A deterministic
         # control commit with no local intent belongs to some other operation
         # and must never be claimed as this clone's persistence receipt.
+        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
         return False
     if current_tip != control_commit:
         # FC3: probe the checkout the alignment will touch before the intent and
@@ -6045,6 +6061,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
             + control_manifest_obstruction_warning(alignment_obstruction, command),
             file=sys.stderr,
         )
+    capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
     return True
 
 
@@ -15633,6 +15650,8 @@ def replay_plan(repo_root, manifest, target, mode):
         'return_tree': projection,
         'skip_contained': target.get('skip_contained', False),
         'expected_tip': target.get('expected_tip'),
+        'source_reset_lease': target.get('source_reset_lease'),
+        'reset_destination_lease': target.get('reset_destination_lease'),
         'emit_output': not projection,
     }
     steps = []
@@ -15838,7 +15857,35 @@ def execute_replay_steps(repo_root, plan):
                 if render:
                     print(render)
         if plan['mode'] == 'ephemeral':
-            target_worktree = find_worktree_for_branch(repo_root, branch)
+            reset_destination_lease = target.get('reset_destination_lease')
+            if reset_destination_lease is None:
+                target_worktree = find_worktree_for_branch(repo_root, branch)
+            else:
+                observed_reset_destination = checkout_reset_destination_lease(
+                    repo_root, branch
+                )
+                if observed_reset_destination != reset_destination_lease:
+                    raise SyncwheelError(
+                        'integration reset destination changed before published replay reset; '
+                        'refusing to overwrite it'
+                    )
+                observed_path = observed_reset_destination['worktree_path']
+                target_worktree = Path(observed_path) if observed_path else None
+            source_reset_lease = target.get('source_reset_lease')
+            if target_worktree and source_reset_lease:
+                observed_source_lease = checkout_source_lease(
+                    repo_root,
+                    Path(repo_root) / source_reset_lease['manifest_path'],
+                )
+                if (
+                    observed_source_lease is None
+                    or observed_source_lease['reset_guard_digest']
+                    != source_reset_lease['reset_guard_digest']
+                ):
+                    raise SyncwheelError(
+                        'source checkout changed before published integration replay reset; '
+                        'refusing to overwrite it'
+                    )
             if target_worktree:
                 run(['git', '-C', str(target_worktree), 'reset', '--hard', branch], cwd=repo_root)
         if target.get('return_tree'):
@@ -16021,6 +16068,58 @@ def checkout_path_fingerprint(repo_root, relative):
     return checkout_path_observation(repo_root, relative)['fingerprint']
 
 
+def checkout_reset_guard(repo_root):
+    """Bind a hard-reset decision to the index and checkout-relative dirt."""
+    repo_root = Path(repo_root).resolve()
+    index = git(repo_root, 'ls-files', '--stage', '-z')
+    unstaged_paths = sorted({
+        path for path in git(
+            repo_root, 'diff-files', '--name-only', '-z'
+        ).stdout.split('\0')
+        if path
+    })
+    untracked_paths = sorted({
+        path for path in git(
+            repo_root, 'ls-files', '--others', '--exclude-standard', '-z'
+        ).stdout.split('\0')
+        if path
+    })
+    return {
+        'index_sha256': hashlib.sha256(index.stdout.encode('utf-8')).hexdigest(),
+        'unstaged': {
+            path: checkout_path_fingerprint(repo_root, path)
+            for path in unstaged_paths
+        },
+        'untracked': {
+            path: checkout_path_fingerprint(repo_root, path)
+            for path in untracked_paths
+        },
+    }
+
+
+def checkout_reset_destination_lease(repo_root, branch):
+    """Bind the worktree that would receive an integration hard reset."""
+    worktree = find_worktree_for_branch(repo_root, branch)
+    branch_ref = f'refs/heads/{branch}'
+    if worktree is None:
+        return {
+            'branch_ref': branch_ref,
+            'worktree_path': None,
+            'reset_guard_digest': None,
+        }
+    worktree = Path(worktree).resolve()
+    observed_branch_ref = git(
+        worktree, 'symbolic-ref', '--quiet', 'HEAD', check=False
+    ).stdout.strip()
+    return {
+        'branch_ref': observed_branch_ref,
+        'worktree_path': str(worktree),
+        'reset_guard_digest': canonical_json_digest(
+            checkout_reset_guard(worktree)
+        ),
+    }
+
+
 def checkout_source_lease(repo_root, manifest_path):
     """Bind a reuse decision to HEAD, index, dirt, and its control source bytes."""
     repo_root = Path(repo_root).resolve()
@@ -16035,10 +16134,10 @@ def checkout_source_lease(repo_root, manifest_path):
         manifest_relative,
         '.gitignore',
     })
-    index = git(repo_root, 'ls-files', '--stage', '-z')
+    reset_guard = checkout_reset_guard(repo_root)
     evidence = {
         'head': ref_tip(repo_root, 'HEAD'),
-        'index_sha256': hashlib.sha256(index.stdout.encode('utf-8')).hexdigest(),
+        'index_sha256': reset_guard['index_sha256'],
         'status': status,
         'paths': {
             path: checkout_path_fingerprint(repo_root, path)
@@ -16050,6 +16149,7 @@ def checkout_source_lease(repo_root, manifest_path):
         'manifest_path': manifest_relative,
         'manifest': evidence['paths'][manifest_relative],
         'gitignore': evidence['paths']['.gitignore'],
+        'reset_guard_digest': canonical_json_digest(reset_guard),
     }
 
 
@@ -16448,12 +16548,14 @@ def plan_published_integration_tip_reuse(
             if proof['published'] != proof['base']:
                 unsafe_product_paths.append(proof['path'])
         if unsafe_product_paths:
-            return published_integration_tip_reuse_fallback(
-                observation,
-                'published integration contains unexplained product paths: '
-                + ', '.join(unsafe_product_paths),
-                path_proof,
-            )
+            return {
+                **published_integration_tip_reuse_refusal(
+                    observation,
+                    'published integration contains unexplained product paths: '
+                    + ', '.join(unsafe_product_paths),
+                ),
+                'pathProof': path_proof,
+            }
 
     if source_lease['manifest_path'] in changed_paths:
         projected_manifest_entry = tree_path_entry(
@@ -16604,7 +16706,9 @@ def published_integration_tip_reuse_is_current(
     )
 
 
-def published_integration_replay_target(manifest, plan, worktree):
+def published_integration_replay_target(
+    manifest, plan, worktree, reset_destination_lease,
+):
     """Replay the declared projection from an exactly leased published tip."""
     integration = copy.deepcopy(manifest['integration'])
     integration['base'] = plan['publishedTip']
@@ -16613,17 +16717,31 @@ def published_integration_replay_target(manifest, plan, worktree):
         for item in plan['replayInputs']['refs']
         if item.get('kind') == 'merge-stack'
     }
-    return replay_target(
+    target = replay_target(
         integration=integration,
         worktree=worktree,
         skip_contained=True,
         stack_ref_overrides=stack_ref_overrides,
         expected_tip=plan['publishedTip'],
     )
+    target['source_reset_lease'] = {
+        'manifest_path': plan['sourceLease']['manifest_path'],
+        'reset_guard_digest': plan['sourceLease']['reset_guard_digest'],
+    }
+    target['reset_destination_lease'] = copy.deepcopy(reset_destination_lease)
+    return target
 
 
-def published_integration_replay_is_current(repo_root, manifest, manifest_path, plan):
+def published_integration_replay_is_current(
+    repo_root, manifest, manifest_path, plan, expected_source_lease,
+):
     """Verify the replay result and every remote/input lease before publication."""
+    before_source = checkout_source_lease(repo_root, manifest_path)
+    if (
+        before_source is None
+        or before_source['digest'] != expected_source_lease.get('digest')
+    ):
+        return False
     try:
         before_inputs = integration_projection_input_snapshot(repo_root, manifest)
     except SyncwheelError:
@@ -16671,7 +16789,11 @@ def published_integration_replay_is_current(repo_root, manifest, manifest_path, 
         != tree_path_entry(repo_root, plan['projectedTree'], '.gitignore')
     ):
         return False
-    return True
+    after_source = checkout_source_lease(repo_root, manifest_path)
+    return bool(
+        after_source
+        and after_source['digest'] == expected_source_lease.get('digest')
+    )
 
 
 def unpublished_local_integration_control_tip(repo_root, manifest):
@@ -23522,6 +23644,9 @@ def command_reconcile(args):
                 (worktree, in_place),
                 plumbing_supported=integration_supports_plumbing(manifest),
             )
+            reset_destination_lease = checkout_reset_destination_lease(
+                repo_root, integration['branch']
+            )
             reuse = plan_published_integration_tip_reuse(
                 repo_root, manifest, manifest_path
             ) if coordinated_push else None
@@ -23550,7 +23675,9 @@ def command_reconcile(args):
                 )
             replay_mode = 'ephemeral' if published_replay else mode
             target = (
-                published_integration_replay_target(manifest, reuse, worktree)
+                published_integration_replay_target(
+                    manifest, reuse, worktree, reset_destination_lease
+                )
                 if published_replay
                 else replay_target(integration=integration, worktree=worktree)
             )
@@ -23569,13 +23696,16 @@ def command_reconcile(args):
                 acknowledge_in_place_manifest_replay(
                     repo_root, manifest_path, result['after_tip']
                 )
+            post_replay_source_lease = {} if published_replay else None
             control_manifest_restored = restore_control_manifest_after_integration_rebuild(
                 repo_root, manifest_path, manifest, result['after_tip'], result['mode'],
                 reason='reconcile integration rebuild', command='syncwheel reconcile --apply',
+                source_lease_out=post_replay_source_lease,
             ) or control_manifest_restored
             integration_after_tip = ref_tip(repo_root, integration['branch'])
             if published_replay and not published_integration_replay_is_current(
-                repo_root, manifest, manifest_path, reuse
+                repo_root, manifest, manifest_path, reuse,
+                post_replay_source_lease,
             ):
                 raise SyncwheelError(
                     'published integration replay result or lease changed before publication; '
@@ -23947,6 +24077,9 @@ def command_int_rebuild(args):
             repo_root, manifest['integration']['branch'], worktree,
             allowed_paths=source_allowance,
         )
+    reset_destination_lease = checkout_reset_destination_lease(
+        repo_root, integration['branch']
+    )
     reuse = plan_published_integration_tip_reuse(
         repo_root,
         manifest,
@@ -24018,7 +24151,9 @@ def command_int_rebuild(args):
         )
     replay_mode = 'ephemeral' if published_replay else mode
     target = (
-        published_integration_replay_target(manifest, reuse, worktree)
+        published_integration_replay_target(
+            manifest, reuse, worktree, reset_destination_lease
+        )
         if published_replay
         else replay_target(integration=integration, worktree=worktree)
     )
@@ -24055,14 +24190,17 @@ def command_int_rebuild(args):
             acknowledge_in_place_manifest_replay(
                 repo_root, manifest_path, result['after_tip']
             )
+        post_replay_source_lease = {} if published_replay else None
         restore_control_manifest_after_integration_rebuild(
             repo_root, manifest_path, manifest, result['after_tip'], result['mode'],
             reason=args.reason or 'restore_control_manifest_after_integration_rebuild',
             command='syncwheel int rebuild',
+            source_lease_out=post_replay_source_lease,
         )
         integration_after_tip = ref_tip(repo_root, manifest['integration']['branch'])
         if published_replay and not published_integration_replay_is_current(
-            repo_root, manifest, manifest_path, reuse
+            repo_root, manifest, manifest_path, reuse,
+            post_replay_source_lease,
         ):
             raise SyncwheelError(
                 'published integration replay result or lease changed before publication; '

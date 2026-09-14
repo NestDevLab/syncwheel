@@ -7025,6 +7025,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
         self.run_cli(repo, 'int', 'push')
+        self.git(repo, 'switch', '-q', 'main')
         branch = f'pr/{stack_id}'
         source = self.commit_on_branch(repo, branch, f'{stack_id}.txt')
         self.run_cli(repo, 'stack', 'create', stack_id, source, '--branch', branch)
@@ -7040,6 +7041,16 @@ with module.coordination_publication_lock(Path(repo_path)):
         other = self.mirror_coordinated_clone(
             origin, repo, f'{name}-other', ['integration/shared', branch],
         )
+        if split_claims:
+            for ref in extra_refs:
+                expected_tip = intent['changed_refs'][ref]
+                fixture_ref = 'refs/syncwheel/fixtures/pending-' + ref.rsplit('/', 1)[-1]
+                self.git(repo, 'merge-base', '--is-ancestor', f'origin/{ref[11:]}', expected_tip)
+                self.git(other, 'fetch', '-q', str(repo), f'{ref}:{fixture_ref}')
+                self.assertEqual(module.ref_tip(other, fixture_ref), expected_tip)
+                current_tip = module.ref_tip(other, ref[11:])
+                self.git(other, 'update-ref', ref, expected_tip, current_tip)
+                self.git(other, 'update-ref', '-d', fixture_ref, expected_tip)
         manifest, manifest_path = module.load_manifest(other)
         changed = {f'refs/heads/{branch}': module.ref_tip(other, branch)}
         if not split_claims:
