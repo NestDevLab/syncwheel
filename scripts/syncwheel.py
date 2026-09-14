@@ -15862,7 +15862,13 @@ def execute_replay_steps(repo_root, plan):
                 target_worktree = find_worktree_for_branch(repo_root, branch)
             else:
                 observed_reset_destination = checkout_reset_destination_lease(
-                    repo_root, branch
+                    repo_root,
+                    branch,
+                    status_base=reset_destination_lease.get('status_base'),
+                    allowed_paths=reset_destination_lease.get('allowed_paths'),
+                    allowed_path_prefixes=reset_destination_lease.get(
+                        'allowed_path_prefixes'
+                    ),
                 )
                 if observed_reset_destination != reset_destination_lease:
                     raise SyncwheelError(
@@ -16097,26 +16103,83 @@ def checkout_reset_guard(repo_root):
     }
 
 
-def checkout_reset_destination_lease(repo_root, branch):
-    """Bind the worktree that would receive an integration hard reset."""
+def checkout_reset_destination_lease(
+    repo_root, branch, status_base=None, allowed_paths=None,
+    allowed_path_prefixes=None,
+):
+    """Return one clean-validated observation of the integration reset target."""
     worktree = find_worktree_for_branch(repo_root, branch)
     branch_ref = f'refs/heads/{branch}'
+    allowed_paths = sorted(set(allowed_paths or ()))
+    allowed_path_prefixes = sorted({
+        str(prefix).replace('\\', '/').rstrip('/') + '/'
+        for prefix in (allowed_path_prefixes or ())
+    })
+    empty_status = {'staged': [], 'unstaged': [], 'untracked': []}
     if worktree is None:
         return {
             'branch_ref': branch_ref,
             'worktree_path': None,
+            'status_base': None,
+            'status': empty_status,
+            'allowed_paths': allowed_paths,
+            'allowed_path_prefixes': allowed_path_prefixes,
             'reset_guard_digest': None,
         }
     worktree = Path(worktree).resolve()
     observed_branch_ref = git(
         worktree, 'symbolic-ref', '--quiet', 'HEAD', check=False
     ).stdout.strip()
+    if observed_branch_ref != branch_ref:
+        raise SyncwheelError(
+            'integration reset destination changed during lease capture; '
+            'refusing to overwrite it'
+        )
+    status_base = status_base or ref_tip(worktree, 'HEAD')
+    before_guard = checkout_reset_guard(worktree)
+    staged_paths = sorted({
+        path for path in git(
+            worktree, 'diff', '--cached', '--name-only', '--no-renames', '-z',
+            status_base, '--',
+        ).stdout.split('\0')
+        if path
+    })
+    status = {
+        'staged': staged_paths,
+        'unstaged': sorted(before_guard['unstaged']),
+        'untracked': sorted(before_guard['untracked']),
+    }
+    changed_paths = sorted({
+        path for paths in status.values() for path in paths
+    })
+    unexpected_paths = [
+        path for path in changed_paths
+        if path not in allowed_paths and not any(
+            path.startswith(prefix) for prefix in allowed_path_prefixes
+        )
+    ]
+    after_guard = checkout_reset_guard(worktree)
+    final_branch_ref = git(
+        worktree, 'symbolic-ref', '--quiet', 'HEAD', check=False
+    ).stdout.strip()
+    if before_guard != after_guard or final_branch_ref != observed_branch_ref:
+        raise SyncwheelError(
+            'integration reset destination changed during lease capture; '
+            'refusing to overwrite it'
+        )
+    if unexpected_paths:
+        raise SyncwheelError(
+            'integration reset destination is not clean at lease capture; '
+            'refusing to overwrite it: ' + ', '.join(unexpected_paths)
+        )
     return {
         'branch_ref': observed_branch_ref,
         'worktree_path': str(worktree),
-        'reset_guard_digest': canonical_json_digest(
-            checkout_reset_guard(worktree)
-        ),
+        'status_base': status_base,
+        'status': status,
+        'allowed_paths': allowed_paths,
+        'allowed_path_prefixes': allowed_path_prefixes,
+        'reset_guard_digest': canonical_json_digest(after_guard),
     }
 
 
@@ -23609,6 +23672,10 @@ def command_reconcile(args):
             )
         elif action['type'] == 'rebuild_integration':
             integration = manifest['integration']
+            reset_destination_allowed_paths = control_manifest_source_allowance(
+                repo_root, manifest_path
+            )
+            reset_destination_allowed_prefixes = []
             use_primary_checkout = get_current_branch(repo_root) == integration['branch']
             if args.in_place_integration or use_primary_checkout:
                 if get_current_branch(repo_root) != integration['branch']:
@@ -23621,19 +23688,16 @@ def command_reconcile(args):
                     repo_root,
                     allowed_path_prefixes=['.syncwheel/'],
                     remedy_commands=primary_checkout_remedy_commands(manifest),
-                    allowed_paths=control_manifest_source_allowance(
-                        repo_root, manifest_path
-                    ),
+                    allowed_paths=reset_destination_allowed_paths,
                 )
+                reset_destination_allowed_prefixes = ['.syncwheel/']
                 worktree = None
                 in_place = True
             else:
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(
                     repo_root, integration['branch'], worktree,
-                    allowed_paths=control_manifest_source_allowance(
-                        repo_root, manifest_path
-                    ),
+                    allowed_paths=reset_destination_allowed_paths,
                 )
                 in_place = False
             mode, worktree = select_replay_mode(
@@ -23643,9 +23707,6 @@ def command_reconcile(args):
                 integration['branch'],
                 (worktree, in_place),
                 plumbing_supported=integration_supports_plumbing(manifest),
-            )
-            reset_destination_lease = checkout_reset_destination_lease(
-                repo_root, integration['branch']
             )
             reuse = plan_published_integration_tip_reuse(
                 repo_root, manifest, manifest_path
@@ -23673,6 +23734,16 @@ def command_reconcile(args):
                     'published integration replay lease changed before execution; '
                     'retry reconcile from a fresh observation'
                 )
+            reset_destination_lease = (
+                checkout_reset_destination_lease(
+                    repo_root,
+                    integration['branch'],
+                    allowed_paths=reset_destination_allowed_paths,
+                    allowed_path_prefixes=reset_destination_allowed_prefixes,
+                )
+                if published_replay
+                else None
+            )
             replay_mode = 'ephemeral' if published_replay else mode
             target = (
                 published_integration_replay_target(
@@ -24077,9 +24148,6 @@ def command_int_rebuild(args):
             repo_root, manifest['integration']['branch'], worktree,
             allowed_paths=source_allowance,
         )
-    reset_destination_lease = checkout_reset_destination_lease(
-        repo_root, integration['branch']
-    )
     reuse = plan_published_integration_tip_reuse(
         repo_root,
         manifest,
@@ -24149,6 +24217,15 @@ def command_int_rebuild(args):
             'published integration replay lease changed before execution; '
             'retry int rebuild from a fresh observation'
         )
+    reset_destination_lease = (
+        checkout_reset_destination_lease(
+            repo_root,
+            integration['branch'],
+            allowed_paths=source_allowance,
+        )
+        if published_replay and not args.dry_run
+        else None
+    )
     replay_mode = 'ephemeral' if published_replay else mode
     target = (
         published_integration_replay_target(
