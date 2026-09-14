@@ -4061,9 +4061,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         local_tip = self.git(
             fixture['repo'], 'rev-parse', 'integration/shared'
         ).stdout.strip()
-        suffix = list(reversed(module.rev_list(
+        suffix = module.rev_list(
             fixture['repo'], f"{fixture['integration_tip']}..{local_tip}"
-        )))
+        )
         self.assertTrue(suffix)
         self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
         self.assertEqual(plan['localIntegrationTip'], local_tip)
