@@ -415,6 +415,28 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
         self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
 
+    def anchor_generated_metadata_in_replay_base(self, repo):
+        """Keep generated initialization commits outside modeled integration work."""
+        setup_commits = self.git(
+            repo, 'rev-list', '--reverse', 'origin/main..HEAD'
+        ).stdout.split()
+        self.assertTrue(setup_commits)
+        for commit in setup_commits:
+            changed = set(
+                self.git(
+                    repo, 'show', '--format=', '--name-only', commit
+                ).stdout.splitlines()
+            )
+            self.assertTrue(changed)
+            self.assertLessEqual(
+                changed, {'.gitignore', '.syncwheel/manifest.json'}
+            )
+        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        self.assertEqual(
+            self.git(repo, 'rev-parse', 'origin/main').stdout.strip(),
+            self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+        )
+
     def set_integration_membership(self, repo, integration_membership):
         manifest_path = repo / '.syncwheel' / 'manifest.json'
         # Coordination fixtures model pre-existing repositories. Keep their
@@ -723,6 +745,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo, integration_membership='required')
+        self.anchor_generated_metadata_in_replay_base(repo)
         integration_commits = []
         for index in (1, 2):
             path = repo / f'unmapped-{index}.txt'
@@ -1504,6 +1527,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote('derived-paths-compose')
         repo = self.clone(origin, 'derived-paths-compose')
         self.init_coordinated(repo, integration_membership='required')
+        self.anchor_generated_metadata_in_replay_base(repo)
         manifest_path = repo / '.syncwheel' / 'manifest.json'
         manifest = json.loads(manifest_path.read_text())
         manifest['version'] = 3
@@ -1559,6 +1583,10 @@ with module.coordination_publication_lock(Path(repo_path)):
             '--branch', 'pr/derived-orphan',
         )
         self.run_cli(repo, 'stack', 'push', 'derived-orphan')
+        _remote_tip, remote_state = self.remote_state(origin)
+        published_integration_tip = remote_state['managed_refs'][
+            'refs/heads/integration/shared'
+        ]
         manifest_path.write_text(json.dumps(base_manifest, indent=2) + '\n')
         new_tip = self.commit_on_branch(repo, 'pr/derived-local', 'local.txt')
         self.run_cli(
@@ -1579,7 +1607,12 @@ with module.coordination_publication_lock(Path(repo_path)):
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
         self.assertEqual(plan['status'], 'publish-required')
-        self.assertEqual(plan['expectedIntegrationTip'], integration_tip)
+        self.assertEqual(plan['expectedIntegrationTip'], published_integration_tip)
+        self.assertNotEqual(published_integration_tip, integration_tip)
+        self.git(
+            repo, 'merge-base', '--is-ancestor', published_integration_tip,
+            integration_tip,
+        )
         self.git(
             repo, 'merge-base', '--is-ancestor', derived_tip, integration_tip,
         )
