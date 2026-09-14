@@ -4476,8 +4476,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         ]
         self.assertTrue(completed[-1]['recovered'])
 
-    def test_compose_stale_adoption_refuses_after_a_later_publication(self):
-        fixture = self.prepare_additive_compose('compose-stale-adoption')
+    def prepare_compose_adoption_race(self, name):
+        fixture = self.prepare_additive_compose(name)
         module = fixture['module']
         with mock.patch.object(
             module,
@@ -4526,6 +4526,43 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(
             peer, 'stack', 'create', 'third', third_tip, '--branch', 'pr/third'
         )
+        return fixture, stale_local, adoption_plan, peer, first_tip
+
+    def compose_adoption_local_snapshot(self, fixture):
+        module = fixture['module']
+        index_path = Path(
+            self.git(
+                fixture['repo'], 'rev-parse', '--path-format=absolute',
+                '--git-path', 'index',
+            ).stdout.strip()
+        )
+        return {
+            'heads': self.git(
+                fixture['repo'], 'for-each-ref',
+                '--format=%(refname) %(objectname)', 'refs/heads',
+            ).stdout,
+            'index': index_path.read_bytes(),
+            'status': self.git(
+                fixture['repo'], 'status', '--porcelain=v1'
+            ).stdout,
+            'manifest': fixture['manifest_path'].read_bytes(),
+            'events': module.load_ledger_events(
+                fixture['repo'], fixture['manifest_path']
+            ),
+        }
+
+    def assert_compose_adoption_refusal_is_local_noop(self, fixture, apply):
+        module = fixture['module']
+        before = self.compose_adoption_local_snapshot(fixture)
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            apply()
+        self.assertEqual(self.compose_adoption_local_snapshot(fixture), before)
+
+    def test_compose_stale_adoption_refuses_after_a_later_publication(self):
+        fixture, stale_local, adoption_plan, peer, first_tip = (
+            self.prepare_compose_adoption_race('compose-stale-adoption')
+        )
+        module = fixture['module']
         self.run_cli(peer, 'stack', 'push', 'third')
         second_tip, second_state = self.remote_state(fixture['origin'])
         self.assertNotEqual(second_tip, first_tip)
@@ -4533,47 +4570,54 @@ with module.coordination_publication_lock(Path(repo_path)):
             [stack['id'] for stack in second_state['manifest']['stacks']],
             ['orphan', 'new-stack', 'third'],
         )
-
-        index_path = Path(
-            self.git(
-                fixture['repo'], 'rev-parse', '--path-format=absolute',
-                '--git-path', 'index',
-            ).stdout.strip()
-        )
-
-        def local_snapshot():
-            return {
-                'heads': self.git(
-                    fixture['repo'], 'for-each-ref',
-                    '--format=%(refname) %(objectname)', 'refs/heads',
-                ).stdout,
-                'index': index_path.read_bytes(),
-                'status': self.git(
-                    fixture['repo'], 'status', '--porcelain=v1'
-                ).stdout,
-                'manifest': fixture['manifest_path'].read_bytes(),
-                'events': module.load_ledger_events(
-                    fixture['repo'], fixture['manifest_path']
-                ),
-            }
-
-        before = local_snapshot()
         remote_before = self.git(
             fixture['repo'], 'ls-remote', '--heads', 'origin'
         ).stdout
-        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
-            module.apply_coordination_compose_stack_plan(
+        self.assert_compose_adoption_refusal_is_local_noop(
+            fixture,
+            lambda: module.apply_coordination_compose_stack_plan(
                 fixture['repo'], stale_local,
                 fixture['manifest_path'], adoption_plan,
-            )
+            ),
+        )
 
-        self.assertEqual(local_snapshot(), before)
         self.assertEqual(
             self.git(
                 fixture['repo'], 'ls-remote', '--heads', 'origin'
             ).stdout,
             remote_before,
         )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], second_tip)
+
+    def test_compose_adoption_rechecks_state_after_landed_recovery(self):
+        fixture, stale_local, adoption_plan, peer, first_tip = (
+            self.prepare_compose_adoption_race('compose-adoption-postcheck-race')
+        )
+        module = fixture['module']
+        original_publish = module.coordinated_publish
+        second_tip = None
+
+        def publish_peer_before_recovery(*args, **kwargs):
+            nonlocal second_tip
+            self.run_cli(peer, 'stack', 'push', 'third')
+            second_tip, second_state = self.remote_state(fixture['origin'])
+            self.assertNotEqual(second_tip, first_tip)
+            self.assertEqual(
+                [stack['id'] for stack in second_state['manifest']['stacks']],
+                ['orphan', 'new-stack', 'third'],
+            )
+            return original_publish(*args, **kwargs)
+
+        with mock.patch.object(
+            module, 'coordinated_publish', side_effect=publish_peer_before_recovery
+        ):
+            self.assert_compose_adoption_refusal_is_local_noop(
+                fixture,
+                lambda: module.apply_coordination_compose_stack_plan(
+                    fixture['repo'], stale_local,
+                    fixture['manifest_path'], adoption_plan,
+                ),
+            )
         self.assertEqual(self.remote_state(fixture['origin'])[0], second_tip)
 
     def test_compose_stops_when_remote_state_lease_moves_after_plan(self):
