@@ -7105,7 +7105,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        self.track_fixture_ignore_in_replay_base(repo)
+        self.anchor_generated_metadata_in_replay_base(repo)
         self.run_cli(repo, 'int', 'push')
         feature_sha = self.commit_on_branch(repo, 'pr/feature-a', f'{name}-a.txt')
         self.run_cli(
@@ -7114,14 +7114,23 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(repo, 'stack', 'push', 'feature-a')
         return origin, repo
 
-    def diverge_manifest_from_integration_tip(self, repo, name, command):
-        if command[:2] == ('int', 'push'):
-            self.run_cli(repo, 'stack', 'demote', 'feature-a')
-            return
-        second_sha = self.commit_on_branch(repo, 'pr/feature-b', f'{name}-b.txt')
-        self.run_cli(
-            repo, 'stack', 'create', 'feature-b', second_sha, '--branch', 'pr/feature-b',
+    def external_manifest_proposal(self, repo, name, command):
+        proposal_path = self.tmp / f'{name}-proposal.json'
+        proposal_path.write_bytes(
+            (repo / '.syncwheel' / 'manifest.json').read_bytes()
         )
+        if command[:2] == ('int', 'push'):
+            self.run_cli(
+                repo, 'stack', 'demote', 'feature-a',
+                '--manifest', str(proposal_path),
+            )
+        else:
+            second_sha = self.commit_on_branch(repo, 'pr/feature-b', f'{name}-b.txt')
+            self.run_cli(
+                repo, 'stack', 'create', 'feature-b', second_sha,
+                '--branch', 'pr/feature-b', '--manifest', str(proposal_path),
+            )
+        return proposal_path
 
     def test_dirty_integration_checkout_refuses_before_the_control_ref_moves(self):
         module = self.load_module()
@@ -7133,23 +7142,63 @@ with module.coordination_publication_lock(Path(repo_path)):
             with self.subTest(command=name):
                 label = f'dirty-integration-{name}'
                 origin, repo = self.prepare_published_integration(label)
-                self.diverge_manifest_from_integration_tip(repo, label, command)
                 manifest_path = repo / '.syncwheel' / 'manifest.json'
+                proposal_path = self.external_manifest_proposal(
+                    repo, label, command
+                )
                 (repo / 'README.md').write_text('unrelated local edit\n')
                 before = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
+                index_path = Path(
+                    self.git(
+                        repo, 'rev-parse', '--path-format=absolute',
+                        '--git-path', 'index',
+                    ).stdout.strip()
+                )
 
-                failure = self.run_cli(repo, *command, expected=2)
+                def mutation_snapshot():
+                    return {
+                        'local_refs': self.git(
+                            repo, 'for-each-ref',
+                            '--format=%(refname) %(objectname)', 'refs/heads',
+                        ).stdout,
+                        'remote_refs': self.git(
+                            repo, 'ls-remote', '--heads', 'origin'
+                        ).stdout,
+                        'index': index_path.read_bytes(),
+                        'cached': self.git(
+                            repo, 'diff', '--cached', '--name-status'
+                        ).stdout,
+                        'status': self.git(
+                            repo, 'status', '--porcelain=v1'
+                        ).stdout,
+                        'manifest': manifest_path.read_bytes(),
+                        'proposal': proposal_path.read_bytes(),
+                        'readme': (repo / 'README.md').read_bytes(),
+                        'internal_events': module.load_ledger_events(
+                            repo, manifest_path
+                        ),
+                        'proposal_events': module.load_ledger_events(
+                            repo, proposal_path
+                        ),
+                    }
+
+                unchanged = mutation_snapshot()
+
+                failure = self.run_cli(
+                    repo, *command, '--manifest', str(proposal_path), expected=2
+                )
 
                 self.assertIn(str(repo), failure.stderr)
                 self.assertIn('README.md', failure.stderr)
                 self.assertIn(f'rerun: syncwheel {command[0]} {command[1]}', failure.stderr)
+                self.assertEqual(mutation_snapshot(), unchanged)
                 self.assertEqual(
                     self.git(repo, 'rev-parse', 'integration/shared').stdout.strip(),
                     before,
                 )
                 self.assertEqual(
                     module.pending_control_manifest_intents(
-                        module.load_ledger_events(repo, manifest_path)
+                        module.load_ledger_events(repo, proposal_path)
                     ),
                     [],
                 )
@@ -7158,11 +7207,13 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
 
                 self.git(repo, 'checkout', '--', 'README.md')
-                self.run_cli(repo, *command)
+                self.run_cli(
+                    repo, *command, '--manifest', str(proposal_path)
+                )
 
                 self.assertEqual(
                     module.pending_control_manifest_intents(
-                        module.load_ledger_events(repo, manifest_path)
+                        module.load_ledger_events(repo, proposal_path)
                     ),
                     [],
                 )
