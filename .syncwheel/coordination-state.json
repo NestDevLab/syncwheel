@@ -1,8 +1,10 @@
 {
   "changed_refs": {},
-  "claims": {},
+  "claims": {
+    "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
+  },
   "coordination_id": "default",
-  "created_at": "2026-09-14T19:46:17+00:00",
+  "created_at": "2026-09-14T19:46:46+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -59,9 +61,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "revision-provider-control-commit-ahead-v2"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -69,31 +69,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "syncwheel/draft/revision-provider-control-commit-ahead-v2",
-        "commits": [
-          "721fcca99f88dfea65180af9f2f8747a5db81f48"
-        ],
-        "id": "revision-provider-control-commit-ahead-v2",
-        "integration_branch": "main-integration",
-        "state": "draft",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "9737e6d2-a3f2-4472-b341-99e6caeff077",
-  "parent_state": "c902c0f3d5f749ceaf2f041c3f777f454201830b",
+  "operation_token": "b46891ff-a775-4d90-8332-0c2e3b55585b",
+  "parent_state": "e28c0f9699c2a72f126127d796bd845e8e396f9d",
   "projection_status": "partial",
-  "publication_id": "7e411fb1-deba-4e16-88f5-d5183bf48a87",
-  "publication_scope": "demote:revision-provider-control-commit-ahead-v2",
+  "publication_id": "0a4450b5-ee7f-4a96-b0c0-b0dbd9e8ca58",
+  "publication_scope": "close:revision-provider-control-commit-ahead-v2",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
   "tombstones": [
@@ -296,6 +280,14 @@
       "ref": "refs/heads/pr/agentwheel-revision-provider",
       "remote_tip": "04bdaae17296d5715ab8cf3fd9213da69075842b",
       "stack": "agentwheel-revision-provider"
+    },
+    {
+      "branch": "syncwheel/draft/revision-provider-control-commit-ahead-v2",
+      "closed_at": "2026-09-14T19:46:36+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2",
+      "remote_tip": "721fcca99f88dfea65180af9f2f8747a5db81f48",
+      "stack": "revision-provider-control-commit-ahead-v2"
     }
   ]
 }
