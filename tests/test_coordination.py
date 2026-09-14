@@ -397,7 +397,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.init_coordinated(
             publisher,
             integration_membership=(
-                'required' if integration_strategy == 'merge-stacks' else 'legacy'
+                'required' if integration_strategy is not None else 'legacy'
             ),
         )
         if integration_strategy is not None:
@@ -8615,7 +8615,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
 
     def test_a14_preserves_concurrent_tracked_edit_before_replay_reset(self):
-        fixture = self.a14_published_tip_reuse_fixture('a14-reset-window')
+        fixture = self.a14_published_tip_reuse_fixture(
+            'a14-reset-window', integration_strategy='cherry-pick'
+        )
         follower = fixture['follower']
         module = fixture['module']
         self.a14_checkout_published_integration(fixture)
@@ -8623,6 +8625,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             follower, fixture['manifest'], fixture['manifest_path']
         )
         self.assertEqual(plan['status'], 'replay')
+        self.assertTrue(plan['replayProductPaths'])
         remote_before = self.a14_remote_snapshot(fixture)
         original = module.find_worktree_for_branch
         injected = []
@@ -8682,7 +8685,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         observed = {}
         for kind in ('head', 'index', 'status', 'manifest', 'gitignore'):
             fixture = self.a14_published_tip_reuse_fixture(
-                f'a14-post-replay-{kind}'
+                f'a14-post-replay-{kind}', integration_strategy='cherry-pick'
             )
             follower = fixture['follower']
             module = fixture['module']
@@ -8691,6 +8694,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 follower, fixture['manifest'], fixture['manifest_path']
             )
             self.assertEqual(plan['status'], 'replay')
+            self.assertTrue(plan['replayProductPaths'])
             remote_before = self.a14_remote_snapshot(fixture)
             original = module.restore_control_manifest_after_integration_rebuild
             injected = []
