@@ -388,6 +388,99 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         return repo
 
+    def a14_published_tip_reuse_fixture(self, name, publisher_change=None):
+        """Create a follower whose integration ref starts at a published partial tip."""
+        origin = self.create_remote(name)
+        publisher = self.clone(origin, f'{name}-publisher')
+        self.init_coordinated(publisher)
+        if publisher_change == 'product':
+            (publisher / 'published-only.txt').write_text('published only\n')
+            self.git(publisher, 'add', 'published-only.txt')
+            self.git(
+                publisher, 'commit', '-q', '-m', 'test: published product delta'
+            )
+
+        source = self.commit_on_branch(
+            publisher, f'pr/{name}-s1', f'{name}-s1.txt'
+        )
+        self.run_cli(
+            publisher, 'stack', 'create', 's1', source,
+            '--branch', f'pr/{name}-s1',
+        )
+        self.run_cli(publisher, 'stack', 'push', 's1')
+
+        follower = self.clone(origin, f'{name}-follower')
+        (follower / '.syncwheel').mkdir(parents=True, exist_ok=True)
+        proposal = (publisher / '.syncwheel' / 'manifest.json').read_bytes()
+        (follower / '.syncwheel' / 'manifest.json').write_bytes(proposal)
+        self.disable_fixture_hooks(follower)
+        manifest = json.loads(proposal)
+        integration_branch = manifest['integration']['branch']
+        self.git(
+            follower, 'fetch', '-q', str(publisher),
+            f'refs/heads/pr/{name}-s1:refs/heads/pr/{name}-s1',
+        )
+        self.git(
+            follower, 'branch', integration_branch,
+            f'origin/{integration_branch}',
+        )
+        module = self.load_module()
+        loaded, manifest_path = module.load_manifest(follower)
+        return {
+            'module': module,
+            'manifest': loaded,
+            'manifest_path': manifest_path,
+            'origin': origin,
+            'publisher': publisher,
+            'follower': follower,
+            'integration_ref': f'refs/heads/{integration_branch}',
+            'published_tip': self.git(
+                follower, 'rev-parse', f'origin/{integration_branch}'
+            ).stdout.strip(),
+            'source': source,
+        }
+
+    def a14_checkout_published_integration(self, fixture):
+        follower = fixture['follower']
+        (follower / '.gitignore').unlink(missing_ok=True)
+        self.git(
+            follower, 'switch', '-q', fixture['manifest']['integration']['branch']
+        )
+
+    def a14_source_snapshot(self, fixture):
+        repo = fixture['follower']
+        manifest_path = fixture['manifest_path']
+
+        def optional_bytes(path):
+            return path.read_bytes() if path.exists() else None
+
+        return {
+            'head': self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+            'integration': self.git(
+                repo, 'rev-parse', fixture['integration_ref']
+            ).stdout.strip(),
+            'index': self.git(repo, 'ls-files', '--stage', '-z').stdout,
+            'status': self.git(
+                repo, 'status', '--porcelain=v1', '--untracked-files=all'
+            ).stdout,
+            'manifest': optional_bytes(manifest_path),
+            'gitignore': optional_bytes(repo / '.gitignore'),
+            'readme': optional_bytes(repo / 'README.md'),
+        }
+
+    def a14_remote_snapshot(self, fixture):
+        state_tip, state = self.remote_state(fixture['origin'])
+        heads = subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'for-each-ref',
+                '--format=%(refname) %(objectname)', 'refs/heads',
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        return {'state_tip': state_tip, 'state': state, 'heads': heads}
+
     def init_coordinated(self, repo, integration='integration/shared', integration_membership='legacy'):
         self.git(repo, 'branch', integration, 'origin/main')
         self.run_cli(
@@ -7838,3 +7931,196 @@ with module.coordination_publication_lock(Path(repo_path)):
             tip_y,
         )
         self.assertNotIn('Traceback', failure.stderr)
+
+    def test_a14_preserves_concurrent_tracked_edit_before_replay_reset(self):
+        fixture = self.a14_published_tip_reuse_fixture('a14-reset-window')
+        follower = fixture['follower']
+        module = fixture['module']
+        self.a14_checkout_published_integration(fixture)
+        plan = module.plan_published_integration_tip_reuse(
+            follower, fixture['manifest'], fixture['manifest_path']
+        )
+        self.assertEqual(plan['status'], 'replay')
+        remote_before = self.a14_remote_snapshot(fixture)
+        original = module.find_worktree_for_branch
+        injected = []
+
+        def inject_before_source_reset(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if (
+                not injected
+                and result is not None
+                and Path(result).resolve() == follower.resolve()
+                and module.ref_tip(follower, fixture['integration_ref'])
+                != plan['publishedTip']
+            ):
+                (follower / 'README.md').write_text(
+                    'concurrent tracked edit before replay reset\n'
+                )
+                injected.append(self.a14_source_snapshot(fixture))
+            return result
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'rebuild', '--repo', str(follower),
+            '--reason', 'exercise reset-window source lease',
+        ])
+        error = None
+        returncode = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            module, 'find_worktree_for_branch', side_effect=inject_before_source_reset
+        ):
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    returncode = args.func(args)
+            except module.SyncwheelError as exc:
+                error = str(exc)
+
+        observed = {
+            'reached_reset_window': len(injected) == 1,
+            'refused': error is not None or returncode == 2,
+            'source_snapshot_preserved': bool(injected)
+            and self.a14_source_snapshot(fixture) == injected[0],
+            'remote_unchanged': self.a14_remote_snapshot(fixture) == remote_before,
+        }
+        self.assertEqual(
+            observed,
+            {
+                'reached_reset_window': True,
+                'refused': True,
+                'source_snapshot_preserved': True,
+                'remote_unchanged': True,
+            },
+            'A14_RESET_WINDOW_TRACKED_EDIT',
+        )
+
+    def test_a14_rechecks_source_head_index_status_manifest_and_gitignore_after_replay(self):
+        observed = {}
+        for kind in ('head', 'index', 'status', 'manifest', 'gitignore'):
+            fixture = self.a14_published_tip_reuse_fixture(
+                f'a14-post-replay-{kind}'
+            )
+            follower = fixture['follower']
+            module = fixture['module']
+            self.a14_checkout_published_integration(fixture)
+            plan = module.plan_published_integration_tip_reuse(
+                follower, fixture['manifest'], fixture['manifest_path']
+            )
+            self.assertEqual(plan['status'], 'replay')
+            remote_before = self.a14_remote_snapshot(fixture)
+            original = module.restore_control_manifest_after_integration_rebuild
+            injected = []
+
+            def inject_after_restore(*args, **kwargs):
+                result = original(*args, **kwargs)
+                if injected:
+                    return result
+                if kind == 'head':
+                    self.git(
+                        follower, 'commit', '--allow-empty', '-q', '-m',
+                        'test: concurrent post-replay head',
+                    )
+                elif kind == 'index':
+                    (follower / 'README.md').write_text(
+                        'concurrent post-replay index\n'
+                    )
+                    self.git(follower, 'add', 'README.md')
+                elif kind == 'status':
+                    (follower / 'README.md').write_text(
+                        'concurrent post-replay status\n'
+                    )
+                elif kind == 'manifest':
+                    path = fixture['manifest_path']
+                    path.write_bytes(path.read_bytes() + b' ')
+                else:
+                    path = follower / '.gitignore'
+                    path.write_bytes(path.read_bytes() + b'# concurrent source lease\n')
+                injected.append(self.a14_source_snapshot(fixture))
+                return result
+
+            parser = module.build_parser()
+            args = parser.parse_args([
+                'int', 'rebuild', '--repo', str(follower),
+                '--reason', f'exercise post-replay {kind} source lease',
+            ])
+            error = None
+            returncode = None
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                module,
+                'restore_control_manifest_after_integration_rebuild',
+                side_effect=inject_after_restore,
+            ):
+                try:
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        returncode = args.func(args)
+                except module.SyncwheelError as exc:
+                    error = str(exc)
+
+            observed[kind] = {
+                'reached_post_replay': len(injected) == 1,
+                'refused': error is not None or returncode == 2,
+                'source_snapshot_preserved': bool(injected)
+                and self.a14_source_snapshot(fixture) == injected[0],
+                'remote_unchanged': self.a14_remote_snapshot(fixture) == remote_before,
+            }
+
+        expected = {
+            kind: {
+                'reached_post_replay': True,
+                'refused': True,
+                'source_snapshot_preserved': True,
+                'remote_unchanged': True,
+            }
+            for kind in ('head', 'index', 'status', 'manifest', 'gitignore')
+        }
+        self.assertEqual(observed, expected, 'A14_SOURCE_LEASE_POST_REPLAY')
+
+    def test_a14_refuses_unmapped_product_fallback_during_int_rebuild(self):
+        fixture = self.a14_published_tip_reuse_fixture(
+            'a14-unmapped-product', publisher_change='product'
+        )
+        follower = fixture['follower']
+        module = fixture['module']
+        self.a14_checkout_published_integration(fixture)
+        plan = module.plan_published_integration_tip_reuse(
+            follower, fixture['manifest'], fixture['manifest_path']
+        )
+        self.assertEqual(plan['status'], 'fallback')
+        self.assertIn('unexplained product paths', plan['reason'])
+        local_before = self.a14_source_snapshot(fixture)
+        remote_before = self.a14_remote_snapshot(fixture)
+        published_before = self.git(
+            follower, 'show',
+            f"{fixture['published_tip']}:published-only.txt",
+        ).stdout
+
+        failure = self.run_cli_unchecked(
+            follower, 'int', 'rebuild',
+            '--reason', 'refuse an unmapped published product fallback',
+        )
+
+        observed = {
+            'returncode': failure.returncode,
+            'named_refusal': 'unexplained product paths' in failure.stderr,
+            'local_unchanged': self.a14_source_snapshot(fixture) == local_before,
+            'remote_unchanged': self.a14_remote_snapshot(fixture) == remote_before,
+            'published_bytes_preserved': self.git(
+                follower, 'show',
+                f"{fixture['published_tip']}:published-only.txt",
+            ).stdout == published_before == 'published only\n',
+        }
+        self.assertEqual(
+            observed,
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'local_unchanged': True,
+                'remote_unchanged': True,
+                'published_bytes_preserved': True,
+            },
+            'A14_UNMAPPED_PRODUCT_REFUSAL',
+        )
