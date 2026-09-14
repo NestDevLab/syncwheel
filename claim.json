@@ -1,0 +1,11 @@
+{
+  "changed_refs": [],
+  "claimed_at": "2026-09-14T19:46:45+00:00",
+  "closed": true,
+  "coordination_id": "default",
+  "operation_token": "b46891ff-a775-4d90-8332-0c2e3b55585b",
+  "publication_scope": "close:revision-provider-control-commit-ahead-v2",
+  "reason": "merged",
+  "source_ref": "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2",
+  "syncwheel_version": "0.43.5"
+}
