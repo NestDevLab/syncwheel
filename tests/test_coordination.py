@@ -4170,6 +4170,122 @@ with module.coordination_publication_lock(Path(repo_path)):
                 applying['plan'],
             )
 
+    def test_compose_pending_intent_rechecks_local_integration_before_publication(self):
+        for suffix_kind in ('manifest', 'product'):
+            with self.subTest(suffix_kind=suffix_kind):
+                fixture = self.prepare_additive_compose(
+                    f'compose-pending-{suffix_kind}'
+                )
+                module = fixture['module']
+                plan = fixture['plan']
+                proposed = module.apply_coordination_snapshot(
+                    fixture['manifest'], plan['composedSnapshot']
+                )
+                operation = module.begin_coordination_publication(
+                    fixture['repo'],
+                    proposed,
+                    fixture['manifest_path'],
+                    {plan['sourceRef']: plan['sourceTip']},
+                    f"compose-stack:{plan['stack']}",
+                    plan['projectionStatus'],
+                    expected_state_tip=plan['expectedRemoteStateTip'],
+                )
+                self.assertFalse(operation['retry'])
+                remote_before = self.git(
+                    fixture['repo'], 'ls-remote', '--heads', 'origin'
+                ).stdout
+                remote_integration_tree = module.ref_tree(
+                    fixture['repo'], fixture['integration_tip']
+                )
+                local_tip = plan['localIntegrationTip']
+                if suffix_kind == 'manifest':
+                    alternate = json.loads(json.dumps(fixture['manifest']))
+                    alternate['stacks'][0]['meta']['purpose'] = 'pending-race'
+                    moved_tip = module.materialize_control_manifest_commit(
+                        fixture['repo'], alternate, local_tip
+                    )
+                    module.git(
+                        fixture['repo'], 'update-ref',
+                        'refs/heads/integration/shared', moved_tip, local_tip,
+                    )
+                else:
+                    path = fixture['repo'] / 'pending-product.txt'
+                    path.write_text('pending product\n')
+                    self.git(fixture['repo'], 'add', path.name)
+                    self.git(
+                        fixture['repo'], 'commit', '-qm',
+                        'test: pending product integration race',
+                    )
+
+                failure = None
+                try:
+                    module.apply_coordination_compose_stack_plan(
+                        fixture['repo'], fixture['manifest'],
+                        fixture['manifest_path'], plan,
+                    )
+                except module.SyncwheelError as exc:
+                    failure = str(exc)
+
+                self.assertEqual(
+                    self.git(
+                        fixture['repo'], 'ls-remote', '--heads', 'origin'
+                    ).stdout,
+                    remote_before,
+                )
+                self.assertEqual(
+                    module.ref_tree(fixture['repo'], fixture['integration_tip']),
+                    remote_integration_tree,
+                )
+                self.assertIsNotNone(failure)
+                self.assertIn('reviewed plan drifted', failure)
+
+    def test_compose_rejects_missing_behind_and_diverged_local_integration(self):
+        for relation in ('missing', 'behind', 'diverged'):
+            with self.subTest(relation=relation):
+                fixture = self.prepare_additive_compose(
+                    f'compose-local-{relation}', plan=False
+                )
+                module = fixture['module']
+                local_tip = module.ref_tip(fixture['repo'], 'integration/shared')
+                published_tip = fixture['integration_tip']
+                if relation == 'missing':
+                    module.git(
+                        fixture['repo'], 'update-ref', '-d',
+                        'refs/heads/integration/shared', local_tip,
+                    )
+                else:
+                    published_parent = module.commit_first_parent(
+                        fixture['repo'], published_tip
+                    )
+                    replacement = published_parent
+                    if relation == 'diverged':
+                        alternate = json.loads(json.dumps(fixture['manifest']))
+                        alternate['stacks'][0]['meta']['purpose'] = 'diverged'
+                        replacement = module.materialize_control_manifest_commit(
+                            fixture['repo'], alternate, published_parent
+                        )
+                    module.git(
+                        fixture['repo'], 'update-ref',
+                        'refs/heads/integration/shared', replacement, local_tip,
+                    )
+
+                remote_before = self.git(
+                    fixture['repo'], 'ls-remote', '--heads', 'origin'
+                ).stdout
+                with self.assertRaisesRegex(
+                    module.SyncwheelError, 'linear manifest-only control suffix'
+                ):
+                    module.coordination_compose_stack_plan(
+                        fixture['repo'], fixture['manifest'], 'new-stack',
+                        fixture['base_tip'], fixture['base_state']['manifest_digest'],
+                    )
+                self.assertEqual(
+                    self.git(
+                        fixture['repo'], 'ls-remote', '--heads', 'origin'
+                    ).stdout,
+                    remote_before,
+                )
+
     def test_compose_publishes_new_stack_and_preserves_remote_stack_and_unmapped_integration(self):
         fixture = self.prepare_additive_compose()
         module = fixture['module']
