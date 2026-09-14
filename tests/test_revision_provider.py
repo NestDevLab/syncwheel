@@ -1242,6 +1242,44 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         repeated, _ = self.fixture.protocol_request({**request, 'action': 'recover'})
         self.assertEqual(repeated, {**finalized, 'action': 'recover'})
 
+    def test_stack_ownership_leaves_control_commit_to_the_provider(self):
+        observed = {}
+
+        class StackOwnershipProbe(SYNCWHEEL.SyncwheelRevisionBackend):
+            def prepare_control_commit(self, request, message):
+                repo_root = self._repo_root(request)
+                journal = self.load_journal(request)
+                observed.update(
+                    {
+                        'head': SYNCWHEEL.ref_tip(repo_root, 'HEAD'),
+                        'product': journal['productCommitSha'],
+                        'dirty': self._dirty_paths(repo_root),
+                    }
+                )
+                return super().prepare_control_commit(request, message)
+
+        payload = self.fixture.request(
+            'preflight', operation_id='provider-owns-control-commit'
+        )
+        request = protocol.parse_request(payload)
+        backend = StackOwnershipProbe(protocol)
+        protocol.handle_request(
+            backend,
+            protocol.parse_request(self.fixture.check_request(payload)),
+        )
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        protocol.handle_request(backend, request)
+        finalized = protocol.handle_request(
+            backend, replace(request, action='finalize')
+        )
+
+        self.assertEqual(observed['head'], observed['product'])
+        self.assertEqual(observed['dirty'], {'.syncwheel/manifest.json'})
+        self.assertEqual(finalized['status'], 'verified')
+        self.assertEqual(
+            self.fixture.git('rev-parse', 'HEAD'), finalized['controlCommitSha']
+        )
+
     def test_route_is_manifest_base_when_projection_reproduces_product_blobs(self):
         request = self.fixture.request(
             'preflight', operation_id='manifest-base-route'

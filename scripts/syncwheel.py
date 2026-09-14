@@ -4566,7 +4566,9 @@ def require_manifest_transaction_current(manifest_path):
 
 
 @contextlib.contextmanager
-def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command'):
+def manifest_write_transaction(
+    repo_root, manifest_path, owner='manifest-command', *, commit_tracked_changes=True,
+):
     identity = str(Path(manifest_path).resolve(strict=False))
     transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', None)
     if transactions is None:
@@ -4592,7 +4594,9 @@ def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command
         transactions[identity] = transaction
         try:
             yield
-            if transaction['manifestWritten'] or transaction['gitignoreWritten']:
+            if commit_tracked_changes and (
+                transaction['manifestWritten'] or transaction['gitignoreWritten']
+            ):
                 commit_git_tracked_manifest(
                     repo_root,
                     manifest_path,
@@ -25757,7 +25761,12 @@ class SyncwheelRevisionBackend:
             ),
         )
         manifest, manifest_path = self._manifest(repo_root)
-        with manifest_write_transaction(repo_root, manifest_path, 'revision-provider'):
+        with manifest_write_transaction(
+            repo_root,
+            manifest_path,
+            'revision-provider',
+            commit_tracked_changes=False,
+        ):
             manifest, _ = self._manifest(repo_root)
             desired = self._desired_stack(request, journal, manifest)
             existing = stack_map(manifest).get(request.draft_stack_id)
