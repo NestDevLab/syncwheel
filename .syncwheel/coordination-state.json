@@ -1,10 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "721fcca99f88dfea65180af9f2f8747a5db81f48",
-    "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48"
-  },
+  "changed_refs": {},
   "coordination_id": "default",
-  "created_at": "2026-08-31T16:39:50+00:00",
+  "created_at": "2026-09-14T19:45:43+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -90,13 +87,23 @@
     ],
     "version": 2
   },
-  "manifest_digest": "3df5c678ad5341a46b83acc4175d8b266e93e4a865143ad6cbee4ba21e83c352",
-  "parent_state": "36507af5e4ef537ba79d7274d686132f7652bfb9",
+  "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
+  "parent_state": "e51e3c789e48b6df8188728ec483f98655d80a36",
   "projection_status": "partial",
-  "publication_id": "a93124fd-610b-469c-a97f-b64cc8f8f776",
-  "publication_scope": "partial",
+  "publication_id": "70ca7943-c480-4fab-b05e-df4e4c722935",
+  "publication_scope": "repair-digest-heal:refs/heads/main-integration",
+  "repair_evidence": {
+    "manifestDigest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
+    "observedTip": "721fcca99f88dfea65180af9f2f8747a5db81f48",
+    "planDigest": "a4cd4502110976b1c30393aa2c386ffc83059b3bfb311969e5019ff9cb83e27a",
+    "proof": "exact-recomputed-control-manifest-digest",
+    "recordedManifestDigest": "3df5c678ad5341a46b83acc4175d8b266e93e4a865143ad6cbee4ba21e83c352",
+    "recordedTip": "721fcca99f88dfea65180af9f2f8747a5db81f48",
+    "ref": "refs/heads/main-integration",
+    "schemaVersion": 1
+  },
   "schema_version": 2,
-  "syncwheel_version": "0.36.1",
+  "syncwheel_version": "0.43.5",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
