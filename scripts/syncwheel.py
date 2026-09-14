@@ -10789,6 +10789,41 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
     return repaired
 
 
+def coordination_compose_local_control_suffix(
+    repo_root, published_integration_tip, local_integration_tip,
+):
+    """Prove the complete local-only suffix is linear manifest control history."""
+    refusal = (
+        'coordination compose local integration must equal the published tip or '
+        'carry a complete linear manifest-only control suffix'
+    )
+    if not local_integration_tip:
+        raise SyncwheelError(refusal)
+    if local_integration_tip == published_integration_tip:
+        return []
+    ancestor = git(
+        repo_root,
+        'merge-base',
+        '--is-ancestor',
+        published_integration_tip,
+        local_integration_tip,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise SyncwheelError(refusal)
+    reverse_suffix = []
+    current = local_integration_tip
+    while current != published_integration_tip:
+        parents = git(
+            repo_root, 'show', '-s', '--format=%P', current, check=False
+        ).stdout.split()
+        if len(parents) != 1 or not is_manifest_only_commit(repo_root, current):
+            raise SyncwheelError(refusal)
+        reverse_suffix.append(current)
+        current = parents[0]
+    return list(reversed(reverse_suffix))
+
+
 def coordination_compose_stack_plan(
     repo_root, manifest, stack_id, known_base_state_tip, known_base_manifest_digest
 ):
@@ -10853,10 +10888,14 @@ def coordination_compose_stack_plan(
     integration_tip = latest['state']['managed_refs'].get(integration_ref)
     if not integration_tip or observed_refs.get(integration_ref) != integration_tip:
         raise SyncwheelError('coordination compose requires an exact unchanged integration tip')
-    if ref_tip(repo_root, manifest['integration']['branch']) != integration_tip:
-        raise SyncwheelError('coordination compose local integration must match the remote state tip exactly')
+    local_integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
+    local_control_suffix = coordination_compose_local_control_suffix(
+        repo_root, integration_tip, local_integration_tip
+    )
     proposed_manifest = apply_coordination_snapshot(manifest, merged_snapshot)
     validation = validate_manifest(repo_root, proposed_manifest)
+    if ref_tip(repo_root, manifest['integration']['branch']) != local_integration_tip:
+        raise SyncwheelError('coordination compose local integration changed during planning')
     if validation['errors']:
         raise SyncwheelError(
             'coordination compose proposed manifest is invalid: ' + '; '.join(validation['errors'])
@@ -10886,6 +10925,11 @@ def coordination_compose_stack_plan(
         'integrationRef': integration_ref,
         'expectedIntegrationTip': integration_tip,
         'expectedIntegrationTree': ref_tree(repo_root, integration_tip),
+        'localIntegrationTip': local_integration_tip,
+        'localIntegrationControlSuffix': local_control_suffix,
+        'localIntegrationControlSuffixDigest': canonical_json_digest(
+            local_control_suffix
+        ),
         'unmappedIntegrationCommits': unmapped,
         'projectionStatus': 'partial',
         'integrationMutation': False,
