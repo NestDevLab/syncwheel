@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.43.6 - 2026-09-14
+
+- Keep revision-provider draft ownership changes uncommitted until the provider
+  creates its single control commit. Finalization therefore observes the
+  product revision at `HEAD` and retains provider ownership of the control
+  commit.
+- Compose a new stack over a published coordination state when the local
+  integration tip adds only a linear manifest-only control suffix. Bind the
+  plan to that ordered suffix and to the reviewed local, ref, digest and state
+  leases; rederive unlanded pending plans and verify landed adoption results
+  before saving local state. Product, merge, missing, behind, diverged and race
+  cases remain fail-closed while unrelated published stacks and unmapped
+  integration bytes are preserved.
+- Rebuild declared stack product changes from a published partial projection
+  while refusing unexplained product loss. Apply the integration-successor
+  check to every operation that changes the integration ref, preserve the
+  existing complete claim and landing proof checks, and refresh legacy
+  coordination digests when they migrate to the current manifest form.
+- Bind replay resets to separate leases for the source checkout and the
+  observed destination checkout. Recheck the source HEAD, index, status,
+  manifest and managed `.gitignore`, and the destination path, branch checkout,
+  index and status; allow only declared control metadata changes, refuse
+  concurrent dirt or path drift, and reset only the leased destination.
+
 ## 0.43.5 - 2026-09-05
 
 - Include `.gitignore` in the same path-limited transaction commit as the
