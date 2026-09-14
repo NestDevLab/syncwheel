@@ -4237,7 +4237,12 @@ with module.coordination_publication_lock(Path(repo_path)):
                     remote_integration_tree,
                 )
                 self.assertIsNotNone(failure)
-                self.assertIn('reviewed plan drifted', failure)
+                expected_failure = (
+                    'reviewed plan drifted'
+                    if suffix_kind == 'manifest'
+                    else 'linear manifest-only control suffix'
+                )
+                self.assertIn(expected_failure, failure)
 
     def test_compose_rejects_missing_behind_and_diverged_local_integration(self):
         for relation in ('missing', 'behind', 'diverged'):
