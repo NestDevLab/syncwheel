@@ -741,7 +741,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             'control_digest': control_digest,
         }
 
-    def prepare_additive_compose(self, name='additive-compose'):
+    def prepare_additive_compose(self, name='additive-compose', plan=True):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo, integration_membership='required')
@@ -771,13 +771,15 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         module = self.load_module()
         manifest, manifest_path = module.load_manifest(repo)
-        plan, proposed, _ = module.coordination_compose_stack_plan(
-            repo,
-            manifest,
-            'new-stack',
-            base_tip,
-            base_state['manifest_digest'],
-        )
+        compose_plan = proposed = None
+        if plan:
+            compose_plan, proposed, _ = module.coordination_compose_stack_plan(
+                repo,
+                manifest,
+                'new-stack',
+                base_tip,
+                base_state['manifest_digest'],
+            )
         return {
             'origin': origin,
             'repo': repo,
@@ -794,7 +796,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 'refs/heads/integration/shared'
             ],
             'integration_commits': integration_commits,
-            'plan': plan,
+            'plan': compose_plan,
             'proposed': proposed,
         }
 
@@ -4044,14 +4046,150 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.remote_state(fixture['origin'], 'second-domain')[0], competing_tip
         )
 
+    def test_compose_binds_a_linear_local_manifest_only_suffix(self):
+        fixture = self.prepare_additive_compose('compose-local-control', plan=False)
+        module = fixture['module']
+
+        plan, _proposed, _remote = module.coordination_compose_stack_plan(
+            fixture['repo'],
+            fixture['manifest'],
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+
+        local_tip = self.git(
+            fixture['repo'], 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+        suffix = list(reversed(module.rev_list(
+            fixture['repo'], f"{fixture['integration_tip']}..{local_tip}"
+        )))
+        self.assertTrue(suffix)
+        self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
+        self.assertEqual(plan['localIntegrationTip'], local_tip)
+        self.assertEqual(plan['localIntegrationControlSuffix'], suffix)
+        self.assertEqual(
+            plan['localIntegrationControlSuffixDigest'],
+            module.canonical_json_digest(suffix),
+        )
+        for commit in suffix:
+            self.assertEqual(module.commit_parent_count(fixture['repo'], commit), 1)
+            self.assertTrue(module.is_manifest_only_commit(fixture['repo'], commit))
+
+    def test_compose_rejects_product_and_merge_local_integration_suffixes(self):
+        product = self.prepare_additive_compose('compose-product-suffix', plan=False)
+        product_path = product['repo'] / 'unexpected-product.txt'
+        product_path.write_text('unexpected\n')
+        self.git(product['repo'], 'add', product_path.name)
+        self.git(product['repo'], 'commit', '-qm', 'test: unexpected local product')
+        with self.assertRaisesRegex(
+            product['module'].SyncwheelError,
+            'linear manifest-only control suffix',
+        ):
+            product['module'].coordination_compose_stack_plan(
+                product['repo'], product['manifest'], 'new-stack',
+                product['base_tip'], product['base_state']['manifest_digest'],
+            )
+
+        merged = self.prepare_additive_compose('compose-merge-suffix', plan=False)
+        module = merged['module']
+        local_tip = module.ref_tip(merged['repo'], 'integration/shared')
+        alternate = json.loads(json.dumps(merged['manifest']))
+        alternate['stacks'][0]['meta']['purpose'] = 'merge-parent'
+        second_parent = module.materialize_control_manifest_commit(
+            merged['repo'], alternate, local_tip
+        )
+        merge_tip = module.git(
+            merged['repo'], 'commit-tree', module.ref_tree(merged['repo'], second_parent),
+            '-p', local_tip, '-p', second_parent,
+            '-m', 'test: merge local control proposals',
+        ).stdout.strip()
+        module.git(
+            merged['repo'], 'update-ref', 'refs/heads/integration/shared',
+            merge_tip, local_tip,
+        )
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'linear manifest-only control suffix',
+        ):
+            module.coordination_compose_stack_plan(
+                merged['repo'], merged['manifest'], 'new-stack',
+                merged['base_tip'], merged['base_state']['manifest_digest'],
+            )
+
+    def test_compose_detects_local_integration_races(self):
+        planning = self.prepare_additive_compose('compose-local-plan-race', plan=False)
+        module = planning['module']
+        original_validate = module.validate_manifest
+        raced = False
+
+        def move_local_control_tip(repo_root, manifest):
+            nonlocal raced
+            result = original_validate(repo_root, manifest)
+            if not raced:
+                raced = True
+                observed = module.ref_tip(repo_root, manifest['integration']['branch'])
+                alternate = json.loads(json.dumps(manifest))
+                alternate['stacks'][0]['meta']['purpose'] = 'planning-race'
+                advanced = module.materialize_control_manifest_commit(
+                    repo_root, alternate, observed
+                )
+                module.git(
+                    repo_root, 'update-ref',
+                    f"refs/heads/{manifest['integration']['branch']}",
+                    advanced, observed,
+                )
+            return result
+
+        with mock.patch.object(
+            module, 'validate_manifest', side_effect=move_local_control_tip
+        ):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'local integration changed during planning'
+            ):
+                module.coordination_compose_stack_plan(
+                    planning['repo'], planning['manifest'], 'new-stack',
+                    planning['base_tip'], planning['base_state']['manifest_digest'],
+                )
+
+        applying = self.prepare_additive_compose('compose-local-apply-race')
+        module = applying['module']
+        observed = applying['plan']['localIntegrationTip']
+        alternate = json.loads(json.dumps(applying['manifest']))
+        alternate['stacks'][0]['meta']['purpose'] = 'apply-race'
+        advanced = module.materialize_control_manifest_commit(
+            applying['repo'], alternate, observed
+        )
+        module.git(
+            applying['repo'], 'update-ref', 'refs/heads/integration/shared',
+            advanced, observed,
+        )
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_compose_stack_plan(
+                applying['repo'], applying['manifest'], applying['manifest_path'],
+                applying['plan'],
+            )
+
     def test_compose_publishes_new_stack_and_preserves_remote_stack_and_unmapped_integration(self):
         fixture = self.prepare_additive_compose()
         module = fixture['module']
         plan = fixture['plan']
+        local_integration_tip = self.git(
+            fixture['repo'], 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+        remote_integration_tree = module.ref_tree(
+            fixture['repo'], fixture['integration_tip']
+        )
         self.assertEqual(plan['status'], 'publish-required')
         self.assertEqual(plan['remoteAddedStacks'], ['orphan'])
         self.assertEqual(plan['localAddedStacks'], ['new-stack'])
         self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
+        self.assertEqual(plan['localIntegrationTip'], local_integration_tip)
+        self.assertTrue(plan['localIntegrationControlSuffix'])
+        self.assertEqual(
+            plan['localIntegrationControlSuffixDigest'],
+            module.canonical_json_digest(plan['localIntegrationControlSuffix']),
+        )
         self.assertEqual(plan['unmappedIntegrationCommits'], fixture['integration_commits'])
         self.assertFalse(plan['integrationMutation'])
         self.assertEqual(
@@ -4091,6 +4229,16 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue(any(item.endswith(':refs/heads/pr/new-stack') for item in command))
         self.assertFalse(any(item.endswith(':refs/heads/pr/orphan') for item in command))
         self.assertFalse(any(item.endswith(f":{plan['integrationRef']}") for item in command))
+        self.assertEqual(
+            self.git(
+                fixture['repo'], 'ls-remote', 'origin', plan['integrationRef']
+            ).stdout.split()[0],
+            fixture['integration_tip'],
+        )
+        self.assertEqual(
+            module.ref_tree(fixture['repo'], fixture['integration_tip']),
+            remote_integration_tree,
+        )
 
         accepted_tip, accepted = self.remote_state(fixture['origin'])
         self.assertEqual(accepted_tip, result['remote_state_tip'])
