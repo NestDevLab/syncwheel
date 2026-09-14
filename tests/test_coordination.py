@@ -4476,6 +4476,106 @@ with module.coordination_publication_lock(Path(repo_path)):
         ]
         self.assertTrue(completed[-1]['recovered'])
 
+    def test_compose_stale_adoption_refuses_after_a_later_publication(self):
+        fixture = self.prepare_additive_compose('compose-stale-adoption')
+        module = fixture['module']
+        with mock.patch.object(
+            module,
+            'save_manifest_with_ledger',
+            side_effect=module.SyncwheelError('fixture manifest save failed'),
+        ):
+            with self.assertRaisesRegex(module.SyncwheelError, 'local adoption pending'):
+                module.apply_coordination_compose_stack_plan(
+                    fixture['repo'],
+                    fixture['manifest'],
+                    fixture['manifest_path'],
+                    fixture['plan'],
+                )
+
+        first_tip, first_state = self.remote_state(fixture['origin'])
+        stale_local, _ = module.load_manifest(
+            fixture['repo'], fixture['manifest_path']
+        )
+        adoption_plan, _, _ = module.coordination_compose_stack_plan(
+            fixture['repo'],
+            stale_local,
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+        self.assertEqual(adoption_plan['status'], 'adopt-only')
+        self.assertEqual(adoption_plan['expectedRemoteStateTip'], first_tip)
+
+        peer = self.clone(fixture['origin'], 'compose-stale-adoption-peer')
+        (peer / '.syncwheel').mkdir(parents=True, exist_ok=True)
+        peer_manifest = module.apply_coordination_snapshot(
+            stale_local, first_state['manifest']
+        )
+        (peer / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(peer_manifest, indent=2) + '\n'
+        )
+        self.disable_fixture_hooks(peer)
+        for branch in ('integration/shared', 'pr/orphan', 'pr/new-stack'):
+            self.git(peer, 'branch', branch, f'origin/{branch}')
+        self.run_cli(
+            peer,
+            'int', 'rebuild',
+            '--reason', 'adopt the first compose publication',
+        )
+        third_tip = self.commit_on_branch(peer, 'pr/third', 'third.txt')
+        self.run_cli(
+            peer, 'stack', 'create', 'third', third_tip, '--branch', 'pr/third'
+        )
+        self.run_cli(peer, 'stack', 'push', 'third')
+        second_tip, second_state = self.remote_state(fixture['origin'])
+        self.assertNotEqual(second_tip, first_tip)
+        self.assertEqual(
+            [stack['id'] for stack in second_state['manifest']['stacks']],
+            ['orphan', 'new-stack', 'third'],
+        )
+
+        index_path = Path(
+            self.git(
+                fixture['repo'], 'rev-parse', '--path-format=absolute',
+                '--git-path', 'index',
+            ).stdout.strip()
+        )
+
+        def local_snapshot():
+            return {
+                'heads': self.git(
+                    fixture['repo'], 'for-each-ref',
+                    '--format=%(refname) %(objectname)', 'refs/heads',
+                ).stdout,
+                'index': index_path.read_bytes(),
+                'status': self.git(
+                    fixture['repo'], 'status', '--porcelain=v1'
+                ).stdout,
+                'manifest': fixture['manifest_path'].read_bytes(),
+                'events': module.load_ledger_events(
+                    fixture['repo'], fixture['manifest_path']
+                ),
+            }
+
+        before = local_snapshot()
+        remote_before = self.git(
+            fixture['repo'], 'ls-remote', '--heads', 'origin'
+        ).stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_compose_stack_plan(
+                fixture['repo'], stale_local,
+                fixture['manifest_path'], adoption_plan,
+            )
+
+        self.assertEqual(local_snapshot(), before)
+        self.assertEqual(
+            self.git(
+                fixture['repo'], 'ls-remote', '--heads', 'origin'
+            ).stdout,
+            remote_before,
+        )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], second_tip)
+
     def test_compose_stops_when_remote_state_lease_moves_after_plan(self):
         fixture = self.prepare_additive_compose('compose-state-race')
         module = fixture['module']
