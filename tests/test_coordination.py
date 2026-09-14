@@ -410,11 +410,6 @@ with module.coordination_publication_lock(Path(repo_path)):
             '--reason', 'coordination fixture uses raw primary branch setup', '--apply',
         )
 
-    def track_fixture_ignore_in_replay_base(self, repo):
-        self.git(repo, 'add', '.gitignore')
-        self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
-        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
-
     def anchor_generated_metadata_in_replay_base(self, repo):
         """Keep generated initialization commits outside modeled integration work."""
         setup_commits = self.git(
@@ -422,6 +417,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         ).stdout.split()
         self.assertTrue(setup_commits)
         for commit in setup_commits:
+            commit_with_parent = self.git(
+                repo, 'rev-list', '--parents', '-n', '1', commit
+            ).stdout.split()
+            self.assertEqual(len(commit_with_parent), 2)
             changed = set(
                 self.git(
                     repo, 'show', '--format=', '--name-only', commit
@@ -436,6 +435,82 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.git(repo, 'rev-parse', 'origin/main').stdout.strip(),
             self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
         )
+
+    def anchor_generated_ignore_without_control_manifest(self, repo):
+        """Build the manifest-loss replay base from the generated ignore bytes."""
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        generated_ignore = (repo / '.gitignore').read_bytes()
+        generated_ignore_blob = self.git(
+            repo, 'hash-object', '.gitignore'
+        ).stdout.strip()
+        source_branch = self.git(
+            repo, 'branch', '--show-current'
+        ).stdout.strip()
+        self.assertTrue(manifest_path.exists())
+
+        self.git(
+            repo, 'switch', '-q', '-c', 'fixture/manifest-loss-base',
+            'origin/main',
+        )
+        manifest_path.unlink()
+        self.assertFalse(manifest_path.exists())
+        (repo / '.gitignore').write_bytes(generated_ignore)
+        self.git(repo, 'add', '.gitignore')
+        self.git(
+            repo, 'commit', '-q', '-m',
+            'test: anchor generated ignore without control manifest',
+        )
+        setup_commit = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.assertEqual(
+            len(self.git(
+                repo, 'rev-list', '--parents', '-n', '1', setup_commit
+            ).stdout.split()),
+            2,
+        )
+        self.assertEqual(
+            self.git(
+                repo, 'show', '--format=', '--name-only', setup_commit
+            ).stdout.splitlines(),
+            ['.gitignore'],
+        )
+        self.assertEqual(
+            self.git(repo, 'rev-parse', 'HEAD:.gitignore').stdout.strip(),
+            generated_ignore_blob,
+        )
+        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        self.assertEqual(
+            self.git(repo, 'rev-parse', 'origin/main').stdout.strip(),
+            setup_commit,
+        )
+        self.git(
+            repo, 'cat-file', '-e',
+            'origin/main:.syncwheel/manifest.json', expected=128,
+        )
+        self.git(repo, 'switch', '-q', source_branch)
+        self.assertTrue(manifest_path.exists())
+        self.assertEqual((repo / '.gitignore').read_bytes(), generated_ignore)
+
+    def stage_owned_control_manifest_delta(self, repo):
+        """Leave one valid tracked manifest delta for control-CAS fixtures."""
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        before_digest = module.manifest_digest(manifest)
+        self.assertNotIn('replay_mode', manifest['defaults'])
+        self.assertEqual(
+            module.configured_replay_mode(repo, manifest), ('auto', 'builtin')
+        )
+        manifest['defaults']['replay_mode'] = 'auto'
+        module.save_manifest(manifest_path, manifest)
+        observed, _ = module.load_manifest(repo, manifest_path)
+        self.assertNotEqual(module.manifest_digest(observed), before_digest)
+        self.assertEqual(
+            module.configured_replay_mode(repo, observed), ('auto', 'manifest')
+        )
+        self.assertEqual(
+            self.git(repo, 'status', '--porcelain').stdout,
+            ' M .syncwheel/manifest.json\n',
+        )
+        return observed, manifest_path
 
     def set_integration_membership(self, repo, integration_membership):
         manifest_path = repo / '.syncwheel' / 'manifest.json'
@@ -867,8 +942,9 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_state_is_append_only_and_safe_for_public_transport(self):
         origin = self.create_remote()
         first = self.clone(origin, 'first')
+        second = self.clone(origin, 'second')
         self.init_coordinated(first)
-        self.track_fixture_ignore_in_replay_base(first)
+        self.anchor_generated_metadata_in_replay_base(first)
         self.run_cli(first, 'int', 'push')
         first_tip, first_state = self.remote_state(origin)
         module = self.load_module()
@@ -909,7 +985,6 @@ with module.coordination_publication_lock(Path(repo_path)):
             'Syncwheel Coordination <coordination@syncwheel.invalid>',
         )
 
-        second = self.clone(origin, 'second')
         self.git(second, 'fetch', 'origin', 'integration/shared:refs/remotes/origin/integration/shared')
         self.git(second, 'branch', 'integration/shared', 'origin/integration/shared')
         self.run_cli(
@@ -1856,7 +1931,22 @@ with module.coordination_publication_lock(Path(repo_path)):
             'integration/shared',
         )
         self.disable_fixture_hooks(second)
+        self.git(second, 'switch', '-q', 'main')
+        self.git(second, 'branch', '-f', 'integration/shared', remote_tip)
+        remote_tree = self.git(
+            second, 'rev-parse', f'{remote_tip}^{{tree}}'
+        ).stdout.strip()
+        self.assertEqual(
+            self.git(
+                second, 'rev-parse', 'integration/shared^{tree}'
+            ).stdout.strip(),
+            remote_tree,
+        )
         self.git(second, 'switch', '-q', 'integration/shared')
+        self.assertEqual(
+            self.git(second, 'rev-parse', 'HEAD^{tree}').stdout.strip(),
+            remote_tree,
+        )
         self.git(second, 'commit', '--allow-empty', '-qm', 'chore: equivalent local projection')
         local_tip = self.git(second, 'rev-parse', 'HEAD').stdout.strip()
         self.git(second, 'switch', '-q', 'main')
@@ -1901,11 +1991,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        # Keep the fixture's generated ignore policy in the replay base so a
-        # manifest-less checkout is still clean enough for the retry itself.
-        self.git(repo, 'add', '.gitignore')
-        self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
-        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        # Keep only the generated ignore policy in the replay base so the
+        # interrupted replay still exercises recovery of a removed manifest.
+        self.anchor_generated_ignore_without_control_manifest(repo)
         feature_sha = self.commit_on_branch(
             repo, 'pr/feature-a', f'{name}-feature.txt'
         )
@@ -2149,7 +2237,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.git(repo, 'switch', '-q', 'integration/shared')
         module = self.load_module()
-        manifest, manifest_path = module.load_manifest(repo)
+        manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        replay_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
         args = SimpleNamespace(
             repo=str(repo), manifest=None, personal=None, stack='feature-a',
             remote=None, dry_run=False, force_with_lease=False,
@@ -2170,6 +2259,11 @@ with module.coordination_publication_lock(Path(repo_path)):
         control_commit = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
+        self.assertNotEqual(control_commit, replay_tip)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{control_commit}^').stdout.strip(),
+            replay_tip,
+        )
         interrupted_status = self.git(
             repo, 'status', '--porcelain', '--untracked-files=no'
         ).stdout
@@ -2211,7 +2305,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.init_coordinated(repo)
         self.git(repo, 'switch', '-q', 'integration/shared')
         module = self.load_module()
-        manifest, manifest_path = module.load_manifest(repo)
+        manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        replay_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
 
         def crash_after_ref(stage):
             if stage == 'ref_updated':
@@ -2222,14 +2317,19 @@ with module.coordination_publication_lock(Path(repo_path)):
                 module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
-                    module.coordinated_publish(
-                        repo, manifest, manifest_path, {},
-                        'control-retry', 'partial',
-                        operation_token='control-retry',
+                    module.restore_control_manifest_after_integration_rebuild(
+                        repo, manifest_path, manifest, replay_tip, 'control',
+                        reason='direct coordinated publish control fixture',
+                        command='syncwheel coordinated publish',
                     )
         control_commit = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
+        self.assertNotEqual(control_commit, replay_tip)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{control_commit}^').stdout.strip(),
+            replay_tip,
+        )
 
         with module.manifest_write_transaction(repo, manifest_path):
             result = module.coordinated_publish(
@@ -2260,7 +2360,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.init_coordinated(repo)
         self.git(repo, 'switch', '-q', 'integration/shared')
         module = self.load_module()
-        manifest, manifest_path = module.load_manifest(repo)
+        manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        replay_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
         args = SimpleNamespace(
             repo=str(repo), manifest=None, personal=None, remote=None,
             dry_run=False, force_with_lease=False, git_args=[], command='int',
@@ -2279,6 +2380,11 @@ with module.coordination_publication_lock(Path(repo_path)):
         control_commit = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
+        self.assertNotEqual(control_commit, replay_tip)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{control_commit}^').stdout.strip(),
+            replay_tip,
+        )
 
         self.run_cli(repo, 'int', 'push')
 
@@ -3248,11 +3354,15 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_coordination_domains_cannot_claim_the_same_managed_ref(self):
         origin = self.create_remote()
         first = self.clone(origin, 'owner-one')
+        second = self.clone(origin, 'owner-two')
         self.init_coordinated(first)
-        self.track_fixture_ignore_in_replay_base(first)
+        self.anchor_generated_metadata_in_replay_base(first)
         self.run_cli(first, 'int', 'push')
 
-        second = self.clone(origin, 'owner-two')
+        self.git(
+            second, 'fetch', 'origin',
+            'integration/shared:refs/remotes/origin/integration/shared',
+        )
         self.git(second, 'branch', 'integration/shared', 'origin/integration/shared')
         self.run_cli(
             second,
@@ -3277,10 +3387,10 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_stale_manifest_cannot_drop_a_remotely_published_stack(self):
         origin = self.create_remote()
         stale = self.clone(origin, 'stale')
-        self.init_coordinated(stale)
-        self.track_fixture_ignore_in_replay_base(stale)
-
         current = self.clone(origin, 'current')
+        self.init_coordinated(stale)
+        self.anchor_generated_metadata_in_replay_base(stale)
+
         self.init_coordinated(current)
 
         # Both clones establish the same deterministic initial control object,
@@ -7272,7 +7382,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         module = self.load_module()
         origin, repo = self.prepare_published_integration('dirty-after-cas')
         self.run_cli(repo, 'stack', 'demote', 'feature-a')
-        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
         ready = self.tmp / 'dirty-after-cas-ready'
         release = self.tmp / 'dirty-after-cas-release'
         process = subprocess.Popen(
@@ -7326,7 +7436,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        self.track_fixture_ignore_in_replay_base(repo)
+        self.anchor_generated_metadata_in_replay_base(repo)
         feature_sha = self.commit_on_branch(repo, 'pr/feature-a', f'{name}-a.txt')
         self.run_cli(
             repo, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a',
@@ -7471,8 +7581,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         """A second clone whose tracked manifest diverges from the integration tip."""
         origin = self.create_remote(name=f'{name}-origin')
         first = self.clone(origin, f'{name}-first')
+        second = self.clone(origin, f'{name}-second')
         self.init_coordinated(first)
-        self.track_fixture_ignore_in_replay_base(first)
+        self.anchor_generated_metadata_in_replay_base(first)
         feature_sha = self.commit_on_branch(first, 'pr/feature-a', f'{name}.txt')
         self.run_cli(
             first, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a',
@@ -7480,7 +7591,6 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(first, 'stack', 'push', 'feature-a')
         self.run_cli(first, 'int', 'push')
 
-        second = self.clone(origin, f'{name}-second')
         self.git(
             second, 'fetch', 'origin',
             'integration/shared:refs/remotes/origin/integration/shared',
@@ -7494,7 +7604,101 @@ with module.coordination_publication_lock(Path(repo_path)):
             '--integration-branch', 'integration/shared',
         )
         self.disable_fixture_hooks(second)
-        return origin, second
+        # Preserve the independently initialized proposal while returning the
+        # integration ref/index to the exact published control tip.
+        self.git(second, 'switch', '-q', 'main')
+        self.git(
+            second, 'branch', '-f', 'integration/shared',
+            'origin/integration/shared',
+        )
+        self.git(second, 'switch', '-q', 'integration/shared')
+        module = self.load_module()
+        manifest_path = second / '.syncwheel' / 'manifest.json'
+        published = module.manifest_from_tree(
+            second, 'origin/integration/shared',
+            module.integration_manifest_path(second),
+        )
+        published_tip = self.git(
+            second, 'rev-parse', 'origin/integration/shared'
+        ).stdout.strip()
+        self.assertEqual(
+            self.git(second, 'rev-parse', 'integration/shared').stdout.strip(),
+            published_tip,
+        )
+        self.assertIn('feature-a', module.stack_map(published))
+        self.assertNotIn('replay_mode', published['defaults'])
+        self.assertEqual(
+            module.configured_replay_mode(second, published),
+            ('auto', 'builtin'),
+        )
+
+        # Recreate the interrupted persistence precondition that transactional
+        # provider commits now settle automatically at command exit.  The
+        # intermediate manifest spells out the effective disabled landing
+        # default, and the fault fires before its control commit can move.
+        intent_manifest = json.loads(json.dumps(published))
+        intent_manifest['landing'] = module.normalize_landing_policy(None)
+        self.assertEqual(
+            module.landing_policy(intent_manifest),
+            module.landing_policy(published),
+        )
+        module.save_manifest(manifest_path, intent_manifest)
+        intent_manifest, _ = module.load_manifest(second, manifest_path)
+        intent_digest = module.manifest_digest(intent_manifest)
+        self.assertNotEqual(intent_digest, module.manifest_digest(published))
+
+        def interrupt_after_intent(stage):
+            if stage == 'intent_saved':
+                raise RuntimeError('simulated crash after control intent')
+
+        with self.assertRaisesRegex(RuntimeError, 'after control intent'):
+            with module.manifest_write_transaction(second, manifest_path):
+                with mock.patch.object(
+                    module, 'control_manifest_io_checkpoint',
+                    side_effect=interrupt_after_intent,
+                ):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        second, manifest_path, intent_manifest, published_tip,
+                        'control', reason='cross-clone divergence fixture',
+                        command='syncwheel int push',
+                    )
+        self.assertEqual(
+            self.git(second, 'rev-parse', 'integration/shared').stdout.strip(),
+            published_tip,
+        )
+        pending = module.pending_control_manifest_intents(
+            module.load_ledger_events(second, manifest_path)
+        )
+        self.assertEqual(len(pending), 1)
+        intent = pending[0]['payload']
+        self.assertEqual(intent['expected_manifest_digest'], intent_digest)
+        self.assertFalse(any(
+            event['type'] in {
+                'manifest_saved', 'control_manifest_persistence_abandoned',
+            }
+            and (event.get('payload') or {}).get('operation_id')
+            == intent['operation_id']
+            for event in module.load_ledger_events(second, manifest_path)
+        ))
+
+        proposal = json.loads(json.dumps(published))
+        proposal['defaults']['replay_mode'] = 'auto'
+        module.save_manifest(manifest_path, proposal)
+        proposal, _ = module.load_manifest(second, manifest_path)
+        proposal_digest = module.manifest_digest(proposal)
+        self.assertNotIn(
+            proposal_digest,
+            {module.manifest_digest(published), intent_digest},
+        )
+        self.assertEqual(
+            module.coordination_manifest_snapshot(proposal),
+            module.coordination_manifest_snapshot(published),
+        )
+        self.assertEqual(
+            module.configured_replay_mode(second, proposal),
+            ('auto', 'manifest'),
+        )
+        return origin, second, intent
 
     def test_divergence_remedy_accepts_the_tracked_manifest_it_replaces(self):
         module = self.load_module()
@@ -7503,8 +7707,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         # tracked file inside the checkout that carries it.
         for mode in ('in-place', 'ephemeral'):
             with self.subTest(replay_mode=mode):
-                _origin, second = self.prepare_cross_clone_control_divergence(
-                    f'divergence-{mode}'
+                _origin, second, intent = (
+                    self.prepare_cross_clone_control_divergence(
+                        f'divergence-{mode}'
+                    )
                 )
                 manifest_path = second / '.syncwheel' / 'manifest.json'
                 self.assertEqual(
@@ -7519,6 +7725,12 @@ with module.coordination_publication_lock(Path(repo_path)):
                     "'adopt reviewed control manifest proposal'"
                 )
                 self.assertIn(remedy, failure.stderr)
+                self.assertEqual(
+                    len(module.pending_control_manifest_intents(
+                        module.load_ledger_events(second, manifest_path)
+                    )),
+                    1,
+                )
 
                 self.run_cli(
                     second, 'int', 'rebuild', '--replay-mode', mode,
@@ -7526,6 +7738,21 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
 
                 adopted, _ = module.load_manifest(second, manifest_path)
+                events = module.load_ledger_events(second, manifest_path)
+                self.assertEqual(
+                    module.pending_control_manifest_intents(events), []
+                )
+                abandoned = [
+                    event for event in events
+                    if event['type'] == 'control_manifest_persistence_abandoned'
+                    and (event.get('payload') or {}).get('operation_id')
+                    == intent['operation_id']
+                ]
+                self.assertEqual(len(abandoned), 1)
+                self.assertEqual(
+                    abandoned[0]['payload']['outcome'],
+                    'superseded_local_proposal',
+                )
                 self.assertEqual(
                     module.manifest_digest(adopted), module.manifest_digest(local)
                 )
@@ -7541,7 +7768,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name='absent-integration-origin')
         repo = self.clone(origin, 'absent-integration')
         self.init_coordinated(repo)
-        self.track_fixture_ignore_in_replay_base(repo)
+        self.anchor_generated_metadata_in_replay_base(repo)
         self.git(repo, 'switch', '-q', '-c', 'work', 'origin/main')
         self.git(repo, 'branch', '-D', 'integration/shared')
 
