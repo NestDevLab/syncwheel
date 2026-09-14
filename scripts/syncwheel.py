@@ -10982,6 +10982,8 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             claims_fallback=True,
         )
     if publication_operation and publication_landed:
+        if observed_publication['tip'] != plan['expectedRemoteStateTip']:
+            raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
         current = plan
         latest = {
             'tip': plan['expectedRemoteStateTip'],
