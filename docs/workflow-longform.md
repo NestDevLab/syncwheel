@@ -38,8 +38,10 @@ Mutating `stack push`, `int rebuild`, and `int push` all enter the same
 manifest-write classification and recover any pending control-manifest intent
 before loading the manifest. Control persistence is ordered as durable intent,
 ref CAS, checkout alignment without a ref move, manifest save, then receipt.
-When `stack push` creates or recovers that control commit, its coordinated
-atomic publish includes the integration ref together with the stack ref.
+`stack push` includes a local integration control tip in its coordinated atomic
+publish only when that tip has one persistence receipt and its tree is the exact
+current projection. An ineligible housekeeping tip remains local; every ref
+selected for publication still passes the shared successor guard.
 
 ## What becomes deterministic
 

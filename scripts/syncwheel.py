@@ -16859,7 +16859,7 @@ def published_integration_replay_is_current(
     )
 
 
-def unpublished_local_integration_control_tip(repo_root, manifest):
+def unpublished_local_integration_control_tip(repo_root, manifest, manifest_path=None):
     """Return only a receipt-backed control tip with the exact projected tree."""
     observation = observe_published_integration_tip(repo_root, manifest)
     if observation is None:
@@ -16878,18 +16878,7 @@ def unpublished_local_integration_control_tip(repo_root, manifest):
     )
     if committed is None or manifest_digest(committed) != manifest_digest(manifest):
         return None
-    if not coordination_ref_is_safe_successor(
-        repo_root,
-        observation['config'],
-        observation['integration_ref'],
-        observation['published_tip'],
-        branch,
-    ):
-        raise SyncwheelError(
-            'local integration branch is not a safe successor of the published integration ref; '
-            'run handoff and resolve the overlap'
-        )
-    events = load_control_manifest_events(repo_root)
+    events = load_control_manifest_events(repo_root, manifest_path)
     intents, receipts = control_manifest_operation_records(events, local_tip)
     completed = sorted(set(intents) & set(receipts))
     if len(completed) != 1:
@@ -22711,15 +22700,17 @@ def command_stack_push(args):
             f"refs/heads/{stack['branch']}": ref_tip(repo_root, stack['branch'])
         }
         changed_refs = dict(identity_changed_refs)
-        verified_control_tip = (
-            unpublished_local_integration_control_tip(repo_root, manifest)
-            if not args.dry_run else None
-        )
-        if verified_control_tip:
-            changed_refs[
-                f"refs/heads/{manifest['integration']['branch']}"
-            ] = verified_control_tip
         try:
+            verified_control_tip = (
+                unpublished_local_integration_control_tip(
+                    repo_root, manifest, manifest_path
+                )
+                if not args.dry_run else None
+            )
+            if verified_control_tip:
+                changed_refs[
+                    f"refs/heads/{manifest['integration']['branch']}"
+                ] = verified_control_tip
             publication_operation = (
                 None if args.dry_run else begin_coordination_publication(
                     repo_root,
