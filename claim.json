@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/mgt-0287-sw1"
+  ],
+  "claimed_at": "2026-09-15T13:11:46+00:00",
+  "coordination_id": "default",
+  "operation_token": "9061edce-fbc0-455f-a905-8a387edc7bba",
+  "publication_scope": "stack:mgt-0287-sw1",
+  "source_ref": "refs/heads/pr/mgt-0287-sw1",
+  "syncwheel_version": "0.43.5"
+}
