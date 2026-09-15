@@ -6276,8 +6276,13 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         if (
             reuse_preflight
             and reuse_preflight.get('status') == 'refuse'
-            and reuse_preflight.get('reason', '').startswith(
-                'source .gitignore differs from the published control bytes'
+            and (
+                reuse_preflight.get('reason', '').startswith(
+                    'source .gitignore differs from the published control bytes'
+                )
+                or reuse_preflight.get('reason') == (
+                    'integration replay inputs changed during published-tip proof'
+                )
             )
         ):
             raise SyncwheelError(reuse_preflight['reason'])
