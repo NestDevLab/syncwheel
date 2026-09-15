@@ -7998,11 +7998,11 @@ with module.coordination_publication_lock(Path(repo_path)):
         A14 says the ancestry check applies whenever integration_ref is in
         changed_refs, with no scope condition. Two honest clones, no
         adversary: clone A bootstraps and publishes s1 (tip X); clone Z
-        onboards, publishes s2 on top (tip Y, a child of X); clone A, still
-        stale at X, then runs an ordinary `stack push s3`, whose own
-        control-manifest refresh folds integration_ref into changed_refs as a
-        sibling of X, not a descendant of Y. That push must be refused, not
-        silently accepted with rc 0 overwriting Y.
+        onboards and publishes s2 on top (tip Y, a child of X). The fixture
+        then gives clone A an exact replay base for its s3 manifest, producing
+        a receipt-backed, exact projected control tip that is not a descendant
+        of Y. Once selected into changed_refs, that tip must be refused by the
+        universal guard rather than silently overwriting Y.
         """
         origin = self.create_remote('a14-stale-push')
         repo_a = self.clone(origin, 'a14-stale-push-a')
@@ -8029,14 +8029,72 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         # Clone A learns s2 the way a git-tracked manifest is normally
         # discovered: it adopts Z's manifest content directly, the same
-        # mechanism mirror_coordinated_clone uses for onboarding. It never
-        # rebuilds its own integration/shared branch, which stays at X.
+        # mechanism mirror_coordinated_clone uses for onboarding. The local
+        # integration ref is then fixture-aligned to an exact replay base so
+        # stack push itself creates the control tip whose eligibility and
+        # successor checks this regression exercises.
         (repo_a / '.syncwheel' / 'manifest.json').write_text(
             (repo_z / '.syncwheel' / 'manifest.json').read_text()
         )
 
         source_s3 = self.commit_on_branch(repo_a, 'pr/a14-s3', 'a14-s3.txt')
         self.run_cli(repo_a, 'stack', 'create', 's3', source_s3, '--branch', 'pr/a14-s3')
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo_a)
+        manifest_bytes = manifest_path.read_bytes()
+        expected_manifest_digest = module.manifest_digest(manifest)
+        integration_branch = manifest['integration']['branch']
+        integration_ref = f'refs/heads/{integration_branch}'
+        previous_local_tip = module.ref_tip(repo_a, integration_branch)
+        replay_base = self.git(repo_a, 'rev-parse', 'origin/main').stdout.strip()
+        self.assertNotEqual(previous_local_tip, replay_base)
+        self.assertEqual(
+            self.git(repo_a, 'branch', '--show-current').stdout.strip(),
+            integration_branch,
+        )
+        self.git(repo_a, 'switch', '-q', 'main')
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.git(
+            repo_a, 'update-ref', integration_ref, replay_base, previous_local_tip,
+        )
+        self.assertEqual(module.ref_tip(repo_a, integration_branch), replay_base)
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.git(repo_a, 'switch', '-q', integration_branch)
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.assertEqual(
+            self.git(repo_a, 'write-tree').stdout.strip(),
+            module.ref_tree(repo_a, replay_base),
+        )
+        tracked_status = self.git(
+            repo_a, 'status', '--porcelain', '--untracked-files=no',
+        ).stdout.splitlines()
+        self.assertNotIn('.gitignore', [line[3:] for line in tracked_status])
+        self.assertTrue(all(
+            line[3:] == '.syncwheel/manifest.json' for line in tracked_status
+        ))
+
+        replay_inputs = module.integration_projection_input_snapshot(repo_a, manifest)
+        replay_tree = module.materialize_integration_projection(repo_a, manifest)
+        source_gitignore = module.checkout_path_observation(repo_a, '.gitignore')
+        self.assertIn(source_gitignore['fingerprint']['kind'], {'file', 'missing'})
+        projected_tree = module.materialize_control_manifest_projection_tree(
+            repo_a,
+            manifest,
+            replay_tree,
+            gitignore_bytes=(
+                source_gitignore['bytes']
+                if source_gitignore['fingerprint']['kind'] == 'file'
+                else None
+            ),
+        )
+        expected_control_tip = module.materialize_control_manifest_commit(
+            repo_a, manifest, replay_base,
+        )
+        remote_refs_before = self.git(
+            repo_a, 'ls-remote', '--refs', 'origin',
+        ).stdout
+        remote_state_before = self.remote_state(origin)
+
         failure = self.run_cli_unchecked(repo_a, 'stack', 'push', 's3')
 
         self.assertEqual(failure.returncode, 2, failure.stderr)
@@ -8044,13 +8102,113 @@ with module.coordination_publication_lock(Path(repo_path)):
             'local integration branch is not a safe successor of the published integration ref',
             failure.stderr,
         )
+        self.assertNotIn('Traceback', failure.stderr)
+        self.assertEqual(
+            self.git(repo_a, 'ls-remote', '--refs', 'origin').stdout,
+            remote_refs_before,
+        )
+        self.assertEqual(self.remote_state(origin), remote_state_before)
         self.assertEqual(
             self.git(
                 repo_a, 'ls-remote', 'origin', 'refs/heads/integration/shared'
             ).stdout.split()[0],
             tip_y,
         )
-        self.assertNotIn('Traceback', failure.stderr)
+
+        observed_manifest, observed_manifest_path = module.load_manifest(repo_a)
+        self.assertEqual(observed_manifest_path, manifest_path)
+        self.assertEqual(
+            manifest_path.read_bytes(),
+            module.canonical_manifest_file_text(manifest).encode('utf-8'),
+        )
+        self.assertEqual(
+            module.manifest_digest(observed_manifest), expected_manifest_digest,
+        )
+        self.assertEqual(
+            module.integration_projection_input_snapshot(repo_a, observed_manifest),
+            replay_inputs,
+        )
+        local_tip = module.ref_tip(repo_a, integration_branch)
+        self.assertEqual(local_tip, expected_control_tip)
+        self.assertEqual(
+            self.git(repo_a, 'rev-parse', f'{local_tip}^').stdout.strip(),
+            replay_base,
+        )
+        self.assertEqual(module.ref_tree(repo_a, local_tip), projected_tree)
+        control_path = module.integration_manifest_path(repo_a)
+        control_relative = control_path.resolve().relative_to(repo_a.resolve()).as_posix()
+        self.assertEqual(
+            self.git(repo_a, 'show', f'{local_tip}:{control_relative}').stdout,
+            module.canonical_manifest_file_text(observed_manifest),
+        )
+        self.assertFalse(module.coordination_ref_is_safe_successor(
+            repo_a,
+            module.coordination_config(observed_manifest),
+            integration_ref,
+            tip_y,
+            integration_branch,
+        ))
+
+        events = module.load_control_manifest_events(repo_a, manifest_path)
+        persistence_intents, persistence_receipts = (
+            module.control_manifest_operation_records(events, local_tip)
+        )
+        completed_persistence = sorted(
+            set(persistence_intents) & set(persistence_receipts)
+        )
+        self.assertEqual(len(completed_persistence), 1)
+        persistence_operation = completed_persistence[0]
+        self.assertEqual(set(persistence_intents), {persistence_operation})
+        self.assertEqual(set(persistence_receipts), {persistence_operation})
+        persistence_intent = persistence_intents[persistence_operation]['payload']
+        persistence_receipt = persistence_receipts[persistence_operation]
+        self.assertEqual(persistence_intent['replay_tip'], replay_base)
+        self.assertEqual(
+            persistence_intent['expected_control_commit'], local_tip,
+        )
+        self.assertEqual(
+            persistence_intent['expected_manifest_digest'],
+            expected_manifest_digest,
+        )
+        self.assertEqual(persistence_receipt['type'], 'manifest_saved')
+        self.assertEqual(
+            persistence_receipt['payload']['control_commit'], local_tip,
+        )
+        self.assertEqual(
+            persistence_receipt['payload']['manifest_hash'],
+            expected_manifest_digest,
+        )
+
+        ledger_events = module.load_ledger_events(repo_a, manifest_path)
+        s3_publication_intents = [
+            event for event in ledger_events
+            if event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('scope') == 'stack:s3'
+        ]
+        observed_pending_publications = []
+        for event in s3_publication_intents:
+            operation_token = event['payload'].get('operation_token')
+            terminals = [
+                terminal['type'] for terminal in ledger_events
+                if terminal['type']
+                in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+                and terminal['payload'].get('operation_token') == operation_token
+            ]
+            observed_pending_publications.append({
+                'changed_refs': event['payload'].get('changed_refs'),
+                'terminals': terminals,
+            })
+        self.assertEqual(
+            observed_pending_publications,
+            [{
+                'changed_refs': {
+                    'refs/heads/pr/a14-s3': source_s3,
+                    integration_ref: local_tip,
+                },
+                'terminals': [],
+            }],
+            'A14_SELECTED_INTEGRATION_REACHES_UNIVERSAL_SUCCESSOR_GUARD',
+        )
 
     def assert_a14_equal_manifest_push_refuses_non_descendant_product(
         self, fixture, managed_ref, command, filename, expected_error
