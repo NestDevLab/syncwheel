@@ -3818,7 +3818,10 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             finalized, _ = fixture.protocol_request(
                 {**request, 'action': 'finalize'}
             )
-            manifest = fixture.read_manifest()
+            manifest, manifest_path = SYNCWHEEL.load_manifest(
+                fixture.repo, fixture.manifest_path
+            )
+            self.assertEqual(manifest_path, fixture.manifest_path)
             derived = finalized['productCommitSha']
             projected_tree = SYNCWHEEL.materialize_integration_projection(
                 fixture.repo, manifest
