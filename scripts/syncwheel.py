@@ -13717,6 +13717,8 @@ def coordinated_publish_cycle(
     for ref, sha in changed_refs.items():
         if not sha:
             raise SyncwheelError(f'cannot publish an empty managed ref: {ref}')
+    if integration_ref in changed_refs:
+        require_selected_integration_control(repo_root, manifest, changed_refs[integration_ref])
     if dry_run:
         payload = {
             'coordination_id': config['id'],
@@ -13919,7 +13921,9 @@ def local_manifest_projection_is_convergent(repo_root, manifest, manifest_path=N
         integration = manifest['integration']
         if not branch_exists(repo_root, integration['branch']):
             return False
-        if integration_sync_report(repo_root, manifest).get('local_matches_projection') is not True:
+        report = integration_sync_report(repo_root, manifest)
+        if (report.get('local_matches_product_projection') is not True
+                or report.get('local_control_manifest_matches_selected') is not True):
             return False
         for channel in manifest.get('channels', []):
             tip = ref_tip(repo_root, channel['branch'])
@@ -23373,75 +23377,85 @@ def trees_differ_only_by_manifest(repo_root, left_tree, right_tree):
     return bool(changed) and set(changed) == {'.syncwheel/manifest.json'}
 
 
+def integration_control_manifest_from_tree(repo_root, tree):
+    """Read only the literal, regular Git control blob; never resolve checkout links."""
+    entry = tree_path_entry(repo_root, tree, '.syncwheel/manifest.json')
+    if entry is None or entry['mode'] != '100644':
+        return None
+    try:
+        value = json.loads(tree_path_bytes(repo_root, entry))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SyncwheelError(f'integration control manifest is invalid at {tree}:.syncwheel/manifest.json') from exc
+    return value if isinstance(value, dict) else None
+
+
+def integration_control_matches_selected(repo_root, manifest, tree):
+    committed = integration_control_manifest_from_tree(repo_root, tree)
+    return committed is not None and manifest_digest(committed) == manifest_digest(manifest)
+
+
+def require_selected_integration_control(repo_root, manifest, tip):
+    if not tip or not integration_control_matches_selected(repo_root, manifest, tip):
+        raise SyncwheelError('integration tip does not contain the selected control manifest; rebuild the reviewed selection')
+
+
 def integration_tree_matches_product_projection(repo_root, manifest, candidate_tree, product_tree):
-    """Accept exact product bytes plus the declared Syncwheel control paths."""
+    """Compare product bytes independently of which valid control manifest is selected."""
+    committed = integration_control_manifest_from_tree(repo_root, candidate_tree)
+    entry = tree_path_entry(repo_root, candidate_tree, '.syncwheel/manifest.json')
+    if entry is not None and committed is None:
+        return False
     if candidate_tree == product_tree:
         return True
     changed = integration_tree_changed_paths(repo_root, candidate_tree, product_tree)
-    if not changed or not set(changed).issubset({
+    if committed is None or not changed or not set(changed).issubset({
         '.syncwheel/manifest.json', '.gitignore',
     }):
-        return False
-    committed = manifest_from_tree(
-        repo_root, candidate_tree, integration_manifest_path(repo_root)
-    )
-    if committed is None or manifest_digest(committed) != manifest_digest(manifest):
         return False
     if '.gitignore' not in changed:
         return True
     candidate_entry = tree_path_entry(repo_root, candidate_tree, '.gitignore')
     product_entry = tree_path_entry(repo_root, product_tree, '.gitignore')
     if (
-        candidate_entry is None
-        or candidate_entry['mode'] != '100644'
+        candidate_entry is None or candidate_entry['mode'] != '100644'
         or (product_entry is not None and product_entry['mode'] != '100644')
     ):
         return False
-    candidate_bytes = tree_path_bytes(repo_root, candidate_entry)
-    product_bytes = tree_path_bytes(repo_root, product_entry)
     try:
-        candidate_text = candidate_bytes.decode('utf-8')
+        candidate = split_syncwheel_managed_gitignore(
+            tree_path_bytes(repo_root, candidate_entry).decode('utf-8'), syncwheel_worktree_root(manifest)
+        )
+        product = split_syncwheel_managed_gitignore(
+            tree_path_bytes(repo_root, product_entry).decode('utf-8'), syncwheel_worktree_root(manifest)
+        )
     except UnicodeDecodeError:
         return False
-    split = split_syncwheel_managed_gitignore(
-        candidate_text, syncwheel_worktree_root(manifest)
-    )
-    return bool(
-        split
-        and split['managed'] is not None
-        and split['unmanaged'].encode('utf-8') == product_bytes
-    )
+    return bool(candidate and product and candidate['managed'] is not None
+                and candidate['unmanaged'] == product['unmanaged'])
 
 
 def integration_sync_report(repo_root, manifest, remote=None, stack_ref_overrides=None):
     integration = manifest['integration']
     branch = integration['branch']
     remote_ref = remote_integration_ref(manifest, remote)
-    local_exists = branch_exists(repo_root, branch)
-    remote_exists = ref_exists(repo_root, remote_ref)
+    local_oid = ref_tip(repo_root, branch)
+    remote_oid = ref_tip(repo_root, remote_ref)
     report = {
-        'branch': branch,
-        'remote_ref': remote_ref,
-        'local_exists': local_exists,
-        'remote_exists': remote_exists,
-        'relation': 'missing',
-        'ahead': None,
-        'behind': None,
-        'local_tree': None,
-        'remote_tree': None,
+        'branch': branch, 'remote_ref': remote_ref,
+        'local_oid': local_oid, 'remote_oid': remote_oid,
+        'local_exists': bool(local_oid), 'remote_exists': bool(remote_oid),
+        'relation': 'missing', 'ahead': None, 'behind': None,
+        'local_tree': ref_tree(repo_root, local_oid) if local_oid else None,
+        'remote_tree': ref_tree(repo_root, remote_oid) if remote_oid else None,
         'projected_tree': None,
-        'remote_matches_projection': None,
-        'local_matches_projection': None,
+        'remote_matches_projection': None, 'local_matches_projection': None,
+        'remote_matches_product_projection': None, 'local_matches_product_projection': None,
+        'remote_control_manifest_matches_selected': None, 'local_control_manifest_matches_selected': None,
         'local_control_only_ahead': False,
     }
-    if local_exists:
-        report['local_tree'] = ref_tree(repo_root, branch)
-    if remote_exists:
-        report['remote_tree'] = ref_tree(repo_root, remote_ref)
-    if local_exists and remote_exists:
-        ahead, behind = rev_left_right_count(repo_root, branch, remote_ref)
-        report['ahead'] = ahead
-        report['behind'] = behind
+    if local_oid and remote_oid:
+        ahead, behind = rev_left_right_count(repo_root, local_oid, remote_oid)
+        report['ahead'], report['behind'] = ahead, behind
         if ahead == 0 and behind == 0:
             report['relation'] = 'aligned'
         elif ahead == 0:
@@ -23450,28 +23464,27 @@ def integration_sync_report(repo_root, manifest, remote=None, stack_ref_override
             report['relation'] = 'local_ahead'
         else:
             report['relation'] = 'diverged'
-    elif local_exists:
+    elif local_oid:
         report['relation'] = 'local_only'
-    elif remote_exists:
+    elif remote_oid:
         report['relation'] = 'remote_only'
-
     if report['relation'] == 'local_ahead':
-        ahead_commits = rev_list(repo_root, f'{remote_ref}..{branch}')
+        ahead_commits = rev_list(repo_root, f'{remote_oid}..{local_oid}')
         report['local_control_only_ahead'] = bool(ahead_commits) and all(
             is_manifest_only_commit(repo_root, commit) for commit in ahead_commits
         )
-
     try:
         projected_tree = materialize_integration_projection(repo_root, manifest, stack_ref_overrides)
         report['projected_tree'] = projected_tree
-        if report['remote_tree']:
-            report['remote_matches_projection'] = integration_tree_matches_product_projection(
-                repo_root, manifest, report['remote_tree'], projected_tree
-            )
-        if report['local_tree']:
-            report['local_matches_projection'] = integration_tree_matches_product_projection(
-                repo_root, manifest, report['local_tree'], projected_tree
-            )
+        for side in ('local', 'remote'):
+            tree = report[f'{side}_tree']
+            if tree:
+                product = integration_tree_matches_product_projection(repo_root, manifest, tree, projected_tree)
+                report[f'{side}_matches_product_projection'] = product
+                report[f'{side}_matches_projection'] = product  # Compatibility alias.
+                report[f'{side}_control_manifest_matches_selected'] = integration_control_matches_selected(
+                    repo_root, manifest, tree
+                )
     except SyncwheelError as exc:
         report['projection_error'] = str(exc)
     return report
@@ -23714,6 +23727,8 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             or stack_rebuild_planned
             or not integration_report['local_exists']
             or integration_report.get('local_matches_projection') is False
+            or (integration_report.get('local_control_manifest_matches_selected') is False
+                and not integration_report.get('local_control_only_ahead'))
             or (
                 integration_report.get('local_matches_projection') is not True
                 and (
@@ -23734,10 +23749,13 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
     integration_align_from_remote = (
         not args.skip_integration
         and args.rebuild != 'all'
+        and not integration_report.get('local_control_only_ahead')
         and not integration_report.get('projection_error')
         and integration_report['remote_exists']
         and integration_report.get('remote_matches_projection') is True
-        and integration_report.get('local_matches_projection') is not True
+        and integration_report.get('remote_control_manifest_matches_selected') is True
+        and (integration_report.get('local_matches_projection') is not True
+             or integration_report.get('local_control_manifest_matches_selected') is not True)
     )
     if integration_align_from_remote:
         actions.append({
@@ -23755,7 +23773,9 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         and integration_report['local_exists']
         and integration_report['remote_exists']
         and integration_report.get('local_matches_projection') is True
+        and integration_report.get('local_control_manifest_matches_selected') is True
         and integration_report.get('remote_matches_projection') is True
+        and integration_report.get('remote_control_manifest_matches_selected') is True
         and integration_report['relation'] != 'aligned'
         and not integration_report.get('local_control_only_ahead')
     )
@@ -23777,6 +23797,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         integration_rebuild_needed
         or not integration_report['remote_exists']
         or integration_report.get('remote_matches_projection') is False
+        or integration_report.get('remote_control_manifest_matches_selected') is False
         or integration_report.get('local_control_only_ahead') is True
     ):
         actions.append({
@@ -24340,11 +24361,21 @@ def command_reconcile(args):
                 action['remote_ref'],
                 worktree,
             )
+            # This helper fetches after planning. Validate the fetched object
+            # before any backup/ref/index effect, then use only its immutable OID.
+            run_command_list(commands[:1], repo_root, True)
+            remote_tip = ref_tip(repo_root, action['remote_ref'])
+            require_selected_integration_control(repo_root, manifest, remote_tip)
+            if not integration_tree_matches_product_projection(
+                repo_root, manifest, ref_tree(repo_root, remote_tip),
+                materialize_integration_projection(repo_root, manifest, stack_ref_overrides),
+            ):
+                raise SyncwheelError('fetched integration does not match the selected product projection')
+            commands = [[remote_tip if arg == action['remote_ref'] else arg for arg in command]
+                        for command in commands[1:]]
             run_command_list(commands, repo_root, True)
             if use_primary_checkout:
-                acknowledge_in_place_manifest_replay(
-                    repo_root, manifest_path, action['remote_ref']
-                )
+                acknowledge_in_place_manifest_replay(repo_root, manifest_path, remote_tip)
             append_ledger_event(
                 repo_root,
                 'integration_aligned_remote',
@@ -24371,6 +24402,7 @@ def command_reconcile(args):
             branch = manifest['integration']['branch']
             ref = f'refs/heads/{branch}'
             tip = ref_tip(repo_root, branch)
+            require_selected_integration_control(repo_root, manifest, tip)
             command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
             run_authorized_push(
                 repo_root, command, remote, [ref],
@@ -24415,6 +24447,10 @@ def command_reconcile(args):
         publication_operation = pending_coordination_publication_for_scope(
             repo_root, manifest_path, publication_scope
         )
+        effective_refs = (publication_operation.get('changed_refs') or {}) if publication_operation else coordinated_refs
+        integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+        if integration_ref in effective_refs:
+            require_selected_integration_control(repo_root, manifest, effective_refs[integration_ref])
         if publication_operation:
             if publication_operation.get('operation_token') not in adoptable:
                 raise SyncwheelError(
@@ -24582,6 +24618,8 @@ def command_int_align_remote(args):
         raise SyncwheelError(f"remote integration ref does not exist: {report['remote_ref']}")
     if report.get('projection_error'):
         raise SyncwheelError(f"cannot project integration from manifest: {report['projection_error']}")
+    if not args.force:
+        require_selected_integration_control(repo_root, manifest, report['remote_oid'])
     if not args.force and not report['remote_matches_projection']:
         raise SyncwheelError(
             f"remote integration ref {report['remote_ref']} does not match manifest projection; "
@@ -24596,7 +24634,7 @@ def command_int_align_remote(args):
     backup = backup_branch_command(repo_root, integration['branch'], timestamp)
     if backup:
         commands.append(backup)
-    commands.append(['git', 'reset', '--hard', report['remote_ref']])
+    commands.append(['git', 'reset', '--hard', report['remote_oid']])
     run_command_list(commands, repo_root, not args.dry_run)
     if not args.dry_run:
         append_ledger_event(

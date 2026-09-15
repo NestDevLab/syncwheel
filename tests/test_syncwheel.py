@@ -4547,6 +4547,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             'stacks': ['feature-a'],
         }
 
+        # Full convergence also requires the selected control manifest in Git.
+        self.assertFalse(module.local_manifest_projection_is_convergent(self.repo, manifest))
+        (self.repo / '.syncwheel/manifest.json').write_text(module.canonical_manifest_file_text(manifest))
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: bind selected control state')
         self.assertTrue(module.local_manifest_projection_is_convergent(self.repo, manifest))
 
     def test_integration_projection_accepts_manifest_only_control_tree(self):
@@ -7300,6 +7305,406 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertIn('syncwheel auto-updated 0.6.0 -> 0.7.0', result.stderr)
         self.assertEqual((fixture['install'] / 'VERSION').read_text().strip(), '0.7.0')
+
+    def prepare_selected_control_alignment(self, label):
+        module = self.load_syncwheel_module()
+        branch = f'integration/{label}'
+        integration_ref = f'refs/heads/{branch}'
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / f'{label}-manifest.json'
+        selected = self.read_manifest()
+        selected['defaults']['publication_remote'] = 'origin'
+        selected['integration'] = {
+            'branch': branch,
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        selected['stacks'] = []
+        manifest_path.write_text(json.dumps(selected, indent=2) + '\n')
+        selected, selected_path = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+
+        self.git('branch', branch, base)
+        self.git('switch', '-q', branch)
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(selected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist selected alignment control')
+        selected_tip = self.git('rev-parse', branch)
+
+        unselected = json.loads(json.dumps(selected))
+        unselected['control'] = 'not selected by the external manifest'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(unselected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist unselected alignment control')
+        unselected_tip = self.git('rev-parse', branch)
+        self.git('reset', '--hard', selected_tip)
+
+        origin = self.tmp / f'{label}-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('push', 'origin', f'{unselected_tip}:refs/syncwheel/test/unselected')
+        subprocess.run(
+            [
+                'git', '--git-dir', str(origin), 'update-ref', '-d',
+                'refs/syncwheel/test/unselected',
+            ],
+            check=True,
+        )
+        self.git('fetch', 'origin', '--prune')
+        Path(self.repo / 'local-only.txt').write_text(f'{label} local only\n')
+        self.git('add', 'local-only.txt')
+        self.git('commit', '-q', '-m', 'test: local alignment obstruction')
+        local_tip = self.git('rev-parse', branch)
+
+        self.assertEqual(self.git('rev-parse', f'{selected_tip}^'), base)
+        self.assertEqual(self.git('rev-parse', f'{unselected_tip}^'), selected_tip)
+        self.assertEqual(self.git('rev-parse', f'{local_tip}^'), selected_tip)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                base, selected_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                selected_tip, unselected_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        for tip in (selected_tip, unselected_tip):
+            entry = module.tree_path_entry(
+                self.repo, tip, '.syncwheel/manifest.json'
+            )
+            self.assertEqual(entry['mode'], '100644')
+        selected_committed = module.manifest_from_tree(
+            self.repo, selected_tip, tracked_manifest
+        )
+        unselected_committed = module.manifest_from_tree(
+            self.repo, unselected_tip, tracked_manifest
+        )
+        self.assertEqual(
+            module.manifest_digest(selected_committed),
+            module.manifest_digest(selected),
+        )
+        self.assertNotEqual(
+            module.manifest_digest(unselected_committed),
+            module.manifest_digest(selected),
+        )
+        self.assertEqual(
+            subprocess.run(
+                ['git', '--git-dir', str(origin), 'rev-parse', integration_ref],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip(),
+            selected_tip,
+        )
+        return {
+            'module': module,
+            'branch': branch,
+            'integration_ref': integration_ref,
+            'manifest_path': manifest_path,
+            'manifest': selected,
+            'manifest_bytes': manifest_path.read_bytes(),
+            'origin': origin,
+            'base': base,
+            'selected_tip': selected_tip,
+            'unselected_tip': unselected_tip,
+            'local_tip': local_tip,
+        }
+
+
+    def test_reconcile_preserves_unselected_control_ahead_of_a_selected_remote(self):
+        fixture = self.prepare_selected_control_alignment('control-ahead-selected-remote')
+        self.git('reset', '--hard', fixture['unselected_tip'])
+        module = fixture['module']
+        before = self.git('show-ref', '--heads')
+        source = (self.repo / '.syncwheel/manifest.json').read_bytes()
+        args = module.build_parser().parse_args([
+            'reconcile', '--repo', str(self.repo), '--manifest', str(fixture['manifest_path']),
+            '--no-fetch', '--apply', '--push',
+        ])
+        args.git_args = []
+        with self.assertRaisesRegex(module.SyncwheelError, 'selected control manifest'):
+            args.func(args)
+        self.assertEqual(self.git('show-ref', '--heads'), before)
+        self.assertEqual((self.repo / '.syncwheel/manifest.json').read_bytes(), source)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_int_align_remote_uses_the_observed_control_oid_when_the_remote_moves(self):
+        fixture = self.prepare_selected_control_alignment('int-align-pinned')
+        module = fixture['module']
+        original_report = module.integration_sync_report
+        original_run_command_list = module.run_command_list
+        observations = []
+        reset_targets = []
+
+        def report_then_move_remote(*args, **kwargs):
+            report = original_report(*args, **kwargs)
+            self.assertEqual(
+                module.ref_tip(self.repo, report['remote_ref']),
+                fixture['selected_tip'],
+            )
+            subprocess.run(
+                [
+                    'git', '--git-dir', str(fixture['origin']), 'update-ref',
+                    fixture['integration_ref'], fixture['unselected_tip'],
+                    fixture['selected_tip'],
+                ],
+                check=True,
+            )
+            observations.append(report['remote_ref'])
+            return report
+
+        def record_command_list(commands, repo_root, apply):
+            for entry in commands:
+                command, _ = module.command_argv_env(entry)
+                if command[:3] == ['git', 'reset', '--hard']:
+                    reset_targets.append(command[3])
+            return original_run_command_list(commands, repo_root, apply)
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'align-remote', '--repo', str(self.repo),
+            '--manifest', str(fixture['manifest_path']), '--remote', 'origin',
+        ])
+        args.git_args = []
+        with mock.patch.object(
+            module, 'integration_sync_report', side_effect=report_then_move_remote
+        ), mock.patch.object(
+            module, 'run_command_list', side_effect=record_command_list
+        ):
+            returncode = args.func(args)
+
+        aligned = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, fixture['manifest_path']
+            )
+            if event['type'] == 'integration_aligned_remote'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'report_calls': len(observations),
+                'reset_targets': reset_targets,
+                'local_tip': self.git('rev-parse', fixture['branch']),
+                'remote_tracking_tip': self.git(
+                    'rev-parse', f"origin/{fixture['branch']}"
+                ),
+                'bare_remote_tip': subprocess.run(
+                    [
+                        'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                        fixture['integration_ref'],
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+                'ledger_after_tips': [event['after_tip'] for event in aligned],
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+                'worktree_clean': self.git('status', '--porcelain=v1') == '',
+            },
+            {
+                'returncode': 0,
+                'report_calls': 1,
+                'reset_targets': [fixture['selected_tip']],
+                'local_tip': fixture['selected_tip'],
+                'remote_tracking_tip': fixture['selected_tip'],
+                'bare_remote_tip': fixture['unselected_tip'],
+                'ledger_after_tips': [fixture['selected_tip']],
+                'manifest_unchanged': True,
+                'worktree_clean': True,
+            },
+            'INT_ALIGN_USES_PINNED_SELECTED_CONTROL_OID',
+        )
+
+
+    def test_int_align_remote_refuses_an_unselected_control_oid(self):
+        fixture = self.prepare_selected_control_alignment('int-align-selected')
+        module = fixture['module']
+        subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'update-ref',
+                fixture['integration_ref'], fixture['unselected_tip'],
+                fixture['selected_tip'],
+            ],
+            check=True,
+        )
+        refs_before = self.git('show-ref', '--heads')
+        index_before = self.git('write-tree')
+        status_before = self.git('status', '--porcelain=v1')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_before = tracked_manifest.read_bytes()
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'align-remote', '--repo', str(self.repo),
+            '--manifest', str(fixture['manifest_path']), '--remote', 'origin',
+        ])
+        args.git_args = []
+        refusal = None
+        returncode = 0
+        try:
+            returncode = args.func(args)
+        except module.SyncwheelError as exc:
+            returncode = 2
+            refusal = str(exc)
+
+        aligned = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, fixture['manifest_path']
+            )
+            if event['type'] == 'integration_aligned_remote'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'named_refusal': bool(
+                    refusal and 'selected control manifest' in refusal
+                ),
+                'remote_tip': subprocess.run(
+                    [
+                        'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                        fixture['integration_ref'],
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+                'refs_unchanged': self.git('show-ref', '--heads') == refs_before,
+                'index_unchanged': self.git('write-tree') == index_before,
+                'status_unchanged': self.git('status', '--porcelain=v1')
+                == status_before,
+                'tracked_manifest_unchanged': tracked_manifest.read_bytes()
+                == tracked_before,
+                'external_manifest_unchanged': fixture[
+                    'manifest_path'
+                ].read_bytes() == fixture['manifest_bytes'],
+                'alignment_receipts': len(aligned),
+            },
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'remote_tip': fixture['unselected_tip'],
+                'refs_unchanged': True,
+                'index_unchanged': True,
+                'status_unchanged': True,
+                'tracked_manifest_unchanged': True,
+                'external_manifest_unchanged': True,
+                'alignment_receipts': 0,
+            },
+            'INT_ALIGN_REFUSES_UNSELECTED_CONTROL_OID',
+        )
+
+
+    def test_reconcile_align_refuses_a_newly_fetched_unselected_control_oid(self):
+        fixture = self.prepare_selected_control_alignment('reconcile-align-selected')
+        module = fixture['module']
+        original_actions = module.reconcile_actions
+        planned = []
+        refs_before = self.git('show-ref', '--heads')
+        index_before = self.git('write-tree')
+        status_before = self.git('status', '--porcelain=v1')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_before = tracked_manifest.read_bytes()
+
+        def plan_then_move_remote(*args, **kwargs):
+            actions = original_actions(*args, **kwargs)
+            self.assertEqual(
+                [action['type'] for action in actions],
+                ['align_integration_to_remote'],
+            )
+            subprocess.run(
+                [
+                    'git', '--git-dir', str(fixture['origin']), 'update-ref',
+                    fixture['integration_ref'], fixture['unselected_tip'],
+                    fixture['selected_tip'],
+                ],
+                check=True,
+            )
+            planned.extend(actions)
+            return actions
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(self.repo),
+            '--manifest', str(fixture['manifest_path']), '--remote', 'origin',
+            '--no-fetch', '--apply', '--rebuild', 'none',
+        ])
+        args.git_args = []
+        refusal = None
+        returncode = 0
+        with mock.patch.object(
+            module, 'reconcile_actions', side_effect=plan_then_move_remote
+        ):
+            try:
+                returncode = args.func(args)
+            except module.SyncwheelError as exc:
+                returncode = 2
+                refusal = str(exc)
+
+        aligned = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, fixture['manifest_path']
+            )
+            if event['type'] == 'integration_aligned_remote'
+        ]
+        self.assertEqual(
+            {
+                'planned': len(planned),
+                'returncode': returncode,
+                'named_refusal': bool(
+                    refusal and 'selected control manifest' in refusal
+                ),
+                'local_tip': self.git('rev-parse', fixture['branch']),
+                'remote_tracking_tip': self.git(
+                    'rev-parse', f"origin/{fixture['branch']}"
+                ),
+                'bare_remote_tip': subprocess.run(
+                    [
+                        'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                        fixture['integration_ref'],
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+                'alignment_receipts': len(aligned),
+                'heads_unchanged': self.git('show-ref', '--heads')
+                == refs_before,
+                'index_unchanged': self.git('write-tree') == index_before,
+                'status_unchanged': self.git('status', '--porcelain=v1')
+                == status_before,
+                'tracked_manifest_unchanged': tracked_manifest.read_bytes()
+                == tracked_before,
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+            },
+            {
+                'planned': 1,
+                'returncode': 2,
+                'named_refusal': True,
+                'local_tip': fixture['local_tip'],
+                'remote_tracking_tip': fixture['unselected_tip'],
+                'bare_remote_tip': fixture['unselected_tip'],
+                'alignment_receipts': 0,
+                'heads_unchanged': True,
+                'index_unchanged': True,
+                'status_unchanged': True,
+                'tracked_manifest_unchanged': True,
+                'manifest_unchanged': True,
+            },
+            'RECONCILE_ALIGN_REVALIDATES_SELECTED_CONTROL_OID',
+        )
+
 
 
 if __name__ == '__main__':

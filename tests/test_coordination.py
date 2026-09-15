@@ -9224,3 +9224,370 @@ with module.coordination_publication_lock(Path(repo_path)):
             },
             'A14_UNMAPPED_PRODUCT_REFUSAL',
         )
+
+    def prepare_selected_control_pending_reconcile(self, label, include_stack):
+        origin = self.create_remote(label)
+        repo = self.clone(origin, label)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        selected, _ = module.load_manifest(repo)
+        integration_branch = selected['integration']['branch']
+        integration_ref = f'refs/heads/{integration_branch}'
+        state_before, published = self.remote_state(origin)
+        published_tip = published['managed_refs'][integration_ref]
+        self.assertEqual(
+            self.git(repo, 'rev-parse', integration_branch).stdout.strip(),
+            published_tip,
+        )
+        tracked_manifest = repo / '.syncwheel' / 'manifest.json'
+        published_control = module.manifest_from_tree(
+            repo, published_tip, tracked_manifest
+        )
+        self.assertEqual(
+            module.manifest_digest(published_control),
+            module.manifest_digest(selected),
+        )
+
+        stack = None
+        if include_stack:
+            stack_id = f'{label}-stack'
+            stack_branch = f'pr/{stack_id}'
+            source = self.commit_on_branch(
+                repo, stack_branch, f'{stack_id}.txt'
+            )
+            stack = {
+                'id': stack_id,
+                'branch': stack_branch,
+                'base': selected['defaults']['base_ref'],
+                'target_remote': selected['defaults']['canonical_remote'],
+                'target_branch': selected['defaults']['base_branch'],
+                'integration_branch': integration_branch,
+                'commits': [source],
+                'state': 'published',
+                'publication': {'enabled': True},
+                'meta': {},
+            }
+            selected['stacks'].append(stack)
+
+        manifest_path = self.tmp / f'{label}-selected-manifest.json'
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+        selected, selected_path = module.load_manifest(repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+
+        local_control = json.loads(json.dumps(selected))
+        local_control['control'] = 'not selected by the external manifest'
+        self.git(repo, 'switch', '-q', integration_branch)
+        tracked_manifest.write_text(
+            module.canonical_manifest_file_text(local_control)
+        )
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(
+            repo, 'commit', '-q', '-m',
+            'syncwheel: persist unselected pending control state',
+        )
+        local_control_tip = self.git(
+            repo, 'rev-parse', integration_branch
+        ).stdout.strip()
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{local_control_tip}^').stdout.strip(),
+            published_tip,
+        )
+        self.git(repo, 'merge-base', '--is-ancestor', published_tip, local_control_tip)
+        self.assertEqual(
+            self.git(
+                repo, 'diff-tree', '--no-commit-id', '--name-only', '-r',
+                published_tip, local_control_tip,
+            ).stdout.splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        entry = module.tree_path_entry(
+            repo, local_control_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(entry['mode'], '100644')
+        committed = json.loads(
+            module.tree_path_bytes(repo, entry).decode('utf-8')
+        )
+        self.assertNotEqual(
+            module.manifest_digest(committed), module.manifest_digest(selected)
+        )
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': selected,
+            'manifest_path': manifest_path,
+            'manifest_bytes': manifest_path.read_bytes(),
+            'integration_branch': integration_branch,
+            'integration_ref': integration_ref,
+            'published_tip': published_tip,
+            'local_control_tip': local_control_tip,
+            'state_before': state_before,
+            'stack': stack,
+        }
+
+
+    def test_reconcile_stack_only_pending_retry_ignores_unselected_integration_control(self):
+        fixture = self.prepare_selected_control_pending_reconcile(
+            'pending-stack-only', include_stack=True
+        )
+        module = fixture['module']
+        repo = fixture['repo']
+        stack = fixture['stack']
+        stack_ref = f"refs/heads/{stack['branch']}"
+        stack_tip = module.ref_tip(repo, stack['branch'])
+        operation = module.begin_coordination_publication(
+            repo,
+            fixture['manifest'],
+            fixture['manifest_path'],
+            {stack_ref: stack_tip},
+            'partial',
+            'partial',
+        )
+        token = operation['operation_token']
+        events_before = module.load_ledger_events(
+            repo, fixture['manifest_path']
+        )
+        intent_tokens_before = [
+            event['payload'].get('operation_token')
+            for event in events_before
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        self.assertEqual(intent_tokens_before, [token])
+        observed_pending = []
+        original_pending = module.pending_coordination_publication_for_scope
+
+        def record_pending(*args, **kwargs):
+            pending = original_pending(*args, **kwargs)
+            observed_pending.append({
+                'operation_token': pending.get('operation_token'),
+                'changed_refs': pending.get('changed_refs'),
+            })
+            return pending
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(repo),
+            '--manifest', str(fixture['manifest_path']), '--no-fetch',
+            '--apply', '--push', '--stack', stack['id'],
+            '--skip-integration', '--rebuild', 'none',
+        ])
+        args.git_args = []
+        with mock.patch.object(
+            module, 'reconcile_actions', return_value=[]
+        ), mock.patch.object(
+            module, 'pending_coordination_publication_for_scope',
+            side_effect=record_pending,
+        ):
+            returncode = args.func(args)
+
+        state_after, published = self.remote_state(fixture['origin'])
+        events_after = module.load_ledger_events(repo, fixture['manifest_path'])
+        intent_tokens_after = [
+            event['payload'].get('operation_token')
+            for event in events_after
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        terminal = [
+            event for event in events_after
+            if event['type']
+            in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+            and (event['payload'] or {}).get('operation_token') == token
+        ]
+        bare_stack_tip = self.git(
+            fixture['origin'], 'rev-parse', stack_ref
+        ).stdout.strip()
+        bare_integration_tip = self.git(
+            fixture['origin'], 'rev-parse', fixture['integration_ref']
+        ).stdout.strip()
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'observed_pending': observed_pending,
+                'intent_tokens_before': intent_tokens_before,
+                'intent_tokens_after': intent_tokens_after,
+                'pending_after': module.pending_coordination_publications(
+                    repo, fixture['manifest_path']
+                ),
+                'terminal_types': [event['type'] for event in terminal],
+                'remote_stack_tip': published['managed_refs'].get(stack_ref),
+                'bare_remote_stack_tip': bare_stack_tip,
+                'remote_integration_unchanged': published['managed_refs'].get(
+                    fixture['integration_ref']
+                ) == fixture['published_tip'],
+                'bare_remote_integration_unchanged': bare_integration_tip
+                == fixture['published_tip'],
+                'state_advanced': state_after != fixture['state_before'],
+                'local_integration_unchanged': module.ref_tip(
+                    repo, fixture['integration_branch']
+                ) == fixture['local_control_tip'],
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+            },
+            {
+                'returncode': 0,
+                'observed_pending': [{
+                    'operation_token': token,
+                    'changed_refs': {stack_ref: stack_tip},
+                }],
+                'intent_tokens_before': [token],
+                'intent_tokens_after': [token],
+                'pending_after': [],
+                'terminal_types': ['coordination_publish_completed'],
+                'remote_stack_tip': stack_tip,
+                'bare_remote_stack_tip': stack_tip,
+                'remote_integration_unchanged': True,
+                'bare_remote_integration_unchanged': True,
+                'state_advanced': True,
+                'local_integration_unchanged': True,
+                'manifest_unchanged': True,
+            },
+        )
+
+
+    def test_reconcile_pending_integration_refuses_unselected_control_before_publish(self):
+        fixture = self.prepare_selected_control_pending_reconcile(
+            'pending-integration-selected', include_stack=False
+        )
+        module = fixture['module']
+        repo = fixture['repo']
+        changed_refs = {
+            fixture['integration_ref']: fixture['local_control_tip']
+        }
+        operation = module.begin_coordination_publication(
+            repo,
+            fixture['manifest'],
+            fixture['manifest_path'],
+            changed_refs,
+            'partial',
+            'partial',
+        )
+        token = operation['operation_token']
+        events_before = module.load_ledger_events(
+            repo, fixture['manifest_path']
+        )
+        intent_tokens_before = [
+            event['payload'].get('operation_token')
+            for event in events_before
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        self.assertEqual(intent_tokens_before, [token])
+        observed_pending = []
+        publish_calls = []
+        original_pending = module.pending_coordination_publication_for_scope
+
+        def record_pending(*args, **kwargs):
+            pending = original_pending(*args, **kwargs)
+            observed_pending.append({
+                'operation_token': pending.get('operation_token'),
+                'changed_refs': pending.get('changed_refs'),
+            })
+            return pending
+
+        def block_publication(*args, **kwargs):
+            publish_calls.append({
+                'changed_refs': args[3],
+                'scope': args[4],
+            })
+            raise module.SyncwheelError(
+                'test sentinel blocked coordinated publication'
+            )
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(repo),
+            '--manifest', str(fixture['manifest_path']), '--no-fetch',
+            '--apply', '--push', '--skip-integration', '--rebuild', 'none',
+        ])
+        args.git_args = []
+        returncode = 0
+        refusal = None
+        with mock.patch.object(
+            module, 'reconcile_actions', return_value=[]
+        ), mock.patch.object(
+            module, 'pending_coordination_publication_for_scope',
+            side_effect=record_pending,
+        ), mock.patch.object(
+            module, 'coordinated_publish', side_effect=block_publication
+        ):
+            try:
+                returncode = args.func(args)
+            except module.SyncwheelError as exc:
+                returncode = 2
+                refusal = str(exc)
+
+        pending_after = module.pending_coordination_publications(
+            repo, fixture['manifest_path']
+        )
+        events_after = module.load_ledger_events(repo, fixture['manifest_path'])
+        intent_tokens_after = [
+            event['payload'].get('operation_token')
+            for event in events_after
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        intents = [
+            event for event in events_after
+            if event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('operation_token') == token
+        ]
+        terminal = [
+            event for event in events_after
+            if event['type']
+            in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+            and (event['payload'] or {}).get('operation_token') == token
+        ]
+        bare_integration_tip = self.git(
+            fixture['origin'], 'rev-parse', fixture['integration_ref']
+        ).stdout.strip()
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'named_refusal': bool(
+                    refusal and 'selected control manifest' in refusal
+                ),
+                'publish_calls': publish_calls,
+                'observed_pending': observed_pending,
+                'intent_tokens_before': intent_tokens_before,
+                'intent_tokens_after': intent_tokens_after,
+                'pending_tokens': [
+                    pending.get('operation_token') for pending in pending_after
+                ],
+                'intent_count': len(intents),
+                'terminal_events': terminal,
+                'remote_state_unchanged': self.remote_state(
+                    fixture['origin']
+                )[0] == fixture['state_before'],
+                'remote_integration_unchanged': self.remote_state(
+                    fixture['origin']
+                )[1]['managed_refs'][fixture['integration_ref']]
+                == fixture['published_tip'],
+                'bare_remote_integration_unchanged': bare_integration_tip
+                == fixture['published_tip'],
+                'local_integration_unchanged': module.ref_tip(
+                    repo, fixture['integration_branch']
+                ) == fixture['local_control_tip'],
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+            },
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'publish_calls': [],
+                'observed_pending': [{
+                    'operation_token': token,
+                    'changed_refs': changed_refs,
+                }],
+                'intent_tokens_before': [token],
+                'intent_tokens_after': [token],
+                'pending_tokens': [token],
+                'intent_count': 1,
+                'terminal_events': [],
+                'remote_state_unchanged': True,
+                'remote_integration_unchanged': True,
+                'bare_remote_integration_unchanged': True,
+                'local_integration_unchanged': True,
+                'manifest_unchanged': True,
+            },
+            'PENDING_INTEGRATION_REQUIRES_SELECTED_CONTROL',
+        )

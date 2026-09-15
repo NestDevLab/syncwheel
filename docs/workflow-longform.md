@@ -58,6 +58,13 @@ If inputs change before the CAS, ordinary recovery refuses the stale intent;
 plans from the current selection. This escape does not abandon an intent
 whose ref CAS already landed.
 
+Integration reports distinguish product equivalence from selected control state:
+`*_matches_product_projection` compares product bytes, while
+`*_control_manifest_matches_selected` validates the literal regular control blob.
+The older `*_matches_projection` fields remain product-equivalence aliases.
+Alignment and publication validate the selected control state on the exact OID
+they consume; a stack-only retry does not adopt an unrelated integration tip.
+
 ## What becomes deterministic
 
 With the manifest in place, the script can tell you:
