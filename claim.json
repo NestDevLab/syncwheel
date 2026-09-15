@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/mgt-0287-ci-sharding"
-  ],
-  "claimed_at": "2026-09-15T20:30:39+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-15T20:45:05+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "01a87fe8-f6fe-4670-89e0-94085963b2ac",
-  "publication_scope": "stack:mgt-0287-ci-sharding",
+  "operation_token": "d02dfb59-8b12-448a-b77d-84b99cfaf8da",
+  "publication_scope": "close:mgt-0287-ci-sharding",
+  "reason": "merged",
   "source_ref": "refs/heads/pr/mgt-0287-ci-sharding",
   "syncwheel_version": "0.43.5"
 }
