@@ -45,6 +45,13 @@ def _fixture(case, name):
     plan = syncwheel.plan_published_integration_tip_reuse(
         caller, fixture["manifest"], fixture["manifest_path"]
     )
+    selected, selected_path = syncwheel.load_manifest(
+        caller, fixture["manifest_path"]
+    )
+    selected["defaults"]["replay_mode"] = "auto"
+    syncwheel.save_manifest(selected_path, selected)
+    fixture["manifest"] = selected
+    fixture["manifest_path"] = selected_path
     return fixture, caller, syncwheel, integration_branch, target, target_manifest, plan
 
 
@@ -64,7 +71,7 @@ def _invoke_int_rebuild(syncwheel, caller):
     return args.func(args)
 
 
-def test_a14_reset_uses_the_final_observed_destination():
+def test_a14_refuses_when_reset_destination_changes_after_lease():
     case = module.ActiveActiveCoordinationTest(methodName="runTest")
     case.setUp()
     try:
@@ -80,91 +87,68 @@ def test_a14_reset_uses_the_final_observed_destination():
         decoy = case.tmp / "a14-reset-destination-decoy"
         decoy.mkdir()
         remote_before = case.a14_remote_snapshot(fixture)
-        target_readme_before = (target / "README.md").read_bytes()
+        target_before = _reset_sensitive_snapshot(case, target, target_manifest)
         original_find = syncwheel.find_worktree_for_branch
-        original_run = syncwheel.run
-        direct_lookups = []
-        observed_lookups = []
-        reset_paths = []
+        substituted = []
 
         def choose_worktree(*args, **kwargs):
             result = original_find(*args, **kwargs)
             callers = [frame.function for frame in inspect.stack()[1:]]
-            caller_name = next(
-                (
-                    name
-                    for name in callers
-                    if name
-                    in {
-                        "checkout_reset_destination_lease",
-                        "execute_replay_steps",
-                    }
-                ),
-                None,
-            )
             ref_advanced = bool(
                 isinstance(plan, dict)
                 and syncwheel.ref_tip(caller, fixture["integration_ref"])
                 != plan.get("publishedTip")
             )
-            if ref_advanced and caller_name == "execute_replay_steps":
-                direct_lookups.append(str(decoy.resolve()))
+            if (
+                ref_advanced
+                and "apply_integration_reconciliation" in callers
+                and not substituted
+            ):
+                substituted.append(str(decoy.resolve()))
                 return decoy
-            if ref_advanced and caller_name == "checkout_reset_destination_lease":
-                observed_lookups.append(str(Path(result).resolve()) if result else None)
             return result
 
-        def intercept_reset(argv, *args, **kwargs):
-            command = [str(value) for value in argv]
-            if (
-                len(command) >= 6
-                and command[:2] == ["git", "-C"]
-                and command[3:5] == ["reset", "--hard"]
-                and command[5] == integration_branch
-            ):
-                reset_paths.append(str(Path(command[2]).resolve()))
-                raise ResetIntercept(command[2])
-            return original_run(argv, *args, **kwargs)
-
-        intercepted = None
         error = None
         stdout = io.StringIO()
         stderr = io.StringIO()
         with mock.patch.object(
             syncwheel, "find_worktree_for_branch", side_effect=choose_worktree
-        ), mock.patch.object(syncwheel, "run", side_effect=intercept_reset):
+        ):
             try:
                 with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                     _invoke_int_rebuild(syncwheel, caller)
-            except ResetIntercept as exc:
-                intercepted = exc.path
             except syncwheel.SyncwheelError as exc:
                 error = str(exc)
 
+        pending = syncwheel.pending_control_manifest_intents(
+            syncwheel.load_ledger_events(caller, fixture["manifest_path"])
+        )
         observed = {
-            "final_reset_was_intercepted": intercepted is not None,
             "plan_status_replay": bool(
                 isinstance(plan, dict) and plan.get("status") == "replay"
             ),
+            "destination_change_injected": substituted == [str(decoy.resolve())],
+            "destination_change_refused": bool(
+                error and "integration reconciliation checkout moved" in error
+            ),
+            "pending_intent_preserved": len(pending) == 1,
             "remote_snapshot_preserved": case.a14_remote_snapshot(fixture)
             == remote_before,
-            "reset_uses_actual_destination": reset_paths == [str(target.resolve())],
             "target_branch_identity": case.git(
                 target, "branch", "--show-current"
             ).stdout.strip()
             == integration_branch,
-            "target_readme_preserved_before_reset": (target / "README.md").read_bytes()
-            == target_readme_before,
+            "target_checkout_preserved": _reset_sensitive_snapshot(
+                case, target, target_manifest
+            ) == target_before,
         }
         print(
             "A14_RESET_DESTINATION_PATH_OBSERVATION="
             + json.dumps(
                 {
                     **observed,
-                    "direct_lookups": direct_lookups,
                     "error": error,
-                    "observed_lookups": observed_lookups,
-                    "reset_paths": reset_paths,
+                    "substituted": substituted,
                 },
                 sort_keys=True,
             ),
@@ -252,7 +236,7 @@ def load_tests(loader, tests, pattern):
     return loader.suiteClass(
         [
             unittest.FunctionTestCase(
-                test_a14_reset_uses_the_final_observed_destination
+                test_a14_refuses_when_reset_destination_changes_after_lease
             ),
             unittest.FunctionTestCase(
                 test_a14_refuses_dirt_added_after_reset_destination_preflight

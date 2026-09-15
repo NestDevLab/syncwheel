@@ -2334,8 +2334,15 @@ with module.coordination_publication_lock(Path(repo_path)):
                 replay_subject = self.git(
                     repo, 'show', '-s', '--format=%s', intent['replay_tip']
                 ).stdout.strip()
-                self.assertNotEqual(
+                self.assertEqual(
                     replay_subject, 'chore: restore Syncwheel control manifest'
+                )
+                detached_subject = self.git(
+                    repo, 'show', '-s', '--format=%s',
+                    intent['detached_replay_tip'],
+                ).stdout.strip()
+                self.assertNotEqual(
+                    detached_subject, 'chore: restore Syncwheel control manifest'
                 )
 
                 self.run_cli(repo, *retry)
@@ -7767,13 +7774,14 @@ with module.coordination_publication_lock(Path(repo_path)):
 
                 unchanged = mutation_snapshot()
 
-                failure = self.run_cli(
-                    repo, *command, '--manifest', str(proposal_path), expected=2
+                rebuild = (
+                    'int', 'rebuild', '--manifest', str(proposal_path),
+                    '--reason', 'adopt reviewed control manifest proposal',
                 )
+                failure = self.run_cli(repo, *rebuild, expected=2)
 
                 self.assertIn(str(repo), failure.stderr)
                 self.assertIn('README.md', failure.stderr)
-                self.assertIn(f'rerun: syncwheel {command[0]} {command[1]}', failure.stderr)
                 self.assertEqual(mutation_snapshot(), unchanged)
                 self.assertEqual(
                     self.git(repo, 'rev-parse', 'integration/shared').stdout.strip(),
@@ -7790,6 +7798,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
 
                 self.git(repo, 'checkout', '--', 'README.md')
+                self.run_cli(repo, *rebuild)
                 self.run_cli(
                     repo, *command, '--manifest', str(proposal_path)
                 )
@@ -8801,18 +8810,33 @@ with module.coordination_publication_lock(Path(repo_path)):
             's1: local branch is not a safe successor of the published managed ref',
         )
 
-    def test_published_tip_reuse_falls_back_for_published_user_gitignore_bytes(self):
+    def test_published_tip_reuse_refuses_unowned_user_gitignore_history(self):
         fixture = self.a14_published_tip_reuse_fixture(
             'reuse-gitignore-delta', publisher_change='gitignore'
         )
-
+        before = self.a14_published_tip_rebuild_observation(fixture)
+        remote_before = self.a14_published_tip_remote_observation(fixture)
         published_gitignore = self.git(
             fixture['follower'], 'show',
             f"{fixture['published_tip']}:.gitignore",
         ).stdout
         self.assertIn('user-owned-ignore\n', published_gitignore)
-        self.assert_a14_published_tip_rebuild_falls_back_without_remote_mutation(
-            fixture, '.gitignore', published_gitignore
+
+        failure = self.run_cli_unchecked(
+            fixture['follower'], 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
+        )
+
+        self.assertEqual(failure.returncode, 2, failure.stderr)
+        self.assertIn('integration reconciliation has unclassified history', failure.stderr)
+        self.assertEqual(self.a14_published_tip_rebuild_observation(fixture), before)
+        self.assertEqual(self.a14_published_tip_remote_observation(fixture), remote_before)
+        self.assertEqual(
+            self.git(
+                fixture['follower'], 'show',
+                f"{fixture['published_tip']}:.gitignore",
+            ).stdout,
+            published_gitignore,
         )
 
     def test_published_tip_reuse_rejects_dirty_or_malformed_source_gitignore(self):
@@ -8856,58 +8880,77 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
                 module = fixture['module']
                 before = self.a14_published_tip_rebuild_observation(fixture)
-                original = module.published_integration_tip_reuse_is_current
                 raced = False
 
-                def race_before_current_check(*args, **kwargs):
+                def introduce_race():
                     nonlocal raced
-                    if not raced:
-                        raced = True
-                        if stale == 'state':
-                            subprocess.run(
-                                [
-                                    'git', '--git-dir', str(fixture['origin']),
-                                    'update-ref', '-d',
-                                    'refs/heads/syncwheel/state/default',
-                                ],
-                                check=True,
-                            )
+                    raced = True
+                    if stale == 'state':
+                        subprocess.run(
+                            [
+                                'git', '--git-dir', str(fixture['origin']),
+                                'update-ref', '-d',
+                                'refs/heads/syncwheel/state/default',
+                            ],
+                            check=True,
+                        )
+                    elif stale == 'integration':
+                        subprocess.run(
+                            [
+                                'git', '--git-dir', str(fixture['origin']),
+                                'update-ref', fixture['integration_ref'],
+                                fixture['source'], fixture['published_tip'],
+                            ],
+                            check=True,
+                        )
+                    else:
+                        manifest = fixture['manifest']
+                        if stale == 'base':
+                            ref = self.git(
+                                fixture['follower'], 'rev-parse',
+                                '--symbolic-full-name',
+                                manifest['integration']['base'],
+                            ).stdout.strip()
                         else:
-                            if stale == 'integration':
-                                subprocess.run(
-                                    [
-                                        'git', '--git-dir', str(fixture['origin']),
-                                        'update-ref', fixture['integration_ref'],
-                                        fixture['source'], fixture['published_tip'],
-                                    ],
-                                    check=True,
-                                )
-                            else:
-                                manifest = fixture['manifest']
-                                if stale == 'base':
-                                    ref = self.git(
-                                        fixture['follower'], 'rev-parse',
-                                        '--symbolic-full-name',
-                                        manifest['integration']['base'],
-                                    ).stdout.strip()
-                                else:
-                                    ref = (
-                                        'refs/heads/'
-                                        + manifest['stacks'][0]['branch']
-                                    )
-                                parent = self.git(
-                                    fixture['follower'], 'rev-parse', ref
-                                ).stdout.strip()
-                                advanced = self.git(
-                                    fixture['follower'], 'commit-tree',
-                                    f'{parent}^{{tree}}', '-p', parent,
-                                    '-m', f'test: race {stale} replay input',
-                                ).stdout.strip()
-                                self.git(
-                                    fixture['follower'], 'update-ref',
-                                    ref, advanced, parent,
-                                )
-                    return original(*args, **kwargs)
+                            ref = 'refs/heads/' + manifest['stacks'][0]['branch']
+                        parent = self.git(
+                            fixture['follower'], 'rev-parse', ref
+                        ).stdout.strip()
+                        advanced = self.git(
+                            fixture['follower'], 'commit-tree',
+                            f'{parent}^{{tree}}', '-p', parent,
+                            '-m', f'test: race {stale} replay input',
+                        ).stdout.strip()
+                        self.git(
+                            fixture['follower'], 'update-ref',
+                            ref, advanced, parent,
+                        )
+
+                if stale == 'merge-stack':
+                    original = module.integration_projection_input_snapshot
+
+                    def race_replay_input_snapshot(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        if not raced:
+                            introduce_race()
+                        return result
+
+                    patched_name = 'integration_projection_input_snapshot'
+                    patched_effect = race_replay_input_snapshot
+                    expected_error = (
+                        'integration replay inputs changed during published-tip proof'
+                    )
+                else:
+                    original = module.apply_integration_reconciliation
+
+                    def race_before_reconciliation_cas(*args, **kwargs):
+                        if not raced:
+                            introduce_race()
+                        return original(*args, **kwargs)
+
+                    patched_name = 'apply_integration_reconciliation'
+                    patched_effect = race_before_reconciliation_cas
+                    expected_error = 'integration reconciliation lease changed before CAS'
 
                 parser = module.build_parser()
                 args = parser.parse_args([
@@ -8916,13 +8959,10 @@ with module.coordination_publication_lock(Path(repo_path)):
                 ])
                 args.dry_run = False
                 with mock.patch.object(
-                    module,
-                    'published_integration_tip_reuse_is_current',
-                    side_effect=race_before_current_check,
+                    module, patched_name, side_effect=patched_effect,
                 ):
                     with self.assertRaisesRegex(
-                        module.SyncwheelError,
-                        'published integration reuse lease changed before decision',
+                        module.SyncwheelError, expected_error,
                     ):
                         args.func(args)
 
@@ -9001,6 +9041,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(
             follower, 'stack', 'create', 's2', source,
             '--branch', 'pr/a14-s2',
+        )
+        self.run_cli(
+            follower, 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
         )
         self.run_cli(follower, 'stack', 'push', 's2')
 
@@ -9114,14 +9158,16 @@ with module.coordination_publication_lock(Path(repo_path)):
             )
             self.assertEqual(plan['status'], 'replay')
             self.assertTrue(plan['replayProductPaths'])
+            fixture['manifest'], fixture['manifest_path'] = (
+                self.stage_owned_control_manifest_delta(follower)
+            )
             remote_before = self.a14_remote_snapshot(fixture)
-            original = module.restore_control_manifest_after_integration_rebuild
+            original = module.apply_integration_reconciliation
             injected = []
 
-            def inject_after_restore(*args, **kwargs):
-                result = original(*args, **kwargs)
+            def inject_before_reconciliation_cas(*args, **kwargs):
                 if injected:
-                    return result
+                    return original(*args, **kwargs)
                 if kind == 'head':
                     self.git(
                         follower, 'commit', '--allow-empty', '-q', '-m',
@@ -9143,7 +9189,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                     path = follower / '.gitignore'
                     path.write_bytes(path.read_bytes() + b'# concurrent source lease\n')
                 injected.append(self.a14_source_snapshot(fixture))
-                return result
+                return original(*args, **kwargs)
 
             parser = module.build_parser()
             args = parser.parse_args([
@@ -9156,8 +9202,8 @@ with module.coordination_publication_lock(Path(repo_path)):
             stderr = io.StringIO()
             with mock.patch.object(
                 module,
-                'restore_control_manifest_after_integration_rebuild',
-                side_effect=inject_after_restore,
+                'apply_integration_reconciliation',
+                side_effect=inject_before_reconciliation_cas,
             ):
                 try:
                     with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):

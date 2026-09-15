@@ -24,14 +24,14 @@ def _run_unallowed_dirt_case(case):
     ) = destination_cases._fixture(case, "a14-reset-capture-unallowed")
     remote_before = case.a14_remote_snapshot(fixture)
     clean_at_entry = not case.git(target, "status", "--porcelain").stdout
-    original_ensure = syncwheel.ensure_non_in_place_target_clean
+    original_capture = syncwheel.checkout_reset_destination_lease
     injected = []
     allowance = []
 
-    def inject_after_successful_preflight(*args, **kwargs):
-        result = original_ensure(*args, **kwargs)
-        worktree = kwargs.get("worktree") if "worktree" in kwargs else args[2]
-        if Path(worktree).resolve() == target.resolve() and not injected:
+    def inject_after_successful_capture(*args, **kwargs):
+        result = original_capture(*args, **kwargs)
+        worktree = result.get("worktree_path")
+        if worktree and Path(worktree).resolve() == target.resolve() and not injected:
             allowed_paths = set(kwargs.get("allowed_paths") or ())
             allowance.append(sorted(allowed_paths))
             (target / "README.md").write_text(
@@ -50,8 +50,8 @@ def _run_unallowed_dirt_case(case):
     stderr = io.StringIO()
     with mock.patch.object(
         syncwheel,
-        "ensure_non_in_place_target_clean",
-        side_effect=inject_after_successful_preflight,
+        "checkout_reset_destination_lease",
+        side_effect=inject_after_successful_capture,
     ):
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
@@ -94,16 +94,21 @@ def _run_allowed_manifest_case(case):
     ) = destination_cases._fixture(case, "a14-reset-capture-allowed")
     remote_before = case.a14_remote_snapshot(fixture)
     clean_at_entry = not case.git(target, "status", "--porcelain").stdout
-    original_ensure = syncwheel.ensure_non_in_place_target_clean
+    original_capture = syncwheel.checkout_reset_destination_lease
     original_run = syncwheel.run
     injected = []
     allowance = []
     reset_paths = []
 
-    def inject_allowed_manifest_after_preflight(*args, **kwargs):
-        result = original_ensure(*args, **kwargs)
-        worktree = kwargs.get("worktree") if "worktree" in kwargs else args[2]
-        if Path(worktree).resolve() == target.resolve() and not injected:
+    captures = 0
+
+    def inject_allowed_manifest_after_second_capture(*args, **kwargs):
+        nonlocal captures
+        result = original_capture(*args, **kwargs)
+        worktree = result.get("worktree_path")
+        if worktree and Path(worktree).resolve() == target.resolve():
+            captures += 1
+        if captures == 2 and not injected:
             allowed_paths = set(kwargs.get("allowed_paths") or ())
             allowance.append(sorted(allowed_paths))
             target_manifest.write_bytes(target_manifest.read_bytes() + b"\n")
@@ -116,14 +121,15 @@ def _run_allowed_manifest_case(case):
 
     def intercept_reset(argv, *args, **kwargs):
         command = [str(value) for value in argv]
+        cwd = kwargs.get("cwd")
         if (
-            len(command) >= 6
-            and command[:2] == ["git", "-C"]
-            and command[3:5] == ["reset", "--hard"]
-            and command[5] == integration_branch
+            len(command) >= 5
+            and command[:4] == ["git", "read-tree", "--reset", "-u"]
+            and cwd is not None
+            and Path(cwd).resolve() == target.resolve()
         ):
-            reset_paths.append(str(Path(command[2]).resolve()))
-            raise destination_cases.ResetIntercept(command[2])
+            reset_paths.append(str(Path(cwd).resolve()))
+            raise destination_cases.ResetIntercept(cwd)
         return original_run(argv, *args, **kwargs)
 
     intercepted = None
@@ -132,8 +138,8 @@ def _run_allowed_manifest_case(case):
     stderr = io.StringIO()
     with mock.patch.object(
         syncwheel,
-        "ensure_non_in_place_target_clean",
-        side_effect=inject_allowed_manifest_after_preflight,
+        "checkout_reset_destination_lease",
+        side_effect=inject_allowed_manifest_after_second_capture,
     ), mock.patch.object(syncwheel, "run", side_effect=intercept_reset):
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):

@@ -115,6 +115,12 @@ class RevisionProviderRepository:
             enabled=False,
             reason='isolated revision-provider fixture',
         )
+        # The fixture publishes its initial base as integration, then advances
+        # that base in on_base scenarios. Start with canonical control bytes so
+        # bootstrap does not create an integration-only formatting commit that
+        # those base resets would incorrectly discard.
+        canonical_manifest, _ = SYNCWHEEL.load_manifest(self.repo)
+        manifest_path.write_text(SYNCWHEEL.canonical_manifest_file_text(canonical_manifest))
         self.git('add', '.gitignore', 'base.txt', '.syncwheel/manifest.json')
         self.git('commit', '-q', '-m', 'test: initialize managed repository')
         self.git('push', '-q', '-u', 'origin', 'main')
@@ -126,6 +132,7 @@ class RevisionProviderRepository:
         self.git('switch', '-q', '-c', 'main-integration', 'main')
         if coordination_mode == 'active-active':
             self.cli('int', 'push')
+            assert self.git('rev-parse', 'main-integration') == self.git('rev-parse', 'main')
 
     def close(self):
         self.temp.cleanup()
@@ -313,7 +320,7 @@ class RevisionProviderRepository:
         return json.loads(self.manifest_path.read_text())
 
     def write_manifest(self, manifest):
-        self.manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
 
     def staged_derived_digest(self, *paths):
         path_blobs = {}

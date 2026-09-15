@@ -5117,6 +5117,16 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(self.git('status', '--short', '--untracked-files=all', '--', '.syncwheel/ledger'), '')
         self.assertGreater(json.loads(ledger_state.stdout)['last_seq'], 0)
 
+    def commit_selected_integration_control(self, manifest_path):
+        """Prepare valid control state for product-history equivalence tests."""
+        module = self.load_syncwheel_module()
+        manifest, _ = module.load_manifest(self.repo, manifest_path)
+        control_path = self.repo / '.syncwheel' / 'manifest.json'
+        control_path.parent.mkdir(parents=True, exist_ok=True)
+        control_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: persist selected integration control')
+
     def test_reconcile_aligns_local_to_remote_when_remote_matches_projection(self):
         beta = self.git('rev-parse', 'main')
         base = self.git('rev-parse', 'main~1')
@@ -5146,6 +5156,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.git('branch', 'integration/reconcile', base)
         self.git('switch', '-q', 'integration/reconcile')
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
 
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -5223,6 +5234,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.git('branch', '-f', 'pr/feature-b', 'HEAD')
         self.git('switch', '-q', '-c', 'integration/reconcile', base)
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
 
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -5282,6 +5294,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.git('branch', '-f', 'pr/feature-b', remote_stack)
         self.git('switch', '-q', '-c', 'integration/reconcile', base)
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
         remote_integration = self.git('rev-parse', 'HEAD')
 
         origin = self.tmp / 'origin.git'
@@ -5298,6 +5311,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.git('switch', '-q', 'integration/reconcile')
         self.git('reset', '--hard', base)
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
         local_integration = self.git('rev-parse', 'HEAD')
         self.git('switch', '-q', 'main')
         self.git('clean', '-fd')
@@ -5610,6 +5624,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.git('switch', '-q', '-c', 'integration/shared', 'main')
         self.git('merge', '--no-ff', 'pr/feature-c', '-m', "Merge stack 'feature-c' into integration/shared")
+        self.commit_selected_integration_control(manifest_path)
 
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -5848,6 +5863,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         data['integration']['base'] = 'main'
         data['integration']['stacks'] = ['feature-b']
         data['stacks'] = [data['stacks'][1]]
+        data['stacks'][0]['commits'] = []
         manifest.write_text(json.dumps(data, indent=2) + '\n')
 
         result = self.run_cli('reconcile', '--mode', 'resume', '--no-fetch', '--json', expected=0)

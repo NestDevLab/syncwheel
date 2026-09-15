@@ -6101,6 +6101,15 @@ def integration_reconciliation_history(
             continue
         if observation and integration_reconciliation_historical_derived(repo_root, commit, tip, observation):
             continue
+        product_paths = sorted(
+            changed - {'.syncwheel/manifest.json', '.gitignore'}
+        )
+        if product_paths:
+            raise SyncwheelError(
+                'published integration contains unexplained product paths: '
+                + ', '.join(product_paths)
+                + f' (unclassified history {commit})'
+            )
         raise SyncwheelError(f'integration reconciliation has unclassified history: {commit}')
 
 
@@ -6250,6 +6259,9 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         return False
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
+        # Refresh moving replay inputs before freezing their local and remote
+        # observations, as the ordinary replay path does before materializing.
+        git(repo_root, 'fetch', '--all', '--prune')
         observed = observe_published_integration_tip(repo_root, manifest)
         if observed is None:
             return False
@@ -6258,6 +6270,17 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         verify_coordination_state_manifest_digest(
             repo_root, observed['state'], observed['config']['remote']
         )
+        reuse_preflight = plan_published_integration_tip_reuse(
+            repo_root, manifest, manifest_path, refresh_inputs=False,
+        )
+        if (
+            reuse_preflight
+            and reuse_preflight.get('status') == 'refuse'
+            and reuse_preflight.get('reason', '').startswith(
+                'source .gitignore differs from the published control bytes'
+            )
+        ):
+            raise SyncwheelError(reuse_preflight['reason'])
         local_tip = ref_tip(repo_root, branch)
         if not local_tip or not branch_contains(repo_root, local_tip, observed['published_tip']):
             raise SyncwheelError('integration reconciliation requires a local successor of published history')
@@ -6268,7 +6291,10 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
             raise SyncwheelError('integration reconciliation requires regular control files')
         inputs = integration_projection_input_snapshot(repo_root, manifest)
         destination = checkout_reset_destination_lease(
-            repo_root, branch, allowed_paths=control_manifest_source_allowance(repo_root, manifest_path)
+            repo_root, branch,
+            allowed_paths=control_manifest_source_allowance(
+                repo_root, manifest_path
+            ),
         )
         store = load_derived_provenance_store(repo_root)
         shared = shared_derived_provenance_records(repo_root, manifest, observed['state'])
@@ -13542,9 +13568,7 @@ def coordinated_publish_cycle(
         not dry_run
         and integration_tip
         and not integration_ref_published
-        and manifest_from_tree(
-            repo_root, integration_tip, integration_manifest_path(repo_root)
-        ) is None
+        and not integration_control_matches_selected(repo_root, manifest, integration_tip)
     ):
         restore_control_manifest_after_integration_rebuild(
             repo_root,
@@ -16704,7 +16728,7 @@ def checkout_reset_destination_lease(
         )
     if unexpected_paths:
         raise SyncwheelError(
-            'integration reset destination is not clean at lease capture; '
+            f'integration reset destination {worktree} is not clean at lease capture; '
             'refusing to overwrite it: ' + ', '.join(unexpected_paths)
         )
     return {
