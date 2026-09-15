@@ -1,14 +1,14 @@
 {
   "changed_refs": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "6c9e8be5f170805c531cae2ccc5f4c52aa889c61"
+    "refs/heads/pr/mgt-0287-ci-sharding": "dfcfc0ec0946f92066a8986079c282aecde02d65"
   },
   "claims": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "6fe38db15299d1105182a690bb74f78ac402b899",
+    "refs/heads/pr/mgt-0287-ci-sharding": "18f32a769081bb7004b4d953efb20def36d22a78",
     "refs/heads/pr/mgt-0287-sw1": "8abee5e30b581a37ec87228bcf4d4b0b6e204d52",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-15T18:11:51+00:00",
+  "created_at": "2026-09-15T18:34:25+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -24,7 +24,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
-    "refs/heads/pr/mgt-0287-ci-sharding": "6c9e8be5f170805c531cae2ccc5f4c52aa889c61",
+    "refs/heads/pr/mgt-0287-ci-sharding": "dfcfc0ec0946f92066a8986079c282aecde02d65",
     "refs/heads/pr/mgt-0287-sw1": "f1c88d27fdce99ea8a4bfac148e4743c01fd380d",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
@@ -137,7 +137,8 @@
         "commits": [
           "c0e7e8aacef66f266ae7f0f9eb41abf4e9b61ba5",
           "e1384eb9a0f8aa18d6011b3a7a44a62bb8658394",
-          "cbe0a02e9e86dc50324ad640208e3418ff373c90"
+          "cbe0a02e9e86dc50324ad640208e3418ff373c90",
+          "4d9e7f6dc063a12b346ace3a0a817493ed6e91a7"
         ],
         "id": "mgt-0287-ci-sharding",
         "integration_branch": "main-integration",
@@ -147,10 +148,10 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "ee73c3c3-78f1-44f9-8b5e-0bd647244fe1",
-  "parent_state": "b8f8a7a1443b4c2d7a7a3de24fdaa339f857f0bb",
+  "operation_token": "f89140cf-38ec-4bf0-9a34-c4a0a161916b",
+  "parent_state": "2665cd3ff353f4b0aa39f4431fd33b46570b3878",
   "projection_status": "partial",
-  "publication_id": "41e143c8-fe3a-4d25-9633-3f9ddc220fd0",
+  "publication_id": "cf1e6da5-f2cd-4f12-8d3c-031eb662ecff",
   "publication_scope": "stack:mgt-0287-ci-sharding",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
