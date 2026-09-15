@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.43.7 - 2026-09-15
+
+- Allow an explicit `private_free_rules` merge-policy fallback when GitHub Free
+  withholds branch-protection and repository-rules APIs for a private
+  repository. The fallback accepts only the exact plan-limit response, keeps
+  every other readiness check active, records a visible warning, and leaves
+  final enforcement to GitHub. Public repositories and unrelated API failures
+  remain blocked.
+
 ## 0.43.6 - 2026-09-14
 
 - Keep revision-provider draft ownership changes uncommitted until the provider
