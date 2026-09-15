@@ -3516,7 +3516,63 @@ with module.coordination_publication_lock(Path(repo_path)):
             state['manifest'],
             'content-drift',
             state['managed_refs']['refs/heads/pr/content-drift'],
+            changed,
         ))
+
+    def test_successor_validation_rejects_unsafe_frozen_tip_after_branch_advances(self):
+        origin = self.create_remote('frozen-successor')
+        repo = self.clone(origin, 'frozen-successor')
+        self.init_coordinated(repo)
+
+        source = self.commit_on_branch(repo, 'scratch/frozen', 'frozen.txt')
+        self.git(repo, 'branch', 'pr/frozen', source)
+        self.run_cli(
+            repo, 'stack', 'create', 'frozen', source, '--branch', 'pr/frozen'
+        )
+        self.run_cli(repo, 'stack', 'push', 'frozen')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        state = module.read_remote_coordination_state(
+            repo,
+            config,
+            fetch=True,
+            local_manifest_version=manifest['version'],
+        )['state']
+        stack_ref = 'refs/heads/pr/frozen'
+        remote_tip = state['managed_refs'][stack_ref]
+
+        frozen_tip = self.commit_on_branch(
+            repo, 'scratch/frozen-unsafe', 'frozen-unsafe.txt'
+        )
+        safe_live_tip = self.git(
+            repo,
+            'commit-tree',
+            f'{remote_tip}^{{tree}}',
+            '-p',
+            remote_tip,
+            '-m',
+            'test: safe live successor',
+        ).stdout.strip()
+        self.git(repo, 'branch', '-f', 'pr/frozen', safe_live_tip)
+        self.git(repo, 'merge-base', '--is-ancestor', remote_tip, frozen_tip, expected=1)
+        self.git(repo, 'merge-base', '--is-ancestor', remote_tip, safe_live_tip)
+
+        local_snapshot = module.coordination_manifest_snapshot(manifest, repo)
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'frozen: local branch is not a safe successor',
+        ):
+            module.validate_coordination_changed_ref_successors(
+                repo,
+                manifest,
+                config,
+                state,
+                state['manifest'],
+                local_snapshot,
+                {stack_ref: frozen_tip},
+            )
 
     def test_partial_stack_adoption_predicate_fails_closed(self):
         module = self.load_module()

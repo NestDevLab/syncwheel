@@ -12275,14 +12275,14 @@ def fetch_coordination_ref_tip(repo_root, config, ref, expected_tip):
     return expected_tip
 
 
-def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local_branch):
-    local_tip = ref_tip(repo_root, local_branch)
-    if local_tip == remote_tip:
+def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, candidate_tip):
+    candidate_tip = ref_tip(repo_root, candidate_tip)
+    if candidate_tip == remote_tip:
         return True
     fetch_coordination_ref_tip(repo_root, config, ref, remote_tip)
-    if ref_tree(repo_root, local_branch) == ref_tree(repo_root, remote_tip):
+    if ref_tree(repo_root, candidate_tip) == ref_tree(repo_root, remote_tip):
         return True
-    return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, local_tip, check=False).returncode == 0
+    return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, candidate_tip, check=False).returncode == 0
 
 
 def deterministic_stack_replay_tip(repo_root, base, commits):
@@ -12356,6 +12356,7 @@ def coordination_stack_ref_is_exact_rebase(
     remote_snapshot,
     stack_id,
     remote_tip,
+    candidate_tip,
 ):
     """Accept only a replay-proven rebase of an already published stack ref."""
     previous_manifest = apply_coordination_snapshot(manifest, remote_snapshot)
@@ -12380,15 +12381,15 @@ def coordination_stack_ref_is_exact_rebase(
         return False
     if commit_full_sha(repo_root, previous_commits[-1]) != remote_tip:
         return False
-    local_tip = ref_tip(repo_root, local_stack['branch'])
-    if not local_tip or commit_full_sha(repo_root, local_commits[-1]) != local_tip:
+    candidate_tip = ref_tip(repo_root, candidate_tip)
+    if not candidate_tip or commit_full_sha(repo_root, local_commits[-1]) != candidate_tip:
         return False
     expected_tip = deterministic_stack_replay_tip(
         repo_root,
         local_stack['base'],
         previous_commits,
     )
-    return expected_tip == local_tip
+    return expected_tip == candidate_tip
 
 
 def integration_partial_stack_adoption_allowed(
@@ -12429,13 +12430,14 @@ def validate_coordination_changed_ref_successors(
         ref = f"refs/heads/{local_stack['branch']}"
         if ref not in changed_refs:
             continue
+        candidate_tip = changed_refs[ref]
         remote_tip = state.get('managed_refs', {}).get(ref)
         safe_successor = not remote_tip or coordination_ref_is_safe_successor(
             repo_root,
             config,
             ref,
             remote_tip,
-            local_stack['branch'],
+            candidate_tip,
         )
         exact_rebase = remote_tip and coordination_stack_ref_is_exact_rebase(
             repo_root,
@@ -12443,6 +12445,7 @@ def validate_coordination_changed_ref_successors(
             remote_snapshot,
             stack_id,
             remote_tip,
+            candidate_tip,
         )
         if not safe_successor and not exact_rebase:
             raise SyncwheelError(
@@ -12460,7 +12463,7 @@ def validate_coordination_changed_ref_successors(
             config,
             integration_ref,
             remote_tip,
-            manifest['integration']['branch'],
+            changed_refs[integration_ref],
         )
     ):
         raise SyncwheelError(
