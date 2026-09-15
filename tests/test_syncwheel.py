@@ -4290,6 +4290,71 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertTrue(report['local_matches_projection'])
 
+    def test_integration_report_separates_product_projection_from_selected_control(self):
+        module = self.load_syncwheel_module()
+        selected_manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/control-authority')
+        selected_manifest['stacks'] = []
+        selected_manifest['integration'] = {
+            'branch': 'integration/control-authority',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        candidate_manifest = {**selected_manifest, 'control': 'unselected'}
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(
+            module.canonical_manifest_file_text(candidate_manifest)
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist unselected control state')
+
+        report = module.integration_sync_report(self.repo, selected_manifest)
+
+        for field in (
+            'local_oid',
+            'remote_oid',
+            'local_matches_product_projection',
+            'remote_matches_product_projection',
+            'local_control_manifest_matches_selected',
+            'remote_control_manifest_matches_selected',
+        ):
+            self.assertIn(field, report)
+        self.assertEqual(
+            report['local_oid'],
+            self.git('rev-parse', 'integration/control-authority'),
+        )
+        self.assertIsNone(report['remote_oid'])
+        self.assertTrue(report['local_matches_product_projection'])
+        self.assertTrue(report['local_matches_projection'])
+        self.assertFalse(report['local_control_manifest_matches_selected'])
+        self.assertIsNone(report['remote_matches_product_projection'])
+        self.assertIsNone(report['remote_control_manifest_matches_selected'])
+        self.assertFalse(
+            module.local_manifest_projection_is_convergent(
+                self.repo, selected_manifest
+            )
+        )
+
+        selected_report = module.integration_sync_report(
+            self.repo, candidate_manifest
+        )
+
+        for field in (
+            'local_matches_product_projection',
+            'local_control_manifest_matches_selected',
+        ):
+            self.assertIn(field, selected_report)
+        self.assertTrue(selected_report['local_matches_product_projection'])
+        self.assertTrue(selected_report['local_matches_projection'])
+        self.assertTrue(selected_report['local_control_manifest_matches_selected'])
+        self.assertTrue(
+            module.local_manifest_projection_is_convergent(
+                self.repo, candidate_manifest
+            )
+        )
+
     def test_integration_projection_rejects_invalid_json_control_manifest(self):
         module = self.load_syncwheel_module()
         manifest = self.read_manifest()
@@ -5038,6 +5103,107 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertTrue(report['integration']['local_control_only_ahead'])
         self.assertEqual([action['type'] for action in report['actions']], ['push_integration'])
+
+    def test_reconcile_apply_refuses_an_unselected_control_only_ahead_tip(self):
+        module = self.load_syncwheel_module()
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'unselected-control-ahead-manifest.json'
+        data = self.read_manifest()
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/unselected-control-ahead',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        data['stacks'] = []
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('branch', 'integration/unselected-control-ahead', base)
+
+        origin = self.tmp / 'unselected-control-ahead-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin', '--prune')
+        remote_ref = 'refs/heads/integration/unselected-control-ahead'
+        remote_before = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', remote_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        self.git('switch', '-q', 'integration/unselected-control-ahead')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked = json.loads(tracked_manifest.read_text())
+        tracked['control'] = 'not selected by the external manifest'
+        tracked_manifest.write_text(json.dumps(tracked, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist unselected control ownership')
+        local_tip = self.git('rev-parse', 'integration/unselected-control-ahead')
+        manifest_before = manifest_path.read_bytes()
+        self.assertEqual(self.git('rev-parse', f'{local_tip}^'), remote_before)
+        self.git('merge-base', '--is-ancestor', remote_before, local_tip)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                remote_before, local_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        manifest_entry = module.tree_path_entry(
+            self.repo, local_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(manifest_entry['mode'], '100644')
+        committed_manifest = json.loads(
+            module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')
+        )
+        self.assertIsInstance(committed_manifest, dict)
+        selected_manifest = json.loads(manifest_before)
+        self.assertIsInstance(selected_manifest, dict)
+        self.assertNotEqual(
+            module.manifest_digest(committed_manifest),
+            module.manifest_digest(selected_manifest),
+        )
+
+        environment = dict(os.environ)
+        environment['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        refused = subprocess.run(
+            [
+                'python3', str(CLI), 'reconcile', '--manifest', str(manifest_path),
+                '--no-fetch', '--apply', '--push',
+            ],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+        remote_after = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', remote_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+        self.assertEqual(
+            {
+                'returncode': refused.returncode,
+                'named_refusal': 'selected control manifest' in refused.stderr,
+                'remote_unchanged': remote_after == remote_before,
+                'local_unchanged': self.git(
+                    'rev-parse', 'integration/unselected-control-ahead'
+                ) == local_tip,
+                'manifest_unchanged': manifest_path.read_bytes() == manifest_before,
+            },
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'remote_unchanged': True,
+                'local_unchanged': True,
+                'manifest_unchanged': True,
+            },
+            'UNSELECTED_CONTROL_AHEAD_APPLY_REFUSED',
+        )
 
     def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
         base = self.git('rev-parse', 'HEAD')

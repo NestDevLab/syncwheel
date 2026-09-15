@@ -3794,6 +3794,128 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_authenticated_derived_partial_push_preserves_public_provenance(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            fixture.enable_derived_paths('locks/', on_base=True)
+            fixture.cli('publish')
+            fixture.install_existing_stack(
+                path='locks/codex.lock',
+                content='first-owner\n',
+                manifest_on_base=True,
+            )
+            fixture.cli('publish')
+            request = fixture.request(
+                'preflight',
+                operation_id='shared-derived-partial-publish',
+                path='locks/codex.lock',
+                before=fixture.sha256('first-owner\n'),
+                after_content='second-owner\n',
+            )
+            fixture.protocol_request(fixture.check_request(request))
+            (fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+            fixture.protocol_request(request)
+            finalized, _ = fixture.protocol_request(
+                {**request, 'action': 'finalize'}
+            )
+            manifest = fixture.read_manifest()
+            derived = finalized['productCommitSha']
+            projected_tree = SYNCWHEEL.materialize_integration_projection(
+                fixture.repo, manifest
+            )
+            derived_entry = SYNCWHEEL.tree_path_entry(
+                fixture.repo, derived, 'locks/codex.lock'
+            )
+            record = {
+                'operation_id': 'shared-derived-partial-publish',
+                'commit': derived,
+                'paths': ['locks/codex.lock'],
+                'paths_digest': SYNCWHEEL.derived_projection_commit_paths_digest(
+                    fixture.repo, derived, ['locks/codex.lock']
+                ),
+                'composition_digest': SYNCWHEEL.integration_composition_digest(
+                    manifest
+                ),
+            }
+
+            self.assertEqual(
+                SYNCWHEEL.derived_provenance_records(fixture.repo, manifest),
+                [record],
+            )
+            self.assertTrue(
+                SYNCWHEEL.is_derived_projection_commit(
+                    fixture.repo, manifest, derived, [record]
+                )
+            )
+            self.assertEqual(derived_entry['mode'], '100644')
+            self.assertEqual(
+                SYNCWHEEL.tree_path_bytes(fixture.repo, derived_entry),
+                b'second-owner\n',
+            )
+            self.assertFalse(
+                SYNCWHEEL.integration_tree_matches_product_projection(
+                    fixture.repo,
+                    manifest,
+                    SYNCWHEEL.ref_tree(fixture.repo, derived),
+                    projected_tree,
+                )
+            )
+
+            fixture.cli('int', 'push')
+
+            selected_control = fixture.git('rev-parse', 'main-integration')
+            selected_manifest = SYNCWHEEL.manifest_from_tree(
+                fixture.repo, selected_control, fixture.manifest_path
+            )
+            remote_tip = fixture.git(
+                'ls-remote', '--heads', str(fixture.remote), 'main-integration'
+            ).split()[0]
+            state = SYNCWHEEL.coordination_state_from_commit(
+                fixture.repo,
+                'origin/syncwheel/state/revision-provider-test',
+                'revision-provider-test',
+            )
+            self.assertEqual(
+                SYNCWHEEL.manifest_digest(selected_manifest),
+                SYNCWHEEL.manifest_digest(manifest),
+            )
+            self.assertEqual(remote_tip, selected_control)
+            self.assertTrue(
+                SYNCWHEEL.branch_contains(fixture.repo, remote_tip, derived)
+            )
+            for tip in (selected_control, remote_tip):
+                published_entry = SYNCWHEEL.tree_path_entry(
+                    fixture.repo, tip, 'locks/codex.lock'
+                )
+                self.assertEqual(published_entry, derived_entry)
+                self.assertEqual(
+                    SYNCWHEEL.tree_path_bytes(fixture.repo, published_entry),
+                    b'second-owner\n',
+                )
+                self.assertFalse(
+                    SYNCWHEEL.integration_tree_matches_product_projection(
+                        fixture.repo,
+                        manifest,
+                        SYNCWHEEL.ref_tree(fixture.repo, tip),
+                        projected_tree,
+                    )
+                )
+            self.assertEqual(
+                state['managed_refs']['refs/heads/main-integration'], remote_tip
+            )
+            self.assertEqual(
+                state['manifest']['integration']['derived_provenance'], [record]
+            )
+
+            peer = CoordinationPeer(fixture, 'derived-partial-peer')
+            peer_manifest = peer.read_manifest()
+            self.assertEqual(
+                SYNCWHEEL.validate_manifest(peer.repo, peer_manifest)['errors'],
+                [],
+            )
+        finally:
+            fixture.close()
+
     def test_manifest_base_ownership_reconciles_a_stale_derived_path(self):
         self.fixture.enable_derived_paths('locks/')
         base = self.fixture.git('rev-parse', 'HEAD')
