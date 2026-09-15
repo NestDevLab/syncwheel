@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/mgt-0287-ci-sharding"
+  ],
+  "claimed_at": "2026-09-15T17:48:59+00:00",
+  "coordination_id": "default",
+  "operation_token": "3c2d7a36-f689-4dd4-85e3-5ad8bc3c49f1",
+  "publication_scope": "stack:mgt-0287-ci-sharding",
+  "source_ref": "refs/heads/pr/mgt-0287-ci-sharding",
+  "syncwheel_version": "0.43.5"
+}
