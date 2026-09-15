@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/mgt-0287-sw1"
-  ],
-  "claimed_at": "2026-09-15T19:13:23+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-15T20:44:38+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "2205787b-abf9-41cd-bce8-e7642429c895",
-  "publication_scope": "stack:mgt-0287-sw1",
+  "operation_token": "7428bc5b-53ba-4fca-b3f3-5af3f612d3b2",
+  "publication_scope": "close:mgt-0287-sw1",
+  "reason": "merged",
   "source_ref": "refs/heads/pr/mgt-0287-sw1",
   "syncwheel_version": "0.43.5"
 }
