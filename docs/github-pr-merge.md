@@ -16,6 +16,7 @@ syncwheel repo pr-merge-policy set github \
   --base main \
   --method squash \
   --allow-bypass required_reviews \
+  --allow-bypass private_free_rules \
   --merge-actor LOGIN \
   --pr-author LOGIN \
   --commit-author LOGIN \
@@ -33,6 +34,14 @@ syncwheel repo pr-merge-policy clear --apply
 At least one provenance filter (`--pr-author`, `--commit-author`, or
 `--head-repository`) is mandatory. Configured filters are combined with AND;
 empty lists, unknown keys, tokens, commands, and secrets are rejected.
+
+`private_free_rules` is a narrow fallback for private repositories on GitHub
+Free. It applies only when GitHub returns its explicit plan-limit response for
+the branch-protection or rules APIs and the repository is confirmed private.
+Syncwheel still requires an admin actor, an exact allowlisted source, a pinned
+head, green CI, no unresolved review work, and a mergeable PR. The final
+`gh pr merge` remains subject to GitHub's server-side enforcement. Other 403s,
+public repositories, and unrecognized errors remain blocked.
 
 ## Plan and apply
 
@@ -59,6 +68,8 @@ The fixed adapter invokes only `gh pr merge`, pins the operation with
 only when GitHub proves that required reviews are the sole remaining blocker.
 CI failures, conflicts, stale bases, changes requested, unresolved threads,
 merge queues, unknown rules, and unrecognized states always stop the plan.
+Unavailable rule APIs stop the plan unless the exact GitHub Free private-repo
+response is covered by the explicit `private_free_rules` policy above.
 
 If the command or connection fails after preparation, repeating the same
 operation id and digest reconciles the remote PR without issuing a second

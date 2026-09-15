@@ -205,6 +205,64 @@ class GithubPrMergeTest(unittest.TestCase):
             )
         self.assertTrue(any(item['code'] == 'required_check_missing' for item in plan['blockers']))
 
+    def private_free_observation(self):
+        observed = self.observation(decision='')
+        observed['repositoryInfo']['isPrivate'] = True
+        observed['pr']['mergeStateStatus'] = 'CLEAN'
+        detail = 'gh: Upgrade to GitHub Pro or make this repository public to enable this feature. (HTTP 403)'
+        observed['rules'] = {
+            'branchProtection': None,
+            'branchProtectionStatus': 403,
+            'branchProtectionError': detail,
+            'rulesets': None,
+            'rulesetsStatus': 403,
+            'rulesetsError': detail,
+        }
+        return observed
+
+    def test_private_free_rules_fallback_requires_explicit_policy(self):
+        observed = self.private_free_observation()
+        blockers = []
+        fallback = SYNCWHEEL.github_rules_blockers(
+            observed['rules'],
+            blockers,
+            repository_info=observed['repositoryInfo'],
+            allowed_bypasses=['required_reviews'],
+        )
+        self.assertIsNone(fallback)
+        self.assertEqual([item['code'] for item in blockers], ['rules_unavailable', 'rules_unavailable'])
+
+    def test_private_free_rules_fallback_allows_a_green_merge_plan(self):
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        policy = self.policy()
+        policy['allowed_bypasses'].append('private_free_rules')
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = policy
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        observed = self.private_free_observation()
+        with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=observed):
+            plan = SYNCWHEEL.build_github_pr_merge_plan(
+                self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+            )
+        self.assertEqual(plan['status'], 'ready')
+        self.assertEqual(plan['rulesFallback'], 'private_free_rules')
+        self.assertTrue(any(item['code'] == 'private_free_rules_unavailable' for item in plan['warnings']))
+        self.assertFalse(any(item['code'] == 'rules_unavailable' for item in plan['blockers']))
+
+    def test_private_free_rules_fallback_rejects_public_or_unrecognized_403(self):
+        observed = self.private_free_observation()
+        observed['repositoryInfo']['isPrivate'] = False
+        self.assertFalse(SYNCWHEEL.github_private_free_rules_unavailable(
+            observed['repositoryInfo'], observed['rules'],
+        ))
+        observed['repositoryInfo']['isPrivate'] = True
+        observed['rules']['rulesetsError'] = 'gh: Resource not accessible by integration (HTTP 403)'
+        self.assertFalse(SYNCWHEEL.github_private_free_rules_unavailable(
+            observed['repositoryInfo'], observed['rules'],
+        ))
+
     def test_merge_receipt_reconciles_success_without_second_merge(self):
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
