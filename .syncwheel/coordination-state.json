@@ -1,14 +1,14 @@
 {
   "changed_refs": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "dfcfc0ec0946f92066a8986079c282aecde02d65"
+    "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7"
   },
   "claims": {
     "refs/heads/pr/mgt-0287-ci-sharding": "693c58cf1ad8b47f6f205b923e58c4fc65220ba1",
-    "refs/heads/pr/mgt-0287-sw1": "8abee5e30b581a37ec87228bcf4d4b0b6e204d52",
+    "refs/heads/pr/mgt-0287-sw1": "5c9a965bcbee88fdff7cffd27d5f589138a530fd",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-15T18:34:55+00:00",
+  "created_at": "2026-09-15T19:13:23+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -25,7 +25,7 @@
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/mgt-0287-ci-sharding": "dfcfc0ec0946f92066a8986079c282aecde02d65",
-    "refs/heads/pr/mgt-0287-sw1": "f1c88d27fdce99ea8a4bfac148e4743c01fd380d",
+    "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
     "refs/heads/pr/reconcile-replay-mode-args": "6f51bb1b92e689043a0055d806b4f9fc2ff5ce36",
@@ -121,7 +121,8 @@
           "3127a1c12ff5d07d3f080ca70bd3224f8fae466c",
           "f2e984fe88791e8bc4fa8522126da3d653f4db61",
           "1e5085e98bd32d74caabdd91ef9f3516d1a3d462",
-          "afc590c2d0f5910a8570d56f1de4d1de4e15a4af"
+          "afc590c2d0f5910a8570d56f1de4d1de4e15a4af",
+          "bebfbb4963f3f76f57f97e9cae8c64a134cb8a27"
         ],
         "id": "mgt-0287-sw1",
         "integration_branch": "main-integration",
@@ -148,11 +149,11 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "60bc964c-89d2-4c8d-9f91-4bdebb320560",
-  "parent_state": "9e164041720da405e1cde4dd533453c7f55cd363",
+  "operation_token": "2205787b-abf9-41cd-bce8-e7642429c895",
+  "parent_state": "f1948535930d277616b97d88f2b09be16cd3d486",
   "projection_status": "partial",
-  "publication_id": "81992d9a-65aa-414d-9e8b-cb1cebb32bee",
-  "publication_scope": "stack:mgt-0287-ci-sharding",
+  "publication_id": "71c4113c-15af-41a4-9368-2479f7451471",
+  "publication_scope": "stack:mgt-0287-sw1",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
   "tombstones": [
