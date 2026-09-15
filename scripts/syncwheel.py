@@ -15895,7 +15895,8 @@ def execute_replay_steps(repo_root, plan):
             if target_worktree:
                 run(['git', '-C', str(target_worktree), 'reset', '--hard', branch], cwd=repo_root)
         if target.get('return_tree'):
-            result['tree'] = ref_tree(target['worktree'], 'HEAD')
+            result['commit'] = ref_tip(target['worktree'], 'HEAD')
+            result['tree'] = ref_tree(repo_root, result['commit'])
         result['after_tip'] = ref_tip(repo_root, branch)
         return result
     finally:
@@ -15958,7 +15959,12 @@ def materialize_stack_projection(repo_root, stack):
         return execute_replay(repo_root, plan, True)['tree']
 
 
-def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
+def materialize_integration_replay(repo_root, manifest, stack_ref_overrides=None):
+    """Build the ordinary replay commit without moving refs or the source index.
+
+    Keep the detached commit as well as its tree: ancestry reconciliation needs
+    the actual replay graph before deciding whether to move integration.
+    """
     with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
         plan = replay_plan(
             repo_root,
@@ -15972,7 +15978,12 @@ def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=
             ),
             'desk',
         )
-        return execute_replay(repo_root, plan, True)['tree']
+        return execute_replay(repo_root, plan, True)['commit']
+
+
+def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
+    commit = materialize_integration_replay(repo_root, manifest, stack_ref_overrides)
+    return ref_tree(repo_root, commit)
 
 
 def checkout_path_observation(repo_root, relative):
