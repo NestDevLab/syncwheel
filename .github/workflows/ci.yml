@@ -35,6 +35,9 @@ jobs:
       - name: Compile CLI
         run: python -m py_compile scripts/syncwheel.py
 
+      - name: Test unit shard contract
+        run: python .github/scripts/test_run_unittest_shard.py
+
       - name: Check generated website version
         run: python docs/sync_version.py --check
 
