@@ -4153,6 +4153,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             'int', 'push', '--repo', str(self.repo),
             '--manifest', str(manifest_path), '--remote', 'origin',
         ])
+        args.git_args = []
         with mock.patch.object(
             module, 'run_authorized_push', side_effect=advance_then_push
         ):
