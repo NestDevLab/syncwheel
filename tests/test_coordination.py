@@ -2206,7 +2206,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.git(repo, 'switch', '-q', 'integration/shared')
         self.run_cli(repo, 'int', 'push')
-        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
         self.assertTrue(manifest_path.exists())
 
         killed = self.run_cli(
@@ -5818,15 +5818,24 @@ with module.coordination_publication_lock(Path(repo_path)):
             ['integration/shared', 'pr/race'],
         )
         module = self.load_module()
-        real_read = module.read_remote_coordination_state
-        reads = []
+        real_begin = module.begin_coordination_publication
+        begun = []
 
-        def read_then_lose_the_race(*call_args, **call_kwargs):
-            observed = real_read(*call_args, **call_kwargs)
-            reads.append(observed['tip'])
-            if len(reads) == 1:
+        def begin_then_lose_the_race(*call_args, **call_kwargs):
+            operation = real_begin(*call_args, **call_kwargs)
+            self.assertEqual(operation['scope'], 'stack:race')
+            manifest_path = call_args[2]
+            matching_intents = [
+                event for event in module.load_ledger_events(loser, manifest_path)
+                if event['type'] == 'coordination_publish_intent'
+                and event['payload'].get('operation_token')
+                == operation['operation_token']
+            ]
+            self.assertEqual(len(matching_intents), 1)
+            begun.append(operation['operation_token'])
+            if len(begun) == 1:
                 self.run_cli(winner, 'stack', 'push', 'race')
-            return observed
+            return operation
 
         push_args = SimpleNamespace(
             repo=str(loser), manifest=None, personal=None, stack='race',
@@ -5834,13 +5843,14 @@ with module.coordination_publication_lock(Path(repo_path)):
             command='stack',
         )
         with mock.patch.object(
-            module, 'read_remote_coordination_state',
-            side_effect=read_then_lose_the_race,
+            module, 'begin_coordination_publication',
+            side_effect=begin_then_lose_the_race,
         ):
             with self.assertRaisesRegex(
                 module.SyncwheelError, 'remote state changed after the reviewed plan'
             ):
                 module.command_stack_push(push_args)
+        self.assertEqual(len(begun), 1)
 
         self.run_cli(loser, 'int', 'push')
         abandoned = [
@@ -7655,7 +7665,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             repo, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a',
         )
         self.run_cli(repo, 'stack', 'push', 'feature-a')
-        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
         killed = self.run_cli(
             repo,
             'int', 'rebuild', '--in-place',
@@ -8007,6 +8017,30 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote('a14-stale-push')
         repo_a = self.clone(origin, 'a14-stale-push-a')
         self.init_coordinated(repo_a)
+        module = self.load_module()
+        initial_manifest_path = repo_a / '.syncwheel' / 'manifest.json'
+        initial_manifest_bytes = initial_manifest_path.read_bytes()
+
+        def gitignore_contract(observation):
+            self.assertEqual(observation['fingerprint']['kind'], 'file')
+            return {
+                'kind': observation['fingerprint']['kind'],
+                'mode': observation['fingerprint']['mode'],
+                'sha256': observation['fingerprint']['sha256'],
+                'bytes': observation['bytes'],
+            }
+
+        initial_gitignore = gitignore_contract(
+            module.checkout_path_observation(repo_a, '.gitignore')
+        )
+        self.anchor_generated_ignore_without_control_manifest(repo_a)
+        self.assertEqual(initial_manifest_path.read_bytes(), initial_manifest_bytes)
+        self.assertEqual(
+            gitignore_contract(
+                module.checkout_path_observation(repo_a, '.gitignore')
+            ),
+            initial_gitignore,
+        )
 
         source_s1 = self.commit_on_branch(repo_a, 'pr/a14-s1', 'a14-s1.txt')
         self.run_cli(repo_a, 'stack', 'create', 's1', source_s1, '--branch', 'pr/a14-s1')
@@ -8039,7 +8073,6 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         source_s3 = self.commit_on_branch(repo_a, 'pr/a14-s3', 'a14-s3.txt')
         self.run_cli(repo_a, 'stack', 'create', 's3', source_s3, '--branch', 'pr/a14-s3')
-        module = self.load_module()
         manifest, manifest_path = module.load_manifest(repo_a)
         manifest_bytes = manifest_path.read_bytes()
         expected_manifest_digest = module.manifest_digest(manifest)
@@ -8076,16 +8109,12 @@ with module.coordination_publication_lock(Path(repo_path)):
         replay_inputs = module.integration_projection_input_snapshot(repo_a, manifest)
         replay_tree = module.materialize_integration_projection(repo_a, manifest)
         source_gitignore = module.checkout_path_observation(repo_a, '.gitignore')
-        self.assertIn(source_gitignore['fingerprint']['kind'], {'file', 'missing'})
+        source_gitignore_contract = gitignore_contract(source_gitignore)
         projected_tree = module.materialize_control_manifest_projection_tree(
             repo_a,
             manifest,
             replay_tree,
-            gitignore_bytes=(
-                source_gitignore['bytes']
-                if source_gitignore['fingerprint']['kind'] == 'file'
-                else None
-            ),
+            gitignore_bytes=source_gitignore['bytes'],
         )
         expected_control_tip = module.materialize_control_manifest_commit(
             repo_a, manifest, replay_base,
@@ -8128,6 +8157,21 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.integration_projection_input_snapshot(repo_a, observed_manifest),
             replay_inputs,
         )
+        current_replay_tree = module.materialize_integration_projection(
+            repo_a, observed_manifest,
+        )
+        self.assertEqual(current_replay_tree, replay_tree)
+        current_gitignore = module.checkout_path_observation(repo_a, '.gitignore')
+        self.assertEqual(
+            gitignore_contract(current_gitignore), source_gitignore_contract,
+        )
+        current_projected_tree = module.materialize_control_manifest_projection_tree(
+            repo_a,
+            observed_manifest,
+            current_replay_tree,
+            gitignore_bytes=current_gitignore['bytes'],
+        )
+        self.assertEqual(current_projected_tree, projected_tree)
         local_tip = module.ref_tip(repo_a, integration_branch)
         self.assertEqual(local_tip, expected_control_tip)
         self.assertEqual(
@@ -8173,6 +8217,12 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(persistence_receipt['type'], 'manifest_saved')
         self.assertEqual(
             persistence_receipt['payload']['control_commit'], local_tip,
+        )
+        self.assertEqual(
+            module.ref_tree(
+                repo_a, persistence_receipt['payload']['control_commit']
+            ),
+            current_projected_tree,
         )
         self.assertEqual(
             persistence_receipt['payload']['manifest_hash'],
