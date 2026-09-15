@@ -1101,6 +1101,11 @@ class ManagedRefGuardTests(unittest.TestCase):
         subprocess.run(
             ['git', 'commit', '-qm', 'track the manifest'], cwd=self.repo, check=True
         )
+        seed_before = (self.repo / 'seed').read_bytes()
+        first_parent = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=self.repo,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
 
         first = self.run_syncwheel(
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
@@ -1112,22 +1117,79 @@ class ManagedRefGuardTests(unittest.TestCase):
                 ['git', 'status', '--porcelain', '--', '.syncwheel'], cwd=self.repo,
                 capture_output=True, text=True, check=True,
             ).stdout,
-            ' M .syncwheel/manifest.json\n',
+            '',
         )
+        first_tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=self.repo,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertNotEqual(first_tip, first_parent)
+        self.assertEqual(
+            set(subprocess.run(
+                ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', first_tip],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout.splitlines()),
+            {'.gitignore', '.syncwheel/manifest.json'},
+        )
+        self.assertEqual((self.repo / 'seed').read_bytes(), seed_before)
 
         second = self.run_syncwheel(
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
         )
 
         self.assertEqual(second.returncode, 0, second.stderr)
+        second_tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=self.repo,
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        self.assertNotEqual(second_tip, first_tip)
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', second_tip],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout,
+            '.syncwheel/manifest.json\n',
+        )
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'status', '--porcelain'], cwd=self.repo,
+                capture_output=True, text=True, check=True,
+            ).stdout,
+            '',
+        )
+        self.assertEqual((self.repo / 'seed').read_bytes(), seed_before)
 
         (self.repo / 'seed').write_text('changed\n')
+        index_path = Path(subprocess.run(
+            ['git', 'rev-parse', '--path-format=absolute', '--git-path', 'index'],
+            cwd=self.repo, capture_output=True, text=True, check=True,
+        ).stdout.strip())
+
+        def mutation_snapshot():
+            return {
+                'refs': subprocess.run(
+                    ['git', 'for-each-ref', '--format=%(refname) %(objectname)',
+                     'refs/heads'],
+                    cwd=self.repo, capture_output=True, text=True, check=True,
+                ).stdout,
+                'index': index_path.read_bytes(),
+                'status': subprocess.run(
+                    ['git', 'status', '--porcelain=v1'], cwd=self.repo,
+                    capture_output=True, text=True, check=True,
+                ).stdout,
+                'manifest': (self.repo / '.syncwheel' / 'manifest.json').read_bytes(),
+                'seed': (self.repo / 'seed').read_bytes(),
+                'events': syncwheel.load_ledger_events(self.repo),
+            }
+
+        unchanged = mutation_snapshot()
         blocked = self.run_syncwheel(
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
         )
 
         self.assertEqual(blocked.returncode, 2)
         self.assertIn('primary checkout is dirty: 1 tracked file', blocked.stderr)
+        self.assertEqual(mutation_snapshot(), unchanged)
 
     def test_reasoned_disable_lifts_the_dirty_primary_refusal(self):
         self._install_and_branch('main-integration')

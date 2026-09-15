@@ -48,6 +48,10 @@ class CoordinationRemoteRejection(SyncwheelError):
     """The coordination remote refused the atomic push and nothing moved."""
 
 
+class IntegrationReconciliationLeaseDrift(SyncwheelError):
+    """A prepared reconciliation lost an input lease before moving its ref."""
+
+
 class ControlManifestAlignmentDrift(SyncwheelError):
     """The integration ref moved after the control-manifest decision point."""
 
@@ -2861,54 +2865,65 @@ def update_common_derived_provenance(
             repo_root, manifest, coordination_state
         )
         original_store = load_derived_provenance_store(repo_root)
-        shared_by_paths = {
-            tuple(item['paths']): item for item in shared
-        }
-        store = {
-            'version': DERIVED_PROVENANCE_STORE_VERSION,
-            'overrides': [
-                item for item in original_store['overrides']
-                if item['record'] != shared_by_paths.get(tuple(item['paths']))
-            ],
-        }
-        store = normalize_derived_provenance_store(store)
-        effective = apply_derived_provenance_overrides(
-            shared, store, coordinated=coordination_is_active(manifest)
+        updated = projected_derived_provenance_store(
+            original_store, shared, paths, record, expected_commit=expected_commit,
+            coordinated=coordination_is_active(manifest),
         )
-        key = tuple(paths)
-        current = {tuple(item['paths']): item for item in effective}.get(key)
-        if expected_commit is not None and current is not None and (
-            current['commit'] != expected_commit
-        ):
-            raise SyncwheelError(
-                'derived provenance changed before reconciliation for '
-                + json.dumps(paths, ensure_ascii=True)
-            )
-        if expected_commit is not None and current is None:
-            return False
-        overrides = {
-            tuple(item['paths']): item for item in store['overrides']
-        }
-        shared_record = {
-            tuple(item['paths']): item for item in shared
-        }.get(key)
-        base_commit = shared_record['commit'] if shared_record else None
-        if record == shared_record:
-            overrides.pop(key, None)
-        else:
-            overrides[key] = {
-                'paths': paths,
-                'base_commit': base_commit,
-                'record': record,
-            }
-        updated = {
-            'version': DERIVED_PROVENANCE_STORE_VERSION,
-            'overrides': list(overrides.values()),
-        }
-        if normalize_derived_provenance_store(updated) == original_store:
+        if updated is None or updated == original_store:
             return False
         save_derived_provenance_store(repo_root, updated)
         return True
+
+
+def projected_derived_provenance_store(
+    original_store, shared, paths, record, *, expected_commit=None, coordinated=True,
+):
+    """Compute the existing provenance transition without persisting it."""
+    shared_by_paths = {
+        tuple(item['paths']): item for item in shared
+    }
+    store = {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': [
+            item for item in original_store['overrides']
+            if item['record'] != shared_by_paths.get(tuple(item['paths']))
+        ],
+    }
+    store = normalize_derived_provenance_store(store)
+    effective = apply_derived_provenance_overrides(
+        shared, store, coordinated=coordinated
+    )
+    key = tuple(paths)
+    current = {tuple(item['paths']): item for item in effective}.get(key)
+    if expected_commit is not None and current is not None and (
+        current['commit'] != expected_commit
+    ):
+        raise SyncwheelError(
+            'derived provenance changed before reconciliation for '
+            + json.dumps(paths, ensure_ascii=True)
+        )
+    if expected_commit is not None and current is None:
+        return None
+    overrides = {
+        tuple(item['paths']): item for item in store['overrides']
+    }
+    shared_record = {
+        tuple(item['paths']): item for item in shared
+    }.get(key)
+    base_commit = shared_record['commit'] if shared_record else None
+    if record == shared_record:
+        overrides.pop(key, None)
+    else:
+        overrides[key] = {
+            'paths': paths,
+            'base_commit': base_commit,
+            'record': record,
+        }
+    updated = {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': list(overrides.values()),
+    }
+    return normalize_derived_provenance_store(updated)
 
 
 def record_common_derived_provenance(
@@ -3048,7 +3063,7 @@ def derived_paths_rebuild_remedy():
 def stale_derived_projection_records(
     repo_root, manifest, integration_branch, provenance=None
 ):
-    """Return shared/local provider provenance no longer reachable from integration."""
+    """Return provider paths whose recorded result is absent from integration."""
     stale = []
     records = (
         normalize_derived_provenance(provenance)
@@ -3056,9 +3071,14 @@ def stale_derived_projection_records(
         else derived_provenance_records(repo_root, manifest)
     )
     for record in records:
-        if branch_contains(repo_root, integration_branch, record['commit']):
-            continue
+        reachable = branch_contains(repo_root, integration_branch, record['commit'])
         for path in record['paths']:
+            # Reconciliation preserves ancestry while replacing the product tree.
+            # Reachability alone therefore no longer proves the derived result.
+            if reachable and tree_path_entry(repo_root, integration_branch, path) == tree_path_entry(
+                repo_root, record['commit'], path
+            ):
+                continue
             stale.append({**record, 'path': path})
     return sorted(stale, key=lambda item: (item['path'], item['operation_id']))
 
@@ -3513,6 +3533,35 @@ def syncwheel_gitignore_patterns(worktree_root):
         '.syncwheel/manifests/*.local-ledger/',
         syncwheel_ignore_pattern(worktree_root),
     ]
+
+
+def split_syncwheel_managed_gitignore(text, worktree_root):
+    """Split one exact managed block from byte-preserving surrounding text."""
+    if not isinstance(text, str):
+        return None
+    lines = text.splitlines(keepends=True)
+    content = [line[:-1] if line.endswith('\n') else line for line in lines]
+    starts = [
+        index for index, line in enumerate(content)
+        if line == SYNCWHEEL_GITIGNORE_MARKER
+    ]
+    ends = [
+        index for index, line in enumerate(content)
+        if line == SYNCWHEEL_GITIGNORE_END_MARKER
+    ]
+    if not starts and not ends:
+        return {'unmanaged': text, 'managed': None}
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return None
+    start = starts[0]
+    end = ends[0]
+    observed_patterns = content[start + 1:end]
+    if observed_patterns != syncwheel_gitignore_patterns(worktree_root):
+        return None
+    return {
+        'unmanaged': ''.join(lines[:start] + lines[end + 1:]),
+        'managed': ''.join(lines[start:end + 1]),
+    }
 
 
 def syncwheel_local_exclude_patterns(worktree_root):
@@ -4566,7 +4615,9 @@ def require_manifest_transaction_current(manifest_path):
 
 
 @contextlib.contextmanager
-def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command'):
+def manifest_write_transaction(
+    repo_root, manifest_path, owner='manifest-command', *, commit_tracked_changes=True,
+):
     identity = str(Path(manifest_path).resolve(strict=False))
     transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', None)
     if transactions is None:
@@ -4592,7 +4643,9 @@ def manifest_write_transaction(repo_root, manifest_path, owner='manifest-command
         transactions[identity] = transaction
         try:
             yield
-            if transaction['manifestWritten'] or transaction['gitignoreWritten']:
+            if commit_tracked_changes and (
+                transaction['manifestWritten'] or transaction['gitignoreWritten']
+            ):
                 commit_git_tracked_manifest(
                     repo_root,
                     manifest_path,
@@ -5778,10 +5831,23 @@ def align_control_manifest_worktree(
     return integration_worktree
 
 
+def capture_checkout_source_lease(repo_root, manifest_path, target):
+    """Expose one exact post-restore source lease without changing bool results."""
+    if target is None:
+        return
+    observed = checkout_source_lease(repo_root, manifest_path)
+    if observed is None:
+        raise SyncwheelError(
+            'cannot capture the source checkout lease after control restoration'
+        )
+    target.clear()
+    target.update(observed)
+
+
 def restore_control_manifest_after_integration_rebuild(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
-    operation_id=None, persist_source=True,
+    operation_id=None, persist_source=True, source_lease_out=None,
 ):
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
@@ -5795,13 +5861,517 @@ def restore_control_manifest_after_integration_rebuild(
             command=command,
             operation_id=operation_id,
             persist_source=persist_source,
+            source_lease_out=source_lease_out,
         )
+
+
+def integration_reconciliation_source(repo_root, manifest_path):
+    path = Path(manifest_path)
+    return {
+        'head': ref_tip(repo_root, 'HEAD'),
+        'checkout': checkout_reset_guard(repo_root),
+        'manifest': checkout_path_observation(path.parent, path.name)['fingerprint'],
+        'gitignore': checkout_path_fingerprint(repo_root, '.gitignore'),
+    }
+
+
+def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs):
+    """Keep the declared replay graph and the prior local history as distinct parents."""
+    proof = json.dumps(
+        {'version': 2, 'inputs': inputs, 'manifest_digest': manifest_digest(manifest)},
+        sort_keys=True, separators=(',', ':'),
+    )
+    return git(
+        repo_root, 'commit-tree', tree, '-p', local_tip, '-p', replay_tip,
+        '-m', 'chore: reconcile Syncwheel integration history\n\nSyncwheel-Reconciliation: ' + proof,
+        env=replay_commit_env(repo_root, replay_tip),
+    ).stdout.strip()
+
+
+def integration_reconciliation_inputs(repo_root, manifest, inputs):
+    expected = [('base', 'integration', manifest['integration']['base'])]
+    stacks = stack_map(manifest)
+    commits = []
+    for stack_id in manifest['integration']['stacks']:
+        stack = stacks[stack_id]
+        if manifest['integration'].get('strategy', 'cherry-pick') == 'merge-stacks':
+            expected.append(('merge-stack', stack_id, stack['branch']))
+        else:
+            commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_base_commits(stack))
+        commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_only_commits(stack))
+    refs = inputs.get('refs')
+    if (
+        not isinstance(refs, list)
+        or any(not isinstance(item, dict) for item in refs)
+        or [(item.get('kind'), item.get('id'), item.get('spec')) for item in refs] != expected
+        or inputs.get('commits') != commits
+        or any(not isinstance(item.get('tip'), str) or not re.fullmatch(r'[0-9a-f]{40,64}', item['tip']) for item in refs)
+        or any(item.get('remoteRef') and item.get('remoteTip') != item['tip'] for item in refs)
+    ):
+        raise SyncwheelError('integration reconciliation replay input binding is invalid or stale')
+    pinned = json.loads(json.dumps(manifest))
+    pinned['integration']['base'] = inputs['refs'][0]['tip']
+    overrides = {item['id']: item['tip'] for item in inputs['refs'] if item['kind'] == 'merge-stack'}
+    for stack in pinned['stacks']:
+        for key in ('commits', 'integration_commits', 'integration_only_commits'):
+            if key in stack:
+                stack[key] = [commit_full_sha(repo_root, commit) for commit in stack[key]]
+    return pinned, overrides
+
+
+def integration_reconciliation_publishing_states(repo_root, observation):
+    if not observation:
+        return
+    current = observation['state_tip']
+    ref = observation['integration_ref']
+    config = observation['config']
+    while current:
+        state = coordination_state_from_commit(repo_root, current, config['id'])
+        parents = git(repo_root, 'show', '-s', '--format=%P', current).stdout.split()
+        parent = state.get('parent_state')
+        if parents != ([parent] if parent else []):
+            raise SyncwheelError('integration reconciliation historical state chain is invalid')
+        if (state.get('changed_refs') or {}).get(ref):
+            verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
+            yield state
+        current = parent
+
+
+def integration_reconciliation_published_witness(repo_root, manifest, tip, observation):
+    for state in integration_reconciliation_publishing_states(repo_root, observation):
+        if state['changed_refs'].get(observation['integration_ref']) == tip:
+            return state
+    return None
+
+
+def integration_reconciliation_historical_derived(repo_root, commit, tip, observation):
+    for state in integration_reconciliation_publishing_states(repo_root, observation):
+        published = state['changed_refs'].get(observation['integration_ref'])
+        if not branch_contains(repo_root, tip, published) or not branch_contains(repo_root, published, commit):
+            continue
+        records = state['manifest'].get('integration', {}).get('derived_provenance') or []
+        records = [record for record in records if record.get('commit') == commit]
+        if not records:
+            continue
+        historical = coordination_state_control_manifest(repo_root, state, observation['config']['remote'])
+        records = [record for record in records
+                   if record.get('composition_digest') == integration_composition_digest(historical)]
+        if records and is_provenance_bound_derived_projection_commit(repo_root, commit, records):
+            return True
+    return False
+
+
+def integration_reconciliation_proof(repo_root, commit, manifest_path, observation):
+    try:
+        return _integration_reconciliation_proof(repo_root, commit, manifest_path, observation)
+    except (KeyError, TypeError, ValueError, IndexError, SyncwheelError):
+        return None
+
+
+def _integration_reconciliation_proof(repo_root, commit, manifest_path, observation):
+    values = [value for key, value in parsed_commit_trailers(repo_root, commit)
+              if key.casefold() == 'syncwheel-reconciliation']
+    if len(values) != 1:
+        return None
+    try:
+        proof = json.loads(values[0])
+    except ValueError:
+        return None
+    if not isinstance(proof, dict) or proof.get('version') != 2 or not isinstance(proof.get('inputs'), dict):
+        return None
+    control = manifest_from_tree(repo_root, commit, integration_manifest_path(repo_root))
+    parents = git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
+    if control is None or len(parents) != 2 or manifest_digest(control) != proof.get('manifest_digest'):
+        return None
+    inputs = proof['inputs']
+    pinned, overrides = integration_reconciliation_inputs(repo_root, control, inputs)
+    if materialize_integration_replay(repo_root, pinned, overrides) != parents[1]:
+        return None
+    ignore = tree_path_entry(repo_root, commit, '.gitignore')
+    previous_ignore = tree_path_entry(repo_root, parents[0], '.gitignore')
+    if ignore != previous_ignore or (ignore and ignore['mode'] != '100644'):
+        return None
+    tree = materialize_control_manifest_projection_tree(
+        repo_root, control, ref_tree(repo_root, parents[1]),
+        gitignore_bytes=tree_path_bytes(repo_root, ignore) if ignore else None,
+    )
+    if (
+        tree != ref_tree(repo_root, commit)
+        or integration_reconciliation_object(repo_root, control, *parents, tree, inputs) != commit
+    ):
+        return None
+    events = load_control_manifest_events(repo_root, manifest_path)
+    intents, receipts = control_manifest_operation_records(events, commit)
+    local = any(
+        event['payload'].get('version') == 2
+        and event['payload'].get('inputs') == inputs
+        and event['payload'].get('replay_tip') == parents[0]
+        and event['payload'].get('detached_replay_tip') == parents[1]
+        and receipts.get(key, {}).get('type') == 'manifest_saved'
+        for key, event in intents.items()
+    )
+    witness = integration_reconciliation_published_witness(
+        repo_root, control, commit, observation
+    ) if not local else None
+    if not local and witness is None:
+        return None
+    return {'manifest': control, 'inputs': inputs, 'parents': parents, 'witness': witness}
+
+
+def integration_reconciliation_provenance(manifest, store, shared):
+    before = apply_derived_provenance_overrides(shared, store)
+    narrowed = narrowed_derived_provenance_records(None, manifest, before)
+    after_store = store
+    for commit, paths in sorted({(item['commit'], tuple(item['paths'])) for item in narrowed}):
+        projected = projected_derived_provenance_store(
+            after_store, shared, list(paths), None, expected_commit=commit,
+        )
+        if projected is not None:
+            after_store = projected
+    return before, after_store, apply_derived_provenance_overrides(shared, after_store)
+
+
+def integration_reconciliation_history(
+    repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
+    detached_replay=False,
+):
+    """Refuse unexplained history before constructing a successor transaction."""
+    base = manifest['integration']['base']
+    declared = {
+        commit_full_sha(repo_root, commit)
+        for stack in manifest['stacks']
+        for commit in stack_integration_commits(stack)
+    }
+    patches = {commit_patch_id(repo_root, commit) for commit in declared}
+    patches.discard(None)
+    patches.update(patch_ids_reachable_from_ref(repo_root, base))
+    history = rev_list(repo_root, f'{base}..{tip}')
+    proofs = {commit: proof for commit in history
+              if commit_parent_count(repo_root, commit) > 1
+              and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}
+    replay_ranges = [(base, tip)] if detached_replay else []
+    replay_ranges.extend((proof['inputs']['refs'][0]['tip'], proof['parents'][1]) for proof in proofs.values())
+    replay_merges = set()
+    for replay_base, replay_tip in replay_ranges:
+        replay_merges.update(git(repo_root, 'rev-list', '--first-parent', '--merges',
+                                 f'{replay_base}..{replay_tip}').stdout.split())
+    for commit in history:
+        if commit in declared:
+            continue
+        if commit_parent_count(repo_root, commit) != 1:
+            if commit in proofs or commit in replay_merges:
+                continue
+            raise SyncwheelError(f'integration reconciliation has unclassified merge: {commit}')
+        changed = set(commit_changed_files(repo_root, commit))
+        if changed and changed.issubset({'.syncwheel/manifest.json', '.gitignore'}):
+            entry = tree_path_entry(repo_root, commit, '.syncwheel/manifest.json')
+            try:
+                control = json.loads(tree_path_bytes(repo_root, entry))
+            except (ValueError, UnicodeDecodeError):
+                control = None
+            if entry and entry['mode'] == '100644' and isinstance(control, dict):
+                if '.gitignore' not in changed:
+                    continue
+                candidate = tree_path_entry(repo_root, commit, '.gitignore')
+                parent = tree_path_entry(repo_root, f'{commit}^', '.gitignore')
+                if candidate and candidate['mode'] == '100644' and (
+                    parent is None or parent['mode'] == '100644'
+                ):
+                    try:
+                        candidate_ignore = split_syncwheel_managed_gitignore(
+                            tree_path_bytes(repo_root, candidate).decode('utf-8'),
+                            syncwheel_worktree_root(control),
+                        )
+                        parent_ignore = split_syncwheel_managed_gitignore(
+                            tree_path_bytes(repo_root, parent).decode('utf-8'),
+                            syncwheel_worktree_root(control),
+                        )
+                    except UnicodeDecodeError:
+                        candidate_ignore = parent_ignore = None
+                    if (
+                        candidate_ignore and parent_ignore
+                        and candidate_ignore['managed'] is not None
+                        and candidate_ignore['unmanaged'] == parent_ignore['unmanaged']
+                    ):
+                        continue
+        if is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
+            continue
+        patch = commit_patch_id(repo_root, commit)
+        if patch and patch in patches:
+            continue
+        if observation and integration_reconciliation_historical_derived(repo_root, commit, tip, observation):
+            continue
+        product_paths = sorted(
+            changed - {'.syncwheel/manifest.json', '.gitignore'}
+        )
+        if product_paths:
+            raise SyncwheelError(
+                'published integration contains unexplained product paths: '
+                + ', '.join(product_paths)
+                + f' (unclassified history {commit})'
+            )
+        raise SyncwheelError(f'integration reconciliation has unclassified history: {commit}')
+
+
+def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent):
+    """Resume the same object and CAS; never rebuild or overwrite a later proposal."""
+    branch = intent['integration_branch']
+    local_tip = intent['replay_tip']
+    final_tip = intent['expected_control_commit']
+    replay_tip = intent['detached_replay_tip']
+    pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, intent['inputs'])
+    ignore_entry = intent['gitignore_entry']
+    ignore_bytes = tree_path_bytes(repo_root, ignore_entry)
+    source_ignore = intent['source_lease']['gitignore']
+    state = coordination_state_from_commit(repo_root, intent['state_tip'], coordination_config(manifest)['id'])
+    shared = shared_derived_provenance_records(repo_root, manifest, state)
+    provenance_before, store_after, provenance_after = integration_reconciliation_provenance(
+        manifest, intent['provenance_store'], shared,
+    )
+    if (
+        str(Path(manifest_path).absolute()) != intent['manifest_path']
+        or (ignore_entry is not None and (
+            ignore_entry['mode'] != '100644'
+            or hashlib.sha256(ignore_bytes).hexdigest() != source_ignore.get('sha256')
+        ))
+        or materialize_integration_replay(repo_root, pinned, overrides) != replay_tip
+        or materialize_control_manifest_projection_tree(
+            repo_root, manifest, ref_tree(repo_root, replay_tip),
+            gitignore_bytes=ignore_bytes if ignore_entry else None,
+        ) != intent['final_tree']
+        or provenance_before != intent['provenance_before']
+        or store_after != intent['provenance_store_after']
+        or provenance_after != intent['provenance_after']
+    ):
+        raise SyncwheelError('integration reconciliation intent does not bind its replay and source bytes')
+    parents = git(repo_root, 'show', '-s', '--format=%P', final_tip).stdout.split()
+    if (
+        parents != [local_tip, replay_tip]
+        or ref_tree(repo_root, final_tip) != intent['final_tree']
+        or integration_reconciliation_object(
+            repo_root, manifest, local_tip, replay_tip, intent['final_tree'], intent['inputs']
+        ) != final_tip
+        or manifest_digest(manifest) != intent['expected_manifest_digest']
+    ):
+        raise SyncwheelError('integration reconciliation intent has an invalid expected object')
+    source = integration_reconciliation_source(repo_root, manifest_path)
+    before_source = intent['source_lease']
+    current_tip = ref_tip(repo_root, branch)
+    if current_tip not in {local_tip, final_tip}:
+        if not current_tip or not branch_contains(repo_root, current_tip, final_tip):
+            abandon_control_manifest_intent(
+                repo_root, manifest_path, intent, current_tip, 'ref_cas_failed'
+            )
+        raise SyncwheelError('integration changed during reconciliation; preserving the newer ref')
+    if current_tip == local_tip:
+        observed = observe_published_integration_tip(repo_root, manifest)
+        if (
+            source != before_source
+            or not observed or observed.get('status') != 'current'
+            or observed['state_tip'] != intent['state_tip']
+            or observed['remote_refs'] != intent['remote_refs']
+            or integration_projection_input_snapshot(repo_root, manifest) != intent['inputs']
+            or load_derived_provenance_store(repo_root) != intent['provenance_store']
+        ):
+            raise IntegrationReconciliationLeaseDrift(
+                'integration reconciliation lease changed before CAS; review inputs and '
+                'run int rebuild --reason to start a new operation'
+            )
+        require_manifest_transaction_current(manifest_path)
+        moved = git(
+            repo_root, 'update-ref', f'refs/heads/{branch}', final_tip, local_tip,
+            check=False,
+        )
+        if moved.returncode != 0:
+            abandon_control_manifest_intent(
+                repo_root, manifest_path, intent, ref_tip(repo_root, branch), 'ref_cas_failed'
+            )
+            raise SyncwheelError('integration reconciliation CAS lost; competing work preserved')
+    control_manifest_io_checkpoint('ref_updated')
+    control_manifest_io_checkpoint('before_provenance_resolution')
+    with derived_provenance_store_lock(repo_root):
+        store = load_derived_provenance_store(repo_root)
+        if store not in (intent['provenance_store'], intent['provenance_store_after']):
+            raise SyncwheelError('integration reconciliation provenance changed; pending intent preserved')
+        if store != intent['provenance_store_after']:
+            save_derived_provenance_store(repo_root, intent['provenance_store_after'])
+    control_manifest_io_checkpoint('provenance_resolved')
+    worktree = find_worktree_for_branch(repo_root, branch)
+    if (str(Path(worktree).resolve()) if worktree else None) != intent['destination_path']:
+        raise SyncwheelError('integration reconciliation checkout moved; pending intent preserved')
+    if worktree is not None:
+        worktree = Path(worktree)
+        control_manifest_io_checkpoint('before_checkout_alignment')
+        guard = checkout_reset_guard(worktree)
+        current_source = integration_reconciliation_source(repo_root, manifest_path)
+        expected_source = dict(before_source)
+        if Path(repo_root).resolve() == worktree.resolve():
+            expected_source['head'] = final_tip
+        already_aligned = (
+            git(worktree, 'write-tree').stdout.strip() == intent['final_tree']
+            and not guard['unstaged'] and not guard['untracked']
+        )
+        if not already_aligned and (
+            guard != intent['destination_guard'] or current_source != expected_source
+        ):
+            raise SyncwheelError('integration reconciliation checkout changed; pending intent preserved')
+        if ref_tip(repo_root, branch) != final_tip:
+            raise SyncwheelError('integration reconciliation ref changed before checkout alignment')
+        if not already_aligned:
+            git(worktree, 'read-tree', '--reset', '-u', final_tip)
+        if ref_tip(repo_root, branch) != final_tip:
+            raise SyncwheelError('integration reconciliation ref changed during checkout alignment')
+        transaction = active_manifest_write_transaction(manifest_path)
+        if transaction is not None and Path(manifest_path) == integration_manifest_path(worktree):
+            transaction['expectedDigest'] = intent['expected_manifest_digest']
+    aligned_guard = checkout_reset_guard(worktree) if worktree else None
+    control_manifest_io_checkpoint('checkout_aligned')
+    source_manifest, _ = load_manifest(repo_root, manifest_path)
+    if source_manifest is None or manifest_digest(source_manifest) != manifest_digest(manifest):
+        raise SyncwheelError('integration reconciliation source changed; pending intent preserved')
+    control_manifest_io_checkpoint('manifest_saved')
+    if (
+        ref_tip(repo_root, branch) != final_tip
+        or (worktree and checkout_reset_guard(worktree) != aligned_guard)
+        or load_derived_provenance_store(repo_root) != intent['provenance_store_after']
+    ):
+        raise SyncwheelError('integration reconciliation changed before terminal receipt; pending intent preserved')
+    append_ledger_event(
+        repo_root, 'manifest_saved',
+        control_manifest_event_payload(
+            repo_root, manifest_path, manifest, final_tip, 'reconciliation',
+            intent['reason'], intent['command'],
+            {'replay_tip': local_tip, 'version': 2, 'detached_replay_tip': replay_tip},
+            operation_id=intent['operation_id'],
+        ),
+        manifest_path,
+        idempotency_key=control_manifest_event_idempotency_key(
+            manifest, local_tip, final_tip, intent['command'], intent['operation_id']
+        ),
+    )
+    control_manifest_io_checkpoint('ledger_saved')
+    return True
+
+
+def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, reason):
+    """Plan an ordinary detached replay before changing published integration history."""
+    if not coordination_is_active(manifest):
+        return False
+    branch = manifest['integration']['branch']
+    with control_manifest_branch_lock(repo_root, branch):
+        # Refresh moving replay inputs before freezing their local and remote
+        # observations, as the ordinary replay path does before materializing.
+        git(repo_root, 'fetch', '--all', '--prune')
+        observed = observe_published_integration_tip(repo_root, manifest)
+        if observed is None:
+            return False
+        if observed.get('status') != 'current':
+            raise SyncwheelError('integration reconciliation requires current published state')
+        verify_coordination_state_manifest_digest(
+            repo_root, observed['state'], observed['config']['remote']
+        )
+        reuse_preflight = plan_published_integration_tip_reuse(
+            repo_root, manifest, manifest_path, refresh_inputs=False,
+        )
+        if (
+            reuse_preflight
+            and reuse_preflight.get('status') == 'refuse'
+            and (
+                reuse_preflight.get('reason', '').startswith(
+                    'source .gitignore differs from the published control bytes'
+                )
+                or reuse_preflight.get('reason') == (
+                    'integration replay inputs changed during published-tip proof'
+                )
+            )
+        ):
+            raise SyncwheelError(reuse_preflight['reason'])
+        local_tip = ref_tip(repo_root, branch)
+        if not local_tip or not branch_contains(repo_root, local_tip, observed['published_tip']):
+            raise SyncwheelError('integration reconciliation requires a local successor of published history')
+        source = integration_reconciliation_source(repo_root, manifest_path)
+        if source['manifest']['kind'] != 'file' or (
+            source['gitignore']['kind'] == 'file' and source['gitignore']['mode'] & 0o111
+        ):
+            raise SyncwheelError('integration reconciliation requires regular control files')
+        inputs = integration_projection_input_snapshot(repo_root, manifest)
+        destination = checkout_reset_destination_lease(
+            repo_root, branch,
+            allowed_paths=control_manifest_source_allowance(
+                repo_root, manifest_path
+            ),
+        )
+        store = load_derived_provenance_store(repo_root)
+        shared = shared_derived_provenance_records(repo_root, manifest, observed['state'])
+        provenance, store_after, provenance_after = integration_reconciliation_provenance(manifest, store, shared)
+        pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, inputs)
+        replay_tip = materialize_integration_replay(repo_root, pinned, overrides)
+        ignore = regular_checkout_path_bytes(repo_root, '.gitignore')
+        if ignore is None:
+            raise SyncwheelError('integration reconciliation requires regular ignore bytes')
+        tree = materialize_control_manifest_projection_tree(
+            repo_root, manifest, ref_tree(repo_root, replay_tip),
+            gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
+        )
+        integration_reconciliation_history(repo_root, manifest, local_tip, provenance, manifest_path, observed)
+        integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
+                                           detached_replay=True)
+        final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)
+                     if replay_tip != local_tip else None)
+        after = observe_published_integration_tip(repo_root, manifest)
+        if (
+            source != integration_reconciliation_source(repo_root, manifest_path)
+            or inputs != integration_projection_input_snapshot(repo_root, manifest)
+            or not after or after != observed
+            or store != load_derived_provenance_store(repo_root)
+            or local_tip != ref_tip(repo_root, branch)
+            or destination != checkout_reset_destination_lease(
+                repo_root, branch, allowed_paths=control_manifest_source_allowance(repo_root, manifest_path)
+            )
+        ):
+            raise SyncwheelError('integration reconciliation inputs changed during materialization')
+        previous = integration_reconciliation_proof(repo_root, local_tip, manifest_path, observed)
+        if previous and previous['parents'][1] == replay_tip and ref_tree(repo_root, local_tip) == tree:
+            return True
+        if replay_tip == local_tip:
+            control = materialize_control_manifest_commit(repo_root, manifest, local_tip)
+            if ref_tree(repo_root, control) != tree or store_after != store:
+                raise SyncwheelError('integration reconciliation cannot use legacy control persistence')
+            return restore_control_manifest_after_integration_rebuild(
+                repo_root, manifest_path, manifest, local_tip, 'reconciliation',
+                command=command, reason=reason,
+            ) or True
+        intent = {
+            **control_manifest_intent_payload(
+                repo_root, manifest, manifest_digest(manifest), local_tip, final_tip,
+                'reconciliation', reason, command, str(uuid.uuid4()),
+            ),
+            'version': 2, 'detached_replay_tip': replay_tip, 'final_tree': tree,
+            'state_tip': observed['state_tip'], 'published_tip': observed['published_tip'],
+            'remote_refs': observed['remote_refs'], 'inputs': inputs, 'source_lease': source,
+            'manifest_path': str(Path(manifest_path).absolute()),
+            'destination_path': destination['worktree_path'],
+            'gitignore_entry': tree_path_entry(repo_root, tree, '.gitignore')
+                if source['gitignore']['kind'] == 'file' else None,
+            'destination_guard': checkout_reset_guard(destination['worktree_path'])
+                if destination['worktree_path'] else None,
+            'provenance_store': store,
+            'provenance_store_after': store_after,
+            'provenance_before': provenance,
+            'provenance_after': provenance_after,
+        }
+        append_ledger_event(
+            repo_root, 'control_manifest_persistence_intent', intent, manifest_path,
+            idempotency_key=control_manifest_intent_idempotency_key(intent['operation_id']),
+        )
+        control_manifest_io_checkpoint('intent_saved')
+        return apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
 
 
 def _restore_control_manifest_after_integration_rebuild_locked(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
-    operation_id=None, persist_source=True,
+    operation_id=None, persist_source=True, source_lease_out=None,
 ):
     """Publish an isolated manifest-only commit above a rebuilt integration tip.
 
@@ -5815,9 +6385,13 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     observed_digest = manifest_digest(observed) if observed is not None else None
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     current_tip = ref_tip(repo_root, integration_ref)
-    if observed_digest == expected_digest and current_tip == replay_tip:
-        return False
     control_commit = materialize_control_manifest_commit(repo_root, manifest, replay_tip)
+    # Semantic equality does not make differently formatted Git blobs equal.
+    # Canonicalize through the same durable transaction before relying on exact
+    # tree equivalence after another publisher wins a coordination race.
+    if observed_digest == expected_digest and current_tip == replay_tip and control_commit == replay_tip:
+        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
+        return False
     transaction = active_manifest_write_transaction(manifest_path)
     if transaction is not None:
         replayed_source, _ = load_manifest(repo_root, manifest_path)
@@ -5843,6 +6417,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         # A completed local operation is an idempotent retry. A deterministic
         # control commit with no local intent belongs to some other operation
         # and must never be claimed as this clone's persistence receipt.
+        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
         return False
     if current_tip != control_commit:
         # FC3: probe the checkout the alignment will touch before the intent and
@@ -6012,6 +6587,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
             + control_manifest_obstruction_warning(alignment_obstruction, command),
             file=sys.stderr,
         )
+    capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
     return True
 
 
@@ -6146,6 +6722,29 @@ def recover_incomplete_control_manifest_persistence(
                 current, _ = load_manifest(repo_root, manifest_path)
                 return current or manifest
             intent = pending[0]['payload']
+            if intent.get('version') == 2:
+                committed = manifest_from_tree(
+                    repo_root, intent['expected_control_commit'], integration_manifest_path(repo_root)
+                )
+                if committed is None:
+                    raise SyncwheelError('integration reconciliation control manifest is missing')
+                try:
+                    apply_integration_reconciliation(repo_root, manifest_path, committed, intent)
+                except IntegrationReconciliationLeaseDrift:
+                    # Explicit re-planning may retire only an operation whose CAS
+                    # never landed. Post-CAS drift always keeps its pending intent.
+                    if not allow_new_operation or ref_tip(repo_root, branch) != intent['replay_tip']:
+                        raise
+                    current, _ = load_manifest(repo_root, manifest_path)
+                    if current is None:
+                        raise
+                    abandon_control_manifest_intent(
+                        repo_root, manifest_path, intent, intent['replay_tip'], 'superseded_before_cas'
+                    )
+                    return current
+                if recovery_state is not None:
+                    recovery_state.update({'recovered': True, 'control_commit': intent['expected_control_commit']})
+                return committed
             control_commit = intent.get('expected_control_commit')
             replay_tip = intent.get('replay_tip')
             parents = git(
@@ -9962,7 +10561,7 @@ def coordination_state_managed_manifest_digest(repo_root, manifest, managed, int
 def build_coordination_state(
     repo_root, manifest, config, previous, observed_refs, changed_refs, scope,
     projection_status, installation, tombstone=None, claim_commits=None,
-    operation_token=None,
+    operation_token=None, refresh_manifest_digest=False,
 ):
     previous_state = previous.get('state') if previous else None
     managed = {}
@@ -9984,6 +10583,7 @@ def build_coordination_state(
         integration_ref in changed_refs
         or previous_state is None
         or previous_state.get('manifest_digest') is None
+        or refresh_manifest_digest
     ):
         published_manifest_digest = coordination_state_managed_manifest_digest(
             repo_root, manifest, managed, integration_ref
@@ -10785,6 +11385,41 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
     return repaired
 
 
+def coordination_compose_local_control_suffix(
+    repo_root, published_integration_tip, local_integration_tip,
+):
+    """Prove the complete local-only suffix is linear manifest control history."""
+    refusal = (
+        'coordination compose local integration must equal the published tip or '
+        'carry a complete linear manifest-only control suffix'
+    )
+    if not local_integration_tip:
+        raise SyncwheelError(refusal)
+    if local_integration_tip == published_integration_tip:
+        return []
+    ancestor = git(
+        repo_root,
+        'merge-base',
+        '--is-ancestor',
+        published_integration_tip,
+        local_integration_tip,
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        raise SyncwheelError(refusal)
+    reverse_suffix = []
+    current = local_integration_tip
+    while current != published_integration_tip:
+        parents = git(
+            repo_root, 'show', '-s', '--format=%P', current, check=False
+        ).stdout.split()
+        if len(parents) != 1 or not is_manifest_only_commit(repo_root, current):
+            raise SyncwheelError(refusal)
+        reverse_suffix.append(current)
+        current = parents[0]
+    return list(reversed(reverse_suffix))
+
+
 def coordination_compose_stack_plan(
     repo_root, manifest, stack_id, known_base_state_tip, known_base_manifest_digest
 ):
@@ -10814,7 +11449,9 @@ def coordination_compose_stack_plan(
     if base_state['manifest_digest'] != known_base_manifest_digest:
         raise SyncwheelError('coordination compose known base manifest digest does not match state')
     verify_coordination_state_manifest_digest(repo_root, base_state, config['remote'])
-    verify_coordination_state_manifest_digest(repo_root, latest['state'], config['remote'])
+    latest_digest = verify_coordination_state_manifest_digest(
+        repo_root, latest['state'], config['remote']
+    )
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
     composition = compose_additive_coordination_snapshots(
         base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id
@@ -10849,10 +11486,14 @@ def coordination_compose_stack_plan(
     integration_tip = latest['state']['managed_refs'].get(integration_ref)
     if not integration_tip or observed_refs.get(integration_ref) != integration_tip:
         raise SyncwheelError('coordination compose requires an exact unchanged integration tip')
-    if ref_tip(repo_root, manifest['integration']['branch']) != integration_tip:
-        raise SyncwheelError('coordination compose local integration must match the remote state tip exactly')
+    local_integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
+    local_control_suffix = coordination_compose_local_control_suffix(
+        repo_root, integration_tip, local_integration_tip
+    )
     proposed_manifest = apply_coordination_snapshot(manifest, merged_snapshot)
     validation = validate_manifest(repo_root, proposed_manifest)
+    if ref_tip(repo_root, manifest['integration']['branch']) != local_integration_tip:
+        raise SyncwheelError('coordination compose local integration changed during planning')
     if validation['errors']:
         raise SyncwheelError(
             'coordination compose proposed manifest is invalid: ' + '; '.join(validation['errors'])
@@ -10871,9 +11512,7 @@ def coordination_compose_stack_plan(
         'localProposalDigest': manifest_digest(manifest),
         'composedSnapshot': merged_snapshot,
         'proposedManifestDigest': manifest_digest(proposed_manifest),
-        'integrationManifestDigest': coordination_manifest_digest(
-            proposed_manifest, repo_root
-        ),
+        'integrationManifestDigest': latest_digest['control_manifest_digest'],
         'stack': stack_id,
         'sourceRef': source_ref,
         'sourceTip': source_tip,
@@ -10882,6 +11521,11 @@ def coordination_compose_stack_plan(
         'integrationRef': integration_ref,
         'expectedIntegrationTip': integration_tip,
         'expectedIntegrationTree': ref_tree(repo_root, integration_tip),
+        'localIntegrationTip': local_integration_tip,
+        'localIntegrationControlSuffix': local_control_suffix,
+        'localIntegrationControlSuffixDigest': canonical_json_digest(
+            local_control_suffix
+        ),
         'unmappedIntegrationCommits': unmapped,
         'projectionStatus': 'partial',
         'integrationMutation': False,
@@ -10917,7 +11561,25 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
     publication_operation = pending_coordination_publication_after_resolution(
         repo_root, proposed_manifest, manifest_path, retry_fingerprint
     )
+    publication_landed = False
     if publication_operation:
+        config = coordination_config(proposed_manifest)
+        observed_publication = read_remote_coordination_state(
+            repo_root,
+            config,
+            fetch=True,
+            local_manifest_version=proposed_manifest['version'],
+        )
+        publication_landed = coordinated_operation_landed(
+            repo_root,
+            config,
+            observed_publication,
+            publication_operation,
+            claims_fallback=True,
+        )
+    if publication_operation and publication_landed:
+        if observed_publication['tip'] != plan['expectedRemoteStateTip']:
+            raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
         current = plan
         latest = {
             'tip': plan['expectedRemoteStateTip'],
@@ -10950,6 +11612,12 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             ],
             operation_token=publication_operation['operation_token'],
         )
+        if (
+            result.get('status') not in {'recovered', 'already_published'}
+            or result.get('state_tip') != plan['expectedRemoteStateTip']
+            or latest['state'].get('manifest') != plan['composedSnapshot']
+        ):
+            raise SyncwheelError('coordination compose STOP: reviewed plan drifted')
     elif plan['status'] == 'publish-required':
         if publication_operation is None:
             publication_operation = begin_coordination_publication(
@@ -11607,14 +12275,14 @@ def fetch_coordination_ref_tip(repo_root, config, ref, expected_tip):
     return expected_tip
 
 
-def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, local_branch):
-    local_tip = ref_tip(repo_root, local_branch)
-    if local_tip == remote_tip:
+def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, candidate_tip):
+    candidate_tip = ref_tip(repo_root, candidate_tip)
+    if candidate_tip == remote_tip:
         return True
     fetch_coordination_ref_tip(repo_root, config, ref, remote_tip)
-    if ref_tree(repo_root, local_branch) == ref_tree(repo_root, remote_tip):
+    if ref_tree(repo_root, candidate_tip) == ref_tree(repo_root, remote_tip):
         return True
-    return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, local_tip, check=False).returncode == 0
+    return git(repo_root, 'merge-base', '--is-ancestor', remote_tip, candidate_tip, check=False).returncode == 0
 
 
 def deterministic_stack_replay_tip(repo_root, base, commits):
@@ -11688,6 +12356,7 @@ def coordination_stack_ref_is_exact_rebase(
     remote_snapshot,
     stack_id,
     remote_tip,
+    candidate_tip,
 ):
     """Accept only a replay-proven rebase of an already published stack ref."""
     previous_manifest = apply_coordination_snapshot(manifest, remote_snapshot)
@@ -11712,15 +12381,15 @@ def coordination_stack_ref_is_exact_rebase(
         return False
     if commit_full_sha(repo_root, previous_commits[-1]) != remote_tip:
         return False
-    local_tip = ref_tip(repo_root, local_stack['branch'])
-    if not local_tip or commit_full_sha(repo_root, local_commits[-1]) != local_tip:
+    candidate_tip = ref_tip(repo_root, candidate_tip)
+    if not candidate_tip or commit_full_sha(repo_root, local_commits[-1]) != candidate_tip:
         return False
     expected_tip = deterministic_stack_replay_tip(
         repo_root,
         local_stack['base'],
         previous_commits,
     )
-    return expected_tip == local_tip
+    return expected_tip == candidate_tip
 
 
 def integration_partial_stack_adoption_allowed(
@@ -11739,6 +12408,68 @@ def integration_partial_stack_adoption_allowed(
         and all(stack_id in local_members for stack_id in added)
         and all(stack_id in changed_stack_refs for stack_id in added)
     )
+
+
+def validate_coordination_changed_ref_successors(
+    repo_root,
+    manifest,
+    config,
+    state,
+    remote_snapshot,
+    local_snapshot,
+    changed_refs,
+):
+    """Validate every changed ref before topology-equivalent success paths."""
+    remote_stacks = stack_snapshot_map(remote_snapshot)
+    local_stacks = stack_snapshot_map(local_snapshot)
+    for stack_id in sorted(set(remote_stacks) & set(local_stacks)):
+        remote_stack = remote_stacks[stack_id]
+        local_stack = local_stacks[stack_id]
+        if remote_stack['branch'] != local_stack['branch']:
+            continue
+        ref = f"refs/heads/{local_stack['branch']}"
+        if ref not in changed_refs:
+            continue
+        candidate_tip = changed_refs[ref]
+        remote_tip = state.get('managed_refs', {}).get(ref)
+        safe_successor = not remote_tip or coordination_ref_is_safe_successor(
+            repo_root,
+            config,
+            ref,
+            remote_tip,
+            candidate_tip,
+        )
+        exact_rebase = remote_tip and coordination_stack_ref_is_exact_rebase(
+            repo_root,
+            manifest,
+            remote_snapshot,
+            stack_id,
+            remote_tip,
+            candidate_tip,
+        )
+        if not safe_successor and not exact_rebase:
+            raise SyncwheelError(
+                f'{stack_id}: local branch is not a safe successor of the published managed ref; '
+                'run handoff and resolve the overlapping stack change'
+            )
+
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+    remote_tip = state.get('managed_refs', {}).get(integration_ref)
+    if (
+        integration_ref in changed_refs
+        and remote_tip
+        and not coordination_ref_is_safe_successor(
+            repo_root,
+            config,
+            integration_ref,
+            remote_tip,
+            changed_refs[integration_ref],
+        )
+    ):
+        raise SyncwheelError(
+            'local integration branch is not a safe successor of the published integration ref; '
+            'run handoff and resolve the overlap'
+        )
 
 
 def validate_coordination_publication_base(
@@ -11766,9 +12497,6 @@ def validate_coordination_publication_base(
     )
     remote_snapshot = state['manifest']
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
-    if remote_snapshot == local_snapshot:
-        return digest_form
-
     remote_stacks = stack_snapshot_map(remote_snapshot)
     local_stacks = stack_snapshot_map(local_snapshot)
     remote_ids = set(remote_stacks)
@@ -11799,6 +12527,20 @@ def validate_coordination_publication_base(
             + ', '.join(unexpected_removed_channels)
             + '; run handoff and resolve the stale manifest first'
         )
+    # Report an erased declaration before ancestry drift; every admissible
+    # publication still passes the unchanged successor guard before any return.
+    validate_coordination_changed_ref_successors(
+        repo_root,
+        manifest,
+        config,
+        state,
+        remote_snapshot,
+        local_snapshot,
+        changed_refs,
+    )
+    if remote_snapshot == local_snapshot:
+        return digest_form
+
     changed_channel_refs = {
         channel['id']
         for channel in manifest.get('channels', [])
@@ -11968,31 +12710,10 @@ def validate_coordination_publication_base(
                     f'{stack_id}: local manifest differs from published state without publishing its managed branch'
                 )
             continue
-        ref = f"refs/heads/{remote_stack['branch']}"
-        remote_tip = state.get('managed_refs', {}).get(ref)
-        safe_successor = not remote_tip or coordination_ref_is_safe_successor(
-            repo_root,
-            config,
-            ref,
-            remote_tip,
-            local_stack['branch'],
-        )
-        exact_rebase = remote_tip and coordination_stack_ref_is_exact_rebase(
-            repo_root,
-            manifest,
-            remote_snapshot,
-            stack_id,
-            remote_tip,
-        )
-        if not safe_successor and not exact_rebase:
-            raise SyncwheelError(
-                f'{stack_id}: local branch is not a safe successor of the published managed ref; '
-                'run handoff and resolve the overlapping stack change'
-            )
 
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     remote_integration = remote_snapshot.get('integration')
     local_integration = local_snapshot.get('integration')
-    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     if remote_integration != local_integration:
         partial_stack_adoption = integration_partial_stack_adoption_allowed(
             remote_integration, local_integration, added, changed_stack_refs, tombstone
@@ -12004,27 +12725,6 @@ def validate_coordination_publication_base(
                 'local integration configuration differs from published state without publishing integration'
             )
         return digest_form
-
-    remote_tip = state.get('managed_refs', {}).get(integration_ref)
-    # A14: applies whenever integration_ref is in changed_refs, regardless of
-    # scope. A12 keeps this safe for operations that don't touch the ref: they
-    # carry the parent state's recorded tip forward untouched, so a locally
-    # rebuilt integration branch never enters the published state.
-    if (
-        integration_ref in changed_refs
-        and remote_tip
-        and not coordination_ref_is_safe_successor(
-            repo_root,
-            config,
-            integration_ref,
-            remote_tip,
-            manifest['integration']['branch'],
-        )
-    ):
-        raise SyncwheelError(
-            'local integration branch is not a safe successor of the published integration ref; '
-            'run handoff and resolve the overlap'
-        )
     return digest_form
 
 
@@ -12876,9 +13576,7 @@ def coordinated_publish_cycle(
         not dry_run
         and integration_tip
         and not integration_ref_published
-        and manifest_from_tree(
-            repo_root, integration_tip, integration_manifest_path(repo_root)
-        ) is None
+        and not integration_control_matches_selected(repo_root, manifest, integration_tip)
     ):
         restore_control_manifest_after_integration_rebuild(
             repo_root,
@@ -13056,6 +13754,8 @@ def coordinated_publish_cycle(
     for ref, sha in changed_refs.items():
         if not sha:
             raise SyncwheelError(f'cannot publish an empty managed ref: {ref}')
+    if integration_ref in changed_refs:
+        require_selected_integration_control(repo_root, manifest, changed_refs[integration_ref])
     if dry_run:
         payload = {
             'coordination_id': config['id'],
@@ -13095,6 +13795,11 @@ def coordinated_publish_cycle(
         tombstone=tombstone,
         claim_commits=claim_commits,
         operation_token=operation_token,
+        refresh_manifest_digest=bool(
+            base_digest_form
+            and base_digest_form['form']
+            == COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
+        ),
     )
     validate_coordination_state(state, config['id'], config.get('claims', 'advisory'))
     state_commit = create_coordination_state_commit(repo_root, state, expected['tip'])
@@ -13253,7 +13958,9 @@ def local_manifest_projection_is_convergent(repo_root, manifest, manifest_path=N
         integration = manifest['integration']
         if not branch_exists(repo_root, integration['branch']):
             return False
-        if integration_sync_report(repo_root, manifest).get('local_matches_projection') is not True:
+        report = integration_sync_report(repo_root, manifest)
+        if (report.get('local_matches_product_projection') is not True
+                or report.get('local_control_manifest_matches_selected') is not True):
             return False
         for channel in manifest.get('channels', []):
             tip = ref_tip(repo_root, channel['branch'])
@@ -15356,7 +16063,7 @@ def empty_replay_shell_error():
     return lines
 
 
-def plumbing_replay_script(repo_root, branch, base, commits):
+def plumbing_replay_script(repo_root, branch, base, commits, expected_tip=None):
     """Render an object-only replay as one POSIX shell transaction."""
     lines = ['set -e']
     head = base
@@ -15382,7 +16089,10 @@ def plumbing_replay_script(repo_root, branch, base, commits):
             f'N=$({commit_tree} "$T" -p {parent} -m {shlex.quote(replay_commit_message(repo_root, commit))})'
         )
         head = '$N'
-    lines.append(f'git update-ref refs/heads/{branch} {shell_ref(head)}')
+    update = f'git update-ref refs/heads/{branch} {shell_ref(head)}'
+    if expected_tip is not None:
+        update += f' {shell_ref(expected_tip)}'
+    lines.append(update)
     return '\n'.join(lines)
 
 
@@ -15439,6 +16149,7 @@ def replay_target(
     return_tree=False,
     skip_contained=False,
     stack_ref_overrides=None,
+    expected_tip=None,
 ):
     # Projections skip contained commits; rebuilds replay their declared history.
     if stack is not None:
@@ -15457,6 +16168,7 @@ def replay_target(
         'return_tree': return_tree,
         'skip_contained': skip_contained,
         'stack_ref_overrides': stack_ref_overrides or {},
+        'expected_tip': expected_tip,
     }
 
 
@@ -15493,6 +16205,9 @@ def replay_plan(repo_root, manifest, target, mode):
         'worktree': str(worktree) if worktree is not None else None,
         'return_tree': projection,
         'skip_contained': target.get('skip_contained', False),
+        'expected_tip': target.get('expected_tip'),
+        'source_reset_lease': target.get('source_reset_lease'),
+        'reset_destination_lease': target.get('reset_destination_lease'),
         'emit_output': not projection,
     }
     steps = []
@@ -15543,8 +16258,19 @@ def replay_plan(repo_root, manifest, target, mode):
             ]
         else:
             raise SyncwheelError('replay mode plumbing supports cherry-pick integration only')
+        if target.get('skip_contained'):
+            plumbing_commits = [
+                commit for commit in plumbing_commits
+                if not branch_contains(repo_root, base, commit)
+            ]
         steps.append(replay_shell_step(
-            plumbing_replay_script(repo_root, branch, base, plumbing_commits),
+            plumbing_replay_script(
+                repo_root,
+                branch,
+                base,
+                plumbing_commits,
+                expected_tip=target.get('expected_tip'),
+            ),
             plumbing=True,
         ))
         return {
@@ -15602,9 +16328,12 @@ def replay_plan(repo_root, manifest, target, mode):
         raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
 
     if mode == 'ephemeral':
-        steps.append(replay_exec_step([
+        update_ref = [
             'git', '-C', str(worktree), 'update-ref', f'refs/heads/{branch}', 'HEAD',
-        ]))
+        ]
+        if target.get('expected_tip') is not None:
+            update_ref.append(target['expected_tip'])
+        steps.append(replay_exec_step(update_ref))
 
     return {
         'mode': mode,
@@ -15684,11 +16413,46 @@ def execute_replay_steps(repo_root, plan):
                 if render:
                     print(render)
         if plan['mode'] == 'ephemeral':
-            target_worktree = find_worktree_for_branch(repo_root, branch)
+            reset_destination_lease = target.get('reset_destination_lease')
+            if reset_destination_lease is None:
+                target_worktree = find_worktree_for_branch(repo_root, branch)
+            else:
+                observed_reset_destination = checkout_reset_destination_lease(
+                    repo_root,
+                    branch,
+                    status_base=reset_destination_lease.get('status_base'),
+                    allowed_paths=reset_destination_lease.get('allowed_paths'),
+                    allowed_path_prefixes=reset_destination_lease.get(
+                        'allowed_path_prefixes'
+                    ),
+                )
+                if observed_reset_destination != reset_destination_lease:
+                    raise SyncwheelError(
+                        'integration reset destination changed before published replay reset; '
+                        'refusing to overwrite it'
+                    )
+                observed_path = observed_reset_destination['worktree_path']
+                target_worktree = Path(observed_path) if observed_path else None
+            source_reset_lease = target.get('source_reset_lease')
+            if target_worktree and source_reset_lease:
+                observed_source_lease = checkout_source_lease(
+                    repo_root,
+                    Path(repo_root) / source_reset_lease['manifest_path'],
+                )
+                if (
+                    observed_source_lease is None
+                    or observed_source_lease['reset_guard_digest']
+                    != source_reset_lease['reset_guard_digest']
+                ):
+                    raise SyncwheelError(
+                        'source checkout changed before published integration replay reset; '
+                        'refusing to overwrite it'
+                    )
             if target_worktree:
                 run(['git', '-C', str(target_worktree), 'reset', '--hard', branch], cwd=repo_root)
         if target.get('return_tree'):
-            result['tree'] = ref_tree(target['worktree'], 'HEAD')
+            result['commit'] = ref_tip(target['worktree'], 'HEAD')
+            result['tree'] = ref_tree(repo_root, result['commit'])
         result['after_tip'] = ref_tip(repo_root, branch)
         return result
     finally:
@@ -15751,7 +16515,12 @@ def materialize_stack_projection(repo_root, stack):
         return execute_replay(repo_root, plan, True)['tree']
 
 
-def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
+def materialize_integration_replay(repo_root, manifest, stack_ref_overrides=None):
+    """Build the ordinary replay commit without moving refs or the source index.
+
+    Keep the detached commit as well as its tree: ancestry reconciliation needs
+    the actual replay graph before deciding whether to move integration.
+    """
     with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
         plan = replay_plan(
             repo_root,
@@ -15765,7 +16534,974 @@ def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=
             ),
             'desk',
         )
-        return execute_replay(repo_root, plan, True)['tree']
+        return execute_replay(repo_root, plan, True)['commit']
+
+
+def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
+    commit = materialize_integration_replay(repo_root, manifest, stack_ref_overrides)
+    return ref_tree(repo_root, commit)
+
+
+def checkout_path_observation(repo_root, relative):
+    """Read one checkout path through descriptor-bound, no-follow traversal."""
+    parts = Path(relative).parts
+    if (
+        not parts
+        or Path(relative).is_absolute()
+        or any(part in {'', '.', '..'} for part in parts)
+    ):
+        return {'fingerprint': {'kind': 'invalid'}, 'bytes': None}
+    directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+    nofollow = getattr(os, 'O_NOFOLLOW', 0)
+    descriptors = []
+    try:
+        current = os.open(str(Path(repo_root).resolve()), directory_flags | nofollow)
+        descriptors.append(current)
+        for part in parts[:-1]:
+            try:
+                current = os.open(
+                    part, directory_flags | nofollow, dir_fd=current
+                )
+            except FileNotFoundError:
+                return {'fingerprint': {'kind': 'missing'}, 'bytes': b''}
+            except OSError as exc:
+                if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                    return {'fingerprint': {'kind': 'invalid'}, 'bytes': None}
+                raise
+            descriptors.append(current)
+        try:
+            path_stat = os.stat(parts[-1], dir_fd=current, follow_symlinks=False)
+        except FileNotFoundError:
+            return {'fingerprint': {'kind': 'missing'}, 'bytes': b''}
+        mode = stat.S_IMODE(path_stat.st_mode)
+        if stat.S_ISLNK(path_stat.st_mode):
+            return {
+                'fingerprint': {
+                    'kind': 'symlink',
+                    'mode': mode,
+                    'device': path_stat.st_dev,
+                    'inode': path_stat.st_ino,
+                },
+                'bytes': None,
+            }
+        if not stat.S_ISREG(path_stat.st_mode):
+            return {
+                'fingerprint': {'kind': 'other', 'mode': mode},
+                'bytes': None,
+            }
+        try:
+            descriptor = os.open(
+                parts[-1], os.O_RDONLY | nofollow, dir_fd=current
+            )
+        except FileNotFoundError:
+            return {'fingerprint': {'kind': 'changed'}, 'bytes': None}
+        except OSError as exc:
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+                return {'fingerprint': {'kind': 'changed'}, 'bytes': None}
+            raise
+        descriptors.append(descriptor)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or (before.st_dev, before.st_ino) != (path_stat.st_dev, path_stat.st_ino)
+        ):
+            return {'fingerprint': {'kind': 'changed'}, 'bytes': None}
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        stable_fields = (
+            'st_dev', 'st_ino', 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_mode',
+        )
+        if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
+            return {'fingerprint': {'kind': 'changed'}, 'bytes': None}
+        payload = b''.join(chunks)
+        return {
+            'fingerprint': {
+                'kind': 'file',
+                'mode': stat.S_IMODE(after.st_mode),
+                'device': after.st_dev,
+                'inode': after.st_ino,
+                'size': after.st_size,
+                'mtimeNs': after.st_mtime_ns,
+                'ctimeNs': after.st_ctime_ns,
+                'sha256': hashlib.sha256(payload).hexdigest(),
+            },
+            'bytes': payload,
+        }
+    finally:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
+def checkout_path_fingerprint(repo_root, relative):
+    return checkout_path_observation(repo_root, relative)['fingerprint']
+
+
+def checkout_reset_guard(repo_root):
+    """Bind a hard-reset decision to the index and checkout-relative dirt."""
+    repo_root = Path(repo_root).resolve()
+    index = git(repo_root, 'ls-files', '--stage', '-z')
+    unstaged_paths = sorted({
+        path for path in git(
+            repo_root, 'diff-files', '--name-only', '-z'
+        ).stdout.split('\0')
+        if path
+    })
+    untracked_paths = sorted({
+        path for path in git(
+            repo_root, 'ls-files', '--others', '--exclude-standard', '-z'
+        ).stdout.split('\0')
+        if path
+    })
+    return {
+        'index_sha256': hashlib.sha256(index.stdout.encode('utf-8')).hexdigest(),
+        'unstaged': {
+            path: checkout_path_fingerprint(repo_root, path)
+            for path in unstaged_paths
+        },
+        'untracked': {
+            path: checkout_path_fingerprint(repo_root, path)
+            for path in untracked_paths
+        },
+    }
+
+
+def checkout_reset_destination_lease(
+    repo_root, branch, status_base=None, allowed_paths=None,
+    allowed_path_prefixes=None,
+):
+    """Return one clean-validated observation of the integration reset target."""
+    worktree = find_worktree_for_branch(repo_root, branch)
+    branch_ref = f'refs/heads/{branch}'
+    allowed_paths = sorted(set(allowed_paths or ()))
+    allowed_path_prefixes = sorted({
+        str(prefix).replace('\\', '/').rstrip('/') + '/'
+        for prefix in (allowed_path_prefixes or ())
+    })
+    empty_status = {'staged': [], 'unstaged': [], 'untracked': []}
+    if worktree is None:
+        return {
+            'branch_ref': branch_ref,
+            'worktree_path': None,
+            'status_base': None,
+            'status': empty_status,
+            'allowed_paths': allowed_paths,
+            'allowed_path_prefixes': allowed_path_prefixes,
+            'reset_guard_digest': None,
+        }
+    worktree = Path(worktree).resolve()
+    observed_branch_ref = git(
+        worktree, 'symbolic-ref', '--quiet', 'HEAD', check=False
+    ).stdout.strip()
+    if observed_branch_ref != branch_ref:
+        raise SyncwheelError(
+            'integration reset destination changed during lease capture; '
+            'refusing to overwrite it'
+        )
+    status_base = status_base or ref_tip(worktree, 'HEAD')
+    before_guard = checkout_reset_guard(worktree)
+    staged_paths = sorted({
+        path for path in git(
+            worktree, 'diff', '--cached', '--name-only', '--no-renames', '-z',
+            status_base, '--',
+        ).stdout.split('\0')
+        if path
+    })
+    status = {
+        'staged': staged_paths,
+        'unstaged': sorted(before_guard['unstaged']),
+        'untracked': sorted(before_guard['untracked']),
+    }
+    changed_paths = sorted({
+        path for paths in status.values() for path in paths
+    })
+    unexpected_paths = [
+        path for path in changed_paths
+        if path not in allowed_paths and not any(
+            path.startswith(prefix) for prefix in allowed_path_prefixes
+        )
+    ]
+    after_guard = checkout_reset_guard(worktree)
+    final_branch_ref = git(
+        worktree, 'symbolic-ref', '--quiet', 'HEAD', check=False
+    ).stdout.strip()
+    if before_guard != after_guard or final_branch_ref != observed_branch_ref:
+        raise SyncwheelError(
+            'integration reset destination changed during lease capture; '
+            'refusing to overwrite it'
+        )
+    if unexpected_paths:
+        raise SyncwheelError(
+            f'integration reset destination {worktree} is not clean at lease capture; '
+            'refusing to overwrite it: ' + ', '.join(unexpected_paths)
+        )
+    return {
+        'branch_ref': observed_branch_ref,
+        'worktree_path': str(worktree),
+        'status_base': status_base,
+        'status': status,
+        'allowed_paths': allowed_paths,
+        'allowed_path_prefixes': allowed_path_prefixes,
+        'reset_guard_digest': canonical_json_digest(after_guard),
+    }
+
+
+def checkout_source_lease(repo_root, manifest_path):
+    """Bind a reuse decision to HEAD, index, dirt, and its control source bytes."""
+    repo_root = Path(repo_root).resolve()
+    try:
+        manifest_relative = Path(manifest_path).resolve(strict=False).relative_to(
+            repo_root
+        ).as_posix()
+    except ValueError:
+        return None
+    status = journal_status_entries(repo_root)
+    paths = sorted({entry['path'] for entry in status} | {
+        manifest_relative,
+        '.gitignore',
+    })
+    reset_guard = checkout_reset_guard(repo_root)
+    evidence = {
+        'head': ref_tip(repo_root, 'HEAD'),
+        'index_sha256': reset_guard['index_sha256'],
+        'status': status,
+        'paths': {
+            path: checkout_path_fingerprint(repo_root, path)
+            for path in paths
+        },
+    }
+    return {
+        'digest': canonical_json_digest(evidence),
+        'manifest_path': manifest_relative,
+        'manifest': evidence['paths'][manifest_relative],
+        'gitignore': evidence['paths']['.gitignore'],
+        'reset_guard_digest': canonical_json_digest(reset_guard),
+    }
+
+
+def regular_checkout_path_bytes(repo_root, relative):
+    observed = checkout_path_observation(repo_root, relative)
+    if observed['fingerprint']['kind'] == 'missing':
+        return b''
+    if observed['fingerprint']['kind'] != 'file':
+        return None
+    return observed['bytes']
+
+
+def tree_path_entry(repo_root, tree, relative):
+    listing = git(repo_root, 'ls-tree', '-z', tree, '--', relative, check=False)
+    if listing.returncode != 0:
+        raise SyncwheelError(f'cannot inspect integration tree path: {relative}')
+    entries = [entry for entry in listing.stdout.split('\0') if entry]
+    if not entries:
+        return None
+    if len(entries) != 1:
+        raise SyncwheelError(f'ambiguous integration tree path: {relative}')
+    metadata, separator, listed_path = entries[0].partition('\t')
+    if not separator or listed_path != relative:
+        raise SyncwheelError(f'ambiguous integration tree path: {relative}')
+    mode, object_type, object_id = metadata.split(' ', 2)
+    if object_type != 'blob' or not re.fullmatch(r'[0-9a-f]{40,64}', object_id):
+        raise SyncwheelError(f'integration tree path is not a blob: {relative}')
+    return {'mode': mode, 'blob': object_id}
+
+
+def tree_path_bytes(repo_root, entry):
+    if entry is None:
+        return b''
+    result = subprocess.run(
+        ['git', 'cat-file', 'blob', entry['blob']],
+        cwd=repo_root,
+        capture_output=True,
+        env=managed_process_env(),
+    )
+    if result.returncode != 0:
+        raise SyncwheelError(f"cannot read integration tree blob: {entry['blob']}")
+    return result.stdout
+
+
+def integration_tree_changed_paths(repo_root, left, right):
+    return sorted({
+        path for path in git(
+            repo_root,
+            'diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
+            left, right,
+        ).stdout.split('\0')
+        if path
+    })
+
+
+def materialize_control_manifest_projection_tree(
+    repo_root, manifest, replay_tree, gitignore_bytes=None, manifest_bytes=None,
+):
+    """Overlay exact local control bytes on a projected tree without moving a ref."""
+    relative = control_manifest_relative_path(repo_root)
+    with tempfile.NamedTemporaryFile(
+        prefix='syncwheel-control-projection-index-', delete=False
+    ) as handle:
+        index_path = Path(handle.name)
+    index_path.unlink(missing_ok=True)
+    environment = {'GIT_INDEX_FILE': str(index_path)}
+    try:
+        git(repo_root, 'read-tree', replay_tree, env=environment)
+        manifest_payload = (
+            canonical_manifest_file_text(manifest).encode('utf-8')
+            if manifest_bytes is None else manifest_bytes
+        )
+        result = subprocess.run(
+            ['git', 'hash-object', '-w', '--stdin'],
+            cwd=repo_root,
+            input=manifest_payload,
+            capture_output=True,
+            env=managed_process_env(),
+        )
+        if result.returncode != 0:
+            raise SyncwheelError('cannot materialize the exact control manifest blob')
+        blob = result.stdout.decode().strip()
+        git(
+            repo_root,
+            'update-index', '--add', '--cacheinfo',
+            f'100644,{blob},{relative}',
+            env=environment,
+        )
+        if gitignore_bytes is not None:
+            result = subprocess.run(
+                ['git', 'hash-object', '-w', '--stdin'],
+                cwd=repo_root,
+                input=gitignore_bytes,
+                capture_output=True,
+                env=managed_process_env(),
+            )
+            if result.returncode != 0:
+                raise SyncwheelError(
+                    'cannot materialize the exact control .gitignore blob'
+                )
+            gitignore_blob = result.stdout.decode().strip()
+            git(
+                repo_root,
+                'update-index', '--add', '--cacheinfo',
+                f'100644,{gitignore_blob},.gitignore',
+                env=environment,
+            )
+        return git(repo_root, 'write-tree', env=environment).stdout.strip()
+    finally:
+        index_path.unlink(missing_ok=True)
+
+
+def observe_published_integration_tip(repo_root, manifest, *, fetch=True):
+    config = coordination_config(manifest)
+    if not config or config.get('mode') != 'active-active':
+        return None
+    remote = read_remote_coordination_state(
+        repo_root,
+        config,
+        fetch=fetch,
+        local_manifest_version=manifest['version'],
+    )
+    if not remote['tip'] or not remote['state']:
+        return None
+    if fetch and ref_tip(repo_root, 'FETCH_HEAD') != remote['tip']:
+        return {'status': 'stale'}
+    state = remote['state']
+    expected_refs = dict(state.get('managed_refs') or {})
+    observed_refs = remote_ref_tips(repo_root, config['remote'], expected_refs)
+    if observed_refs != expected_refs:
+        return {'status': 'stale'}
+    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+    published_tip = expected_refs.get(integration_ref)
+    if not published_tip:
+        return None
+    return {
+        'status': 'current',
+        'config': config,
+        'state': state,
+        'state_tip': remote['tip'],
+        'state_digest': canonical_json_digest(state),
+        'remote_refs': observed_refs,
+        'integration_ref': integration_ref,
+        'published_tip': published_tip,
+    }
+
+
+def integration_projection_ref_observation(repo_root, kind, identifier, spec):
+    tip = ref_tip(repo_root, spec)
+    if not tip:
+        raise SyncwheelError(f'cannot resolve {kind} replay input: {spec}')
+    symbolic = git(
+        repo_root, 'rev-parse', '--verify', '--symbolic-full-name', spec,
+        check=False,
+    ).stdout.strip()
+    observed = {
+        'kind': kind,
+        'id': identifier,
+        'spec': spec,
+        'symbolicRef': symbolic or None,
+        'tip': tip,
+    }
+    if symbolic.startswith('refs/remotes/'):
+        remotes = sorted(
+            (line.strip() for line in git(repo_root, 'remote').stdout.splitlines()),
+            key=len,
+            reverse=True,
+        )
+        for remote in remotes:
+            prefix = f'refs/remotes/{remote}/'
+            if not symbolic.startswith(prefix):
+                continue
+            remote_ref = f"refs/heads/{symbolic[len(prefix):]}"
+            observed.update({
+                'remote': remote,
+                'remoteRef': remote_ref,
+                'remoteTip': remote_ref_tips(
+                    repo_root, remote, [remote_ref]
+                )[remote_ref],
+            })
+            break
+    return observed
+
+
+def integration_projection_input_snapshot(repo_root, manifest):
+    """Resolve every moving ref and immutable commit consumed by projection."""
+    integration = manifest['integration']
+    refs = [integration_projection_ref_observation(
+        repo_root, 'base', 'integration', integration['base']
+    )]
+    stacks = stack_map(manifest)
+    immutable_commits = []
+    for stack_id in integration['stacks']:
+        stack = stacks[stack_id]
+        if integration.get('strategy', 'cherry-pick') == 'merge-stacks':
+            refs.append(integration_projection_ref_observation(
+                repo_root, 'merge-stack', stack_id, stack['branch']
+            ))
+        else:
+            immutable_commits.extend(
+                commit_full_sha(repo_root, commit)
+                for commit in stack_integration_base_commits(stack)
+            )
+        immutable_commits.extend(
+            commit_full_sha(repo_root, commit)
+            for commit in stack_integration_only_commits(stack)
+        )
+    return {
+        'refs': refs,
+        'commits': immutable_commits,
+    }
+
+
+def published_integration_tip_reuse_fallback(observation, reason, path_proof=None):
+    return {
+        'status': 'fallback',
+        'reason': reason,
+        'stateTip': observation['state_tip'],
+        'publishedTip': observation['published_tip'],
+        'pathProof': path_proof or [],
+    }
+
+
+def published_integration_tip_reuse_refusal(observation, reason):
+    return {
+        'status': 'refuse',
+        'reason': reason,
+        'stateTip': observation.get('state_tip'),
+        'publishedTip': observation.get('published_tip'),
+    }
+
+
+def plan_published_integration_tip_reuse(
+    repo_root, manifest, manifest_path, *, refresh_inputs=True,
+):
+    """Prove that retaining an already-published integration tip loses no bytes."""
+    if not coordination_is_active(manifest):
+        return None
+    if refresh_inputs:
+        git(repo_root, 'fetch', '--all', '--prune')
+    source_lease = checkout_source_lease(repo_root, manifest_path)
+    if source_lease is None:
+        return None
+    observation = observe_published_integration_tip(
+        repo_root, manifest, fetch=refresh_inputs
+    )
+    if observation is None:
+        return None
+    if observation['status'] == 'stale':
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'published coordination state or managed refs changed during reuse planning',
+        )
+    if source_lease['manifest']['kind'] != 'file':
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'source control manifest must remain one regular no-follow file',
+        )
+    branch = manifest['integration']['branch']
+    if ref_tip(repo_root, branch) != observation['published_tip']:
+        return None
+    try:
+        verify_coordination_state_manifest_digest(
+            repo_root, observation['state'], observation['config']['remote']
+        )
+        published_manifest = coordination_state_control_manifest(
+            repo_root, observation['state'], observation['config']['remote']
+        )
+    except SyncwheelError as exc:
+        return published_integration_tip_reuse_refusal(
+            observation,
+            f'published integration control proof is invalid: {exc}',
+        )
+    expected_manifest_digest = manifest_digest(manifest)
+    if manifest_digest(published_manifest) != expected_manifest_digest:
+        return None
+
+    try:
+        replay_inputs = integration_projection_input_snapshot(repo_root, manifest)
+    except SyncwheelError as exc:
+        return published_integration_tip_reuse_fallback(
+            observation, f'integration replay inputs are unavailable: {exc}'
+        )
+    remote_input_drift = [
+        item for item in replay_inputs['refs']
+        if item.get('remoteRef') and item.get('remoteTip') != item['tip']
+    ]
+    if remote_input_drift:
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'integration replay input differs from its remote ref: '
+            + ', '.join(item['spec'] for item in remote_input_drift),
+        )
+
+    source_gitignore_bytes = regular_checkout_path_bytes(repo_root, '.gitignore')
+    if source_gitignore_bytes is None:
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'source .gitignore differs from the published control bytes: not a regular file',
+        )
+    try:
+        source_gitignore_text = source_gitignore_bytes.decode('utf-8')
+    except UnicodeDecodeError:
+        source_gitignore = None
+    else:
+        source_gitignore = split_syncwheel_managed_gitignore(
+            source_gitignore_text, syncwheel_worktree_root(manifest)
+        )
+    if source_gitignore is None:
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'source .gitignore differs from the published control bytes: '
+            'managed block is malformed or duplicated',
+        )
+
+    published_tip = observation['published_tip']
+    published_tree = ref_tree(repo_root, published_tip)
+    published_manifest_entry = tree_path_entry(
+        repo_root, published_tree, source_lease['manifest_path']
+    )
+    published_manifest_bytes = tree_path_bytes(
+        repo_root, published_manifest_entry
+    )
+    replay_tree = materialize_integration_projection(repo_root, manifest)
+    projected_tree = materialize_control_manifest_projection_tree(
+        repo_root,
+        manifest,
+        replay_tree,
+        gitignore_bytes=(
+            source_gitignore_bytes
+            if source_lease['gitignore']['kind'] == 'file'
+            else None
+        ),
+        manifest_bytes=published_manifest_bytes,
+    )
+    try:
+        replay_inputs_after = integration_projection_input_snapshot(
+            repo_root, manifest
+        )
+    except SyncwheelError:
+        replay_inputs_after = None
+    if replay_inputs_after != replay_inputs:
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'integration replay inputs changed during published-tip proof',
+        )
+    changed_paths = integration_tree_changed_paths(
+        repo_root, published_tree, projected_tree
+    )
+    path_proof = [
+        {
+            'path': path,
+            'published': tree_path_entry(repo_root, published_tree, path),
+            'projected': tree_path_entry(repo_root, projected_tree, path),
+        }
+        for path in changed_paths
+    ]
+    allowed_paths = {source_lease['manifest_path'], '.gitignore'}
+
+    published_gitignore_entry = tree_path_entry(
+        repo_root, published_tree, '.gitignore'
+    )
+    published_gitignore_bytes = tree_path_bytes(
+        repo_root, published_gitignore_entry
+    )
+    if (
+        source_gitignore['unmanaged']
+        and source_gitignore_bytes != published_gitignore_bytes
+    ):
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'source .gitignore differs from the published control bytes: '
+            'unreviewed surrounding bytes are present',
+        )
+
+    unexpected = sorted(set(changed_paths) - allowed_paths)
+    if unexpected:
+        base_inputs = [
+            item for item in replay_inputs['refs']
+            if item.get('kind') == 'base' and item.get('id') == 'integration'
+        ]
+        if len(base_inputs) != 1:
+            return published_integration_tip_reuse_refusal(
+                observation,
+                'integration replay input proof has no unique base ref',
+            )
+        base_tree = ref_tree(repo_root, base_inputs[0]['tip'])
+        unsafe_product_paths = []
+        for proof in path_proof:
+            if proof['path'] not in unexpected:
+                continue
+            proof['base'] = tree_path_entry(repo_root, base_tree, proof['path'])
+            # A declared replay may add, modify, or delete a base path. It may
+            # not replace a byte that exists only on the published partial tip:
+            # that would silently discard an unmapped contribution.
+            if proof['published'] != proof['base']:
+                unsafe_product_paths.append(proof['path'])
+        if unsafe_product_paths:
+            return {
+                **published_integration_tip_reuse_refusal(
+                    observation,
+                    'published integration contains unexplained product paths: '
+                    + ', '.join(unsafe_product_paths),
+                ),
+                'pathProof': path_proof,
+            }
+
+    if source_lease['manifest_path'] in changed_paths:
+        projected_manifest_entry = tree_path_entry(
+            repo_root, projected_tree, source_lease['manifest_path']
+        )
+        projected_manifest = manifest_from_tree(
+            repo_root, projected_tree, manifest_path
+        )
+        if (
+            not published_manifest_entry
+            or published_manifest_entry['mode'] != '100644'
+            or not projected_manifest_entry
+            or projected_manifest_entry['mode'] != '100644'
+            or projected_manifest is None
+            or manifest_digest(projected_manifest) != expected_manifest_digest
+        ):
+            return published_integration_tip_reuse_fallback(
+                observation,
+                'projected control manifest is not semantically identical',
+                path_proof,
+            )
+
+    projected_gitignore_entry = tree_path_entry(
+        repo_root, projected_tree, '.gitignore'
+    )
+    projected_gitignore_bytes = tree_path_bytes(
+        repo_root, projected_gitignore_entry
+    )
+    source_gitignore_fingerprint = source_lease['gitignore']
+    gitignore_modes_match = (
+        (
+            published_gitignore_entry is None
+            and source_gitignore_fingerprint['kind'] == 'missing'
+        )
+        or (
+            published_gitignore_entry is not None
+            and published_gitignore_entry['mode'] == '100644'
+            and source_gitignore_fingerprint['kind'] == 'file'
+            and not source_gitignore_fingerprint['mode'] & 0o111
+        )
+    ) and (
+        projected_gitignore_entry is None
+        or projected_gitignore_entry['mode'] == '100644'
+    )
+    if not gitignore_modes_match:
+        return published_integration_tip_reuse_fallback(
+            observation,
+            'source, published, and projected .gitignore modes differ',
+            path_proof,
+        )
+    if '.gitignore' in changed_paths:
+        try:
+            published_gitignore_text = published_gitignore_bytes.decode('utf-8')
+            projected_gitignore_text = projected_gitignore_bytes.decode('utf-8')
+        except UnicodeDecodeError:
+            return published_integration_tip_reuse_fallback(
+                observation,
+                'published or projected .gitignore is not UTF-8 control text',
+                path_proof,
+            )
+        published_gitignore = split_syncwheel_managed_gitignore(
+            published_gitignore_text, syncwheel_worktree_root(manifest)
+        )
+        projected_gitignore = split_syncwheel_managed_gitignore(
+            projected_gitignore_text, syncwheel_worktree_root(manifest)
+        )
+        if (
+            published_gitignore is None
+            or projected_gitignore is None
+            or published_gitignore['unmanaged'] != projected_gitignore['unmanaged']
+        ):
+            return published_integration_tip_reuse_fallback(
+                observation,
+                'published .gitignore differs outside its one managed block',
+                path_proof,
+            )
+
+    if source_gitignore_bytes != published_gitignore_bytes:
+        return published_integration_tip_reuse_fallback(
+            observation,
+            'source .gitignore does not exactly match the published control bytes',
+            path_proof,
+        )
+
+    current_source_lease = checkout_source_lease(repo_root, manifest_path)
+    if (
+        current_source_lease is None
+        or current_source_lease['digest'] != source_lease['digest']
+    ):
+        return published_integration_tip_reuse_refusal(
+            observation,
+            'source checkout changed during published integration reuse planning',
+        )
+    return {
+        'status': 'replay' if unexpected else 'retain',
+        'stateTip': observation['state_tip'],
+        'stateDigest': observation['state_digest'],
+        'remoteRefs': observation['remote_refs'],
+        'integrationRef': observation['integration_ref'],
+        'publishedTip': published_tip,
+        'publishedTree': published_tree,
+        'projectedTree': projected_tree,
+        'manifestDigest': expected_manifest_digest,
+        'sourceLease': source_lease,
+        'replayInputs': replay_inputs,
+        'changedPaths': changed_paths,
+        'replayProductPaths': unexpected,
+        'pathProof': path_proof,
+    }
+
+
+def published_integration_tip_reuse_is_current(
+    repo_root, manifest, manifest_path, plan
+):
+    """Recheck every source, state, and ref lease immediately before retention."""
+    before_source = checkout_source_lease(repo_root, manifest_path)
+    if before_source is None or before_source['digest'] != plan['sourceLease']['digest']:
+        return False
+    if ref_tip(repo_root, manifest['integration']['branch']) != plan['publishedTip']:
+        return False
+    try:
+        if integration_projection_input_snapshot(repo_root, manifest) != plan['replayInputs']:
+            return False
+    except SyncwheelError:
+        return False
+    observed = observe_published_integration_tip(repo_root, manifest)
+    if observed is None or observed.get('status') != 'current':
+        return False
+    if (
+        observed['state_tip'] != plan['stateTip']
+        or observed['state_digest'] != plan['stateDigest']
+        or observed['remote_refs'] != plan['remoteRefs']
+        or observed['published_tip'] != plan['publishedTip']
+    ):
+        return False
+    observed_manifest, _ = load_manifest(repo_root, manifest_path)
+    if (
+        observed_manifest is None
+        or manifest_digest(observed_manifest) != plan['manifestDigest']
+    ):
+        return False
+    after_source = checkout_source_lease(repo_root, manifest_path)
+    return bool(
+        after_source
+        and after_source['digest'] == plan['sourceLease']['digest']
+        and ref_tip(repo_root, manifest['integration']['branch'])
+        == plan['publishedTip']
+    )
+
+
+def published_integration_replay_target(
+    manifest, plan, worktree, reset_destination_lease,
+):
+    """Replay the declared projection from an exactly leased published tip."""
+    integration = copy.deepcopy(manifest['integration'])
+    integration['base'] = plan['publishedTip']
+    stack_ref_overrides = {
+        item['id']: item['tip']
+        for item in plan['replayInputs']['refs']
+        if item.get('kind') == 'merge-stack'
+    }
+    target = replay_target(
+        integration=integration,
+        worktree=worktree,
+        skip_contained=True,
+        stack_ref_overrides=stack_ref_overrides,
+        expected_tip=plan['publishedTip'],
+    )
+    target['source_reset_lease'] = {
+        'manifest_path': plan['sourceLease']['manifest_path'],
+        'reset_guard_digest': plan['sourceLease']['reset_guard_digest'],
+    }
+    target['reset_destination_lease'] = copy.deepcopy(reset_destination_lease)
+    return target
+
+
+def published_integration_replay_is_current(
+    repo_root, manifest, manifest_path, plan, expected_source_lease,
+):
+    """Verify the replay result and every remote/input lease before publication."""
+    before_source = checkout_source_lease(repo_root, manifest_path)
+    if (
+        before_source is None
+        or before_source['digest'] != expected_source_lease.get('digest')
+    ):
+        return False
+    try:
+        before_inputs = integration_projection_input_snapshot(repo_root, manifest)
+    except SyncwheelError:
+        return False
+    if before_inputs != plan['replayInputs']:
+        return False
+    observed = observe_published_integration_tip(repo_root, manifest)
+    if observed is None or observed.get('status') != 'current':
+        return False
+    try:
+        after_inputs = integration_projection_input_snapshot(repo_root, manifest)
+    except SyncwheelError:
+        return False
+    if (
+        after_inputs != plan['replayInputs']
+        or observed['state_tip'] != plan['stateTip']
+        or observed['state_digest'] != plan['stateDigest']
+        or observed['remote_refs'] != plan['remoteRefs']
+        or observed['published_tip'] != plan['publishedTip']
+    ):
+        return False
+    branch = manifest['integration']['branch']
+    local_tip = ref_tip(repo_root, branch)
+    if not local_tip:
+        return False
+    if git(
+        repo_root,
+        'merge-base', '--is-ancestor', plan['publishedTip'], local_tip,
+        check=False,
+    ).returncode != 0:
+        return False
+    local_tree = ref_tree(repo_root, local_tip)
+    if local_tree != plan['projectedTree']:
+        return False
+    committed = manifest_from_tree(
+        repo_root, local_tip, integration_manifest_path(repo_root)
+    )
+    source, _ = load_manifest(repo_root, manifest_path)
+    if (
+        committed is None
+        or source is None
+        or manifest_digest(committed) != plan['manifestDigest']
+        or manifest_digest(source) != plan['manifestDigest']
+        or tree_path_entry(repo_root, local_tree, '.gitignore')
+        != tree_path_entry(repo_root, plan['projectedTree'], '.gitignore')
+    ):
+        return False
+    after_source = checkout_source_lease(repo_root, manifest_path)
+    return bool(
+        after_source
+        and after_source['digest'] == expected_source_lease.get('digest')
+    )
+
+
+def unpublished_local_integration_control_tip(repo_root, manifest, manifest_path=None):
+    """Return only a receipt-backed control tip with the exact projected tree."""
+    observation = observe_published_integration_tip(repo_root, manifest)
+    if observation is None:
+        return None
+    if observation['status'] == 'stale':
+        raise SyncwheelError(
+            'published coordination state or managed refs changed while '
+            'checking the local integration control tip'
+        )
+    branch = manifest['integration']['branch']
+    local_tip = ref_tip(repo_root, branch)
+    if not local_tip or local_tip == observation['published_tip']:
+        return None
+    committed = manifest_from_tree(
+        repo_root, local_tip, integration_manifest_path(repo_root)
+    )
+    if committed is None or manifest_digest(committed) != manifest_digest(manifest):
+        return None
+    events = load_control_manifest_events(repo_root, manifest_path)
+    intents, receipts = control_manifest_operation_records(events, local_tip)
+    completed = sorted(set(intents) & set(receipts))
+    if len(completed) != 1:
+        return None
+    operation_id = completed[0]
+    intent = intents[operation_id]['payload']
+    receipt = receipts[operation_id]['payload']
+    expected_digest = manifest_digest(manifest)
+    parent = git(repo_root, 'rev-parse', f'{local_tip}^', check=False)
+    replay_tip = parent.stdout.strip() if parent.returncode == 0 else None
+    if (
+        intent.get('integration_branch') != branch
+        or intent.get('expected_control_commit') != local_tip
+        or intent.get('expected_manifest_digest') != expected_digest
+        or intent.get('replay_tip') != replay_tip
+        or receipt.get('control_commit') != local_tip
+        or receipt.get('manifest_hash') != expected_digest
+        or (receipt.get('context') or {}).get('control_manifest_digest')
+        != expected_digest
+        or (receipt.get('context') or {}).get('replay_tip') != replay_tip
+    ):
+        return None
+    try:
+        replay_inputs = integration_projection_input_snapshot(repo_root, manifest)
+    except SyncwheelError:
+        return None
+    if any(
+        item.get('remoteRef') and item.get('remoteTip') != item['tip']
+        for item in replay_inputs['refs']
+    ):
+        return None
+    replay_tree = materialize_integration_projection(repo_root, manifest)
+    source_gitignore = checkout_path_observation(repo_root, '.gitignore')
+    source_gitignore_kind = source_gitignore['fingerprint']['kind']
+    if source_gitignore_kind not in {'file', 'missing'}:
+        return None
+    source_gitignore_bytes = source_gitignore['bytes']
+    projected_tree = materialize_control_manifest_projection_tree(
+        repo_root,
+        manifest,
+        replay_tree,
+        gitignore_bytes=(
+            source_gitignore_bytes
+            if source_gitignore_kind == 'file'
+            else None
+        ),
+    )
+    try:
+        replay_inputs_after = integration_projection_input_snapshot(
+            repo_root, manifest
+        )
+    except SyncwheelError:
+        return None
+    if replay_inputs_after != replay_inputs or ref_tree(repo_root, local_tip) != projected_tree:
+        return None
+    return local_tip
 
 
 def materialize_remote_align_commands(repo_root, branch, remote_ref, worktree=None, timestamp=None):
@@ -21513,10 +23249,9 @@ def command_stack_push(args):
             raise SyncwheelError(refusal)
         config = coordination_config(manifest)
         coordinated_push_remote(args, config)
-        control_updated = False
         if not args.dry_run:
             replay_tip = ref_tip(repo_root, manifest['integration']['branch'])
-            control_updated = restore_control_manifest_after_integration_rebuild(
+            restore_control_manifest_after_integration_rebuild(
                 repo_root,
                 manifest_path,
                 manifest,
@@ -21532,11 +23267,17 @@ def command_stack_push(args):
             f"refs/heads/{stack['branch']}": ref_tip(repo_root, stack['branch'])
         }
         changed_refs = dict(identity_changed_refs)
-        if recovery_state.get('recovered') or control_updated:
-            changed_refs[f"refs/heads/{manifest['integration']['branch']}"] = ref_tip(
-                repo_root, manifest['integration']['branch']
-            )
         try:
+            verified_control_tip = (
+                unpublished_local_integration_control_tip(
+                    repo_root, manifest, manifest_path
+                )
+                if not args.dry_run else None
+            )
+            if verified_control_tip:
+                changed_refs[
+                    f"refs/heads/{manifest['integration']['branch']}"
+                ] = verified_control_tip
             publication_operation = (
                 None if args.dry_run else begin_coordination_publication(
                     repo_root,
@@ -21673,35 +23414,85 @@ def trees_differ_only_by_manifest(repo_root, left_tree, right_tree):
     return bool(changed) and set(changed) == {'.syncwheel/manifest.json'}
 
 
+def integration_control_manifest_from_tree(repo_root, tree):
+    """Read only the literal, regular Git control blob; never resolve checkout links."""
+    entry = tree_path_entry(repo_root, tree, '.syncwheel/manifest.json')
+    if entry is None or entry['mode'] != '100644':
+        return None
+    try:
+        value = json.loads(tree_path_bytes(repo_root, entry))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SyncwheelError(f'integration control manifest is invalid at {tree}:.syncwheel/manifest.json') from exc
+    return value if isinstance(value, dict) else None
+
+
+def integration_control_matches_selected(repo_root, manifest, tree):
+    committed = integration_control_manifest_from_tree(repo_root, tree)
+    return committed is not None and manifest_digest(committed) == manifest_digest(manifest)
+
+
+def require_selected_integration_control(repo_root, manifest, tip):
+    if not tip or not integration_control_matches_selected(repo_root, manifest, tip):
+        raise SyncwheelError('integration tip does not contain the selected control manifest; rebuild the reviewed selection')
+
+
+def integration_tree_matches_product_projection(repo_root, manifest, candidate_tree, product_tree):
+    """Compare product bytes independently of which valid control manifest is selected."""
+    committed = integration_control_manifest_from_tree(repo_root, candidate_tree)
+    entry = tree_path_entry(repo_root, candidate_tree, '.syncwheel/manifest.json')
+    if entry is not None and committed is None:
+        return False
+    if candidate_tree == product_tree:
+        return True
+    changed = integration_tree_changed_paths(repo_root, candidate_tree, product_tree)
+    if committed is None or not changed or not set(changed).issubset({
+        '.syncwheel/manifest.json', '.gitignore',
+    }):
+        return False
+    if '.gitignore' not in changed:
+        return True
+    candidate_entry = tree_path_entry(repo_root, candidate_tree, '.gitignore')
+    product_entry = tree_path_entry(repo_root, product_tree, '.gitignore')
+    if (
+        candidate_entry is None or candidate_entry['mode'] != '100644'
+        or (product_entry is not None and product_entry['mode'] != '100644')
+    ):
+        return False
+    try:
+        candidate = split_syncwheel_managed_gitignore(
+            tree_path_bytes(repo_root, candidate_entry).decode('utf-8'), syncwheel_worktree_root(manifest)
+        )
+        product = split_syncwheel_managed_gitignore(
+            tree_path_bytes(repo_root, product_entry).decode('utf-8'), syncwheel_worktree_root(manifest)
+        )
+    except UnicodeDecodeError:
+        return False
+    return bool(candidate and product and candidate['managed'] is not None
+                and candidate['unmanaged'] == product['unmanaged'])
+
+
 def integration_sync_report(repo_root, manifest, remote=None, stack_ref_overrides=None):
     integration = manifest['integration']
     branch = integration['branch']
     remote_ref = remote_integration_ref(manifest, remote)
-    local_exists = branch_exists(repo_root, branch)
-    remote_exists = ref_exists(repo_root, remote_ref)
+    local_oid = ref_tip(repo_root, branch)
+    remote_oid = ref_tip(repo_root, remote_ref)
     report = {
-        'branch': branch,
-        'remote_ref': remote_ref,
-        'local_exists': local_exists,
-        'remote_exists': remote_exists,
-        'relation': 'missing',
-        'ahead': None,
-        'behind': None,
-        'local_tree': None,
-        'remote_tree': None,
+        'branch': branch, 'remote_ref': remote_ref,
+        'local_oid': local_oid, 'remote_oid': remote_oid,
+        'local_exists': bool(local_oid), 'remote_exists': bool(remote_oid),
+        'relation': 'missing', 'ahead': None, 'behind': None,
+        'local_tree': ref_tree(repo_root, local_oid) if local_oid else None,
+        'remote_tree': ref_tree(repo_root, remote_oid) if remote_oid else None,
         'projected_tree': None,
-        'remote_matches_projection': None,
-        'local_matches_projection': None,
+        'remote_matches_projection': None, 'local_matches_projection': None,
+        'remote_matches_product_projection': None, 'local_matches_product_projection': None,
+        'remote_control_manifest_matches_selected': None, 'local_control_manifest_matches_selected': None,
         'local_control_only_ahead': False,
     }
-    if local_exists:
-        report['local_tree'] = ref_tree(repo_root, branch)
-    if remote_exists:
-        report['remote_tree'] = ref_tree(repo_root, remote_ref)
-    if local_exists and remote_exists:
-        ahead, behind = rev_left_right_count(repo_root, branch, remote_ref)
-        report['ahead'] = ahead
-        report['behind'] = behind
+    if local_oid and remote_oid:
+        ahead, behind = rev_left_right_count(repo_root, local_oid, remote_oid)
+        report['ahead'], report['behind'] = ahead, behind
         if ahead == 0 and behind == 0:
             report['relation'] = 'aligned'
         elif ahead == 0:
@@ -21710,30 +23501,27 @@ def integration_sync_report(repo_root, manifest, remote=None, stack_ref_override
             report['relation'] = 'local_ahead'
         else:
             report['relation'] = 'diverged'
-    elif local_exists:
+    elif local_oid:
         report['relation'] = 'local_only'
-    elif remote_exists:
+    elif remote_oid:
         report['relation'] = 'remote_only'
-
     if report['relation'] == 'local_ahead':
-        ahead_commits = rev_list(repo_root, f'{remote_ref}..{branch}')
+        ahead_commits = rev_list(repo_root, f'{remote_oid}..{local_oid}')
         report['local_control_only_ahead'] = bool(ahead_commits) and all(
             is_manifest_only_commit(repo_root, commit) for commit in ahead_commits
         )
-
     try:
         projected_tree = materialize_integration_projection(repo_root, manifest, stack_ref_overrides)
         report['projected_tree'] = projected_tree
-        if report['remote_tree']:
-            report['remote_matches_projection'] = (
-                report['remote_tree'] == projected_tree
-                or trees_differ_only_by_manifest(repo_root, report['remote_tree'], projected_tree)
-            )
-        if report['local_tree']:
-            report['local_matches_projection'] = (
-                report['local_tree'] == projected_tree
-                or trees_differ_only_by_manifest(repo_root, report['local_tree'], projected_tree)
-            )
+        for side in ('local', 'remote'):
+            tree = report[f'{side}_tree']
+            if tree:
+                product = integration_tree_matches_product_projection(repo_root, manifest, tree, projected_tree)
+                report[f'{side}_matches_product_projection'] = product
+                report[f'{side}_matches_projection'] = product  # Compatibility alias.
+                report[f'{side}_control_manifest_matches_selected'] = integration_control_matches_selected(
+                    repo_root, manifest, tree
+                )
     except SyncwheelError as exc:
         report['projection_error'] = str(exc)
     return report
@@ -21976,6 +23764,8 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             or stack_rebuild_planned
             or not integration_report['local_exists']
             or integration_report.get('local_matches_projection') is False
+            or (integration_report.get('local_control_manifest_matches_selected') is False
+                and not integration_report.get('local_control_only_ahead'))
             or (
                 integration_report.get('local_matches_projection') is not True
                 and (
@@ -21996,10 +23786,13 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
     integration_align_from_remote = (
         not args.skip_integration
         and args.rebuild != 'all'
+        and not integration_report.get('local_control_only_ahead')
         and not integration_report.get('projection_error')
         and integration_report['remote_exists']
         and integration_report.get('remote_matches_projection') is True
-        and integration_report.get('local_matches_projection') is not True
+        and integration_report.get('remote_control_manifest_matches_selected') is True
+        and (integration_report.get('local_matches_projection') is not True
+             or integration_report.get('local_control_manifest_matches_selected') is not True)
     )
     if integration_align_from_remote:
         actions.append({
@@ -22017,7 +23810,9 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         and integration_report['local_exists']
         and integration_report['remote_exists']
         and integration_report.get('local_matches_projection') is True
+        and integration_report.get('local_control_manifest_matches_selected') is True
         and integration_report.get('remote_matches_projection') is True
+        and integration_report.get('remote_control_manifest_matches_selected') is True
         and integration_report['relation'] != 'aligned'
         and not integration_report.get('local_control_only_ahead')
     )
@@ -22039,6 +23834,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         integration_rebuild_needed
         or not integration_report['remote_exists']
         or integration_report.get('remote_matches_projection') is False
+        or integration_report.get('remote_control_manifest_matches_selected') is False
         or integration_report.get('local_control_only_ahead') is True
     ):
         actions.append({
@@ -22451,6 +24247,16 @@ def command_reconcile(args):
             )
         elif action['type'] == 'rebuild_integration':
             integration = manifest['integration']
+            if reconcile_integration_ancestry(
+                repo_root, manifest_path, manifest,
+                'syncwheel reconcile --apply', 'reconcile integration rebuild',
+            ):
+                control_manifest_restored = True
+                continue
+            reset_destination_allowed_paths = control_manifest_source_allowance(
+                repo_root, manifest_path
+            )
+            reset_destination_allowed_prefixes = []
             use_primary_checkout = get_current_branch(repo_root) == integration['branch']
             if args.in_place_integration or use_primary_checkout:
                 if get_current_branch(repo_root) != integration['branch']:
@@ -22463,19 +24269,16 @@ def command_reconcile(args):
                     repo_root,
                     allowed_path_prefixes=['.syncwheel/'],
                     remedy_commands=primary_checkout_remedy_commands(manifest),
-                    allowed_paths=control_manifest_source_allowance(
-                        repo_root, manifest_path
-                    ),
+                    allowed_paths=reset_destination_allowed_paths,
                 )
+                reset_destination_allowed_prefixes = ['.syncwheel/']
                 worktree = None
                 in_place = True
             else:
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(
                     repo_root, integration['branch'], worktree,
-                    allowed_paths=control_manifest_source_allowance(
-                        repo_root, manifest_path
-                    ),
+                    allowed_paths=reset_destination_allowed_paths,
                 )
                 in_place = False
             mode, worktree = select_replay_mode(
@@ -22486,26 +24289,80 @@ def command_reconcile(args):
                 (worktree, in_place),
                 plumbing_supported=integration_supports_plumbing(manifest),
             )
+            reuse = plan_published_integration_tip_reuse(
+                repo_root, manifest, manifest_path
+            ) if coordinated_push else None
+            if reuse and reuse['status'] in {'refuse', 'fallback'}:
+                raise SyncwheelError(reuse['reason'])
+            if reuse and reuse['status'] == 'retain':
+                if not published_integration_tip_reuse_is_current(
+                    repo_root, manifest, manifest_path, reuse
+                ):
+                    raise SyncwheelError(
+                        'published integration reuse lease changed before decision; '
+                        'retry reconcile from a fresh observation'
+                    )
+                print(
+                    f"{integration['branch']}: retained published integration tip "
+                    f"{reuse['publishedTip']} after exact control-path verification"
+                )
+                continue
+            published_replay = bool(reuse and reuse['status'] == 'replay')
+            if published_replay and not published_integration_tip_reuse_is_current(
+                repo_root, manifest, manifest_path, reuse
+            ):
+                raise SyncwheelError(
+                    'published integration replay lease changed before execution; '
+                    'retry reconcile from a fresh observation'
+                )
+            reset_destination_lease = (
+                checkout_reset_destination_lease(
+                    repo_root,
+                    integration['branch'],
+                    allowed_paths=reset_destination_allowed_paths,
+                    allowed_path_prefixes=reset_destination_allowed_prefixes,
+                )
+                if published_replay
+                else None
+            )
+            replay_mode = 'ephemeral' if published_replay else mode
+            target = (
+                published_integration_replay_target(
+                    manifest, reuse, worktree, reset_destination_lease
+                )
+                if published_replay
+                else replay_target(integration=integration, worktree=worktree)
+            )
             result = execute_replay(
                 repo_root,
                 replay_plan(
                     repo_root,
                     manifest,
-                    replay_target(integration=integration, worktree=worktree),
-                    mode,
+                    target,
+                    replay_mode,
                 ),
                 True,
             )
             require_replay_success(result)
-            if in_place:
+            if result['mode'] == 'in-place':
                 acknowledge_in_place_manifest_replay(
                     repo_root, manifest_path, result['after_tip']
                 )
+            post_replay_source_lease = {} if published_replay else None
             control_manifest_restored = restore_control_manifest_after_integration_rebuild(
                 repo_root, manifest_path, manifest, result['after_tip'], result['mode'],
                 reason='reconcile integration rebuild', command='syncwheel reconcile --apply',
+                source_lease_out=post_replay_source_lease,
             ) or control_manifest_restored
             integration_after_tip = ref_tip(repo_root, integration['branch'])
+            if published_replay and not published_integration_replay_is_current(
+                repo_root, manifest, manifest_path, reuse,
+                post_replay_source_lease,
+            ):
+                raise SyncwheelError(
+                    'published integration replay result or lease changed before publication; '
+                    'the remote was not updated'
+                )
             append_ledger_event(
                 repo_root,
                 'integration_rebuilt',
@@ -22541,11 +24398,21 @@ def command_reconcile(args):
                 action['remote_ref'],
                 worktree,
             )
+            # This helper fetches after planning. Validate the fetched object
+            # before any backup/ref/index effect, then use only its immutable OID.
+            run_command_list(commands[:1], repo_root, True)
+            remote_tip = ref_tip(repo_root, action['remote_ref'])
+            require_selected_integration_control(repo_root, manifest, remote_tip)
+            if not integration_tree_matches_product_projection(
+                repo_root, manifest, ref_tree(repo_root, remote_tip),
+                materialize_integration_projection(repo_root, manifest, stack_ref_overrides),
+            ):
+                raise SyncwheelError('fetched integration does not match the selected product projection')
+            commands = [[remote_tip if arg == action['remote_ref'] else arg for arg in command]
+                        for command in commands[1:]]
             run_command_list(commands, repo_root, True)
             if use_primary_checkout:
-                acknowledge_in_place_manifest_replay(
-                    repo_root, manifest_path, action['remote_ref']
-                )
+                acknowledge_in_place_manifest_replay(repo_root, manifest_path, remote_tip)
             append_ledger_event(
                 repo_root,
                 'integration_aligned_remote',
@@ -22569,19 +24436,22 @@ def command_reconcile(args):
                 })
                 continue
             remote = args.remote or manifest['defaults']['publication_remote']
-            command = ['git', 'push', *push_args, remote, manifest['integration']['branch']]
+            branch = manifest['integration']['branch']
+            ref = f'refs/heads/{branch}'
+            tip = ref_tip(repo_root, branch)
+            require_selected_integration_control(repo_root, manifest, tip)
+            command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
             run_authorized_push(
-                repo_root, command, remote,
-                [f"refs/heads/{manifest['integration']['branch']}"],
+                repo_root, command, remote, [ref],
             )
             print(quoted(command))
             append_ledger_event(
                 repo_root,
                 'integration_pushed',
                 {
-                    'branch': manifest['integration']['branch'],
+                    'branch': branch,
                     'remote': remote,
-                    'tip': ref_tip(repo_root, manifest['integration']['branch']),
+                    'tip': tip,
                 },
                 manifest_path,
             )
@@ -22614,6 +24484,10 @@ def command_reconcile(args):
         publication_operation = pending_coordination_publication_for_scope(
             repo_root, manifest_path, publication_scope
         )
+        effective_refs = (publication_operation.get('changed_refs') or {}) if publication_operation else coordinated_refs
+        integration_ref = f"refs/heads/{manifest['integration']['branch']}"
+        if integration_ref in effective_refs:
+            require_selected_integration_control(repo_root, manifest, effective_refs[integration_ref])
         if publication_operation:
             if publication_operation.get('operation_token') not in adoptable:
                 raise SyncwheelError(
@@ -22781,6 +24655,8 @@ def command_int_align_remote(args):
         raise SyncwheelError(f"remote integration ref does not exist: {report['remote_ref']}")
     if report.get('projection_error'):
         raise SyncwheelError(f"cannot project integration from manifest: {report['projection_error']}")
+    if not args.force:
+        require_selected_integration_control(repo_root, manifest, report['remote_oid'])
     if not args.force and not report['remote_matches_projection']:
         raise SyncwheelError(
             f"remote integration ref {report['remote_ref']} does not match manifest projection; "
@@ -22795,7 +24671,7 @@ def command_int_align_remote(args):
     backup = backup_branch_command(repo_root, integration['branch'], timestamp)
     if backup:
         commands.append(backup)
-    commands.append(['git', 'reset', '--hard', report['remote_ref']])
+    commands.append(['git', 'reset', '--hard', report['remote_oid']])
     run_command_list(commands, repo_root, not args.dry_run)
     if not args.dry_run:
         append_ledger_event(
@@ -22824,6 +24700,7 @@ def command_int_rebuild(args):
             'int rebuild requires --reason for an ai-managed repository'
         )
     if not args.dry_run:
+        complete_pending_promote_intents(repo_root, manifest, manifest_path, apply=True)
         manifest = recover_incomplete_control_manifest_persistence(
             repo_root,
             manifest_path,
@@ -22846,6 +24723,11 @@ def command_int_rebuild(args):
         )
     if isinstance(reason, str):
         reason = reason.strip()
+    if not args.dry_run and reconcile_integration_ancestry(
+        repo_root, manifest_path, manifest, 'syncwheel int rebuild',
+        reason or 'rebuild integration while preserving published history',
+    ):
+        return 0
     mode, worktree = select_replay_mode(
         repo_root,
         manifest,
@@ -22872,13 +24754,99 @@ def command_int_rebuild(args):
             repo_root, manifest['integration']['branch'], worktree,
             allowed_paths=source_allowance,
         )
+    reuse = plan_published_integration_tip_reuse(
+        repo_root,
+        manifest,
+        manifest_path,
+        refresh_inputs=not args.dry_run,
+    )
+    if reuse and reuse['status'] == 'refuse':
+        raise SyncwheelError(reuse['reason'])
+    if reuse and reuse['status'] == 'retain':
+        if args.dry_run:
+            print(
+                'would retain published integration tip '
+                f"{reuse['publishedTip']} after exact control-path verification; "
+                'apply re-fetches and rechecks every source, replay, state, and ref lease'
+            )
+            return 0
+        if not published_integration_tip_reuse_is_current(
+            repo_root, manifest, manifest_path, reuse
+        ):
+            raise SyncwheelError(
+                'published integration reuse lease changed before decision; '
+                'retry int rebuild from a fresh observation'
+            )
+        receipt = {
+            'branch': integration['branch'],
+            'published_tip': reuse['publishedTip'],
+            'published_tree': reuse['publishedTree'],
+            'projected_tree': reuse['projectedTree'],
+            'coordination_state': reuse['stateTip'],
+            'manifest_digest': reuse['manifestDigest'],
+            'source_lease': reuse['sourceLease']['digest'],
+            'changed_paths': reuse['changedPaths'],
+            'path_proof': reuse['pathProof'],
+            'actor': control_manifest_actor(repo_root),
+            'reason': reason or 'retain exact published integration control bytes',
+            'command': 'syncwheel int rebuild',
+        }
+        append_ledger_event(
+            repo_root,
+            'integration_published_tip_reused',
+            receipt,
+            manifest_path,
+            idempotency_key=(
+                'integration-published-tip-reused:'
+                + canonical_json_digest({
+                    'state': reuse['stateTip'],
+                    'tip': reuse['publishedTip'],
+                    'manifest': reuse['manifestDigest'],
+                    'source': reuse['sourceLease']['digest'],
+                })
+            ),
+        )
+        print(
+            f"{integration['branch']}: retained published integration tip "
+            f"{reuse['publishedTip']} after exact control-path verification"
+        )
+        return 0
+    published_replay = bool(reuse and reuse['status'] == 'replay')
+    if (
+        published_replay
+        and not args.dry_run
+        and not published_integration_tip_reuse_is_current(
+            repo_root, manifest, manifest_path, reuse
+        )
+    ):
+        raise SyncwheelError(
+            'published integration replay lease changed before execution; '
+            'retry int rebuild from a fresh observation'
+        )
+    reset_destination_lease = (
+        checkout_reset_destination_lease(
+            repo_root,
+            integration['branch'],
+            allowed_paths=source_allowance,
+        )
+        if published_replay and not args.dry_run
+        else None
+    )
+    replay_mode = 'ephemeral' if published_replay else mode
+    target = (
+        published_integration_replay_target(
+            manifest, reuse, worktree, reset_destination_lease
+        )
+        if published_replay
+        else replay_target(integration=integration, worktree=worktree)
+    )
     result = execute_replay(
         repo_root,
         replay_plan(
             repo_root,
             manifest,
-            replay_target(integration=integration, worktree=worktree),
-            mode,
+            target,
+            replay_mode,
         ),
         not args.dry_run,
     )
@@ -22901,16 +24869,26 @@ def command_int_rebuild(args):
                     'commit': item['commit'],
                     'paths': list(item['paths']),
                 })
-        if mode == 'in-place':
+        if result['mode'] == 'in-place':
             acknowledge_in_place_manifest_replay(
                 repo_root, manifest_path, result['after_tip']
             )
+        post_replay_source_lease = {} if published_replay else None
         restore_control_manifest_after_integration_rebuild(
             repo_root, manifest_path, manifest, result['after_tip'], result['mode'],
             reason=args.reason or 'restore_control_manifest_after_integration_rebuild',
             command='syncwheel int rebuild',
+            source_lease_out=post_replay_source_lease,
         )
         integration_after_tip = ref_tip(repo_root, manifest['integration']['branch'])
+        if published_replay and not published_integration_replay_is_current(
+            repo_root, manifest, manifest_path, reuse,
+            post_replay_source_lease,
+        ):
+            raise SyncwheelError(
+                'published integration replay result or lease changed before publication; '
+                'the remote was not updated'
+            )
         append_ledger_event(
             repo_root,
             'integration_rebuilt',
@@ -23021,8 +24999,11 @@ def command_int_push(args):
     if args.dry_run:
         print(quoted(command))
         return 0
+    ref = f"refs/heads/{integration['branch']}"
+    tip = ref_tip(repo_root, integration['branch'])
+    command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
     run_authorized_push(
-        repo_root, command, remote, [f"refs/heads/{integration['branch']}"]
+        repo_root, command, remote, [ref]
     )
     print(quoted(command))
     append_ledger_event(
@@ -23031,7 +25012,7 @@ def command_int_push(args):
         {
             'branch': integration['branch'],
             'remote': remote,
-            'tip': ref_tip(repo_root, integration['branch']),
+            'tip': tip,
         },
         manifest_path,
     )
@@ -25757,7 +27738,12 @@ class SyncwheelRevisionBackend:
             ),
         )
         manifest, manifest_path = self._manifest(repo_root)
-        with manifest_write_transaction(repo_root, manifest_path, 'revision-provider'):
+        with manifest_write_transaction(
+            repo_root,
+            manifest_path,
+            'revision-provider',
+            commit_tracked_changes=False,
+        ):
             manifest, _ = self._manifest(repo_root)
             desired = self._desired_stack(request, journal, manifest)
             existing = stack_map(manifest).get(request.draft_stack_id)

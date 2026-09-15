@@ -388,6 +388,208 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         return repo
 
+    def a14_published_tip_reuse_fixture(
+        self, name, publisher_change=None, integration_strategy=None,
+    ):
+        """A follower that has the exact published integration ref before rebuild."""
+        origin = self.create_remote(name)
+        publisher = self.clone(origin, f'{name}-publisher')
+        self.init_coordinated(
+            publisher,
+            integration_membership=(
+                'required' if integration_strategy is not None else 'legacy'
+            ),
+        )
+        if integration_strategy is not None:
+            module = self.load_module()
+            manifest, manifest_path = module.load_manifest(publisher)
+            manifest['integration']['strategy'] = integration_strategy
+            with module.manifest_write_transaction(
+                publisher, manifest_path, 'fixture-integration-strategy'
+            ):
+                module.save_manifest_with_ledger(
+                    publisher,
+                    manifest_path,
+                    manifest,
+                    'fixture_integration_strategy',
+                )
+        if publisher_change == 'product':
+            (publisher / 'published-only.txt').write_text('published only\n')
+            self.git(publisher, 'add', 'published-only.txt')
+            self.git(publisher, 'commit', '-q', '-m', 'test: published product delta')
+        elif publisher_change == 'gitignore':
+            path = publisher / '.gitignore'
+            path.write_text('user-owned-ignore\n\n' + path.read_text())
+            self.git(publisher, 'add', '.gitignore')
+            self.git(publisher, 'commit', '-q', '-m', 'test: published user ignore')
+
+        source = self.commit_on_branch(
+            publisher, f'pr/{name}-s1', f'{name}-s1.txt'
+        )
+        self.run_cli(
+            publisher, 'stack', 'create', 's1', source,
+            '--branch', f'pr/{name}-s1',
+        )
+        self.run_cli(publisher, 'stack', 'push', 's1')
+        if integration_strategy == 'merge-stacks':
+            self.run_cli(
+                publisher, 'int', 'rebuild',
+                '--reason', 'publish exact merge-stack integration fixture',
+            )
+            self.run_cli(publisher, 'int', 'push')
+
+        follower = self.clone(origin, f'{name}-follower')
+        (follower / '.syncwheel').mkdir(parents=True, exist_ok=True)
+        proposal = (publisher / '.syncwheel' / 'manifest.json').read_text()
+        (follower / '.syncwheel' / 'manifest.json').write_text(proposal)
+        self.disable_fixture_hooks(follower)
+        integration_branch = json.loads(proposal)['integration']['branch']
+        self.git(
+            follower, 'fetch', '-q', str(publisher),
+            f'refs/heads/pr/{name}-s1:refs/heads/pr/{name}-s1',
+        )
+        self.git(
+            follower,
+            'branch',
+            integration_branch,
+            f'origin/{integration_branch}',
+        )
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(follower)
+        return {
+            'module': module,
+            'manifest': manifest,
+            'manifest_path': manifest_path,
+            'origin': origin,
+            'publisher': publisher,
+            'follower': follower,
+            'integration_ref': f'refs/heads/{integration_branch}',
+            'published_tip': self.git(
+                follower, 'rev-parse', f'origin/{integration_branch}'
+            ).stdout.strip(),
+            'source': source,
+        }
+
+    def a14_checkout_published_integration(self, fixture):
+        follower = fixture['follower']
+        (follower / '.gitignore').unlink(missing_ok=True)
+        self.git(
+            follower, 'switch', '-q', fixture['manifest']['integration']['branch']
+        )
+
+    def a14_source_snapshot(self, fixture):
+        repo = fixture['follower']
+        manifest_path = fixture['manifest_path']
+
+        def optional_bytes(path):
+            return path.read_bytes() if path.exists() else None
+
+        return {
+            'head': self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+            'integration': self.git(
+                repo, 'rev-parse', fixture['integration_ref']
+            ).stdout.strip(),
+            'index': self.git(repo, 'ls-files', '--stage', '-z').stdout,
+            'status': self.git(
+                repo, 'status', '--porcelain=v1', '--untracked-files=all'
+            ).stdout,
+            'manifest': optional_bytes(manifest_path),
+            'gitignore': optional_bytes(repo / '.gitignore'),
+            'readme': optional_bytes(repo / 'README.md'),
+        }
+
+    def a14_remote_snapshot(self, fixture):
+        state_tip, state = self.remote_state(fixture['origin'])
+        heads = subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'for-each-ref',
+                '--format=%(refname) %(objectname)', 'refs/heads',
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        return {'state_tip': state_tip, 'state': state, 'heads': heads}
+
+    def a14_published_tip_rebuild_observation(self, fixture):
+        follower = fixture['follower']
+        manifest_path = fixture['manifest_path']
+        gitignore_path = follower / '.gitignore'
+        return {
+            'head': self.git(follower, 'rev-parse', 'HEAD').stdout.strip(),
+            'integration': self.git(
+                follower, 'rev-parse', fixture['integration_ref']
+            ).stdout.strip(),
+            'status': self.git(
+                follower, 'status', '--porcelain=v1', '--untracked-files=all'
+            ).stdout,
+            'manifest': manifest_path.read_bytes(),
+            'gitignore': gitignore_path.read_bytes() if gitignore_path.exists() else None,
+        }
+
+    def a14_published_tip_remote_observation(self, fixture):
+        state_tip, state = self.remote_state(fixture['origin'])
+        integration_tip = subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                fixture['integration_ref'],
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        return {
+            'state_tip': state_tip,
+            'state': state,
+            'integration_tip': integration_tip,
+        }
+
+    def assert_a14_published_tip_rebuild_falls_back_without_remote_mutation(
+        self, fixture, published_path, expected_text
+    ):
+        before = self.a14_published_tip_rebuild_observation(fixture)
+        remote_before = self.a14_published_tip_remote_observation(fixture)
+        published = self.git(
+            fixture['follower'], 'show',
+            f"{fixture['published_tip']}:{published_path}",
+        ).stdout
+        self.assertEqual(published, expected_text)
+
+        self.run_cli(
+            fixture['follower'], 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
+        )
+
+        after = self.a14_published_tip_rebuild_observation(fixture)
+        self.assertNotEqual(after['integration'], fixture['published_tip'])
+        self.assertEqual(after['head'], before['head'])
+        self.assertEqual(after['manifest'], before['manifest'])
+        self.assertEqual(after['gitignore'], before['gitignore'])
+        self.assertEqual(self.a14_published_tip_remote_observation(fixture), remote_before)
+        self.assertEqual(
+            self.git(
+                fixture['follower'], 'show',
+                f"{fixture['published_tip']}:{published_path}",
+            ).stdout,
+            expected_text,
+        )
+
+    def assert_a14_published_tip_rebuild_refuses_without_local_mutation(
+        self, fixture, message
+    ):
+        before = self.a14_published_tip_rebuild_observation(fixture)
+        remote_before = self.a14_published_tip_remote_observation(fixture)
+
+        failure = self.run_cli_unchecked(
+            fixture['follower'], 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
+        )
+
+        self.assertEqual(failure.returncode, 2, failure.stderr)
+        self.assertIn(message, failure.stderr)
+        self.assertEqual(self.a14_published_tip_rebuild_observation(fixture), before)
+        self.assertEqual(self.a14_published_tip_remote_observation(fixture), remote_before)
+
     def init_coordinated(self, repo, integration='integration/shared', integration_membership='legacy'):
         self.git(repo, 'branch', integration, 'origin/main')
         self.run_cli(
@@ -410,10 +612,107 @@ with module.coordination_publication_lock(Path(repo_path)):
             '--reason', 'coordination fixture uses raw primary branch setup', '--apply',
         )
 
-    def track_fixture_ignore_in_replay_base(self, repo):
-        self.git(repo, 'add', '.gitignore')
-        self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
+    def anchor_generated_metadata_in_replay_base(self, repo):
+        """Keep generated initialization commits outside modeled integration work."""
+        setup_commits = self.git(
+            repo, 'rev-list', '--reverse', 'origin/main..HEAD'
+        ).stdout.split()
+        self.assertTrue(setup_commits)
+        for commit in setup_commits:
+            commit_with_parent = self.git(
+                repo, 'rev-list', '--parents', '-n', '1', commit
+            ).stdout.split()
+            self.assertEqual(len(commit_with_parent), 2)
+            changed = set(
+                self.git(
+                    repo, 'show', '--format=', '--name-only', commit
+                ).stdout.splitlines()
+            )
+            self.assertTrue(changed)
+            self.assertLessEqual(
+                changed, {'.gitignore', '.syncwheel/manifest.json'}
+            )
         self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        self.assertEqual(
+            self.git(repo, 'rev-parse', 'origin/main').stdout.strip(),
+            self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+        )
+
+    def anchor_generated_ignore_without_control_manifest(self, repo):
+        """Build the manifest-loss replay base from the generated ignore bytes."""
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        generated_ignore = (repo / '.gitignore').read_bytes()
+        generated_ignore_blob = self.git(
+            repo, 'hash-object', '.gitignore'
+        ).stdout.strip()
+        source_branch = self.git(
+            repo, 'branch', '--show-current'
+        ).stdout.strip()
+        self.assertTrue(manifest_path.exists())
+
+        self.git(
+            repo, 'switch', '-q', '-c', 'fixture/manifest-loss-base',
+            'origin/main',
+        )
+        manifest_path.unlink()
+        self.assertFalse(manifest_path.exists())
+        (repo / '.gitignore').write_bytes(generated_ignore)
+        self.git(repo, 'add', '.gitignore')
+        self.git(
+            repo, 'commit', '-q', '-m',
+            'test: anchor generated ignore without control manifest',
+        )
+        setup_commit = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.assertEqual(
+            len(self.git(
+                repo, 'rev-list', '--parents', '-n', '1', setup_commit
+            ).stdout.split()),
+            2,
+        )
+        self.assertEqual(
+            self.git(
+                repo, 'show', '--format=', '--name-only', setup_commit
+            ).stdout.splitlines(),
+            ['.gitignore'],
+        )
+        self.assertEqual(
+            self.git(repo, 'rev-parse', 'HEAD:.gitignore').stdout.strip(),
+            generated_ignore_blob,
+        )
+        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        self.assertEqual(
+            self.git(repo, 'rev-parse', 'origin/main').stdout.strip(),
+            setup_commit,
+        )
+        self.git(
+            repo, 'cat-file', '-e',
+            'origin/main:.syncwheel/manifest.json', expected=128,
+        )
+        self.git(repo, 'switch', '-q', source_branch)
+        self.assertTrue(manifest_path.exists())
+        self.assertEqual((repo / '.gitignore').read_bytes(), generated_ignore)
+
+    def stage_owned_control_manifest_delta(self, repo):
+        """Leave one valid tracked manifest delta for control-CAS fixtures."""
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        before_digest = module.manifest_digest(manifest)
+        self.assertNotIn('replay_mode', manifest['defaults'])
+        self.assertEqual(
+            module.configured_replay_mode(repo, manifest), ('auto', 'builtin')
+        )
+        manifest['defaults']['replay_mode'] = 'auto'
+        module.save_manifest(manifest_path, manifest)
+        observed, _ = module.load_manifest(repo, manifest_path)
+        self.assertNotEqual(module.manifest_digest(observed), before_digest)
+        self.assertEqual(
+            module.configured_replay_mode(repo, observed), ('auto', 'manifest')
+        )
+        self.assertEqual(
+            self.git(repo, 'status', '--porcelain').stdout,
+            ' M .syncwheel/manifest.json\n',
+        )
+        return observed, manifest_path
 
     def set_integration_membership(self, repo, integration_membership):
         manifest_path = repo / '.syncwheel' / 'manifest.json'
@@ -719,10 +1018,11 @@ with module.coordination_publication_lock(Path(repo_path)):
             'control_digest': control_digest,
         }
 
-    def prepare_additive_compose(self, name='additive-compose'):
+    def prepare_additive_compose(self, name='additive-compose', plan=True):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo, integration_membership='required')
+        self.anchor_generated_metadata_in_replay_base(repo)
         integration_commits = []
         for index in (1, 2):
             path = repo / f'unmapped-{index}.txt'
@@ -748,13 +1048,15 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         module = self.load_module()
         manifest, manifest_path = module.load_manifest(repo)
-        plan, proposed, _ = module.coordination_compose_stack_plan(
-            repo,
-            manifest,
-            'new-stack',
-            base_tip,
-            base_state['manifest_digest'],
-        )
+        compose_plan = proposed = None
+        if plan:
+            compose_plan, proposed, _ = module.coordination_compose_stack_plan(
+                repo,
+                manifest,
+                'new-stack',
+                base_tip,
+                base_state['manifest_digest'],
+            )
         return {
             'origin': origin,
             'repo': repo,
@@ -771,7 +1073,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 'refs/heads/integration/shared'
             ],
             'integration_commits': integration_commits,
-            'plan': plan,
+            'plan': compose_plan,
             'proposed': proposed,
         }
 
@@ -842,8 +1144,9 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_state_is_append_only_and_safe_for_public_transport(self):
         origin = self.create_remote()
         first = self.clone(origin, 'first')
+        second = self.clone(origin, 'second')
         self.init_coordinated(first)
-        self.track_fixture_ignore_in_replay_base(first)
+        self.anchor_generated_metadata_in_replay_base(first)
         self.run_cli(first, 'int', 'push')
         first_tip, first_state = self.remote_state(origin)
         module = self.load_module()
@@ -884,7 +1187,6 @@ with module.coordination_publication_lock(Path(repo_path)):
             'Syncwheel Coordination <coordination@syncwheel.invalid>',
         )
 
-        second = self.clone(origin, 'second')
         self.git(second, 'fetch', 'origin', 'integration/shared:refs/remotes/origin/integration/shared')
         self.git(second, 'branch', 'integration/shared', 'origin/integration/shared')
         self.run_cli(
@@ -1504,6 +1806,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote('derived-paths-compose')
         repo = self.clone(origin, 'derived-paths-compose')
         self.init_coordinated(repo, integration_membership='required')
+        self.anchor_generated_metadata_in_replay_base(repo)
         manifest_path = repo / '.syncwheel' / 'manifest.json'
         manifest = json.loads(manifest_path.read_text())
         manifest['version'] = 3
@@ -1559,6 +1862,10 @@ with module.coordination_publication_lock(Path(repo_path)):
             '--branch', 'pr/derived-orphan',
         )
         self.run_cli(repo, 'stack', 'push', 'derived-orphan')
+        _remote_tip, remote_state = self.remote_state(origin)
+        published_integration_tip = remote_state['managed_refs'][
+            'refs/heads/integration/shared'
+        ]
         manifest_path.write_text(json.dumps(base_manifest, indent=2) + '\n')
         new_tip = self.commit_on_branch(repo, 'pr/derived-local', 'local.txt')
         self.run_cli(
@@ -1579,7 +1886,12 @@ with module.coordination_publication_lock(Path(repo_path)):
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
         self.assertEqual(plan['status'], 'publish-required')
-        self.assertEqual(plan['expectedIntegrationTip'], integration_tip)
+        self.assertEqual(plan['expectedIntegrationTip'], published_integration_tip)
+        self.assertNotEqual(published_integration_tip, integration_tip)
+        self.git(
+            repo, 'merge-base', '--is-ancestor', published_integration_tip,
+            integration_tip,
+        )
         self.git(
             repo, 'merge-base', '--is-ancestor', derived_tip, integration_tip,
         )
@@ -1821,7 +2133,22 @@ with module.coordination_publication_lock(Path(repo_path)):
             'integration/shared',
         )
         self.disable_fixture_hooks(second)
+        self.git(second, 'switch', '-q', 'main')
+        self.git(second, 'branch', '-f', 'integration/shared', remote_tip)
+        remote_tree = self.git(
+            second, 'rev-parse', f'{remote_tip}^{{tree}}'
+        ).stdout.strip()
+        self.assertEqual(
+            self.git(
+                second, 'rev-parse', 'integration/shared^{tree}'
+            ).stdout.strip(),
+            remote_tree,
+        )
         self.git(second, 'switch', '-q', 'integration/shared')
+        self.assertEqual(
+            self.git(second, 'rev-parse', 'HEAD^{tree}').stdout.strip(),
+            remote_tree,
+        )
         self.git(second, 'commit', '--allow-empty', '-qm', 'chore: equivalent local projection')
         local_tip = self.git(second, 'rev-parse', 'HEAD').stdout.strip()
         self.git(second, 'switch', '-q', 'main')
@@ -1862,15 +2189,38 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(full['projection_status'], 'convergent')
         self.assertEqual(full['managed_refs']['refs/heads/pr/feature-a'], feature_sha)
 
+    def interrupt_legacy_control_persistence(self, repo, stage):
+        """Seed an actual version-1 interruption without the version-2 rebuild router."""
+        runner = self.tmp / 'interrupt-legacy-control.py'
+        runner.write_text(
+            'import importlib.util, sys\n'
+            'from pathlib import Path\n'
+            'cli, repo = map(Path, sys.argv[1:3])\n'
+            'spec = importlib.util.spec_from_file_location("syncwheel_legacy", cli)\n'
+            'module = importlib.util.module_from_spec(spec)\n'
+            'spec.loader.exec_module(module)\n'
+            'manifest, path = module.load_manifest(repo)\n'
+            'tip = module.ref_tip(repo, manifest["integration"]["branch"])\n'
+            'with module.manifest_write_transaction(repo, path, "legacy fixture"):\n'
+            '    module.restore_control_manifest_after_integration_rebuild(\n'
+            '        repo, path, manifest, tip, "control",\n'
+            '        reason="verify legacy interrupted persistence", command="legacy fixture")\n'
+        )
+        killed = subprocess.run(
+            ['python3', str(runner), str(CLI), str(repo)], cwd=repo,
+            text=True, capture_output=True,
+            env={**os.environ, **self.environment,
+                 'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
+        )
+        self.assertEqual(killed.returncode, -signal.SIGKILL, (killed.stdout, killed.stderr))
+
     def prepare_control_manifest_sigkill_recovery(self, name, stage):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        # Keep the fixture's generated ignore policy in the replay base so a
-        # manifest-less checkout is still clean enough for the retry itself.
-        self.git(repo, 'add', '.gitignore')
-        self.git(repo, 'commit', '-q', '-m', 'test: track Syncwheel ignore policy')
-        self.git(repo, 'push', '-q', 'origin', 'HEAD:main')
+        # The detached replay omits the control manifest; reconciliation must
+        # nevertheless preserve the selected source until checkout alignment.
+        self.anchor_generated_ignore_without_control_manifest(repo)
         feature_sha = self.commit_on_branch(
             repo, 'pr/feature-a', f'{name}-feature.txt'
         )
@@ -1881,23 +2231,32 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.git(repo, 'switch', '-q', 'integration/shared')
         self.run_cli(repo, 'int', 'push')
-        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
         self.assertTrue(manifest_path.exists())
 
+        source_before = manifest_path.read_bytes()
+        ignore_before = (repo / '.gitignore').read_bytes()
+        index_before = self.git(repo, 'write-tree').stdout
+        head_before = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        remote_before = self.git(repo, 'ls-remote', 'origin').stdout
         killed = self.run_cli(
-            repo,
-            'int', 'rebuild', '--in-place',
+            repo, 'int', 'rebuild', '--in-place',
             '--reason', f'interrupt control persistence at {stage}',
             expected=-signal.SIGKILL,
             extra_env={'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
         )
         self.assertEqual(killed.returncode, -signal.SIGKILL)
-        self.assertFalse(manifest_path.exists())
+        self.assertEqual(manifest_path.read_bytes(), source_before)
+        self.assertEqual((repo / '.gitignore').read_bytes(), ignore_before)
+        self.assertEqual(self.git(repo, 'write-tree').stdout, index_before)
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_before)
         module = self.load_module()
         events = module.load_ledger_events(repo, manifest_path)
         pending = module.pending_control_manifest_intents(events)
         self.assertEqual(len(pending), 1)
         intent = pending[0]['payload']
+        self.assertEqual(intent['version'], 2)
+        self.assertEqual(intent['replay_tip'], head_before)
         current_tip = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
@@ -1908,7 +2267,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(current_tip, expected_tip)
         return origin, repo, feature_sha, intent
 
-    def test_entrypoint_retries_recover_after_ref_sigkill_removed_manifest(self):
+    def test_entrypoint_retries_recover_after_ref_sigkill_preserved_manifest(self):
         retries = {
             'stack-push': ('stack', 'push', 'feature-a'),
             'int-rebuild': (
@@ -1975,8 +2334,15 @@ with module.coordination_publication_lock(Path(repo_path)):
                 replay_subject = self.git(
                     repo, 'show', '-s', '--format=%s', intent['replay_tip']
                 ).stdout.strip()
-                self.assertNotEqual(
+                self.assertEqual(
                     replay_subject, 'chore: restore Syncwheel control manifest'
+                )
+                detached_subject = self.git(
+                    repo, 'show', '-s', '--format=%s',
+                    intent['detached_replay_tip'],
+                ).stdout.strip()
+                self.assertNotEqual(
+                    detached_subject, 'chore: restore Syncwheel control manifest'
                 )
 
                 self.run_cli(repo, *retry)
@@ -2114,7 +2480,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.git(repo, 'switch', '-q', 'integration/shared')
         module = self.load_module()
-        manifest, manifest_path = module.load_manifest(repo)
+        manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        replay_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
         args = SimpleNamespace(
             repo=str(repo), manifest=None, personal=None, stack='feature-a',
             remote=None, dry_run=False, force_with_lease=False,
@@ -2135,6 +2502,11 @@ with module.coordination_publication_lock(Path(repo_path)):
         control_commit = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
+        self.assertNotEqual(control_commit, replay_tip)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{control_commit}^').stdout.strip(),
+            replay_tip,
+        )
         interrupted_status = self.git(
             repo, 'status', '--porcelain', '--untracked-files=no'
         ).stdout
@@ -2176,7 +2548,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.init_coordinated(repo)
         self.git(repo, 'switch', '-q', 'integration/shared')
         module = self.load_module()
-        manifest, manifest_path = module.load_manifest(repo)
+        manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        replay_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
 
         def crash_after_ref(stage):
             if stage == 'ref_updated':
@@ -2187,14 +2560,19 @@ with module.coordination_publication_lock(Path(repo_path)):
                 module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
-                    module.coordinated_publish(
-                        repo, manifest, manifest_path, {},
-                        'control-retry', 'partial',
-                        operation_token='control-retry',
+                    module.restore_control_manifest_after_integration_rebuild(
+                        repo, manifest_path, manifest, replay_tip, 'control',
+                        reason='direct coordinated publish control fixture',
+                        command='syncwheel coordinated publish',
                     )
         control_commit = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
+        self.assertNotEqual(control_commit, replay_tip)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{control_commit}^').stdout.strip(),
+            replay_tip,
+        )
 
         with module.manifest_write_transaction(repo, manifest_path):
             result = module.coordinated_publish(
@@ -2225,7 +2603,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.init_coordinated(repo)
         self.git(repo, 'switch', '-q', 'integration/shared')
         module = self.load_module()
-        manifest, manifest_path = module.load_manifest(repo)
+        manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        replay_tip = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
         args = SimpleNamespace(
             repo=str(repo), manifest=None, personal=None, remote=None,
             dry_run=False, force_with_lease=False, git_args=[], command='int',
@@ -2244,6 +2623,11 @@ with module.coordination_publication_lock(Path(repo_path)):
         control_commit = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
+        self.assertNotEqual(control_commit, replay_tip)
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{control_commit}^').stdout.strip(),
+            replay_tip,
+        )
 
         self.run_cli(repo, 'int', 'push')
 
@@ -3132,7 +3516,63 @@ with module.coordination_publication_lock(Path(repo_path)):
             state['manifest'],
             'content-drift',
             state['managed_refs']['refs/heads/pr/content-drift'],
+            changed,
         ))
+
+    def test_successor_validation_rejects_unsafe_frozen_tip_after_branch_advances(self):
+        origin = self.create_remote('frozen-successor')
+        repo = self.clone(origin, 'frozen-successor')
+        self.init_coordinated(repo)
+
+        source = self.commit_on_branch(repo, 'scratch/frozen', 'frozen.txt')
+        self.git(repo, 'branch', 'pr/frozen', source)
+        self.run_cli(
+            repo, 'stack', 'create', 'frozen', source, '--branch', 'pr/frozen'
+        )
+        self.run_cli(repo, 'stack', 'push', 'frozen')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        state = module.read_remote_coordination_state(
+            repo,
+            config,
+            fetch=True,
+            local_manifest_version=manifest['version'],
+        )['state']
+        stack_ref = 'refs/heads/pr/frozen'
+        remote_tip = state['managed_refs'][stack_ref]
+
+        frozen_tip = self.commit_on_branch(
+            repo, 'scratch/frozen-unsafe', 'frozen-unsafe.txt'
+        )
+        safe_live_tip = self.git(
+            repo,
+            'commit-tree',
+            f'{remote_tip}^{{tree}}',
+            '-p',
+            remote_tip,
+            '-m',
+            'test: safe live successor',
+        ).stdout.strip()
+        self.git(repo, 'branch', '-f', 'pr/frozen', safe_live_tip)
+        self.git(repo, 'merge-base', '--is-ancestor', remote_tip, frozen_tip, expected=1)
+        self.git(repo, 'merge-base', '--is-ancestor', remote_tip, safe_live_tip)
+
+        local_snapshot = module.coordination_manifest_snapshot(manifest, repo)
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'frozen: local branch is not a safe successor',
+        ):
+            module.validate_coordination_changed_ref_successors(
+                repo,
+                manifest,
+                config,
+                state,
+                state['manifest'],
+                local_snapshot,
+                {stack_ref: frozen_tip},
+            )
 
     def test_partial_stack_adoption_predicate_fails_closed(self):
         module = self.load_module()
@@ -3213,11 +3653,15 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_coordination_domains_cannot_claim_the_same_managed_ref(self):
         origin = self.create_remote()
         first = self.clone(origin, 'owner-one')
+        second = self.clone(origin, 'owner-two')
         self.init_coordinated(first)
-        self.track_fixture_ignore_in_replay_base(first)
+        self.anchor_generated_metadata_in_replay_base(first)
         self.run_cli(first, 'int', 'push')
 
-        second = self.clone(origin, 'owner-two')
+        self.git(
+            second, 'fetch', 'origin',
+            'integration/shared:refs/remotes/origin/integration/shared',
+        )
         self.git(second, 'branch', 'integration/shared', 'origin/integration/shared')
         self.run_cli(
             second,
@@ -3242,10 +3686,10 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_stale_manifest_cannot_drop_a_remotely_published_stack(self):
         origin = self.create_remote()
         stale = self.clone(origin, 'stale')
-        self.init_coordinated(stale)
-        self.track_fixture_ignore_in_replay_base(stale)
-
         current = self.clone(origin, 'current')
+        self.init_coordinated(stale)
+        self.anchor_generated_metadata_in_replay_base(stale)
+
         self.init_coordinated(current)
 
         # Both clones establish the same deterministic initial control object,
@@ -4011,14 +4455,271 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.remote_state(fixture['origin'], 'second-domain')[0], competing_tip
         )
 
+    def test_compose_binds_a_linear_local_manifest_only_suffix(self):
+        fixture = self.prepare_additive_compose('compose-local-control', plan=False)
+        module = fixture['module']
+
+        plan, _proposed, _remote = module.coordination_compose_stack_plan(
+            fixture['repo'],
+            fixture['manifest'],
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+
+        local_tip = self.git(
+            fixture['repo'], 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+        suffix = module.rev_list(
+            fixture['repo'], f"{fixture['integration_tip']}..{local_tip}"
+        )
+        self.assertTrue(suffix)
+        self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
+        self.assertEqual(plan['localIntegrationTip'], local_tip)
+        self.assertEqual(plan['localIntegrationControlSuffix'], suffix)
+        self.assertEqual(
+            plan['localIntegrationControlSuffixDigest'],
+            module.canonical_json_digest(suffix),
+        )
+        for commit in suffix:
+            self.assertEqual(module.commit_parent_count(fixture['repo'], commit), 1)
+            self.assertTrue(module.is_manifest_only_commit(fixture['repo'], commit))
+
+    def test_compose_rejects_product_and_merge_local_integration_suffixes(self):
+        product = self.prepare_additive_compose('compose-product-suffix', plan=False)
+        product_path = product['repo'] / 'unexpected-product.txt'
+        product_path.write_text('unexpected\n')
+        self.git(product['repo'], 'add', product_path.name)
+        self.git(product['repo'], 'commit', '-qm', 'test: unexpected local product')
+        with self.assertRaisesRegex(
+            product['module'].SyncwheelError,
+            'linear manifest-only control suffix',
+        ):
+            product['module'].coordination_compose_stack_plan(
+                product['repo'], product['manifest'], 'new-stack',
+                product['base_tip'], product['base_state']['manifest_digest'],
+            )
+
+        merged = self.prepare_additive_compose('compose-merge-suffix', plan=False)
+        module = merged['module']
+        local_tip = module.ref_tip(merged['repo'], 'integration/shared')
+        alternate = json.loads(json.dumps(merged['manifest']))
+        alternate['stacks'][0]['meta']['purpose'] = 'merge-parent'
+        second_parent = module.materialize_control_manifest_commit(
+            merged['repo'], alternate, local_tip
+        )
+        merge_tip = module.git(
+            merged['repo'], 'commit-tree', module.ref_tree(merged['repo'], second_parent),
+            '-p', local_tip, '-p', second_parent,
+            '-m', 'test: merge local control proposals',
+        ).stdout.strip()
+        module.git(
+            merged['repo'], 'update-ref', 'refs/heads/integration/shared',
+            merge_tip, local_tip,
+        )
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'linear manifest-only control suffix',
+        ):
+            module.coordination_compose_stack_plan(
+                merged['repo'], merged['manifest'], 'new-stack',
+                merged['base_tip'], merged['base_state']['manifest_digest'],
+            )
+
+    def test_compose_detects_local_integration_races(self):
+        planning = self.prepare_additive_compose('compose-local-plan-race', plan=False)
+        module = planning['module']
+        original_validate = module.validate_manifest
+        raced = False
+
+        def move_local_control_tip(repo_root, manifest):
+            nonlocal raced
+            result = original_validate(repo_root, manifest)
+            if not raced:
+                raced = True
+                observed = module.ref_tip(repo_root, manifest['integration']['branch'])
+                alternate = json.loads(json.dumps(manifest))
+                alternate['stacks'][0]['meta']['purpose'] = 'planning-race'
+                advanced = module.materialize_control_manifest_commit(
+                    repo_root, alternate, observed
+                )
+                module.git(
+                    repo_root, 'update-ref',
+                    f"refs/heads/{manifest['integration']['branch']}",
+                    advanced, observed,
+                )
+            return result
+
+        with mock.patch.object(
+            module, 'validate_manifest', side_effect=move_local_control_tip
+        ):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'local integration changed during planning'
+            ):
+                module.coordination_compose_stack_plan(
+                    planning['repo'], planning['manifest'], 'new-stack',
+                    planning['base_tip'], planning['base_state']['manifest_digest'],
+                )
+
+        applying = self.prepare_additive_compose('compose-local-apply-race')
+        module = applying['module']
+        observed = applying['plan']['localIntegrationTip']
+        alternate = json.loads(json.dumps(applying['manifest']))
+        alternate['stacks'][0]['meta']['purpose'] = 'apply-race'
+        advanced = module.materialize_control_manifest_commit(
+            applying['repo'], alternate, observed
+        )
+        module.git(
+            applying['repo'], 'update-ref', 'refs/heads/integration/shared',
+            advanced, observed,
+        )
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_compose_stack_plan(
+                applying['repo'], applying['manifest'], applying['manifest_path'],
+                applying['plan'],
+            )
+
+    def test_compose_pending_intent_rechecks_local_integration_before_publication(self):
+        for suffix_kind in ('manifest', 'product'):
+            with self.subTest(suffix_kind=suffix_kind):
+                fixture = self.prepare_additive_compose(
+                    f'compose-pending-{suffix_kind}'
+                )
+                module = fixture['module']
+                plan = fixture['plan']
+                proposed = module.apply_coordination_snapshot(
+                    fixture['manifest'], plan['composedSnapshot']
+                )
+                operation = module.begin_coordination_publication(
+                    fixture['repo'],
+                    proposed,
+                    fixture['manifest_path'],
+                    {plan['sourceRef']: plan['sourceTip']},
+                    f"compose-stack:{plan['stack']}",
+                    plan['projectionStatus'],
+                    expected_state_tip=plan['expectedRemoteStateTip'],
+                )
+                self.assertFalse(operation['retry'])
+                remote_before = self.git(
+                    fixture['repo'], 'ls-remote', '--heads', 'origin'
+                ).stdout
+                remote_integration_tree = module.ref_tree(
+                    fixture['repo'], fixture['integration_tip']
+                )
+                local_tip = plan['localIntegrationTip']
+                if suffix_kind == 'manifest':
+                    alternate = json.loads(json.dumps(fixture['manifest']))
+                    alternate['stacks'][0]['meta']['purpose'] = 'pending-race'
+                    moved_tip = module.materialize_control_manifest_commit(
+                        fixture['repo'], alternate, local_tip
+                    )
+                    module.git(
+                        fixture['repo'], 'update-ref',
+                        'refs/heads/integration/shared', moved_tip, local_tip,
+                    )
+                else:
+                    path = fixture['repo'] / 'pending-product.txt'
+                    path.write_text('pending product\n')
+                    self.git(fixture['repo'], 'add', path.name)
+                    self.git(
+                        fixture['repo'], 'commit', '-qm',
+                        'test: pending product integration race',
+                    )
+
+                failure = None
+                try:
+                    module.apply_coordination_compose_stack_plan(
+                        fixture['repo'], fixture['manifest'],
+                        fixture['manifest_path'], plan,
+                    )
+                except module.SyncwheelError as exc:
+                    failure = str(exc)
+
+                self.assertEqual(
+                    self.git(
+                        fixture['repo'], 'ls-remote', '--heads', 'origin'
+                    ).stdout,
+                    remote_before,
+                )
+                self.assertEqual(
+                    module.ref_tree(fixture['repo'], fixture['integration_tip']),
+                    remote_integration_tree,
+                )
+                self.assertIsNotNone(failure)
+                expected_failure = (
+                    'reviewed plan drifted'
+                    if suffix_kind == 'manifest'
+                    else 'linear manifest-only control suffix'
+                )
+                self.assertIn(expected_failure, failure)
+
+    def test_compose_rejects_missing_behind_and_diverged_local_integration(self):
+        for relation in ('missing', 'behind', 'diverged'):
+            with self.subTest(relation=relation):
+                fixture = self.prepare_additive_compose(
+                    f'compose-local-{relation}', plan=False
+                )
+                module = fixture['module']
+                local_tip = module.ref_tip(fixture['repo'], 'integration/shared')
+                published_tip = fixture['integration_tip']
+                if relation == 'missing':
+                    module.git(
+                        fixture['repo'], 'update-ref', '-d',
+                        'refs/heads/integration/shared', local_tip,
+                    )
+                else:
+                    published_parent = module.commit_first_parent(
+                        fixture['repo'], published_tip
+                    )
+                    replacement = published_parent
+                    if relation == 'diverged':
+                        alternate = json.loads(json.dumps(fixture['manifest']))
+                        alternate['stacks'][0]['meta']['purpose'] = 'diverged'
+                        replacement = module.materialize_control_manifest_commit(
+                            fixture['repo'], alternate, published_parent
+                        )
+                    module.git(
+                        fixture['repo'], 'update-ref',
+                        'refs/heads/integration/shared', replacement, local_tip,
+                    )
+
+                remote_before = self.git(
+                    fixture['repo'], 'ls-remote', '--heads', 'origin'
+                ).stdout
+                with self.assertRaisesRegex(
+                    module.SyncwheelError, 'linear manifest-only control suffix'
+                ):
+                    module.coordination_compose_stack_plan(
+                        fixture['repo'], fixture['manifest'], 'new-stack',
+                        fixture['base_tip'], fixture['base_state']['manifest_digest'],
+                    )
+                self.assertEqual(
+                    self.git(
+                        fixture['repo'], 'ls-remote', '--heads', 'origin'
+                    ).stdout,
+                    remote_before,
+                )
+
     def test_compose_publishes_new_stack_and_preserves_remote_stack_and_unmapped_integration(self):
         fixture = self.prepare_additive_compose()
         module = fixture['module']
         plan = fixture['plan']
+        local_integration_tip = self.git(
+            fixture['repo'], 'rev-parse', 'integration/shared'
+        ).stdout.strip()
+        remote_integration_tree = module.ref_tree(
+            fixture['repo'], fixture['integration_tip']
+        )
         self.assertEqual(plan['status'], 'publish-required')
         self.assertEqual(plan['remoteAddedStacks'], ['orphan'])
         self.assertEqual(plan['localAddedStacks'], ['new-stack'])
         self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
+        self.assertEqual(plan['localIntegrationTip'], local_integration_tip)
+        self.assertTrue(plan['localIntegrationControlSuffix'])
+        self.assertEqual(
+            plan['localIntegrationControlSuffixDigest'],
+            module.canonical_json_digest(plan['localIntegrationControlSuffix']),
+        )
         self.assertEqual(plan['unmappedIntegrationCommits'], fixture['integration_commits'])
         self.assertFalse(plan['integrationMutation'])
         self.assertEqual(
@@ -4058,6 +4759,16 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue(any(item.endswith(':refs/heads/pr/new-stack') for item in command))
         self.assertFalse(any(item.endswith(':refs/heads/pr/orphan') for item in command))
         self.assertFalse(any(item.endswith(f":{plan['integrationRef']}") for item in command))
+        self.assertEqual(
+            self.git(
+                fixture['repo'], 'ls-remote', 'origin', plan['integrationRef']
+            ).stdout.split()[0],
+            fixture['integration_tip'],
+        )
+        self.assertEqual(
+            module.ref_tree(fixture['repo'], fixture['integration_tip']),
+            remote_integration_tree,
+        )
 
         accepted_tip, accepted = self.remote_state(fixture['origin'])
         self.assertEqual(accepted_tip, result['remote_state_tip'])
@@ -4173,6 +4884,155 @@ with module.coordination_publication_lock(Path(repo_path)):
             and event['payload'].get('scope') == 'compose-stack:new-stack'
         ]
         self.assertTrue(completed[-1]['recovered'])
+
+    def prepare_compose_adoption_race(self, name):
+        fixture = self.prepare_additive_compose(name)
+        module = fixture['module']
+        with mock.patch.object(
+            module,
+            'save_manifest_with_ledger',
+            side_effect=module.SyncwheelError('fixture manifest save failed'),
+        ):
+            with self.assertRaisesRegex(module.SyncwheelError, 'local adoption pending'):
+                module.apply_coordination_compose_stack_plan(
+                    fixture['repo'],
+                    fixture['manifest'],
+                    fixture['manifest_path'],
+                    fixture['plan'],
+                )
+
+        first_tip, first_state = self.remote_state(fixture['origin'])
+        stale_local, _ = module.load_manifest(
+            fixture['repo'], fixture['manifest_path']
+        )
+        adoption_plan, _, _ = module.coordination_compose_stack_plan(
+            fixture['repo'],
+            stale_local,
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+        self.assertEqual(adoption_plan['status'], 'adopt-only')
+        self.assertEqual(adoption_plan['expectedRemoteStateTip'], first_tip)
+
+        peer = self.clone(fixture['origin'], 'compose-stale-adoption-peer')
+        (peer / '.syncwheel').mkdir(parents=True, exist_ok=True)
+        peer_manifest = module.apply_coordination_snapshot(
+            stale_local, first_state['manifest']
+        )
+        (peer / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(peer_manifest, indent=2) + '\n'
+        )
+        self.disable_fixture_hooks(peer)
+        for branch in ('integration/shared', 'pr/orphan', 'pr/new-stack'):
+            self.git(peer, 'branch', branch, f'origin/{branch}')
+        # This fixture intentionally publishes unmapped product files. A full
+        # rebuild must refuse them; adopt the published branch without replay
+        # so the test reaches the later compose-adoption race it exercises.
+        self.git(peer, 'switch', '-q', 'integration/shared')
+        self.assertEqual(
+            self.git(peer, 'rev-parse', 'HEAD').stdout.strip(),
+            first_state['managed_refs']['refs/heads/integration/shared'],
+        )
+        for index in (1, 2):
+            self.assertEqual((peer / f'unmapped-{index}.txt').read_text(), f'unmapped {index}\n')
+        third_tip = self.commit_on_branch(peer, 'pr/third', 'third.txt')
+        self.run_cli(
+            peer, 'stack', 'create', 'third', third_tip, '--branch', 'pr/third'
+        )
+        return fixture, stale_local, adoption_plan, peer, first_tip
+
+    def compose_adoption_local_snapshot(self, fixture):
+        module = fixture['module']
+        index_path = Path(
+            self.git(
+                fixture['repo'], 'rev-parse', '--path-format=absolute',
+                '--git-path', 'index',
+            ).stdout.strip()
+        )
+        return {
+            'heads': self.git(
+                fixture['repo'], 'for-each-ref',
+                '--format=%(refname) %(objectname)', 'refs/heads',
+            ).stdout,
+            'index': index_path.read_bytes(),
+            'status': self.git(
+                fixture['repo'], 'status', '--porcelain=v1'
+            ).stdout,
+            'manifest': fixture['manifest_path'].read_bytes(),
+            'events': module.load_ledger_events(
+                fixture['repo'], fixture['manifest_path']
+            ),
+        }
+
+    def assert_compose_adoption_refusal_is_local_noop(self, fixture, apply):
+        module = fixture['module']
+        before = self.compose_adoption_local_snapshot(fixture)
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            apply()
+        self.assertEqual(self.compose_adoption_local_snapshot(fixture), before)
+
+    def test_compose_stale_adoption_refuses_after_a_later_publication(self):
+        fixture, stale_local, adoption_plan, peer, first_tip = (
+            self.prepare_compose_adoption_race('compose-stale-adoption')
+        )
+        module = fixture['module']
+        self.run_cli(peer, 'stack', 'push', 'third')
+        second_tip, second_state = self.remote_state(fixture['origin'])
+        self.assertNotEqual(second_tip, first_tip)
+        self.assertEqual(
+            [stack['id'] for stack in second_state['manifest']['stacks']],
+            ['orphan', 'new-stack', 'third'],
+        )
+        remote_before = self.git(
+            fixture['repo'], 'ls-remote', '--heads', 'origin'
+        ).stdout
+        self.assert_compose_adoption_refusal_is_local_noop(
+            fixture,
+            lambda: module.apply_coordination_compose_stack_plan(
+                fixture['repo'], stale_local,
+                fixture['manifest_path'], adoption_plan,
+            ),
+        )
+
+        self.assertEqual(
+            self.git(
+                fixture['repo'], 'ls-remote', '--heads', 'origin'
+            ).stdout,
+            remote_before,
+        )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], second_tip)
+
+    def test_compose_adoption_rechecks_state_after_landed_recovery(self):
+        fixture, stale_local, adoption_plan, peer, first_tip = (
+            self.prepare_compose_adoption_race('compose-adoption-postcheck-race')
+        )
+        module = fixture['module']
+        original_publish = module.coordinated_publish
+        second_tip = None
+
+        def publish_peer_before_recovery(*args, **kwargs):
+            nonlocal second_tip
+            self.run_cli(peer, 'stack', 'push', 'third')
+            second_tip, second_state = self.remote_state(fixture['origin'])
+            self.assertNotEqual(second_tip, first_tip)
+            self.assertEqual(
+                [stack['id'] for stack in second_state['manifest']['stacks']],
+                ['orphan', 'new-stack', 'third'],
+            )
+            return original_publish(*args, **kwargs)
+
+        with mock.patch.object(
+            module, 'coordinated_publish', side_effect=publish_peer_before_recovery
+        ):
+            self.assert_compose_adoption_refusal_is_local_noop(
+                fixture,
+                lambda: module.apply_coordination_compose_stack_plan(
+                    fixture['repo'], stale_local,
+                    fixture['manifest_path'], adoption_plan,
+                ),
+            )
+        self.assertEqual(self.remote_state(fixture['origin'])[0], second_tip)
 
     def test_compose_stops_when_remote_state_lease_moves_after_plan(self):
         fixture = self.prepare_additive_compose('compose-state-race')
@@ -5060,15 +5920,24 @@ with module.coordination_publication_lock(Path(repo_path)):
             ['integration/shared', 'pr/race'],
         )
         module = self.load_module()
-        real_read = module.read_remote_coordination_state
-        reads = []
+        real_begin = module.begin_coordination_publication
+        begun = []
 
-        def read_then_lose_the_race(*call_args, **call_kwargs):
-            observed = real_read(*call_args, **call_kwargs)
-            reads.append(observed['tip'])
-            if len(reads) == 1:
+        def begin_then_lose_the_race(*call_args, **call_kwargs):
+            operation = real_begin(*call_args, **call_kwargs)
+            self.assertEqual(operation['scope'], 'stack:race')
+            manifest_path = call_args[2]
+            matching_intents = [
+                event for event in module.load_ledger_events(loser, manifest_path)
+                if event['type'] == 'coordination_publish_intent'
+                and event['payload'].get('operation_token')
+                == operation['operation_token']
+            ]
+            self.assertEqual(len(matching_intents), 1)
+            begun.append(operation['operation_token'])
+            if len(begun) == 1:
                 self.run_cli(winner, 'stack', 'push', 'race')
-            return observed
+            return operation
 
         push_args = SimpleNamespace(
             repo=str(loser), manifest=None, personal=None, stack='race',
@@ -5076,13 +5945,14 @@ with module.coordination_publication_lock(Path(repo_path)):
             command='stack',
         )
         with mock.patch.object(
-            module, 'read_remote_coordination_state',
-            side_effect=read_then_lose_the_race,
+            module, 'begin_coordination_publication',
+            side_effect=begin_then_lose_the_race,
         ):
             with self.assertRaisesRegex(
                 module.SyncwheelError, 'remote state changed after the reviewed plan'
             ):
                 module.command_stack_push(push_args)
+        self.assertEqual(len(begun), 1)
 
         self.run_cli(loser, 'int', 'push')
         abandoned = [
@@ -5440,6 +6310,173 @@ with module.coordination_publication_lock(Path(repo_path)):
             repo, repo / '.syncwheel' / 'manifest.json'
         ))
         self.run_cli(repo, 'int', 'push')
+
+    def prepare_detached_reconciliation(self, label):
+        origin = self.create_remote(label)
+        repo = self.clone(origin, label)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/reconcile', 'reconcile.txt')
+        self.run_cli(repo, 'stack', 'create', 'reconcile', source, '--draft')
+        module = self.load_module()
+        manifest, path = module.load_manifest(repo)
+        manifest['integration']['stacks'] = ['reconcile']
+        self.assertEqual(manifest['stacks'][0]['commits'], [source])
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        return repo, module, manifest, path
+
+    def test_ancestry_reconciliation_recovers_the_same_prepared_commit(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-intent')
+        branch = manifest['integration']['branch']
+        before = module.ref_tip(repo, branch)
+        def interrupt(stage):
+            if stage == 'intent_saved':
+                raise module.SyncwheelError('test: interrupt after intent')
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
+                module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test recovery')
+        pending = module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path))
+        self.assertEqual(len(pending), 1)
+        intent = pending[0]['payload']
+        self.assertEqual(intent['version'], 2)
+        self.assertEqual(module.ref_tip(repo, branch), before)
+        recovered = module.recover_incomplete_control_manifest_persistence(repo, path, manifest)
+        self.assertEqual(module.ref_tip(repo, branch), intent['expected_control_commit'])
+        self.assertEqual(self.git(repo, 'show', '-s', '--format=%P', branch).stdout.split(),
+                         [before, intent['detached_replay_tip']])
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(manifest))
+        self.assertFalse(module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path)))
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+
+    def test_ancestry_reconciliation_can_explicitly_replace_a_pre_cas_proposal(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-new-proposal')
+        branch = manifest['integration']['branch']
+        before = module.ref_tip(repo, branch)
+        def interrupt(stage):
+            if stage == 'intent_saved':
+                raise module.SyncwheelError('test: interrupt after intent')
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
+                module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'old proposal')
+        manifest['integration']['stacks'] = []
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        selected = path.read_bytes()
+        index = self.git(repo, 'write-tree').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'lease changed before CAS'):
+            module.recover_incomplete_control_manifest_persistence(repo, path, manifest)
+        self.assertEqual(len(module.pending_control_manifest_intents(
+            module.load_control_manifest_events(repo, path))), 1)
+        recovered = module.recover_incomplete_control_manifest_persistence(
+            repo, path, manifest, allow_new_operation=True)
+        self.assertEqual(recovered, manifest)
+        self.assertEqual(module.ref_tip(repo, branch), before)
+        self.assertEqual(self.git(repo, 'write-tree').stdout, index)
+        self.assertEqual(path.read_bytes(), selected)
+        self.assertFalse(module.pending_control_manifest_intents(
+            module.load_control_manifest_events(repo, path)))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'use revised selection')
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        self.assertNotEqual(module.git(repo, 'cat-file', '-e', 'HEAD:reconcile.txt', check=False).returncode, 0)
+
+    def test_ancestry_reconciliation_preserves_post_cas_source_changes(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-drift')
+        changed = repo / 'later-proposal.txt'
+        def interrupt(stage):
+            if stage == 'ref_updated':
+                changed.write_text('later user proposal\n')
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'checkout changed'):
+                module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test drift')
+        branch = manifest['integration']['branch']
+        final = module.ref_tip(repo, branch)
+        index = self.git(repo, 'write-tree').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'checkout changed'):
+            module.recover_incomplete_control_manifest_persistence(repo, path, manifest)
+        self.assertEqual(module.ref_tip(repo, branch), final)
+        self.assertEqual(self.git(repo, 'write-tree').stdout, index)
+        self.assertEqual(changed.read_text(), 'later user proposal\n')
+        self.assertEqual(len(module.pending_control_manifest_intents(
+            module.load_control_manifest_events(repo, path))), 1)
+
+    def test_ancestry_reconciliation_is_repeatable_and_portable_after_publication(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-repeat')
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat'))
+        final = module.ref_tip(repo, manifest['integration']['branch'])
+        events = module.load_control_manifest_events(repo, path)
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat'))
+        self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
+        self.assertEqual(module.load_control_manifest_events(repo, path), events)
+        self.run_cli(repo, 'int', 'push')
+        origin = self.git(repo, 'remote', 'get-url', 'origin').stdout.strip()
+        peer = self.clone(origin, 'ancestry-fresh-peer')
+        self.git(peer, 'switch', '-q', '-c', manifest['integration']['branch'],
+                 'origin/' + manifest['integration']['branch'])
+        selected, peer_path = module.load_manifest(peer)
+        self.assertFalse(module.load_control_manifest_events(peer, peer_path))
+        self.assertTrue(module.reconcile_integration_ancestry(peer, peer_path, selected, 'test', 'fresh peer'))
+        self.assertEqual(module.ref_tip(peer, selected['integration']['branch']), final)
+        self.assertFalse(module.load_control_manifest_events(peer, peer_path))
+
+    def test_ancestry_reconciliation_preserves_merge_stack_replay(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-merge-stacks')
+        stack = manifest['stacks'][0]
+        self.git(repo, 'update-ref', 'refs/heads/' + stack['branch'], stack['commits'][0],
+                 module.ref_tip(repo, stack['branch']))
+        manifest['integration']['strategy'] = 'merge-stacks'
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        before = module.ref_tip(repo, manifest['integration']['branch'])
+        expected = module.materialize_integration_replay(repo, manifest)
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'merge stacks'))
+        final = module.ref_tip(repo, manifest['integration']['branch'])
+        self.assertEqual(self.git(repo, 'show', '-s', '--format=%P', final).stdout.split(), [before, expected])
+        self.assertEqual(self.git(repo, 'show', final + ':reconcile.txt').stdout, 'scratch/reconcile\n')
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat merge stacks'))
+        self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
+
+    def test_ancestry_reconciliation_rejects_a_replay_proof_for_different_product_bytes(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-invalid-proof')
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'proof'))
+        final = module.ref_tip(repo, manifest['integration']['branch'])
+        message = self.git(repo, 'show', '-s', '--format=%B', final).stdout
+        parents = self.git(repo, 'show', '-s', '--format=%P', final).stdout.split()
+        different_tree = module.materialize_control_manifest_projection_tree(
+            repo, manifest, module.ref_tree(repo, 'origin/main'),
+            gitignore_bytes=(repo / '.gitignore').read_bytes(),
+        )
+        self.assertNotEqual(different_tree, module.ref_tree(repo, final))
+        forged = self.git(repo, 'commit-tree', different_tree, '-p', parents[0], '-p', parents[1],
+                          '-m', message).stdout.strip()
+        self.assertEqual(module.manifest_digest(module.manifest_from_tree(repo, forged, path)),
+                         module.manifest_digest(manifest))
+        self.assertIsNone(module.integration_reconciliation_proof(repo, forged, path,
+                          module.observe_published_integration_tip(repo, manifest)))
+        self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+
+    def test_ancestry_reconciliation_sigkill_retries_preserve_one_operation(self):
+        for stage in ('intent_saved', 'ref_updated', 'provenance_resolved',
+                      'checkout_aligned', 'manifest_saved', 'ledger_saved'):
+            with self.subTest(stage=stage):
+                repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-kill-' + stage)
+                remote_before = self.git(repo, 'ls-remote', 'origin').stdout
+                with mock.patch.dict(os.environ, {module.ENV_TEST_CONTROL_MANIFEST_SIGKILL: stage}):
+                    self.run_cli(repo, 'int', 'rebuild', '--reason', 'verify interrupted reconciliation',
+                                 expected=-signal.SIGKILL)
+                intents = [event['payload'] for event in module.load_control_manifest_events(repo, path)
+                           if event['type'] == 'control_manifest_persistence_intent'
+                           and event['payload'].get('version') == 2]
+                self.assertEqual(len(intents), 1)
+                intent = intents[0]
+                self.run_cli(repo, 'int', 'rebuild', '--reason', 'verify interrupted reconciliation')
+                self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']),
+                                 intent['expected_control_commit'])
+                self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+                self.assertEqual(self.git(repo, 'show', 'HEAD:reconcile.txt').stdout, 'scratch/reconcile\n')
+                records = [event for event in module.load_control_manifest_events(repo, path)
+                           if event['payload'].get('operation_id') == intent['operation_id']]
+                self.assertEqual([event['type'] for event in records],
+                                 ['control_manifest_persistence_intent', 'manifest_saved'])
+                self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_before)
 
     def test_a_promotion_killed_at_its_manifest_save_completes_on_retry(self):
         origin = self.create_remote('round8-promote-saved')
@@ -6267,6 +7304,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
         self.run_cli(repo, 'int', 'push')
+        self.git(repo, 'switch', '-q', 'main')
         branch = f'pr/{stack_id}'
         source = self.commit_on_branch(repo, branch, f'{stack_id}.txt')
         self.run_cli(repo, 'stack', 'create', stack_id, source, '--branch', branch)
@@ -6282,6 +7320,16 @@ with module.coordination_publication_lock(Path(repo_path)):
         other = self.mirror_coordinated_clone(
             origin, repo, f'{name}-other', ['integration/shared', branch],
         )
+        if split_claims:
+            for ref in extra_refs:
+                expected_tip = intent['changed_refs'][ref]
+                fixture_ref = 'refs/syncwheel/fixtures/pending-' + ref.rsplit('/', 1)[-1]
+                self.git(repo, 'merge-base', '--is-ancestor', f'origin/{ref[11:]}', expected_tip)
+                self.git(other, 'fetch', '-q', str(repo), f'{ref}:{fixture_ref}')
+                self.assertEqual(module.ref_tip(other, fixture_ref), expected_tip)
+                current_tip = module.ref_tip(other, ref[11:])
+                self.git(other, 'update-ref', ref, expected_tip, current_tip)
+                self.git(other, 'update-ref', '-d', fixture_ref, expected_tip)
         manifest, manifest_path = module.load_manifest(other)
         changed = {f'refs/heads/{branch}': module.ref_tip(other, branch)}
         if not split_claims:
@@ -6703,7 +7751,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        self.track_fixture_ignore_in_replay_base(repo)
+        self.anchor_generated_metadata_in_replay_base(repo)
         self.run_cli(repo, 'int', 'push')
         feature_sha = self.commit_on_branch(repo, 'pr/feature-a', f'{name}-a.txt')
         self.run_cli(
@@ -6712,14 +7760,23 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(repo, 'stack', 'push', 'feature-a')
         return origin, repo
 
-    def diverge_manifest_from_integration_tip(self, repo, name, command):
-        if command[:2] == ('int', 'push'):
-            self.run_cli(repo, 'stack', 'demote', 'feature-a')
-            return
-        second_sha = self.commit_on_branch(repo, 'pr/feature-b', f'{name}-b.txt')
-        self.run_cli(
-            repo, 'stack', 'create', 'feature-b', second_sha, '--branch', 'pr/feature-b',
+    def external_manifest_proposal(self, repo, name, command):
+        proposal_path = self.tmp / f'{name}-proposal.json'
+        proposal_path.write_bytes(
+            (repo / '.syncwheel' / 'manifest.json').read_bytes()
         )
+        if command[:2] == ('int', 'push'):
+            self.run_cli(
+                repo, 'stack', 'demote', 'feature-a',
+                '--manifest', str(proposal_path),
+            )
+        else:
+            second_sha = self.commit_on_branch(repo, 'pr/feature-b', f'{name}-b.txt')
+            self.run_cli(
+                repo, 'stack', 'create', 'feature-b', second_sha,
+                '--branch', 'pr/feature-b', '--manifest', str(proposal_path),
+            )
+        return proposal_path
 
     def test_dirty_integration_checkout_refuses_before_the_control_ref_moves(self):
         module = self.load_module()
@@ -6731,23 +7788,64 @@ with module.coordination_publication_lock(Path(repo_path)):
             with self.subTest(command=name):
                 label = f'dirty-integration-{name}'
                 origin, repo = self.prepare_published_integration(label)
-                self.diverge_manifest_from_integration_tip(repo, label, command)
                 manifest_path = repo / '.syncwheel' / 'manifest.json'
+                proposal_path = self.external_manifest_proposal(
+                    repo, label, command
+                )
                 (repo / 'README.md').write_text('unrelated local edit\n')
                 before = self.git(repo, 'rev-parse', 'integration/shared').stdout.strip()
+                index_path = Path(
+                    self.git(
+                        repo, 'rev-parse', '--path-format=absolute',
+                        '--git-path', 'index',
+                    ).stdout.strip()
+                )
 
-                failure = self.run_cli(repo, *command, expected=2)
+                def mutation_snapshot():
+                    return {
+                        'local_refs': self.git(
+                            repo, 'for-each-ref',
+                            '--format=%(refname) %(objectname)', 'refs/heads',
+                        ).stdout,
+                        'remote_refs': self.git(
+                            repo, 'ls-remote', '--heads', 'origin'
+                        ).stdout,
+                        'index': index_path.read_bytes(),
+                        'cached': self.git(
+                            repo, 'diff', '--cached', '--name-status'
+                        ).stdout,
+                        'status': self.git(
+                            repo, 'status', '--porcelain=v1'
+                        ).stdout,
+                        'manifest': manifest_path.read_bytes(),
+                        'proposal': proposal_path.read_bytes(),
+                        'readme': (repo / 'README.md').read_bytes(),
+                        'internal_events': module.load_ledger_events(
+                            repo, manifest_path
+                        ),
+                        'proposal_events': module.load_ledger_events(
+                            repo, proposal_path
+                        ),
+                    }
+
+                unchanged = mutation_snapshot()
+
+                rebuild = (
+                    'int', 'rebuild', '--manifest', str(proposal_path),
+                    '--reason', 'adopt reviewed control manifest proposal',
+                )
+                failure = self.run_cli(repo, *rebuild, expected=2)
 
                 self.assertIn(str(repo), failure.stderr)
                 self.assertIn('README.md', failure.stderr)
-                self.assertIn(f'rerun: syncwheel {command[0]} {command[1]}', failure.stderr)
+                self.assertEqual(mutation_snapshot(), unchanged)
                 self.assertEqual(
                     self.git(repo, 'rev-parse', 'integration/shared').stdout.strip(),
                     before,
                 )
                 self.assertEqual(
                     module.pending_control_manifest_intents(
-                        module.load_ledger_events(repo, manifest_path)
+                        module.load_ledger_events(repo, proposal_path)
                     ),
                     [],
                 )
@@ -6756,11 +7854,14 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
 
                 self.git(repo, 'checkout', '--', 'README.md')
-                self.run_cli(repo, *command)
+                self.run_cli(repo, *rebuild)
+                self.run_cli(
+                    repo, *command, '--manifest', str(proposal_path)
+                )
 
                 self.assertEqual(
                     module.pending_control_manifest_intents(
-                        module.load_ledger_events(repo, manifest_path)
+                        module.load_ledger_events(repo, proposal_path)
                     ),
                     [],
                 )
@@ -6775,7 +7876,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         module = self.load_module()
         origin, repo = self.prepare_published_integration('dirty-after-cas')
         self.run_cli(repo, 'stack', 'demote', 'feature-a')
-        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
         ready = self.tmp / 'dirty-after-cas-ready'
         release = self.tmp / 'dirty-after-cas-release'
         process = subprocess.Popen(
@@ -6829,26 +7930,20 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        self.track_fixture_ignore_in_replay_base(repo)
+        self.anchor_generated_metadata_in_replay_base(repo)
         feature_sha = self.commit_on_branch(repo, 'pr/feature-a', f'{name}-a.txt')
         self.run_cli(
             repo, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a',
         )
         self.run_cli(repo, 'stack', 'push', 'feature-a')
-        manifest_path = repo / '.syncwheel' / 'manifest.json'
-        killed = self.run_cli(
-            repo,
-            'int', 'rebuild', '--in-place',
-            '--reason', f'interrupt control persistence at {stage}',
-            expected=-signal.SIGKILL,
-            extra_env={'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
-        )
-        self.assertEqual(killed.returncode, -signal.SIGKILL)
+        _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
+        self.interrupt_legacy_control_persistence(repo, stage)
         module = self.load_module()
         pending = module.pending_control_manifest_intents(
             module.load_ledger_events(repo, manifest_path)
         )
         self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['payload'].get('version', 1), 1)
         return origin, repo, pending[0]['payload']
 
     def test_manifest_writer_outside_the_entrypoints_settles_a_pending_intent(self):
@@ -6974,8 +8069,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         """A second clone whose tracked manifest diverges from the integration tip."""
         origin = self.create_remote(name=f'{name}-origin')
         first = self.clone(origin, f'{name}-first')
+        second = self.clone(origin, f'{name}-second')
         self.init_coordinated(first)
-        self.track_fixture_ignore_in_replay_base(first)
+        self.anchor_generated_metadata_in_replay_base(first)
         feature_sha = self.commit_on_branch(first, 'pr/feature-a', f'{name}.txt')
         self.run_cli(
             first, 'stack', 'create', 'feature-a', feature_sha, '--branch', 'pr/feature-a',
@@ -6983,7 +8079,6 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(first, 'stack', 'push', 'feature-a')
         self.run_cli(first, 'int', 'push')
 
-        second = self.clone(origin, f'{name}-second')
         self.git(
             second, 'fetch', 'origin',
             'integration/shared:refs/remotes/origin/integration/shared',
@@ -6997,7 +8092,101 @@ with module.coordination_publication_lock(Path(repo_path)):
             '--integration-branch', 'integration/shared',
         )
         self.disable_fixture_hooks(second)
-        return origin, second
+        # Preserve the independently initialized proposal while returning the
+        # integration ref/index to the exact published control tip.
+        self.git(second, 'switch', '-q', 'main')
+        self.git(
+            second, 'branch', '-f', 'integration/shared',
+            'origin/integration/shared',
+        )
+        self.git(second, 'switch', '-q', 'integration/shared')
+        module = self.load_module()
+        manifest_path = second / '.syncwheel' / 'manifest.json'
+        published = module.manifest_from_tree(
+            second, 'origin/integration/shared',
+            module.integration_manifest_path(second),
+        )
+        published_tip = self.git(
+            second, 'rev-parse', 'origin/integration/shared'
+        ).stdout.strip()
+        self.assertEqual(
+            self.git(second, 'rev-parse', 'integration/shared').stdout.strip(),
+            published_tip,
+        )
+        self.assertIn('feature-a', module.stack_map(published))
+        self.assertNotIn('replay_mode', published['defaults'])
+        self.assertEqual(
+            module.configured_replay_mode(second, published),
+            ('auto', 'builtin'),
+        )
+
+        # Recreate the interrupted persistence precondition that transactional
+        # provider commits now settle automatically at command exit.  The
+        # intermediate manifest spells out the effective disabled landing
+        # default, and the fault fires before its control commit can move.
+        intent_manifest = json.loads(json.dumps(published))
+        intent_manifest['landing'] = module.normalize_landing_policy(None)
+        self.assertEqual(
+            module.landing_policy(intent_manifest),
+            module.landing_policy(published),
+        )
+        module.save_manifest(manifest_path, intent_manifest)
+        intent_manifest, _ = module.load_manifest(second, manifest_path)
+        intent_digest = module.manifest_digest(intent_manifest)
+        self.assertNotEqual(intent_digest, module.manifest_digest(published))
+
+        def interrupt_after_intent(stage):
+            if stage == 'intent_saved':
+                raise RuntimeError('simulated crash after control intent')
+
+        with self.assertRaisesRegex(RuntimeError, 'after control intent'):
+            with module.manifest_write_transaction(second, manifest_path):
+                with mock.patch.object(
+                    module, 'control_manifest_io_checkpoint',
+                    side_effect=interrupt_after_intent,
+                ):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        second, manifest_path, intent_manifest, published_tip,
+                        'control', reason='cross-clone divergence fixture',
+                        command='syncwheel int push',
+                    )
+        self.assertEqual(
+            self.git(second, 'rev-parse', 'integration/shared').stdout.strip(),
+            published_tip,
+        )
+        pending = module.pending_control_manifest_intents(
+            module.load_ledger_events(second, manifest_path)
+        )
+        self.assertEqual(len(pending), 1)
+        intent = pending[0]['payload']
+        self.assertEqual(intent['expected_manifest_digest'], intent_digest)
+        self.assertFalse(any(
+            event['type'] in {
+                'manifest_saved', 'control_manifest_persistence_abandoned',
+            }
+            and (event.get('payload') or {}).get('operation_id')
+            == intent['operation_id']
+            for event in module.load_ledger_events(second, manifest_path)
+        ))
+
+        proposal = json.loads(json.dumps(published))
+        proposal['defaults']['replay_mode'] = 'auto'
+        module.save_manifest(manifest_path, proposal)
+        proposal, _ = module.load_manifest(second, manifest_path)
+        proposal_digest = module.manifest_digest(proposal)
+        self.assertNotIn(
+            proposal_digest,
+            {module.manifest_digest(published), intent_digest},
+        )
+        self.assertEqual(
+            module.coordination_manifest_snapshot(proposal),
+            module.coordination_manifest_snapshot(published),
+        )
+        self.assertEqual(
+            module.configured_replay_mode(second, proposal),
+            ('auto', 'manifest'),
+        )
+        return origin, second, intent
 
     def test_divergence_remedy_accepts_the_tracked_manifest_it_replaces(self):
         module = self.load_module()
@@ -7006,8 +8195,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         # tracked file inside the checkout that carries it.
         for mode in ('in-place', 'ephemeral'):
             with self.subTest(replay_mode=mode):
-                _origin, second = self.prepare_cross_clone_control_divergence(
-                    f'divergence-{mode}'
+                _origin, second, intent = (
+                    self.prepare_cross_clone_control_divergence(
+                        f'divergence-{mode}'
+                    )
                 )
                 manifest_path = second / '.syncwheel' / 'manifest.json'
                 self.assertEqual(
@@ -7022,6 +8213,12 @@ with module.coordination_publication_lock(Path(repo_path)):
                     "'adopt reviewed control manifest proposal'"
                 )
                 self.assertIn(remedy, failure.stderr)
+                self.assertEqual(
+                    len(module.pending_control_manifest_intents(
+                        module.load_ledger_events(second, manifest_path)
+                    )),
+                    1,
+                )
 
                 self.run_cli(
                     second, 'int', 'rebuild', '--replay-mode', mode,
@@ -7029,6 +8226,21 @@ with module.coordination_publication_lock(Path(repo_path)):
                 )
 
                 adopted, _ = module.load_manifest(second, manifest_path)
+                events = module.load_ledger_events(second, manifest_path)
+                self.assertEqual(
+                    module.pending_control_manifest_intents(events), []
+                )
+                abandoned = [
+                    event for event in events
+                    if event['type'] == 'control_manifest_persistence_abandoned'
+                    and (event.get('payload') or {}).get('operation_id')
+                    == intent['operation_id']
+                ]
+                self.assertEqual(len(abandoned), 1)
+                self.assertEqual(
+                    abandoned[0]['payload']['outcome'],
+                    'superseded_local_proposal',
+                )
                 self.assertEqual(
                     module.manifest_digest(adopted), module.manifest_digest(local)
                 )
@@ -7044,7 +8256,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote(name='absent-integration-origin')
         repo = self.clone(origin, 'absent-integration')
         self.init_coordinated(repo)
-        self.track_fixture_ignore_in_replay_base(repo)
+        self.anchor_generated_metadata_in_replay_base(repo)
         self.git(repo, 'switch', '-q', '-c', 'work', 'origin/main')
         self.git(repo, 'branch', '-D', 'integration/shared')
 
@@ -7061,15 +8273,39 @@ with module.coordination_publication_lock(Path(repo_path)):
         A14 says the ancestry check applies whenever integration_ref is in
         changed_refs, with no scope condition. Two honest clones, no
         adversary: clone A bootstraps and publishes s1 (tip X); clone Z
-        onboards, publishes s2 on top (tip Y, a child of X); clone A, still
-        stale at X, then runs an ordinary `stack push s3`, whose own
-        control-manifest refresh folds integration_ref into changed_refs as a
-        sibling of X, not a descendant of Y. That push must be refused, not
-        silently accepted with rc 0 overwriting Y.
+        onboards and publishes s2 on top (tip Y, a child of X). The fixture
+        then gives clone A an exact replay base for its s3 manifest, producing
+        a receipt-backed, exact projected control tip that is not a descendant
+        of Y. Once selected into changed_refs, that tip must be refused by the
+        universal guard rather than silently overwriting Y.
         """
         origin = self.create_remote('a14-stale-push')
         repo_a = self.clone(origin, 'a14-stale-push-a')
         self.init_coordinated(repo_a)
+        module = self.load_module()
+        initial_manifest_path = repo_a / '.syncwheel' / 'manifest.json'
+        initial_manifest_bytes = initial_manifest_path.read_bytes()
+
+        def gitignore_contract(observation):
+            self.assertEqual(observation['fingerprint']['kind'], 'file')
+            return {
+                'kind': observation['fingerprint']['kind'],
+                'mode': observation['fingerprint']['mode'],
+                'sha256': observation['fingerprint']['sha256'],
+                'bytes': observation['bytes'],
+            }
+
+        initial_gitignore = gitignore_contract(
+            module.checkout_path_observation(repo_a, '.gitignore')
+        )
+        self.anchor_generated_ignore_without_control_manifest(repo_a)
+        self.assertEqual(initial_manifest_path.read_bytes(), initial_manifest_bytes)
+        self.assertEqual(
+            gitignore_contract(
+                module.checkout_path_observation(repo_a, '.gitignore')
+            ),
+            initial_gitignore,
+        )
 
         source_s1 = self.commit_on_branch(repo_a, 'pr/a14-s1', 'a14-s1.txt')
         self.run_cli(repo_a, 'stack', 'create', 's1', source_s1, '--branch', 'pr/a14-s1')
@@ -7092,14 +8328,67 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         # Clone A learns s2 the way a git-tracked manifest is normally
         # discovered: it adopts Z's manifest content directly, the same
-        # mechanism mirror_coordinated_clone uses for onboarding. It never
-        # rebuilds its own integration/shared branch, which stays at X.
+        # mechanism mirror_coordinated_clone uses for onboarding. The local
+        # integration ref is then fixture-aligned to an exact replay base so
+        # stack push itself creates the control tip whose eligibility and
+        # successor checks this regression exercises.
         (repo_a / '.syncwheel' / 'manifest.json').write_text(
             (repo_z / '.syncwheel' / 'manifest.json').read_text()
         )
 
         source_s3 = self.commit_on_branch(repo_a, 'pr/a14-s3', 'a14-s3.txt')
         self.run_cli(repo_a, 'stack', 'create', 's3', source_s3, '--branch', 'pr/a14-s3')
+        manifest, manifest_path = module.load_manifest(repo_a)
+        manifest_bytes = manifest_path.read_bytes()
+        expected_manifest_digest = module.manifest_digest(manifest)
+        integration_branch = manifest['integration']['branch']
+        integration_ref = f'refs/heads/{integration_branch}'
+        previous_local_tip = module.ref_tip(repo_a, integration_branch)
+        replay_base = self.git(repo_a, 'rev-parse', 'origin/main').stdout.strip()
+        self.assertNotEqual(previous_local_tip, replay_base)
+        self.assertEqual(
+            self.git(repo_a, 'branch', '--show-current').stdout.strip(),
+            integration_branch,
+        )
+        self.git(repo_a, 'switch', '-q', 'main')
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.git(
+            repo_a, 'update-ref', integration_ref, replay_base, previous_local_tip,
+        )
+        self.assertEqual(module.ref_tip(repo_a, integration_branch), replay_base)
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.git(repo_a, 'switch', '-q', integration_branch)
+        self.assertEqual(manifest_path.read_bytes(), manifest_bytes)
+        self.assertEqual(
+            self.git(repo_a, 'write-tree').stdout.strip(),
+            module.ref_tree(repo_a, replay_base),
+        )
+        tracked_status = self.git(
+            repo_a, 'status', '--porcelain', '--untracked-files=no',
+        ).stdout.splitlines()
+        self.assertNotIn('.gitignore', [line[3:] for line in tracked_status])
+        self.assertTrue(all(
+            line[3:] == '.syncwheel/manifest.json' for line in tracked_status
+        ))
+
+        replay_inputs = module.integration_projection_input_snapshot(repo_a, manifest)
+        replay_tree = module.materialize_integration_projection(repo_a, manifest)
+        source_gitignore = module.checkout_path_observation(repo_a, '.gitignore')
+        source_gitignore_contract = gitignore_contract(source_gitignore)
+        projected_tree = module.materialize_control_manifest_projection_tree(
+            repo_a,
+            manifest,
+            replay_tree,
+            gitignore_bytes=source_gitignore['bytes'],
+        )
+        expected_control_tip = module.materialize_control_manifest_commit(
+            repo_a, manifest, replay_base,
+        )
+        remote_refs_before = self.git(
+            repo_a, 'ls-remote', '--refs', 'origin',
+        ).stdout
+        remote_state_before = self.remote_state(origin)
+
         failure = self.run_cli_unchecked(repo_a, 'stack', 'push', 's3')
 
         self.assertEqual(failure.returncode, 2, failure.stderr)
@@ -7107,10 +8396,1305 @@ with module.coordination_publication_lock(Path(repo_path)):
             'local integration branch is not a safe successor of the published integration ref',
             failure.stderr,
         )
+        self.assertNotIn('Traceback', failure.stderr)
+        self.assertEqual(
+            self.git(repo_a, 'ls-remote', '--refs', 'origin').stdout,
+            remote_refs_before,
+        )
+        self.assertEqual(self.remote_state(origin), remote_state_before)
         self.assertEqual(
             self.git(
                 repo_a, 'ls-remote', 'origin', 'refs/heads/integration/shared'
             ).stdout.split()[0],
             tip_y,
         )
+
+        observed_manifest, observed_manifest_path = module.load_manifest(repo_a)
+        self.assertEqual(observed_manifest_path, manifest_path)
+        self.assertEqual(
+            manifest_path.read_bytes(),
+            module.canonical_manifest_file_text(manifest).encode('utf-8'),
+        )
+        self.assertEqual(
+            module.manifest_digest(observed_manifest), expected_manifest_digest,
+        )
+        self.assertEqual(
+            module.integration_projection_input_snapshot(repo_a, observed_manifest),
+            replay_inputs,
+        )
+        current_replay_tree = module.materialize_integration_projection(
+            repo_a, observed_manifest,
+        )
+        self.assertEqual(current_replay_tree, replay_tree)
+        current_gitignore = module.checkout_path_observation(repo_a, '.gitignore')
+        self.assertEqual(
+            gitignore_contract(current_gitignore), source_gitignore_contract,
+        )
+        current_projected_tree = module.materialize_control_manifest_projection_tree(
+            repo_a,
+            observed_manifest,
+            current_replay_tree,
+            gitignore_bytes=current_gitignore['bytes'],
+        )
+        self.assertEqual(current_projected_tree, projected_tree)
+        local_tip = module.ref_tip(repo_a, integration_branch)
+        self.assertEqual(local_tip, expected_control_tip)
+        self.assertEqual(
+            self.git(repo_a, 'rev-parse', f'{local_tip}^').stdout.strip(),
+            replay_base,
+        )
+        self.assertEqual(module.ref_tree(repo_a, local_tip), projected_tree)
+        control_path = module.integration_manifest_path(repo_a)
+        control_relative = control_path.resolve().relative_to(repo_a.resolve()).as_posix()
+        self.assertEqual(
+            self.git(repo_a, 'show', f'{local_tip}:{control_relative}').stdout,
+            module.canonical_manifest_file_text(observed_manifest),
+        )
+        self.assertFalse(module.coordination_ref_is_safe_successor(
+            repo_a,
+            module.coordination_config(observed_manifest),
+            integration_ref,
+            tip_y,
+            integration_branch,
+        ))
+
+        events = module.load_control_manifest_events(repo_a, manifest_path)
+        persistence_intents, persistence_receipts = (
+            module.control_manifest_operation_records(events, local_tip)
+        )
+        completed_persistence = sorted(
+            set(persistence_intents) & set(persistence_receipts)
+        )
+        self.assertEqual(len(completed_persistence), 1)
+        persistence_operation = completed_persistence[0]
+        self.assertEqual(set(persistence_intents), {persistence_operation})
+        self.assertEqual(set(persistence_receipts), {persistence_operation})
+        persistence_intent = persistence_intents[persistence_operation]['payload']
+        persistence_receipt = persistence_receipts[persistence_operation]
+        self.assertEqual(persistence_intent['replay_tip'], replay_base)
+        self.assertEqual(
+            persistence_intent['expected_control_commit'], local_tip,
+        )
+        self.assertEqual(
+            persistence_intent['expected_manifest_digest'],
+            expected_manifest_digest,
+        )
+        self.assertEqual(persistence_receipt['type'], 'manifest_saved')
+        self.assertEqual(
+            persistence_receipt['payload']['control_commit'], local_tip,
+        )
+        self.assertEqual(
+            module.ref_tree(
+                repo_a, persistence_receipt['payload']['control_commit']
+            ),
+            current_projected_tree,
+        )
+        self.assertEqual(
+            persistence_receipt['payload']['manifest_hash'],
+            expected_manifest_digest,
+        )
+
+        ledger_events = module.load_ledger_events(repo_a, manifest_path)
+        s3_publication_intents = [
+            event for event in ledger_events
+            if event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('scope') == 'stack:s3'
+        ]
+        observed_pending_publications = []
+        for event in s3_publication_intents:
+            operation_token = event['payload'].get('operation_token')
+            terminals = [
+                terminal['type'] for terminal in ledger_events
+                if terminal['type']
+                in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+                and terminal['payload'].get('operation_token') == operation_token
+            ]
+            observed_pending_publications.append({
+                'changed_refs': event['payload'].get('changed_refs'),
+                'terminals': terminals,
+            })
+        self.assertEqual(
+            observed_pending_publications,
+            [{
+                'changed_refs': {
+                    'refs/heads/pr/a14-s3': source_s3,
+                    integration_ref: local_tip,
+                },
+                'terminals': [],
+            }],
+            'A14_SELECTED_INTEGRATION_REACHES_UNIVERSAL_SUCCESSOR_GUARD',
+        )
+
+    def assert_a14_equal_manifest_push_refuses_non_descendant_product(
+        self, fixture, managed_ref, command, filename, expected_error
+    ):
+        """A topology-equal snapshot cannot bypass a changed-ref successor check."""
+        follower = fixture['follower']
+        module = fixture['module']
+        before_ref = self.git(
+            follower, 'ls-remote', 'origin', managed_ref
+        ).stdout.split()[0]
+        before_state_tip, before_state = self.remote_state(fixture['origin'])
+        manifest, _ = module.load_manifest(follower)
+        self.assertEqual(
+            before_state['manifest'],
+            module.coordination_manifest_snapshot(manifest, follower),
+        )
+        self.assertEqual(before_state['managed_refs'][managed_ref], before_ref)
+        before_heads = subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'for-each-ref',
+                '--format=%(refname) %(objectname)', 'refs/heads',
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+
+        scratch = self.tmp / f'equal-manifest-{filename}'
+        self.git(
+            follower, 'worktree', 'add', '--detach', '-q',
+            str(scratch), 'origin/main',
+        )
+        try:
+            if managed_ref == fixture['integration_ref']:
+                published_manifest = self.git(
+                    follower, 'show',
+                    f'{before_ref}:.syncwheel/manifest.json',
+                ).stdout
+                (scratch / '.syncwheel').mkdir()
+                (scratch / '.syncwheel' / 'manifest.json').write_text(
+                    published_manifest
+                )
+            (scratch / filename).write_text('unprojected product bytes\n')
+            self.git(scratch, 'add', filename)
+            if managed_ref == fixture['integration_ref']:
+                self.git(scratch, 'add', '.syncwheel/manifest.json')
+            self.git(
+                scratch, 'commit', '-q', '-m',
+                'test: non-descendant equal-manifest product bytes',
+            )
+            sibling = self.git(
+                scratch, 'rev-parse', 'HEAD'
+            ).stdout.strip()
+        finally:
+            self.git(follower, 'worktree', 'remove', '--force', str(scratch))
+
+        self.git(
+            follower, 'merge-base', '--is-ancestor',
+            before_ref, sibling, expected=1,
+        )
+        self.git(follower, 'update-ref', managed_ref, sibling, before_ref)
+
+        failure = self.run_cli_unchecked(follower, *command)
+
+        after_state_tip, after_state = self.remote_state(fixture['origin'])
+        after_heads = subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'for-each-ref',
+                '--format=%(refname) %(objectname)', 'refs/heads',
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout
+        remote_product = subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']),
+                'show', f'{managed_ref}:{filename}',
+            ],
+            text=True,
+            capture_output=True,
+        )
+        observed = {
+            'returncode': failure.returncode,
+            'remote_heads_unchanged': after_heads == before_heads,
+            'state_tip_unchanged': after_state_tip == before_state_tip,
+            'state_payload_unchanged': after_state == before_state,
+            'managed_ref_unchanged': (
+                after_state['managed_refs'][managed_ref] == before_ref
+            ),
+            'remote_product_absent': remote_product.returncode != 0,
+            'local_ref_preserved': (
+                self.git(follower, 'rev-parse', managed_ref).stdout.strip()
+                == sibling
+            ),
+        }
+        self.assertEqual(
+            observed,
+            {
+                'returncode': 2,
+                'remote_heads_unchanged': True,
+                'state_tip_unchanged': True,
+                'state_payload_unchanged': True,
+                'managed_ref_unchanged': True,
+                'remote_product_absent': True,
+                'local_ref_preserved': True,
+            },
+            failure.stderr,
+        )
+        self.assertIn(expected_error, failure.stderr)
         self.assertNotIn('Traceback', failure.stderr)
+
+    def test_full_publish_preserves_the_published_partial_control_projection(self):
+        origin = self.create_remote('partial-full-control')
+        repo = self.clone(origin, 'partial-full-control-publisher')
+        self.init_coordinated(repo)
+        feature_sha = self.commit_on_branch(
+            repo, 'pr/partial-full-control', 'partial-full-control.txt'
+        )
+        self.run_cli(
+            repo, 'stack', 'create', 'feature-a', feature_sha,
+            '--branch', 'pr/partial-full-control',
+        )
+        self.run_cli(repo, 'stack', 'push', 'feature-a')
+        partial_state_tip, partial = self.remote_state(origin)
+        integration_ref = 'refs/heads/integration/shared'
+        published_tip = partial['managed_refs'][integration_ref]
+        published_gitignore = self.git(
+            repo, 'show', f'{published_tip}:.gitignore'
+        ).stdout
+
+        self.run_cli(repo, 'publish')
+
+        full_state_tip, full = self.remote_state(origin)
+        full_tip = full['managed_refs'][integration_ref]
+        self.git(repo, 'merge-base', '--is-ancestor', published_tip, full_tip)
+        self.assertEqual(
+            self.git(repo, 'show', f'{full_tip}:.gitignore').stdout,
+            published_gitignore,
+        )
+        self.assertNotEqual(full_state_tip, partial_state_tip)
+        self.assertEqual(full['parent_state'], partial_state_tip)
+        self.assertEqual(full['publication_scope'], 'full')
+        self.assertEqual(full['projection_status'], 'convergent')
+
+    def test_integration_rebuild_replays_declared_product_from_the_published_tip(self):
+        for strategy in ('cherry-pick', 'merge-stacks'):
+            with self.subTest(strategy=strategy):
+                origin = self.create_remote(f'partial-replay-{strategy}')
+                repo = self.clone(origin, f'partial-replay-{strategy}-publisher')
+                self.init_coordinated(repo, integration_membership='required')
+                module = self.load_module()
+                manifest, manifest_path = module.load_manifest(repo)
+                manifest['integration']['strategy'] = strategy
+                with module.manifest_write_transaction(
+                    repo, manifest_path, f'fixture-partial-replay-{strategy}'
+                ):
+                    module.save_manifest_with_ledger(
+                        repo,
+                        manifest_path,
+                        manifest,
+                        'fixture_partial_replay_strategy',
+                    )
+                source = self.commit_on_branch(
+                    repo,
+                    f'pr/partial-replay-{strategy}',
+                    f'partial-replay-{strategy}.txt',
+                )
+                self.run_cli(
+                    repo, 'stack', 'create', 's1', source,
+                    '--branch', f'pr/partial-replay-{strategy}',
+                )
+                self.run_cli(repo, 'stack', 'push', 's1')
+                partial_state_tip, partial = self.remote_state(origin)
+                integration_ref = 'refs/heads/integration/shared'
+                published_tip = partial['managed_refs'][integration_ref]
+                published_gitignore = self.git(
+                    repo, 'show', f'{published_tip}:.gitignore'
+                ).stdout.encode()
+                published_manifest = self.git(
+                    repo,
+                    'show',
+                    f'{published_tip}:.syncwheel/manifest.json',
+                ).stdout.encode()
+
+                self.run_cli(
+                    repo, 'int', 'rebuild',
+                    '--reason', f'rebuild {strategy} from published partial tip',
+                )
+                rebuilt_tip = self.git(
+                    repo, 'rev-parse', 'integration/shared'
+                ).stdout.strip()
+
+                self.assertNotEqual(rebuilt_tip, published_tip)
+                self.git(
+                    repo, 'merge-base', '--is-ancestor',
+                    published_tip, rebuilt_tip,
+                )
+                rebuilt_manifest, _ = module.load_manifest(repo)
+                product_tree = module.materialize_integration_projection(
+                    repo, rebuilt_manifest
+                )
+                projected_tree = module.materialize_control_manifest_projection_tree(
+                    repo,
+                    rebuilt_manifest,
+                    product_tree,
+                    gitignore_bytes=published_gitignore,
+                    manifest_bytes=published_manifest,
+                )
+                self.assertEqual(module.ref_tree(repo, rebuilt_tip), projected_tree)
+                self.run_cli(repo, 'int', 'push')
+                full_state_tip, published = self.remote_state(origin)
+                self.assertNotEqual(full_state_tip, partial_state_tip)
+                self.assertEqual(
+                    published['managed_refs'][integration_ref], rebuilt_tip
+                )
+                self.assertEqual(
+                    self.git(
+                        repo,
+                        'show',
+                        f'{rebuilt_tip}:partial-replay-{strategy}.txt',
+                    ).stdout,
+                    f'pr/partial-replay-{strategy}\n',
+                )
+
+    def test_integration_rebuild_replays_a_declared_base_file_change_from_the_published_tip(self):
+        for strategy in ('cherry-pick', 'merge-stacks'):
+            with self.subTest(strategy=strategy):
+                origin = self.create_remote(f'partial-modify-{strategy}')
+                repo = self.clone(origin, f'partial-modify-{strategy}-publisher')
+                self.init_coordinated(repo, integration_membership='required')
+                module = self.load_module()
+                manifest, manifest_path = module.load_manifest(repo)
+                manifest['integration']['strategy'] = strategy
+                with module.manifest_write_transaction(
+                    repo, manifest_path, f'fixture-partial-modify-{strategy}'
+                ):
+                    module.save_manifest_with_ledger(
+                        repo,
+                        manifest_path,
+                        manifest,
+                        'fixture_partial_modify_strategy',
+                    )
+
+                previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+                branch = f'pr/partial-modify-{strategy}'
+                self.git(repo, 'switch', '-q', '-c', branch, 'origin/main')
+                (repo / 'README.md').write_text(
+                    f'declared {strategy} replacement\n'
+                )
+                self.git(repo, 'add', 'README.md')
+                self.git(
+                    repo, 'commit', '-q', '-m',
+                    f'feat: declared {strategy} base-file change',
+                )
+                source = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+                self.git(repo, 'switch', '-q', previous)
+                self.run_cli(
+                    repo, 'stack', 'create', 's1', source, '--branch', branch
+                )
+                self.run_cli(repo, 'stack', 'push', 's1')
+                partial_state_tip, partial = self.remote_state(origin)
+                integration_ref = 'refs/heads/integration/shared'
+                published_tip = partial['managed_refs'][integration_ref]
+                self.assertEqual(
+                    self.git(repo, 'show', f'{published_tip}:README.md').stdout,
+                    'seed\n',
+                )
+
+                self.run_cli(
+                    repo, 'int', 'rebuild',
+                    '--reason', f'rebuild declared {strategy} change from published tip',
+                )
+                rebuilt_tip = self.git(
+                    repo, 'rev-parse', 'integration/shared'
+                ).stdout.strip()
+
+                self.git(
+                    repo, 'merge-base', '--is-ancestor',
+                    published_tip, rebuilt_tip,
+                )
+                self.assertEqual(
+                    self.git(repo, 'show', f'{rebuilt_tip}:README.md').stdout,
+                    f'declared {strategy} replacement\n',
+                )
+                self.run_cli(repo, 'int', 'push')
+                full_state_tip, published = self.remote_state(origin)
+                self.assertNotEqual(full_state_tip, partial_state_tip)
+                self.assertEqual(
+                    published['managed_refs'][integration_ref], rebuilt_tip
+                )
+
+    def test_full_publish_refuses_to_drop_a_published_unmapped_product_path(self):
+        fixture = self.a14_published_tip_reuse_fixture(
+            'partial-full-product-refusal', publisher_change='product'
+        )
+        (fixture['follower'] / '.gitignore').unlink(missing_ok=True)
+        self.git(fixture['follower'], 'switch', '-q', 'integration/shared')
+        before = self.a14_published_tip_remote_observation(fixture)
+
+        failure = self.run_cli_unchecked(fixture['follower'], 'publish')
+
+        self.assertEqual(
+            failure.returncode, 2, failure.stdout + failure.stderr
+        )
+        self.assertIn(
+            'published integration contains unexplained product paths',
+            failure.stderr,
+        )
+        self.assertEqual(self.a14_published_tip_remote_observation(fixture), before)
+        self.assertEqual(
+            self.git(
+                fixture['follower'],
+                'show',
+                f"{before['integration_tip']}:published-only.txt",
+            ).stdout,
+            'published only\n',
+        )
+
+    def test_int_push_equal_manifest_refuses_non_descendant_product_bytes(self):
+        fixture = self.a14_published_tip_reuse_fixture('equal-manifest-int')
+
+        self.assert_a14_equal_manifest_push_refuses_non_descendant_product(
+            fixture,
+            fixture['integration_ref'],
+            ('int', 'push'),
+            'unprojected-integration.txt',
+            'local integration branch is not a safe successor of the published integration ref',
+        )
+
+    def test_stack_push_equal_manifest_refuses_non_descendant_product_bytes(self):
+        fixture = self.a14_published_tip_reuse_fixture('equal-manifest-stack')
+        stack_ref = 'refs/heads/pr/equal-manifest-stack-s1'
+
+        self.assert_a14_equal_manifest_push_refuses_non_descendant_product(
+            fixture,
+            stack_ref,
+            ('stack', 'push', 's1'),
+            'unprojected-stack.txt',
+            's1: local branch is not a safe successor of the published managed ref',
+        )
+
+    def test_published_tip_reuse_refuses_unowned_user_gitignore_history(self):
+        fixture = self.a14_published_tip_reuse_fixture(
+            'reuse-gitignore-delta', publisher_change='gitignore'
+        )
+        before = self.a14_published_tip_rebuild_observation(fixture)
+        remote_before = self.a14_published_tip_remote_observation(fixture)
+        published_gitignore = self.git(
+            fixture['follower'], 'show',
+            f"{fixture['published_tip']}:.gitignore",
+        ).stdout
+        self.assertIn('user-owned-ignore\n', published_gitignore)
+
+        failure = self.run_cli_unchecked(
+            fixture['follower'], 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
+        )
+
+        self.assertEqual(failure.returncode, 2, failure.stderr)
+        self.assertIn('integration reconciliation has unclassified history', failure.stderr)
+        self.assertEqual(self.a14_published_tip_rebuild_observation(fixture), before)
+        self.assertEqual(self.a14_published_tip_remote_observation(fixture), remote_before)
+        self.assertEqual(
+            self.git(
+                fixture['follower'], 'show',
+                f"{fixture['published_tip']}:.gitignore",
+            ).stdout,
+            published_gitignore,
+        )
+
+    def test_published_tip_reuse_rejects_dirty_or_malformed_source_gitignore(self):
+        for source_change in ('user-bytes', 'missing-end', 'duplicate'):
+            with self.subTest(source_change=source_change):
+                fixture = self.a14_published_tip_reuse_fixture(
+                    f'reuse-source-gitignore-{source_change}'
+                )
+                module = fixture['module']
+                path = fixture['follower'] / '.gitignore'
+                if source_change == 'user-bytes':
+                    path.write_text('local-user-ignore\n' + path.read_text())
+                elif source_change == 'missing-end':
+                    path.write_text(
+                        path.read_text().replace(
+                            module.SYNCWHEEL_GITIGNORE_END_MARKER + '\n', ''
+                        )
+                    )
+                else:
+                    path.write_text(
+                        path.read_text()
+                        + module.SYNCWHEEL_GITIGNORE_MARKER + '\n'
+                        + '\n'.join(
+                            module.syncwheel_gitignore_patterns('.syncwheel/wt')
+                        ) + '\n'
+                        + module.SYNCWHEEL_GITIGNORE_END_MARKER + '\n'
+                    )
+
+                self.assert_a14_published_tip_rebuild_refuses_without_local_mutation(
+                    fixture, 'source .gitignore differs from the published control bytes'
+                )
+
+    def test_published_tip_reuse_rejects_stale_state_and_ref_leases(self):
+        for stale in ('state', 'integration', 'base', 'merge-stack'):
+            with self.subTest(stale=stale):
+                fixture = self.a14_published_tip_reuse_fixture(
+                    f'reuse-stale-{stale}',
+                    integration_strategy=(
+                        'merge-stacks' if stale == 'merge-stack' else None
+                    ),
+                )
+                module = fixture['module']
+                before = self.a14_published_tip_rebuild_observation(fixture)
+                raced = False
+
+                def introduce_race():
+                    nonlocal raced
+                    raced = True
+                    if stale == 'state':
+                        subprocess.run(
+                            [
+                                'git', '--git-dir', str(fixture['origin']),
+                                'update-ref', '-d',
+                                'refs/heads/syncwheel/state/default',
+                            ],
+                            check=True,
+                        )
+                    elif stale == 'integration':
+                        subprocess.run(
+                            [
+                                'git', '--git-dir', str(fixture['origin']),
+                                'update-ref', fixture['integration_ref'],
+                                fixture['source'], fixture['published_tip'],
+                            ],
+                            check=True,
+                        )
+                    else:
+                        manifest = fixture['manifest']
+                        if stale == 'base':
+                            ref = self.git(
+                                fixture['follower'], 'rev-parse',
+                                '--symbolic-full-name',
+                                manifest['integration']['base'],
+                            ).stdout.strip()
+                        else:
+                            ref = 'refs/heads/' + manifest['stacks'][0]['branch']
+                        parent = self.git(
+                            fixture['follower'], 'rev-parse', ref
+                        ).stdout.strip()
+                        advanced = self.git(
+                            fixture['follower'], 'commit-tree',
+                            f'{parent}^{{tree}}', '-p', parent,
+                            '-m', f'test: race {stale} replay input',
+                        ).stdout.strip()
+                        self.git(
+                            fixture['follower'], 'update-ref',
+                            ref, advanced, parent,
+                        )
+
+                if stale == 'merge-stack':
+                    original = module.integration_projection_input_snapshot
+
+                    def race_replay_input_snapshot(*args, **kwargs):
+                        result = original(*args, **kwargs)
+                        if not raced:
+                            introduce_race()
+                        return result
+
+                    patched_name = 'integration_projection_input_snapshot'
+                    patched_effect = race_replay_input_snapshot
+                    expected_error = (
+                        'integration replay inputs changed during published-tip proof'
+                    )
+                else:
+                    original = module.apply_integration_reconciliation
+
+                    def race_before_reconciliation_cas(*args, **kwargs):
+                        if not raced:
+                            introduce_race()
+                        return original(*args, **kwargs)
+
+                    patched_name = 'apply_integration_reconciliation'
+                    patched_effect = race_before_reconciliation_cas
+                    expected_error = 'integration reconciliation lease changed before CAS'
+
+                parser = module.build_parser()
+                args = parser.parse_args([
+                    'int', 'rebuild', '--repo', str(fixture['follower']),
+                    '--reason', 'adopt reviewed control manifest proposal',
+                ])
+                args.dry_run = False
+                with mock.patch.object(
+                    module, patched_name, side_effect=patched_effect,
+                ):
+                    with self.assertRaisesRegex(
+                        module.SyncwheelError, expected_error,
+                    ):
+                        args.func(args)
+
+                self.assertTrue(raced)
+                self.assertEqual(
+                    self.a14_published_tip_rebuild_observation(fixture), before
+                )
+
+    def test_published_tip_reuse_dry_run_previews_retention(self):
+        fixture = self.a14_published_tip_reuse_fixture('reuse-dry-run')
+
+        preview = self.run_cli(
+            fixture['follower'], 'int', 'rebuild', '--dry-run',
+            '--reason', 'inspect reviewed control manifest proposal',
+        )
+
+        self.assertIn(
+            'would retain published integration tip '
+            + fixture['published_tip'],
+            preview.stdout,
+        )
+        self.assertNotIn('git reset --hard', preview.stdout)
+        self.assertNotIn('git worktree add', preview.stdout)
+
+    def test_stack_push_does_not_publish_unprojected_integration_bytes(self):
+        fixture = self.a14_published_tip_reuse_fixture('reuse-unprojected-product')
+        follower = fixture['follower']
+        integration_branch = fixture['manifest']['integration']['branch']
+        scratch = self.tmp / 'reuse-unprojected-integration'
+        self.git(
+            follower, 'worktree', 'add', '--detach', '-q',
+            str(scratch), fixture['published_tip'],
+        )
+        try:
+            (scratch / 'unprojected.txt').write_text('must stay local\n')
+            self.git(scratch, 'add', 'unprojected.txt')
+            self.git(
+                scratch, 'commit', '-q', '-m',
+                'test: unprojected integration bytes',
+            )
+            unprojected_tip = self.git(
+                scratch, 'rev-parse', 'HEAD'
+            ).stdout.strip()
+        finally:
+            self.git(follower, 'worktree', 'remove', '--force', str(scratch))
+        self.git(
+            follower, 'update-ref', f'refs/heads/{integration_branch}',
+            unprojected_tip, fixture['published_tip'],
+        )
+
+        source = self.commit_on_branch(
+            follower, 'pr/reuse-unprojected-s2', 'projected-s2.txt'
+        )
+        self.run_cli(
+            follower, 'stack', 'create', 's2', source,
+            '--branch', 'pr/reuse-unprojected-s2',
+        )
+        self.run_cli(follower, 'stack', 'push', 's2')
+
+        remote = self.a14_published_tip_remote_observation(fixture)
+        self.assertEqual(remote['integration_tip'], fixture['published_tip'])
+        self.assertEqual(
+            remote['state']['managed_refs'][fixture['integration_ref']],
+            fixture['published_tip'],
+        )
+        absent = self.git(
+            follower, 'show',
+            f"{remote['integration_tip']}:unprojected.txt", expected=128,
+        )
+        self.assertIn('does not exist', absent.stderr)
+
+    def test_stack_push_publishes_the_exact_projected_product_bytes(self):
+        fixture = self.a14_published_tip_reuse_fixture('reuse-projected-product')
+        follower = fixture['follower']
+        source = self.commit_on_branch(follower, 'pr/a14-s2', 'a14-s2.txt')
+        self.run_cli(
+            follower, 'stack', 'create', 's2', source,
+            '--branch', 'pr/a14-s2',
+        )
+        self.run_cli(
+            follower, 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
+        )
+        self.run_cli(follower, 'stack', 'push', 's2')
+
+        remote = self.a14_published_tip_remote_observation(fixture)
+        self.assertNotEqual(remote['integration_tip'], fixture['published_tip'])
+        self.git(
+            follower, 'merge-base', '--is-ancestor',
+            fixture['published_tip'], remote['integration_tip'],
+        )
+        module = fixture['module']
+        manifest, _ = module.load_manifest(follower)
+        replay_tree = module.materialize_integration_projection(follower, manifest)
+        gitignore = module.checkout_path_observation(follower, '.gitignore')
+        projected_tree = module.materialize_control_manifest_projection_tree(
+            follower,
+            manifest,
+            replay_tree,
+            gitignore_bytes=(
+                gitignore['bytes']
+                if gitignore['fingerprint']['kind'] == 'file'
+                else None
+            ),
+        )
+        self.assertEqual(
+            module.ref_tree(follower, remote['integration_tip']),
+            projected_tree,
+        )
+        self.assertEqual(
+            self.git(follower, 'show', 'origin/pr/a14-s2:a14-s2.txt').stdout,
+            'pr/a14-s2\n',
+        )
+
+    def test_a14_preserves_concurrent_tracked_edit_before_replay_reset(self):
+        fixture = self.a14_published_tip_reuse_fixture(
+            'a14-reset-window', integration_strategy='cherry-pick'
+        )
+        follower = fixture['follower']
+        module = fixture['module']
+        self.a14_checkout_published_integration(fixture)
+        plan = module.plan_published_integration_tip_reuse(
+            follower, fixture['manifest'], fixture['manifest_path']
+        )
+        self.assertEqual(plan['status'], 'replay')
+        self.assertTrue(plan['replayProductPaths'])
+        remote_before = self.a14_remote_snapshot(fixture)
+        original = module.find_worktree_for_branch
+        injected = []
+
+        def inject_before_source_reset(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if (
+                not injected
+                and result is not None
+                and Path(result).resolve() == follower.resolve()
+                and module.ref_tip(follower, fixture['integration_ref'])
+                != plan['publishedTip']
+            ):
+                (follower / 'README.md').write_text(
+                    'concurrent tracked edit before replay reset\n'
+                )
+                injected.append(self.a14_source_snapshot(fixture))
+            return result
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'rebuild', '--repo', str(follower),
+            '--reason', 'exercise reset-window source lease',
+        ])
+        error = None
+        returncode = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with mock.patch.object(
+            module, 'find_worktree_for_branch', side_effect=inject_before_source_reset
+        ):
+            try:
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    returncode = args.func(args)
+            except module.SyncwheelError as exc:
+                error = str(exc)
+
+        observed = {
+            'reached_reset_window': len(injected) == 1,
+            'refused': error is not None or returncode == 2,
+            'source_snapshot_preserved': bool(injected)
+            and self.a14_source_snapshot(fixture) == injected[0],
+            'remote_unchanged': self.a14_remote_snapshot(fixture) == remote_before,
+        }
+        self.assertEqual(
+            observed,
+            {
+                'reached_reset_window': True,
+                'refused': True,
+                'source_snapshot_preserved': True,
+                'remote_unchanged': True,
+            },
+            'A14_RESET_WINDOW_TRACKED_EDIT',
+        )
+
+    def test_a14_rechecks_source_head_index_status_manifest_and_gitignore_after_replay(self):
+        observed = {}
+        for kind in ('head', 'index', 'status', 'manifest', 'gitignore'):
+            fixture = self.a14_published_tip_reuse_fixture(
+                f'a14-post-replay-{kind}', integration_strategy='cherry-pick'
+            )
+            follower = fixture['follower']
+            module = fixture['module']
+            self.a14_checkout_published_integration(fixture)
+            plan = module.plan_published_integration_tip_reuse(
+                follower, fixture['manifest'], fixture['manifest_path']
+            )
+            self.assertEqual(plan['status'], 'replay')
+            self.assertTrue(plan['replayProductPaths'])
+            fixture['manifest'], fixture['manifest_path'] = (
+                self.stage_owned_control_manifest_delta(follower)
+            )
+            remote_before = self.a14_remote_snapshot(fixture)
+            original = module.apply_integration_reconciliation
+            injected = []
+
+            def inject_before_reconciliation_cas(*args, **kwargs):
+                if injected:
+                    return original(*args, **kwargs)
+                if kind == 'head':
+                    self.git(
+                        follower, 'commit', '--allow-empty', '-q', '-m',
+                        'test: concurrent post-replay head',
+                    )
+                elif kind == 'index':
+                    (follower / 'README.md').write_text(
+                        'concurrent post-replay index\n'
+                    )
+                    self.git(follower, 'add', 'README.md')
+                elif kind == 'status':
+                    (follower / 'README.md').write_text(
+                        'concurrent post-replay status\n'
+                    )
+                elif kind == 'manifest':
+                    path = fixture['manifest_path']
+                    path.write_bytes(path.read_bytes() + b' ')
+                else:
+                    path = follower / '.gitignore'
+                    path.write_bytes(path.read_bytes() + b'# concurrent source lease\n')
+                injected.append(self.a14_source_snapshot(fixture))
+                return original(*args, **kwargs)
+
+            parser = module.build_parser()
+            args = parser.parse_args([
+                'int', 'rebuild', '--repo', str(follower),
+                '--reason', f'exercise post-replay {kind} source lease',
+            ])
+            error = None
+            returncode = None
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with mock.patch.object(
+                module,
+                'apply_integration_reconciliation',
+                side_effect=inject_before_reconciliation_cas,
+            ):
+                try:
+                    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                        returncode = args.func(args)
+                except module.SyncwheelError as exc:
+                    error = str(exc)
+
+            observed[kind] = {
+                'reached_post_replay': len(injected) == 1,
+                'refused': error is not None or returncode == 2,
+                'source_snapshot_preserved': bool(injected)
+                and self.a14_source_snapshot(fixture) == injected[0],
+                'remote_unchanged': self.a14_remote_snapshot(fixture) == remote_before,
+            }
+
+        expected = {
+            kind: {
+                'reached_post_replay': True,
+                'refused': True,
+                'source_snapshot_preserved': True,
+                'remote_unchanged': True,
+            }
+            for kind in ('head', 'index', 'status', 'manifest', 'gitignore')
+        }
+        self.assertEqual(observed, expected, 'A14_SOURCE_LEASE_POST_REPLAY')
+
+    def test_a14_refuses_unmapped_product_fallback_during_int_rebuild(self):
+        fixture = self.a14_published_tip_reuse_fixture(
+            'a14-unmapped-product', publisher_change='product'
+        )
+        follower = fixture['follower']
+        module = fixture['module']
+        self.a14_checkout_published_integration(fixture)
+        plan = module.plan_published_integration_tip_reuse(
+            follower, fixture['manifest'], fixture['manifest_path']
+        )
+        self.assertIn(plan['status'], {'fallback', 'refuse'})
+        self.assertIn('unexplained product paths', plan['reason'])
+        local_before = self.a14_source_snapshot(fixture)
+        remote_before = self.a14_remote_snapshot(fixture)
+        published_before = self.git(
+            follower, 'show',
+            f"{fixture['published_tip']}:published-only.txt",
+        ).stdout
+
+        failure = self.run_cli_unchecked(
+            follower, 'int', 'rebuild',
+            '--reason', 'refuse an unmapped published product fallback',
+        )
+
+        observed = {
+            'returncode': failure.returncode,
+            'named_refusal': 'unexplained product paths' in failure.stderr,
+            'local_unchanged': self.a14_source_snapshot(fixture) == local_before,
+            'remote_unchanged': self.a14_remote_snapshot(fixture) == remote_before,
+            'published_bytes_preserved': self.git(
+                follower, 'show',
+                f"{fixture['published_tip']}:published-only.txt",
+            ).stdout == published_before == 'published only\n',
+        }
+        self.assertEqual(
+            observed,
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'local_unchanged': True,
+                'remote_unchanged': True,
+                'published_bytes_preserved': True,
+            },
+            'A14_UNMAPPED_PRODUCT_REFUSAL',
+        )
+
+    def prepare_selected_control_pending_reconcile(self, label, include_stack):
+        origin = self.create_remote(label)
+        repo = self.clone(origin, label)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        selected, _ = module.load_manifest(repo)
+        integration_branch = selected['integration']['branch']
+        integration_ref = f'refs/heads/{integration_branch}'
+        state_before, published = self.remote_state(origin)
+        published_tip = published['managed_refs'][integration_ref]
+        self.assertEqual(
+            self.git(repo, 'rev-parse', integration_branch).stdout.strip(),
+            published_tip,
+        )
+        tracked_manifest = repo / '.syncwheel' / 'manifest.json'
+        published_control = module.manifest_from_tree(
+            repo, published_tip, tracked_manifest
+        )
+        self.assertEqual(
+            module.manifest_digest(published_control),
+            module.manifest_digest(selected),
+        )
+
+        stack = None
+        if include_stack:
+            stack_id = f'{label}-stack'
+            stack_branch = f'pr/{stack_id}'
+            source = self.commit_on_branch(
+                repo, stack_branch, f'{stack_id}.txt'
+            )
+            stack = {
+                'id': stack_id,
+                'branch': stack_branch,
+                'base': selected['defaults']['base_ref'],
+                'target_remote': selected['defaults']['canonical_remote'],
+                'target_branch': selected['defaults']['base_branch'],
+                'integration_branch': integration_branch,
+                'commits': [source],
+                'state': 'published',
+                'publication': {'enabled': True},
+                'meta': {},
+            }
+            selected['stacks'].append(stack)
+
+        manifest_path = self.tmp / f'{label}-selected-manifest.json'
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+        selected, selected_path = module.load_manifest(repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+
+        local_control = json.loads(json.dumps(selected))
+        local_control['control'] = 'not selected by the external manifest'
+        self.git(repo, 'switch', '-q', integration_branch)
+        tracked_manifest.write_text(
+            module.canonical_manifest_file_text(local_control)
+        )
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(
+            repo, 'commit', '-q', '-m',
+            'syncwheel: persist unselected pending control state',
+        )
+        local_control_tip = self.git(
+            repo, 'rev-parse', integration_branch
+        ).stdout.strip()
+        self.assertEqual(
+            self.git(repo, 'rev-parse', f'{local_control_tip}^').stdout.strip(),
+            published_tip,
+        )
+        self.git(repo, 'merge-base', '--is-ancestor', published_tip, local_control_tip)
+        self.assertEqual(
+            self.git(
+                repo, 'diff-tree', '--no-commit-id', '--name-only', '-r',
+                published_tip, local_control_tip,
+            ).stdout.splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        entry = module.tree_path_entry(
+            repo, local_control_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(entry['mode'], '100644')
+        committed = json.loads(
+            module.tree_path_bytes(repo, entry).decode('utf-8')
+        )
+        self.assertNotEqual(
+            module.manifest_digest(committed), module.manifest_digest(selected)
+        )
+        return {
+            'origin': origin,
+            'repo': repo,
+            'module': module,
+            'manifest': selected,
+            'manifest_path': manifest_path,
+            'manifest_bytes': manifest_path.read_bytes(),
+            'integration_branch': integration_branch,
+            'integration_ref': integration_ref,
+            'published_tip': published_tip,
+            'local_control_tip': local_control_tip,
+            'state_before': state_before,
+            'stack': stack,
+        }
+
+
+    def test_reconcile_stack_only_pending_retry_ignores_unselected_integration_control(self):
+        fixture = self.prepare_selected_control_pending_reconcile(
+            'pending-stack-only', include_stack=True
+        )
+        module = fixture['module']
+        repo = fixture['repo']
+        stack = fixture['stack']
+        stack_ref = f"refs/heads/{stack['branch']}"
+        stack_tip = module.ref_tip(repo, stack['branch'])
+        operation = module.begin_coordination_publication(
+            repo,
+            fixture['manifest'],
+            fixture['manifest_path'],
+            {stack_ref: stack_tip},
+            'partial',
+            'partial',
+        )
+        token = operation['operation_token']
+        events_before = module.load_ledger_events(
+            repo, fixture['manifest_path']
+        )
+        intent_tokens_before = [
+            event['payload'].get('operation_token')
+            for event in events_before
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        self.assertEqual(intent_tokens_before, [token])
+        observed_pending = []
+        original_pending = module.pending_coordination_publication_for_scope
+
+        def record_pending(*args, **kwargs):
+            pending = original_pending(*args, **kwargs)
+            observed_pending.append({
+                'operation_token': pending.get('operation_token'),
+                'changed_refs': pending.get('changed_refs'),
+            })
+            return pending
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(repo),
+            '--manifest', str(fixture['manifest_path']), '--no-fetch',
+            '--apply', '--push', '--stack', stack['id'],
+            '--skip-integration', '--rebuild', 'none',
+        ])
+        args.git_args = []
+        with mock.patch.object(
+            module, 'reconcile_actions', return_value=[]
+        ), mock.patch.object(
+            module, 'pending_coordination_publication_for_scope',
+            side_effect=record_pending,
+        ):
+            returncode = args.func(args)
+
+        state_after, published = self.remote_state(fixture['origin'])
+        events_after = module.load_ledger_events(repo, fixture['manifest_path'])
+        intent_tokens_after = [
+            event['payload'].get('operation_token')
+            for event in events_after
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        terminal = [
+            event for event in events_after
+            if event['type']
+            in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+            and (event['payload'] or {}).get('operation_token') == token
+        ]
+        bare_stack_tip = self.git(
+            fixture['origin'], 'rev-parse', stack_ref
+        ).stdout.strip()
+        bare_integration_tip = self.git(
+            fixture['origin'], 'rev-parse', fixture['integration_ref']
+        ).stdout.strip()
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'observed_pending': observed_pending,
+                'intent_tokens_before': intent_tokens_before,
+                'intent_tokens_after': intent_tokens_after,
+                'pending_after': module.pending_coordination_publications(
+                    repo, fixture['manifest_path']
+                ),
+                'terminal_types': [event['type'] for event in terminal],
+                'remote_stack_tip': published['managed_refs'].get(stack_ref),
+                'bare_remote_stack_tip': bare_stack_tip,
+                'remote_integration_unchanged': published['managed_refs'].get(
+                    fixture['integration_ref']
+                ) == fixture['published_tip'],
+                'bare_remote_integration_unchanged': bare_integration_tip
+                == fixture['published_tip'],
+                'state_advanced': state_after != fixture['state_before'],
+                'local_integration_unchanged': module.ref_tip(
+                    repo, fixture['integration_branch']
+                ) == fixture['local_control_tip'],
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+            },
+            {
+                'returncode': 0,
+                'observed_pending': [{
+                    'operation_token': token,
+                    'changed_refs': {stack_ref: stack_tip},
+                }],
+                'intent_tokens_before': [token],
+                'intent_tokens_after': [token],
+                'pending_after': [],
+                'terminal_types': ['coordination_publish_completed'],
+                'remote_stack_tip': stack_tip,
+                'bare_remote_stack_tip': stack_tip,
+                'remote_integration_unchanged': True,
+                'bare_remote_integration_unchanged': True,
+                'state_advanced': True,
+                'local_integration_unchanged': True,
+                'manifest_unchanged': True,
+            },
+        )
+
+
+    def test_reconcile_pending_integration_refuses_unselected_control_before_publish(self):
+        fixture = self.prepare_selected_control_pending_reconcile(
+            'pending-integration-selected', include_stack=False
+        )
+        module = fixture['module']
+        repo = fixture['repo']
+        changed_refs = {
+            fixture['integration_ref']: fixture['local_control_tip']
+        }
+        operation = module.begin_coordination_publication(
+            repo,
+            fixture['manifest'],
+            fixture['manifest_path'],
+            changed_refs,
+            'partial',
+            'partial',
+        )
+        token = operation['operation_token']
+        events_before = module.load_ledger_events(
+            repo, fixture['manifest_path']
+        )
+        intent_tokens_before = [
+            event['payload'].get('operation_token')
+            for event in events_before
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        self.assertEqual(intent_tokens_before, [token])
+        observed_pending = []
+        publish_calls = []
+        original_pending = module.pending_coordination_publication_for_scope
+
+        def record_pending(*args, **kwargs):
+            pending = original_pending(*args, **kwargs)
+            observed_pending.append({
+                'operation_token': pending.get('operation_token'),
+                'changed_refs': pending.get('changed_refs'),
+            })
+            return pending
+
+        def block_publication(*args, **kwargs):
+            publish_calls.append({
+                'changed_refs': args[3],
+                'scope': args[4],
+            })
+            raise module.SyncwheelError(
+                'test sentinel blocked coordinated publication'
+            )
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(repo),
+            '--manifest', str(fixture['manifest_path']), '--no-fetch',
+            '--apply', '--push', '--skip-integration', '--rebuild', 'none',
+        ])
+        args.git_args = []
+        returncode = 0
+        refusal = None
+        with mock.patch.object(
+            module, 'reconcile_actions', return_value=[]
+        ), mock.patch.object(
+            module, 'pending_coordination_publication_for_scope',
+            side_effect=record_pending,
+        ), mock.patch.object(
+            module, 'coordinated_publish', side_effect=block_publication
+        ):
+            try:
+                returncode = args.func(args)
+            except module.SyncwheelError as exc:
+                returncode = 2
+                refusal = str(exc)
+
+        pending_after = module.pending_coordination_publications(
+            repo, fixture['manifest_path']
+        )
+        events_after = module.load_ledger_events(repo, fixture['manifest_path'])
+        intent_tokens_after = [
+            event['payload'].get('operation_token')
+            for event in events_after
+            if event['type'] == 'coordination_publish_intent'
+        ]
+        intents = [
+            event for event in events_after
+            if event['type'] == 'coordination_publish_intent'
+            and event['payload'].get('operation_token') == token
+        ]
+        terminal = [
+            event for event in events_after
+            if event['type']
+            in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+            and (event['payload'] or {}).get('operation_token') == token
+        ]
+        bare_integration_tip = self.git(
+            fixture['origin'], 'rev-parse', fixture['integration_ref']
+        ).stdout.strip()
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'named_refusal': bool(
+                    refusal and 'selected control manifest' in refusal
+                ),
+                'publish_calls': publish_calls,
+                'observed_pending': observed_pending,
+                'intent_tokens_before': intent_tokens_before,
+                'intent_tokens_after': intent_tokens_after,
+                'pending_tokens': [
+                    pending.get('operation_token') for pending in pending_after
+                ],
+                'intent_count': len(intents),
+                'terminal_events': terminal,
+                'remote_state_unchanged': self.remote_state(
+                    fixture['origin']
+                )[0] == fixture['state_before'],
+                'remote_integration_unchanged': self.remote_state(
+                    fixture['origin']
+                )[1]['managed_refs'][fixture['integration_ref']]
+                == fixture['published_tip'],
+                'bare_remote_integration_unchanged': bare_integration_tip
+                == fixture['published_tip'],
+                'local_integration_unchanged': module.ref_tip(
+                    repo, fixture['integration_branch']
+                ) == fixture['local_control_tip'],
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+            },
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'publish_calls': [],
+                'observed_pending': [{
+                    'operation_token': token,
+                    'changed_refs': changed_refs,
+                }],
+                'intent_tokens_before': [token],
+                'intent_tokens_after': [token],
+                'pending_tokens': [token],
+                'intent_count': 1,
+                'terminal_events': [],
+                'remote_state_unchanged': True,
+                'remote_integration_unchanged': True,
+                'bare_remote_integration_unchanged': True,
+                'local_integration_unchanged': True,
+                'manifest_unchanged': True,
+            },
+            'PENDING_INTEGRATION_REQUIRES_SELECTED_CONTROL',
+        )

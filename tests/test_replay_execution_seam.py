@@ -265,6 +265,75 @@ class ReplayExecutionSeamTest(unittest.TestCase):
             self.module.ref_tree(self.repo, 'main'),
         )
 
+    def detached_replay_fixture(self):
+        base = self.git('rev-parse', 'main')
+        self.git('switch', '-q', '-c', 'pr/detached', base)
+        (self.repo / 'product.txt').write_text('declared product\n')
+        self.git('add', 'product.txt')
+        self.git('commit', '-q', '-m', 'feat: declared product')
+        source = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+        (self.repo / 'local-only.txt').write_text('retained local history\n')
+        self.git('add', 'local-only.txt')
+        self.git('commit', '-q', '-m', 'local history must not move')
+        self.manifest['integration'].update(base=base, stacks=['detached'])
+        self.manifest['stacks'] = [{
+            'id': 'detached', 'branch': 'pr/detached', 'base': base,
+            'commits': [source],
+        }]
+        self.write_manifest()
+        (self.repo / 'alpha.txt').write_text('unstaged proposal\n')
+        (self.repo / 'beta.txt').write_text('staged proposal\n')
+        self.git('add', 'beta.txt')
+        return base, source
+
+    def detached_replay_source_state(self):
+        return {
+            'refs': self.git('show-ref'),
+            'head': self.git('rev-parse', 'HEAD'),
+            'index': (self.repo / '.git' / 'index').read_bytes(),
+            'files': {str(path.relative_to(self.repo)): path.read_bytes()
+                      for path in self.repo.rglob('*')
+                      if path.is_file() and '.git' not in path.relative_to(self.repo).parts},
+            'worktrees': self.git('worktree', 'list', '--porcelain'),
+        }
+
+    def test_detached_integration_replay_preserves_source_and_returns_repeatable_commit(self):
+        base, source = self.detached_replay_fixture()
+        for strategy in ('cherry-pick', 'merge-stacks'):
+            with self.subTest(strategy=strategy):
+                self.manifest['integration']['strategy'] = strategy
+                before = self.detached_replay_source_state()
+                first = self.module.materialize_integration_replay(self.repo, self.manifest)
+                second = self.module.materialize_integration_replay(self.repo, self.manifest)
+                self.assertEqual(first, second)
+                self.assertEqual(self.module.ref_tree(self.repo, first),
+                                 self.module.ref_tree(self.repo, source))
+                self.assertNotEqual(first, before['head'])
+                self.assertEqual(self.git('rev-parse', f'{first}^1'), base)
+                self.assertEqual(self.module.materialize_integration_projection(
+                    self.repo, self.manifest), self.module.ref_tree(self.repo, first))
+                self.assertEqual(self.detached_replay_source_state(), before)
+
+    def test_detached_integration_replay_cleans_up_after_conflict(self):
+        base, _ = self.detached_replay_fixture()
+        # A second declared commit adds the same path with different bytes.
+        with tempfile.TemporaryDirectory(dir=self.tmp) as tmp:
+            path = Path(tmp)
+            self.git('worktree', 'add', '--detach', '-q', str(path), base)
+            try:
+                (path / 'product.txt').write_text('conflicting product\n')
+                self.git('add', 'product.txt', cwd=path)
+                self.git('commit', '-q', '-m', 'feat: conflicting product', cwd=path)
+                conflict = self.git('rev-parse', 'HEAD', cwd=path)
+            finally:
+                self.git('worktree', 'remove', str(path))
+        self.manifest['stacks'][0]['commits'].append(conflict)
+        before = self.detached_replay_source_state()
+        with self.assertRaises(self.module.SyncwheelError):
+            self.module.materialize_integration_replay(self.repo, self.manifest)
+        self.assertEqual(self.detached_replay_source_state(), before)
+
 
 if __name__ == '__main__':
     unittest.main()

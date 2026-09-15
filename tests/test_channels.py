@@ -1705,10 +1705,15 @@ class DeploymentChannelTest(unittest.TestCase):
         )
         real_append = module.append_ledger_event
 
-        def fail_publish_compat(repo_root, event_type, payload, path=None):
+        def fail_publish_compat(
+            repo_root, event_type, payload, path=None, idempotency_key=None,
+        ):
             if event_type == 'channel_published':
                 raise OSError('compatibility event unavailable')
-            return real_append(repo_root, event_type, payload, path)
+            return real_append(
+                repo_root, event_type, payload, path,
+                idempotency_key=idempotency_key,
+            )
 
         with mock.patch.object(
             module, 'append_ledger_event', side_effect=fail_publish_compat
@@ -1735,10 +1740,15 @@ class DeploymentChannelTest(unittest.TestCase):
             plan_digest=close_preview['planDigest'], operation_id=None,
         )
 
-        def fail_close_compat(repo_root, event_type, payload, path=None):
+        def fail_close_compat(
+            repo_root, event_type, payload, path=None, idempotency_key=None,
+        ):
             if event_type == 'channel_closed':
                 raise OSError('compatibility event unavailable')
-            return real_append(repo_root, event_type, payload, path)
+            return real_append(
+                repo_root, event_type, payload, path,
+                idempotency_key=idempotency_key,
+            )
 
         with mock.patch.object(
             module, 'append_ledger_event', side_effect=fail_close_compat

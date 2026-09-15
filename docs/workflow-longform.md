@@ -38,8 +38,35 @@ Mutating `stack push`, `int rebuild`, and `int push` all enter the same
 manifest-write classification and recover any pending control-manifest intent
 before loading the manifest. Control persistence is ordered as durable intent,
 ref CAS, checkout alignment without a ref move, manifest save, then receipt.
-When `stack push` creates or recovers that control commit, its coordinated
-atomic publish includes the integration ref together with the stack ref.
+`stack push` includes a local integration control tip in its coordinated atomic
+publish only when that tip has one persistence receipt and its tree is the exact
+current projection. An ineligible housekeeping tip remains local; every ref
+selected for publication still passes the shared successor guard.
+
+For an already published integration branch, rebuild first materializes the
+declared replay without moving integration. A reconciliation commit preserves
+the previous local tip as its first parent and the replay result as its second,
+while its tree contains the selected product and control bytes. Its version-2
+control intent binds the replay inputs, source and destination leases, and
+provenance transition before the single ref CAS. Recovery reuses that exact
+object; later checkout or provenance changes leave the intent pending instead
+of being overwritten. Existing version-1 control intents retain their recovery
+path. A fresh clone recognizes reconciliation through the published state and
+the commit's deterministic replay proof, not another clone's local ledger.
+If inputs change before the CAS, ordinary recovery refuses the stale intent;
+`int rebuild --reason "<reviewed change>"` retires that unapplied intent and
+plans from the current selection. This escape does not abandon an intent
+whose ref CAS already landed.
+
+Integration reports distinguish product equivalence from selected control state:
+`*_matches_product_projection` compares product bytes, while
+`*_control_manifest_matches_selected` validates the literal regular control blob.
+The older `*_matches_projection` fields remain product-equivalence aliases.
+Alignment and publication validate the selected control state on the exact OID
+they consume; a stack-only retry does not adopt an unrelated integration tip.
+Control persistence also canonicalizes equivalent JSON representations through
+its normal durable transaction, so formatting alone cannot defeat Git tree
+equivalence after another clone wins a publication race.
 
 ## What becomes deterministic
 
