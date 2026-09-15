@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/mgt-0287-sw1"
   ],
-  "claimed_at": "2026-09-15T15:27:50+00:00",
+  "claimed_at": "2026-09-15T16:10:41+00:00",
   "coordination_id": "default",
-  "operation_token": "4aefaeeb-0ad2-45e5-96f4-4767538d472a",
+  "operation_token": "e9e8ad07-db2b-40c4-9676-4bb66d2e3ea4",
   "publication_scope": "stack:mgt-0287-sw1",
   "source_ref": "refs/heads/pr/mgt-0287-sw1",
   "syncwheel_version": "0.43.5"
