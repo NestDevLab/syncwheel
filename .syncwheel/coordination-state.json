@@ -1,14 +1,14 @@
 {
   "changed_refs": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "5a49250513fc5d3f479f25bc6624bc5c89aecf88"
+    "refs/heads/pr/mgt-0287-ci-sharding": "bbec5e736a31d8a55280ac8699e4b82b65174626"
   },
   "claims": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "853877ae46e068580f65b704a41373e762e4cd75",
+    "refs/heads/pr/mgt-0287-ci-sharding": "d02f22375442e645c54c1d004265afff71f0c5a0",
     "refs/heads/pr/mgt-0287-sw1": "5c9a965bcbee88fdff7cffd27d5f589138a530fd",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-15T19:21:48+00:00",
+  "created_at": "2026-09-15T20:30:39+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -24,7 +24,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
-    "refs/heads/pr/mgt-0287-ci-sharding": "5a49250513fc5d3f479f25bc6624bc5c89aecf88",
+    "refs/heads/pr/mgt-0287-ci-sharding": "bbec5e736a31d8a55280ac8699e4b82b65174626",
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
@@ -150,10 +150,10 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "14b3d55c-bb11-4d11-a98f-b5ef2bac0dff",
-  "parent_state": "5ce23f323b8f4b3f48e6f1a7d77949205dcd4809",
+  "operation_token": "01a87fe8-f6fe-4670-89e0-94085963b2ac",
+  "parent_state": "31d59269659cb087b7ac31852751d510497a6fd4",
   "projection_status": "partial",
-  "publication_id": "b0e524a2-812e-47d3-aae7-e5044dcfc2fd",
+  "publication_id": "e6564cc4-be4c-4f6d-99ae-69366ff235e6",
   "publication_scope": "stack:mgt-0287-ci-sharding",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
