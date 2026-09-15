@@ -4290,6 +4290,170 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertTrue(report['local_matches_projection'])
 
+    def test_integration_projection_rejects_invalid_json_control_manifest(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/invalid-json')
+        manifest['integration'] = {
+            'branch': 'integration/invalid-json',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text('{invalid\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record invalid control state')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, base))
+        self.assertEqual(manifest_entry['mode'], '100644')
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertIsNone(report['local_matches_projection'])
+        self.assertIn('integration control manifest is invalid', report['projection_error'])
+
+    def test_integration_projection_rejects_non_object_control_manifest(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/non-object-manifest')
+        manifest['integration'] = {
+            'branch': 'integration/non-object-manifest',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text('[]\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record non-object control state')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, base))
+        self.assertEqual(manifest_entry['mode'], '100644')
+        self.assertEqual(
+            json.loads(module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')),
+            [],
+        )
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertFalse(report['local_matches_projection'])
+        self.assertNotIn('projection_error', report)
+
+    def test_integration_projection_rejects_non_regular_control_manifest_path(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/symlink-manifest')
+        manifest['integration'] = {
+            'branch': 'integration/symlink-manifest',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.unlink()
+        manifest_path.symlink_to(module.canonical_manifest_json(manifest))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record symlink control state')
+        self.git('switch', '-q', 'main')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+
+        self.assertEqual(manifest_entry['mode'], '120000')
+        self.assertEqual(
+            json.loads(module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')),
+            manifest,
+        )
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, base))
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertFalse(report['local_matches_projection'])
+
+    def test_integration_projection_rejects_unmanaged_gitignore_bytes(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/unmanaged-gitignore')
+        manifest['integration'] = {
+            'branch': 'integration/unmanaged-gitignore',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text(
+            module.canonical_manifest_file_text(manifest)
+        )
+        expected_managed = '\n'.join([
+            module.SYNCWHEEL_GITIGNORE_MARKER,
+            *module.syncwheel_gitignore_patterns(module.syncwheel_worktree_root(manifest)),
+            module.SYNCWHEEL_GITIGNORE_END_MARKER,
+            '',
+        ])
+        gitignore_text = 'user-owned candidate bytes\n' + expected_managed
+        Path(self.repo / '.gitignore').write_text(gitignore_text)
+        self.git('add', '.syncwheel/manifest.json', '.gitignore')
+        self.git('commit', '-q', '-m', 'syncwheel: record changed unmanaged ignore bytes')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+        candidate_gitignore = module.tree_path_entry(
+            self.repo, report['local_tree'], '.gitignore'
+        )
+        product_gitignore = module.tree_path_entry(
+            self.repo, report['projected_tree'], '.gitignore'
+        )
+        split = module.split_syncwheel_managed_gitignore(
+            gitignore_text, module.syncwheel_worktree_root(manifest)
+        )
+
+        self.assertEqual(manifest_entry['mode'], '100644')
+        self.assertEqual(
+            json.loads(module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')),
+            manifest,
+        )
+        self.assertEqual(candidate_gitignore['mode'], '100644')
+        self.assertIsNone(product_gitignore)
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.gitignore', '.syncwheel/manifest.json'],
+        )
+        self.assertIsNotNone(split)
+        self.assertEqual(split['managed'], expected_managed)
+        self.assertEqual(split['unmanaged'], 'user-owned candidate bytes\n')
+        self.assertNotEqual(
+            split['unmanaged'].encode('utf-8'),
+            module.tree_path_bytes(self.repo, product_gitignore),
+        )
+        self.assertFalse(report['local_matches_projection'])
+
     def test_integration_projection_rejects_product_tree_difference(self):
         module = self.load_syncwheel_module()
         manifest = self.read_manifest()
