@@ -4070,6 +4070,134 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork main', result.stdout)
 
+    def test_int_push_publishes_the_frozen_oid_when_the_local_ref_advances(self):
+        module = self.load_syncwheel_module()
+        branch = 'integration/frozen-push'
+        integration_ref = f'refs/heads/{branch}'
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'frozen-push-manifest.json'
+        selected = self.read_manifest()
+        selected['defaults']['publication_remote'] = 'origin'
+        selected['integration'] = {
+            'branch': branch,
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        selected['stacks'] = []
+        manifest_path.write_text(json.dumps(selected, indent=2) + '\n')
+        selected, selected_path = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+        manifest_before = manifest_path.read_bytes()
+
+        self.git('branch', branch, base)
+        origin = self.tmp / 'frozen-push-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('switch', '-q', branch)
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(selected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist selected control state')
+        frozen_tip = self.git('rev-parse', branch)
+        self.assertEqual(self.git('rev-parse', f'{frozen_tip}^'), base)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                base, frozen_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        manifest_entry = module.tree_path_entry(
+            self.repo, frozen_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(manifest_entry['mode'], '100644')
+        committed = json.loads(
+            module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')
+        )
+        self.assertEqual(
+            module.manifest_digest(committed), module.manifest_digest(selected)
+        )
+
+        advanced_tip = self.git(
+            'commit-tree', f'{frozen_tip}^{{tree}}', '-p', frozen_tip,
+            '-m', 'test: concurrent same-tree local advance',
+        )
+        self.assertEqual(
+            module.ref_tree(self.repo, advanced_tip),
+            module.ref_tree(self.repo, frozen_tip),
+        )
+        original_push = module.run_authorized_push
+        push_observations = []
+
+        def advance_then_push(repo_root, command, remote, refs, check=True):
+            self.assertEqual(module.ref_tip(repo_root, branch), frozen_tip)
+            module.git(
+                repo_root, 'update-ref', integration_ref,
+                advanced_tip, frozen_tip,
+            )
+            push_observations.append({
+                'command': list(command),
+                'remote': remote,
+                'refs': list(refs),
+            })
+            return original_push(
+                repo_root, command, remote, refs, check=check
+            )
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'push', '--repo', str(self.repo),
+            '--manifest', str(manifest_path), '--remote', 'origin',
+        ])
+        with mock.patch.object(
+            module, 'run_authorized_push', side_effect=advance_then_push
+        ):
+            returncode = args.func(args)
+
+        remote_tip = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', integration_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        pushed_events = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, manifest_path
+            )
+            if event['type'] == 'integration_pushed'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'push_calls': len(push_observations),
+                'refspec': push_observations[0]['command'][-1],
+                'remote': push_observations[0]['remote'],
+                'authorized_refs': push_observations[0]['refs'],
+                'remote_tip': remote_tip,
+                'local_tip': self.git('rev-parse', branch),
+                'ledger_tips': [event['tip'] for event in pushed_events],
+                'manifest_unchanged': manifest_path.read_bytes() == manifest_before,
+                'worktree_clean': self.git('status', '--porcelain=v1') == '',
+            },
+            {
+                'returncode': 0,
+                'push_calls': 1,
+                'refspec': f'{frozen_tip}:{integration_ref}',
+                'remote': 'origin',
+                'authorized_refs': [integration_ref],
+                'remote_tip': frozen_tip,
+                'local_tip': advanced_tip,
+                'ledger_tips': [frozen_tip],
+                'manifest_unchanged': True,
+                'worktree_clean': True,
+            },
+            'NONCOORDINATED_INT_PUSH_FROZEN_OID',
+        )
+
     def test_reconcile_push_uses_force_with_lease_by_default(self):
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
