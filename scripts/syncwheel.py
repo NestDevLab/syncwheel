@@ -205,7 +205,7 @@ STACK_LAND_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
 GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
-GITHUB_PR_MERGE_BYPASSES = {'required_reviews'}
+GITHUB_PR_MERGE_BYPASSES = {'private_free_rules', 'required_reviews'}
 GITHUB_PR_MERGE_CHECKS = {'all'}
 GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
 GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
@@ -7534,7 +7534,8 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
         )
     bypasses = string_list('allowed_bypasses', required=True)
     if any(item not in GITHUB_PR_MERGE_BYPASSES for item in bypasses):
-        raise SyncwheelError(f'{path}.allowed_bypasses accepts only required_reviews')
+        accepted = ', '.join(sorted(GITHUB_PR_MERGE_BYPASSES))
+        raise SyncwheelError(f'{path}.allowed_bypasses accepts only: {accepted}')
     checks = value.get('checks')
     if checks not in GITHUB_PR_MERGE_CHECKS:
         raise SyncwheelError(f'{path}.checks accepts only all')
@@ -7804,12 +7805,48 @@ def github_rule_review_required(rules):
     return False
 
 
-def github_rules_blockers(rules, blockers):
+def github_private_free_rules_unavailable(repository_info, rules):
+    """Recognize GitHub Free's explicit private-repository rules API limit."""
+    if not isinstance(repository_info, dict) or repository_info.get('isPrivate') is not True:
+        return False
     if not isinstance(rules, dict):
-        return
+        return False
+    plan_limit = 'upgrade to github pro or make this repository public to enable this feature'
+    unavailable = False
+    for prefix in ('branchProtection', 'rulesets'):
+        status = rules.get(f'{prefix}Status')
+        detail = str(rules.get(f'{prefix}Error') or '').casefold()
+        if status in (None, 200, 404):
+            continue
+        if status == 403 and plan_limit in detail:
+            unavailable = True
+            continue
+        return False
+    return unavailable
+
+
+def github_rules_blockers(rules, blockers, *, repository_info=None, allowed_bypasses=(), warnings=None):
+    if not isinstance(rules, dict):
+        return None
+    private_free_fallback = (
+        'private_free_rules' in set(allowed_bypasses or [])
+        and github_private_free_rules_unavailable(repository_info, rules)
+    )
+    if private_free_fallback and warnings is not None:
+        warnings.append({
+            'code': 'private_free_rules_unavailable',
+            'detail': (
+                'GitHub Free does not expose rules APIs for this private repository; '
+                'the merge remains subject to GitHub server-side enforcement'
+            ),
+        })
     if rules.get('mergeQueue') is True or rules.get('merge_queue') is True:
         github_blocker(blockers, 'merge_queue', 'merge queue is enabled and unsupported')
-    if rules.get('branchProtectionStatus') not in (None, 200, 404) and rules.get('branchProtectionError'):
+    if (
+        not private_free_fallback
+        and rules.get('branchProtectionStatus') not in (None, 200, 404)
+        and rules.get('branchProtectionError')
+    ):
         github_blocker(blockers, 'rules_unavailable', 'GitHub branch protection could not be observed')
     rulesets = rules.get('rulesets')
     if isinstance(rulesets, dict):
@@ -7826,8 +7863,13 @@ def github_rules_blockers(rules, blockers):
             github_blocker(blockers, 'unknown_rule', f'unrecognized GitHub rule: {rule_type}')
         if rule_type == 'merge_queue':
             github_blocker(blockers, 'merge_queue', 'merge queue rule is unsupported')
-    if rules.get('rulesetsStatus') not in (None, 200, 404) and rules.get('rulesetsError'):
+    if (
+        not private_free_fallback
+        and rules.get('rulesetsStatus') not in (None, 200, 404)
+        and rules.get('rulesetsError')
+    ):
         github_blocker(blockers, 'rules_unavailable', 'GitHub rules could not be observed')
+    return 'private_free_rules' if private_free_fallback else None
 
 
 def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
@@ -8040,7 +8082,13 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     allow_methods = repository_info.get('allowMergeMethods') if isinstance(repository_info, dict) else {}
     if isinstance(allow_methods, dict) and allow_methods.get(policy['merge_method']) is not True:
         github_blocker(blockers, 'merge_method_disabled', f"merge method is disabled: {policy['merge_method']}")
-    github_rules_blockers(rules, blockers)
+    rules_fallback = github_rules_blockers(
+        rules,
+        blockers,
+        repository_info=repository_info,
+        allowed_bypasses=policy['allowed_bypasses'],
+        warnings=warnings,
+    )
     try:
         target_base_sha = remote_ref_tips(
             repo_root,
@@ -8089,6 +8137,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'review': pr.get('review') or {},
         'threads': (pr.get('review') or {}).get('threads') or [],
         'rules': rules,
+        'rulesFallback': rules_fallback,
         'mergeMethod': policy['merge_method'],
         'path': path,
         'command': command,

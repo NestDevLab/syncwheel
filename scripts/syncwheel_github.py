@@ -280,6 +280,8 @@ def observe(request, cwd):
             "permissions": repo_info.get("permissions") or {},
             "allowMergeMethods": allow,
             "defaultBranch": repo_info.get("default_branch"),
+            "isPrivate": bool(repo_info.get("private")),
+            "visibility": repo_info.get("visibility"),
         },
         "pr": {
             "number": pr.get("number", number),
