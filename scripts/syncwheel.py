@@ -6354,10 +6354,13 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     observed_digest = manifest_digest(observed) if observed is not None else None
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     current_tip = ref_tip(repo_root, integration_ref)
-    if observed_digest == expected_digest and current_tip == replay_tip:
+    control_commit = materialize_control_manifest_commit(repo_root, manifest, replay_tip)
+    # Semantic equality does not make differently formatted Git blobs equal.
+    # Canonicalize through the same durable transaction before relying on exact
+    # tree equivalence after another publisher wins a coordination race.
+    if observed_digest == expected_digest and current_tip == replay_tip and control_commit == replay_tip:
         capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
         return False
-    control_commit = materialize_control_manifest_commit(repo_root, manifest, replay_tip)
     transaction = active_manifest_write_transaction(manifest_path)
     if transaction is not None:
         replayed_source, _ = load_manifest(repo_root, manifest_path)
@@ -12460,18 +12463,6 @@ def validate_coordination_publication_base(
     )
     remote_snapshot = state['manifest']
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
-    validate_coordination_changed_ref_successors(
-        repo_root,
-        manifest,
-        config,
-        state,
-        remote_snapshot,
-        local_snapshot,
-        changed_refs,
-    )
-    if remote_snapshot == local_snapshot:
-        return digest_form
-
     remote_stacks = stack_snapshot_map(remote_snapshot)
     local_stacks = stack_snapshot_map(local_snapshot)
     remote_ids = set(remote_stacks)
@@ -12502,6 +12493,20 @@ def validate_coordination_publication_base(
             + ', '.join(unexpected_removed_channels)
             + '; run handoff and resolve the stale manifest first'
         )
+    # Report an erased declaration before ancestry drift; every admissible
+    # publication still passes the unchanged successor guard before any return.
+    validate_coordination_changed_ref_successors(
+        repo_root,
+        manifest,
+        config,
+        state,
+        remote_snapshot,
+        local_snapshot,
+        changed_refs,
+    )
+    if remote_snapshot == local_snapshot:
+        return digest_form
+
     changed_channel_refs = {
         channel['id']
         for channel in manifest.get('channels', [])

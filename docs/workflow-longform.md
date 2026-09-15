@@ -64,6 +64,9 @@ Integration reports distinguish product equivalence from selected control state:
 The older `*_matches_projection` fields remain product-equivalence aliases.
 Alignment and publication validate the selected control state on the exact OID
 they consume; a stack-only retry does not adopt an unrelated integration tip.
+Control persistence also canonicalizes equivalent JSON representations through
+its normal durable transaction, so formatting alone cannot defeat Git tree
+equivalence after another clone wins a publication race.
 
 ## What becomes deterministic
 

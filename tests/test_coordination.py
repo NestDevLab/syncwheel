@@ -4863,11 +4863,16 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.disable_fixture_hooks(peer)
         for branch in ('integration/shared', 'pr/orphan', 'pr/new-stack'):
             self.git(peer, 'branch', branch, f'origin/{branch}')
-        self.run_cli(
-            peer,
-            'int', 'rebuild',
-            '--reason', 'adopt the first compose publication',
+        # This fixture intentionally publishes unmapped product files. A full
+        # rebuild must refuse them; adopt the published branch without replay
+        # so the test reaches the later compose-adoption race it exercises.
+        self.git(peer, 'switch', '-q', 'integration/shared')
+        self.assertEqual(
+            self.git(peer, 'rev-parse', 'HEAD').stdout.strip(),
+            first_state['managed_refs']['refs/heads/integration/shared'],
         )
+        for index in (1, 2):
+            self.assertEqual((peer / f'unmapped-{index}.txt').read_text(), f'unmapped {index}\n')
         third_tip = self.commit_on_branch(peer, 'pr/third', 'third.txt')
         self.run_cli(
             peer, 'stack', 'create', 'third', third_tip, '--branch', 'pr/third'
