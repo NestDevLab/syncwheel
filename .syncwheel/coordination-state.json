@@ -1,13 +1,13 @@
 {
   "changed_refs": {
-    "refs/heads/pr/mgt-0287-sw1": "f2e984fe88791e8bc4fa8522126da3d653f4db61"
+    "refs/heads/pr/mgt-0287-sw1": "1e5085e98bd32d74caabdd91ef9f3516d1a3d462"
   },
   "claims": {
-    "refs/heads/pr/mgt-0287-sw1": "4566d03603f8c97f73d126e6d9eeea848ce33d68",
+    "refs/heads/pr/mgt-0287-sw1": "1e1b26642361c52a6bd5623aaabef00af34d4c16",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-15T13:11:46+00:00",
+  "created_at": "2026-09-15T15:27:50+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -23,7 +23,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
-    "refs/heads/pr/mgt-0287-sw1": "f2e984fe88791e8bc4fa8522126da3d653f4db61",
+    "refs/heads/pr/mgt-0287-sw1": "1e5085e98bd32d74caabdd91ef9f3516d1a3d462",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
     "refs/heads/pr/reconcile-replay-mode-args": "6f51bb1b92e689043a0055d806b4f9fc2ff5ce36",
@@ -116,7 +116,8 @@
           "ad7aea33efda0187195ed2f98006c8b9a334f329",
           "7d41551d733de785d1e97522b9e0c4470b955a28",
           "3127a1c12ff5d07d3f080ca70bd3224f8fae466c",
-          "f2e984fe88791e8bc4fa8522126da3d653f4db61"
+          "f2e984fe88791e8bc4fa8522126da3d653f4db61",
+          "1e5085e98bd32d74caabdd91ef9f3516d1a3d462"
         ],
         "id": "mgt-0287-sw1",
         "integration_branch": "main-integration",
@@ -126,10 +127,10 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "9061edce-fbc0-455f-a905-8a387edc7bba",
-  "parent_state": "5a7bf8d367b6416ffbfd14f6039f06ddbf80ed91",
+  "operation_token": "4aefaeeb-0ad2-45e5-96f4-4767538d472a",
+  "parent_state": "a81b2a87f70fb9358f5470ae3eb8260640026db7",
   "projection_status": "partial",
-  "publication_id": "99a30f1f-049f-4743-acf6-10042b888dd6",
+  "publication_id": "ac7446f4-eab2-463d-8aed-c0e7a88123c6",
   "publication_scope": "stack:mgt-0287-sw1",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
