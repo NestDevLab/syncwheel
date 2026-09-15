@@ -70,7 +70,7 @@ jobs:
     name: unit (${{ matrix.python-version }}, shard ${{ matrix.shard }}/6)
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       max-parallel: 18
