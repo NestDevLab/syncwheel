@@ -3,12 +3,12 @@
     "refs/heads/pr/mgt-0287-ci-sharding": "dfcfc0ec0946f92066a8986079c282aecde02d65"
   },
   "claims": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "18f32a769081bb7004b4d953efb20def36d22a78",
+    "refs/heads/pr/mgt-0287-ci-sharding": "693c58cf1ad8b47f6f205b923e58c4fc65220ba1",
     "refs/heads/pr/mgt-0287-sw1": "8abee5e30b581a37ec87228bcf4d4b0b6e204d52",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-15T18:34:25+00:00",
+  "created_at": "2026-09-15T18:34:55+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -148,10 +148,10 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "f89140cf-38ec-4bf0-9a34-c4a0a161916b",
-  "parent_state": "2665cd3ff353f4b0aa39f4431fd33b46570b3878",
+  "operation_token": "60bc964c-89d2-4c8d-9f91-4bdebb320560",
+  "parent_state": "9e164041720da405e1cde4dd533453c7f55cd363",
   "projection_status": "partial",
-  "publication_id": "cf1e6da5-f2cd-4f12-8d3c-031eb662ecff",
+  "publication_id": "81992d9a-65aa-414d-9e8b-cb1cebb32bee",
   "publication_scope": "stack:mgt-0287-ci-sharding",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
