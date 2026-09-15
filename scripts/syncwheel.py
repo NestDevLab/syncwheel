@@ -23836,19 +23836,21 @@ def command_reconcile(args):
                 })
                 continue
             remote = args.remote or manifest['defaults']['publication_remote']
-            command = ['git', 'push', *push_args, remote, manifest['integration']['branch']]
+            branch = manifest['integration']['branch']
+            ref = f'refs/heads/{branch}'
+            tip = ref_tip(repo_root, branch)
+            command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
             run_authorized_push(
-                repo_root, command, remote,
-                [f"refs/heads/{manifest['integration']['branch']}"],
+                repo_root, command, remote, [ref],
             )
             print(quoted(command))
             append_ledger_event(
                 repo_root,
                 'integration_pushed',
                 {
-                    'branch': manifest['integration']['branch'],
+                    'branch': branch,
                     'remote': remote,
-                    'tip': ref_tip(repo_root, manifest['integration']['branch']),
+                    'tip': tip,
                 },
                 manifest_path,
             )
@@ -24384,8 +24386,11 @@ def command_int_push(args):
     if args.dry_run:
         print(quoted(command))
         return 0
+    ref = f"refs/heads/{integration['branch']}"
+    tip = ref_tip(repo_root, integration['branch'])
+    command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
     run_authorized_push(
-        repo_root, command, remote, [f"refs/heads/{integration['branch']}"]
+        repo_root, command, remote, [ref]
     )
     print(quoted(command))
     append_ledger_event(
@@ -24394,7 +24399,7 @@ def command_int_push(args):
         {
             'branch': integration['branch'],
             'remote': remote,
-            'tip': ref_tip(repo_root, integration['branch']),
+            'tip': tip,
         },
         manifest_path,
     )
