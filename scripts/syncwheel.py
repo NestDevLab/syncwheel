@@ -48,6 +48,10 @@ class CoordinationRemoteRejection(SyncwheelError):
     """The coordination remote refused the atomic push and nothing moved."""
 
 
+class IntegrationReconciliationLeaseDrift(SyncwheelError):
+    """A prepared reconciliation lost an input lease before moving its ref."""
+
+
 class ControlManifestAlignmentDrift(SyncwheelError):
     """The integration ref moved after the control-manifest decision point."""
 
@@ -2861,54 +2865,65 @@ def update_common_derived_provenance(
             repo_root, manifest, coordination_state
         )
         original_store = load_derived_provenance_store(repo_root)
-        shared_by_paths = {
-            tuple(item['paths']): item for item in shared
-        }
-        store = {
-            'version': DERIVED_PROVENANCE_STORE_VERSION,
-            'overrides': [
-                item for item in original_store['overrides']
-                if item['record'] != shared_by_paths.get(tuple(item['paths']))
-            ],
-        }
-        store = normalize_derived_provenance_store(store)
-        effective = apply_derived_provenance_overrides(
-            shared, store, coordinated=coordination_is_active(manifest)
+        updated = projected_derived_provenance_store(
+            original_store, shared, paths, record, expected_commit=expected_commit,
+            coordinated=coordination_is_active(manifest),
         )
-        key = tuple(paths)
-        current = {tuple(item['paths']): item for item in effective}.get(key)
-        if expected_commit is not None and current is not None and (
-            current['commit'] != expected_commit
-        ):
-            raise SyncwheelError(
-                'derived provenance changed before reconciliation for '
-                + json.dumps(paths, ensure_ascii=True)
-            )
-        if expected_commit is not None and current is None:
-            return False
-        overrides = {
-            tuple(item['paths']): item for item in store['overrides']
-        }
-        shared_record = {
-            tuple(item['paths']): item for item in shared
-        }.get(key)
-        base_commit = shared_record['commit'] if shared_record else None
-        if record == shared_record:
-            overrides.pop(key, None)
-        else:
-            overrides[key] = {
-                'paths': paths,
-                'base_commit': base_commit,
-                'record': record,
-            }
-        updated = {
-            'version': DERIVED_PROVENANCE_STORE_VERSION,
-            'overrides': list(overrides.values()),
-        }
-        if normalize_derived_provenance_store(updated) == original_store:
+        if updated is None or updated == original_store:
             return False
         save_derived_provenance_store(repo_root, updated)
         return True
+
+
+def projected_derived_provenance_store(
+    original_store, shared, paths, record, *, expected_commit=None, coordinated=True,
+):
+    """Compute the existing provenance transition without persisting it."""
+    shared_by_paths = {
+        tuple(item['paths']): item for item in shared
+    }
+    store = {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': [
+            item for item in original_store['overrides']
+            if item['record'] != shared_by_paths.get(tuple(item['paths']))
+        ],
+    }
+    store = normalize_derived_provenance_store(store)
+    effective = apply_derived_provenance_overrides(
+        shared, store, coordinated=coordinated
+    )
+    key = tuple(paths)
+    current = {tuple(item['paths']): item for item in effective}.get(key)
+    if expected_commit is not None and current is not None and (
+        current['commit'] != expected_commit
+    ):
+        raise SyncwheelError(
+            'derived provenance changed before reconciliation for '
+            + json.dumps(paths, ensure_ascii=True)
+        )
+    if expected_commit is not None and current is None:
+        return None
+    overrides = {
+        tuple(item['paths']): item for item in store['overrides']
+    }
+    shared_record = {
+        tuple(item['paths']): item for item in shared
+    }.get(key)
+    base_commit = shared_record['commit'] if shared_record else None
+    if record == shared_record:
+        overrides.pop(key, None)
+    else:
+        overrides[key] = {
+            'paths': paths,
+            'base_commit': base_commit,
+            'record': record,
+        }
+    updated = {
+        'version': DERIVED_PROVENANCE_STORE_VERSION,
+        'overrides': list(overrides.values()),
+    }
+    return normalize_derived_provenance_store(updated)
 
 
 def record_common_derived_provenance(
@@ -3048,7 +3063,7 @@ def derived_paths_rebuild_remedy():
 def stale_derived_projection_records(
     repo_root, manifest, integration_branch, provenance=None
 ):
-    """Return shared/local provider provenance no longer reachable from integration."""
+    """Return provider paths whose recorded result is absent from integration."""
     stale = []
     records = (
         normalize_derived_provenance(provenance)
@@ -3056,9 +3071,14 @@ def stale_derived_projection_records(
         else derived_provenance_records(repo_root, manifest)
     )
     for record in records:
-        if branch_contains(repo_root, integration_branch, record['commit']):
-            continue
+        reachable = branch_contains(repo_root, integration_branch, record['commit'])
         for path in record['paths']:
+            # Reconciliation preserves ancestry while replacing the product tree.
+            # Reachability alone therefore no longer proves the derived result.
+            if reachable and tree_path_entry(repo_root, integration_branch, path) == tree_path_entry(
+                repo_root, record['commit'], path
+            ):
+                continue
             stale.append({**record, 'path': path})
     return sorted(stale, key=lambda item: (item['path'], item['operation_id']))
 
@@ -5845,6 +5865,478 @@ def restore_control_manifest_after_integration_rebuild(
         )
 
 
+def integration_reconciliation_source(repo_root, manifest_path):
+    path = Path(manifest_path)
+    return {
+        'head': ref_tip(repo_root, 'HEAD'),
+        'checkout': checkout_reset_guard(repo_root),
+        'manifest': checkout_path_observation(path.parent, path.name)['fingerprint'],
+        'gitignore': checkout_path_fingerprint(repo_root, '.gitignore'),
+    }
+
+
+def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs):
+    """Keep the declared replay graph and the prior local history as distinct parents."""
+    proof = json.dumps(
+        {'version': 2, 'inputs': inputs, 'manifest_digest': manifest_digest(manifest)},
+        sort_keys=True, separators=(',', ':'),
+    )
+    return git(
+        repo_root, 'commit-tree', tree, '-p', local_tip, '-p', replay_tip,
+        '-m', 'chore: reconcile Syncwheel integration history\n\nSyncwheel-Reconciliation: ' + proof,
+        env=replay_commit_env(repo_root, replay_tip),
+    ).stdout.strip()
+
+
+def integration_reconciliation_inputs(repo_root, manifest, inputs):
+    expected = [('base', 'integration', manifest['integration']['base'])]
+    stacks = stack_map(manifest)
+    commits = []
+    for stack_id in manifest['integration']['stacks']:
+        stack = stacks[stack_id]
+        if manifest['integration'].get('strategy', 'cherry-pick') == 'merge-stacks':
+            expected.append(('merge-stack', stack_id, stack['branch']))
+        else:
+            commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_base_commits(stack))
+        commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_only_commits(stack))
+    refs = inputs.get('refs')
+    if (
+        not isinstance(refs, list)
+        or any(not isinstance(item, dict) for item in refs)
+        or [(item.get('kind'), item.get('id'), item.get('spec')) for item in refs] != expected
+        or inputs.get('commits') != commits
+        or any(not isinstance(item.get('tip'), str) or not re.fullmatch(r'[0-9a-f]{40,64}', item['tip']) for item in refs)
+        or any(item.get('remoteRef') and item.get('remoteTip') != item['tip'] for item in refs)
+    ):
+        raise SyncwheelError('integration reconciliation replay input binding is invalid or stale')
+    pinned = json.loads(json.dumps(manifest))
+    pinned['integration']['base'] = inputs['refs'][0]['tip']
+    overrides = {item['id']: item['tip'] for item in inputs['refs'] if item['kind'] == 'merge-stack'}
+    for stack in pinned['stacks']:
+        for key in ('commits', 'integration_commits', 'integration_only_commits'):
+            if key in stack:
+                stack[key] = [commit_full_sha(repo_root, commit) for commit in stack[key]]
+    return pinned, overrides
+
+
+def integration_reconciliation_publishing_states(repo_root, observation):
+    if not observation:
+        return
+    current = observation['state_tip']
+    ref = observation['integration_ref']
+    config = observation['config']
+    while current:
+        state = coordination_state_from_commit(repo_root, current, config['id'])
+        parents = git(repo_root, 'show', '-s', '--format=%P', current).stdout.split()
+        parent = state.get('parent_state')
+        if parents != ([parent] if parent else []):
+            raise SyncwheelError('integration reconciliation historical state chain is invalid')
+        if (state.get('changed_refs') or {}).get(ref):
+            verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
+            yield state
+        current = parent
+
+
+def integration_reconciliation_published_witness(repo_root, manifest, tip, observation):
+    for state in integration_reconciliation_publishing_states(repo_root, observation):
+        if state['changed_refs'].get(observation['integration_ref']) == tip:
+            return state
+    return None
+
+
+def integration_reconciliation_historical_derived(repo_root, commit, tip, observation):
+    for state in integration_reconciliation_publishing_states(repo_root, observation):
+        published = state['changed_refs'].get(observation['integration_ref'])
+        if not branch_contains(repo_root, tip, published) or not branch_contains(repo_root, published, commit):
+            continue
+        records = state['manifest'].get('integration', {}).get('derived_provenance') or []
+        records = [record for record in records if record.get('commit') == commit]
+        if not records:
+            continue
+        historical = coordination_state_control_manifest(repo_root, state, observation['config']['remote'])
+        records = [record for record in records
+                   if record.get('composition_digest') == integration_composition_digest(historical)]
+        if records and is_provenance_bound_derived_projection_commit(repo_root, commit, records):
+            return True
+    return False
+
+
+def integration_reconciliation_proof(repo_root, commit, manifest_path, observation):
+    try:
+        return _integration_reconciliation_proof(repo_root, commit, manifest_path, observation)
+    except (KeyError, TypeError, ValueError, IndexError, SyncwheelError):
+        return None
+
+
+def _integration_reconciliation_proof(repo_root, commit, manifest_path, observation):
+    values = [value for key, value in parsed_commit_trailers(repo_root, commit)
+              if key.casefold() == 'syncwheel-reconciliation']
+    if len(values) != 1:
+        return None
+    try:
+        proof = json.loads(values[0])
+    except ValueError:
+        return None
+    if not isinstance(proof, dict) or proof.get('version') != 2 or not isinstance(proof.get('inputs'), dict):
+        return None
+    control = manifest_from_tree(repo_root, commit, integration_manifest_path(repo_root))
+    parents = git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
+    if control is None or len(parents) != 2 or manifest_digest(control) != proof.get('manifest_digest'):
+        return None
+    inputs = proof['inputs']
+    pinned, overrides = integration_reconciliation_inputs(repo_root, control, inputs)
+    if materialize_integration_replay(repo_root, pinned, overrides) != parents[1]:
+        return None
+    ignore = tree_path_entry(repo_root, commit, '.gitignore')
+    previous_ignore = tree_path_entry(repo_root, parents[0], '.gitignore')
+    if ignore != previous_ignore or (ignore and ignore['mode'] != '100644'):
+        return None
+    tree = materialize_control_manifest_projection_tree(
+        repo_root, control, ref_tree(repo_root, parents[1]),
+        gitignore_bytes=tree_path_bytes(repo_root, ignore) if ignore else None,
+    )
+    if (
+        tree != ref_tree(repo_root, commit)
+        or integration_reconciliation_object(repo_root, control, *parents, tree, inputs) != commit
+    ):
+        return None
+    events = load_control_manifest_events(repo_root, manifest_path)
+    intents, receipts = control_manifest_operation_records(events, commit)
+    local = any(
+        event['payload'].get('version') == 2
+        and event['payload'].get('inputs') == inputs
+        and event['payload'].get('replay_tip') == parents[0]
+        and event['payload'].get('detached_replay_tip') == parents[1]
+        and receipts.get(key, {}).get('type') == 'manifest_saved'
+        for key, event in intents.items()
+    )
+    witness = integration_reconciliation_published_witness(
+        repo_root, control, commit, observation
+    ) if not local else None
+    if not local and witness is None:
+        return None
+    return {'manifest': control, 'inputs': inputs, 'parents': parents, 'witness': witness}
+
+
+def integration_reconciliation_provenance(manifest, store, shared):
+    before = apply_derived_provenance_overrides(shared, store)
+    narrowed = narrowed_derived_provenance_records(None, manifest, before)
+    after_store = store
+    for commit, paths in sorted({(item['commit'], tuple(item['paths'])) for item in narrowed}):
+        projected = projected_derived_provenance_store(
+            after_store, shared, list(paths), None, expected_commit=commit,
+        )
+        if projected is not None:
+            after_store = projected
+    return before, after_store, apply_derived_provenance_overrides(shared, after_store)
+
+
+def integration_reconciliation_history(
+    repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
+    detached_replay=False,
+):
+    """Refuse unexplained history before constructing a successor transaction."""
+    base = manifest['integration']['base']
+    declared = {
+        commit_full_sha(repo_root, commit)
+        for stack in manifest['stacks']
+        for commit in stack_integration_commits(stack)
+    }
+    patches = {commit_patch_id(repo_root, commit) for commit in declared}
+    patches.discard(None)
+    patches.update(patch_ids_reachable_from_ref(repo_root, base))
+    history = rev_list(repo_root, f'{base}..{tip}')
+    proofs = {commit: proof for commit in history
+              if commit_parent_count(repo_root, commit) > 1
+              and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}
+    replay_ranges = [(base, tip)] if detached_replay else []
+    replay_ranges.extend((proof['inputs']['refs'][0]['tip'], proof['parents'][1]) for proof in proofs.values())
+    replay_merges = set()
+    for replay_base, replay_tip in replay_ranges:
+        replay_merges.update(git(repo_root, 'rev-list', '--first-parent', '--merges',
+                                 f'{replay_base}..{replay_tip}').stdout.split())
+    for commit in history:
+        if commit in declared:
+            continue
+        if commit_parent_count(repo_root, commit) != 1:
+            if commit in proofs or commit in replay_merges:
+                continue
+            raise SyncwheelError(f'integration reconciliation has unclassified merge: {commit}')
+        changed = set(commit_changed_files(repo_root, commit))
+        if changed and changed.issubset({'.syncwheel/manifest.json', '.gitignore'}):
+            entry = tree_path_entry(repo_root, commit, '.syncwheel/manifest.json')
+            try:
+                control = json.loads(tree_path_bytes(repo_root, entry))
+            except (ValueError, UnicodeDecodeError):
+                control = None
+            if entry and entry['mode'] == '100644' and isinstance(control, dict):
+                if '.gitignore' not in changed:
+                    continue
+                candidate = tree_path_entry(repo_root, commit, '.gitignore')
+                parent = tree_path_entry(repo_root, f'{commit}^', '.gitignore')
+                if candidate and candidate['mode'] == '100644' and (
+                    parent is None or parent['mode'] == '100644'
+                ):
+                    try:
+                        candidate_ignore = split_syncwheel_managed_gitignore(
+                            tree_path_bytes(repo_root, candidate).decode('utf-8'),
+                            syncwheel_worktree_root(control),
+                        )
+                        parent_ignore = split_syncwheel_managed_gitignore(
+                            tree_path_bytes(repo_root, parent).decode('utf-8'),
+                            syncwheel_worktree_root(control),
+                        )
+                    except UnicodeDecodeError:
+                        candidate_ignore = parent_ignore = None
+                    if (
+                        candidate_ignore and parent_ignore
+                        and candidate_ignore['managed'] is not None
+                        and candidate_ignore['unmanaged'] == parent_ignore['unmanaged']
+                    ):
+                        continue
+        if is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
+            continue
+        patch = commit_patch_id(repo_root, commit)
+        if patch and patch in patches:
+            continue
+        if observation and integration_reconciliation_historical_derived(repo_root, commit, tip, observation):
+            continue
+        raise SyncwheelError(f'integration reconciliation has unclassified history: {commit}')
+
+
+def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent):
+    """Resume the same object and CAS; never rebuild or overwrite a later proposal."""
+    branch = intent['integration_branch']
+    local_tip = intent['replay_tip']
+    final_tip = intent['expected_control_commit']
+    replay_tip = intent['detached_replay_tip']
+    pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, intent['inputs'])
+    ignore_entry = intent['gitignore_entry']
+    ignore_bytes = tree_path_bytes(repo_root, ignore_entry)
+    source_ignore = intent['source_lease']['gitignore']
+    state = coordination_state_from_commit(repo_root, intent['state_tip'], coordination_config(manifest)['id'])
+    shared = shared_derived_provenance_records(repo_root, manifest, state)
+    provenance_before, store_after, provenance_after = integration_reconciliation_provenance(
+        manifest, intent['provenance_store'], shared,
+    )
+    if (
+        str(Path(manifest_path).absolute()) != intent['manifest_path']
+        or (ignore_entry is not None and (
+            ignore_entry['mode'] != '100644'
+            or hashlib.sha256(ignore_bytes).hexdigest() != source_ignore.get('sha256')
+        ))
+        or materialize_integration_replay(repo_root, pinned, overrides) != replay_tip
+        or materialize_control_manifest_projection_tree(
+            repo_root, manifest, ref_tree(repo_root, replay_tip),
+            gitignore_bytes=ignore_bytes if ignore_entry else None,
+        ) != intent['final_tree']
+        or provenance_before != intent['provenance_before']
+        or store_after != intent['provenance_store_after']
+        or provenance_after != intent['provenance_after']
+    ):
+        raise SyncwheelError('integration reconciliation intent does not bind its replay and source bytes')
+    parents = git(repo_root, 'show', '-s', '--format=%P', final_tip).stdout.split()
+    if (
+        parents != [local_tip, replay_tip]
+        or ref_tree(repo_root, final_tip) != intent['final_tree']
+        or integration_reconciliation_object(
+            repo_root, manifest, local_tip, replay_tip, intent['final_tree'], intent['inputs']
+        ) != final_tip
+        or manifest_digest(manifest) != intent['expected_manifest_digest']
+    ):
+        raise SyncwheelError('integration reconciliation intent has an invalid expected object')
+    source = integration_reconciliation_source(repo_root, manifest_path)
+    before_source = intent['source_lease']
+    current_tip = ref_tip(repo_root, branch)
+    if current_tip not in {local_tip, final_tip}:
+        if not current_tip or not branch_contains(repo_root, current_tip, final_tip):
+            abandon_control_manifest_intent(
+                repo_root, manifest_path, intent, current_tip, 'ref_cas_failed'
+            )
+        raise SyncwheelError('integration changed during reconciliation; preserving the newer ref')
+    if current_tip == local_tip:
+        observed = observe_published_integration_tip(repo_root, manifest)
+        if (
+            source != before_source
+            or not observed or observed.get('status') != 'current'
+            or observed['state_tip'] != intent['state_tip']
+            or observed['remote_refs'] != intent['remote_refs']
+            or integration_projection_input_snapshot(repo_root, manifest) != intent['inputs']
+            or load_derived_provenance_store(repo_root) != intent['provenance_store']
+        ):
+            raise IntegrationReconciliationLeaseDrift(
+                'integration reconciliation lease changed before CAS; review inputs and '
+                'run int rebuild --reason to start a new operation'
+            )
+        require_manifest_transaction_current(manifest_path)
+        moved = git(
+            repo_root, 'update-ref', f'refs/heads/{branch}', final_tip, local_tip,
+            check=False,
+        )
+        if moved.returncode != 0:
+            abandon_control_manifest_intent(
+                repo_root, manifest_path, intent, ref_tip(repo_root, branch), 'ref_cas_failed'
+            )
+            raise SyncwheelError('integration reconciliation CAS lost; competing work preserved')
+    control_manifest_io_checkpoint('ref_updated')
+    control_manifest_io_checkpoint('before_provenance_resolution')
+    with derived_provenance_store_lock(repo_root):
+        store = load_derived_provenance_store(repo_root)
+        if store not in (intent['provenance_store'], intent['provenance_store_after']):
+            raise SyncwheelError('integration reconciliation provenance changed; pending intent preserved')
+        if store != intent['provenance_store_after']:
+            save_derived_provenance_store(repo_root, intent['provenance_store_after'])
+    control_manifest_io_checkpoint('provenance_resolved')
+    worktree = find_worktree_for_branch(repo_root, branch)
+    if (str(Path(worktree).resolve()) if worktree else None) != intent['destination_path']:
+        raise SyncwheelError('integration reconciliation checkout moved; pending intent preserved')
+    if worktree is not None:
+        worktree = Path(worktree)
+        control_manifest_io_checkpoint('before_checkout_alignment')
+        guard = checkout_reset_guard(worktree)
+        current_source = integration_reconciliation_source(repo_root, manifest_path)
+        expected_source = dict(before_source)
+        if Path(repo_root).resolve() == worktree.resolve():
+            expected_source['head'] = final_tip
+        already_aligned = (
+            git(worktree, 'write-tree').stdout.strip() == intent['final_tree']
+            and not guard['unstaged'] and not guard['untracked']
+        )
+        if not already_aligned and (
+            guard != intent['destination_guard'] or current_source != expected_source
+        ):
+            raise SyncwheelError('integration reconciliation checkout changed; pending intent preserved')
+        if ref_tip(repo_root, branch) != final_tip:
+            raise SyncwheelError('integration reconciliation ref changed before checkout alignment')
+        if not already_aligned:
+            git(worktree, 'read-tree', '--reset', '-u', final_tip)
+        if ref_tip(repo_root, branch) != final_tip:
+            raise SyncwheelError('integration reconciliation ref changed during checkout alignment')
+        transaction = active_manifest_write_transaction(manifest_path)
+        if transaction is not None and Path(manifest_path) == integration_manifest_path(worktree):
+            transaction['expectedDigest'] = intent['expected_manifest_digest']
+    aligned_guard = checkout_reset_guard(worktree) if worktree else None
+    control_manifest_io_checkpoint('checkout_aligned')
+    source_manifest, _ = load_manifest(repo_root, manifest_path)
+    if source_manifest is None or manifest_digest(source_manifest) != manifest_digest(manifest):
+        raise SyncwheelError('integration reconciliation source changed; pending intent preserved')
+    control_manifest_io_checkpoint('manifest_saved')
+    if (
+        ref_tip(repo_root, branch) != final_tip
+        or (worktree and checkout_reset_guard(worktree) != aligned_guard)
+        or load_derived_provenance_store(repo_root) != intent['provenance_store_after']
+    ):
+        raise SyncwheelError('integration reconciliation changed before terminal receipt; pending intent preserved')
+    append_ledger_event(
+        repo_root, 'manifest_saved',
+        control_manifest_event_payload(
+            repo_root, manifest_path, manifest, final_tip, 'reconciliation',
+            intent['reason'], intent['command'],
+            {'replay_tip': local_tip, 'version': 2, 'detached_replay_tip': replay_tip},
+            operation_id=intent['operation_id'],
+        ),
+        manifest_path,
+        idempotency_key=control_manifest_event_idempotency_key(
+            manifest, local_tip, final_tip, intent['command'], intent['operation_id']
+        ),
+    )
+    control_manifest_io_checkpoint('ledger_saved')
+    return True
+
+
+def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, reason):
+    """Plan an ordinary detached replay before changing published integration history."""
+    if not coordination_is_active(manifest):
+        return False
+    branch = manifest['integration']['branch']
+    with control_manifest_branch_lock(repo_root, branch):
+        observed = observe_published_integration_tip(repo_root, manifest)
+        if observed is None:
+            return False
+        if observed.get('status') != 'current':
+            raise SyncwheelError('integration reconciliation requires current published state')
+        verify_coordination_state_manifest_digest(
+            repo_root, observed['state'], observed['config']['remote']
+        )
+        local_tip = ref_tip(repo_root, branch)
+        if not local_tip or not branch_contains(repo_root, local_tip, observed['published_tip']):
+            raise SyncwheelError('integration reconciliation requires a local successor of published history')
+        source = integration_reconciliation_source(repo_root, manifest_path)
+        if source['manifest']['kind'] != 'file' or (
+            source['gitignore']['kind'] == 'file' and source['gitignore']['mode'] & 0o111
+        ):
+            raise SyncwheelError('integration reconciliation requires regular control files')
+        inputs = integration_projection_input_snapshot(repo_root, manifest)
+        destination = checkout_reset_destination_lease(
+            repo_root, branch, allowed_paths=control_manifest_source_allowance(repo_root, manifest_path)
+        )
+        store = load_derived_provenance_store(repo_root)
+        shared = shared_derived_provenance_records(repo_root, manifest, observed['state'])
+        provenance, store_after, provenance_after = integration_reconciliation_provenance(manifest, store, shared)
+        pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, inputs)
+        replay_tip = materialize_integration_replay(repo_root, pinned, overrides)
+        ignore = regular_checkout_path_bytes(repo_root, '.gitignore')
+        if ignore is None:
+            raise SyncwheelError('integration reconciliation requires regular ignore bytes')
+        tree = materialize_control_manifest_projection_tree(
+            repo_root, manifest, ref_tree(repo_root, replay_tip),
+            gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
+        )
+        integration_reconciliation_history(repo_root, manifest, local_tip, provenance, manifest_path, observed)
+        integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
+                                           detached_replay=True)
+        final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)
+                     if replay_tip != local_tip else None)
+        after = observe_published_integration_tip(repo_root, manifest)
+        if (
+            source != integration_reconciliation_source(repo_root, manifest_path)
+            or inputs != integration_projection_input_snapshot(repo_root, manifest)
+            or not after or after != observed
+            or store != load_derived_provenance_store(repo_root)
+            or local_tip != ref_tip(repo_root, branch)
+            or destination != checkout_reset_destination_lease(
+                repo_root, branch, allowed_paths=control_manifest_source_allowance(repo_root, manifest_path)
+            )
+        ):
+            raise SyncwheelError('integration reconciliation inputs changed during materialization')
+        previous = integration_reconciliation_proof(repo_root, local_tip, manifest_path, observed)
+        if previous and previous['parents'][1] == replay_tip and ref_tree(repo_root, local_tip) == tree:
+            return True
+        if replay_tip == local_tip:
+            control = materialize_control_manifest_commit(repo_root, manifest, local_tip)
+            if ref_tree(repo_root, control) != tree or store_after != store:
+                raise SyncwheelError('integration reconciliation cannot use legacy control persistence')
+            return restore_control_manifest_after_integration_rebuild(
+                repo_root, manifest_path, manifest, local_tip, 'reconciliation',
+                command=command, reason=reason,
+            ) or True
+        intent = {
+            **control_manifest_intent_payload(
+                repo_root, manifest, manifest_digest(manifest), local_tip, final_tip,
+                'reconciliation', reason, command, str(uuid.uuid4()),
+            ),
+            'version': 2, 'detached_replay_tip': replay_tip, 'final_tree': tree,
+            'state_tip': observed['state_tip'], 'published_tip': observed['published_tip'],
+            'remote_refs': observed['remote_refs'], 'inputs': inputs, 'source_lease': source,
+            'manifest_path': str(Path(manifest_path).absolute()),
+            'destination_path': destination['worktree_path'],
+            'gitignore_entry': tree_path_entry(repo_root, tree, '.gitignore')
+                if source['gitignore']['kind'] == 'file' else None,
+            'destination_guard': checkout_reset_guard(destination['worktree_path'])
+                if destination['worktree_path'] else None,
+            'provenance_store': store,
+            'provenance_store_after': store_after,
+            'provenance_before': provenance,
+            'provenance_after': provenance_after,
+        }
+        append_ledger_event(
+            repo_root, 'control_manifest_persistence_intent', intent, manifest_path,
+            idempotency_key=control_manifest_intent_idempotency_key(intent['operation_id']),
+        )
+        control_manifest_io_checkpoint('intent_saved')
+        return apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
+
+
 def _restore_control_manifest_after_integration_rebuild_locked(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
@@ -6196,6 +6688,29 @@ def recover_incomplete_control_manifest_persistence(
                 current, _ = load_manifest(repo_root, manifest_path)
                 return current or manifest
             intent = pending[0]['payload']
+            if intent.get('version') == 2:
+                committed = manifest_from_tree(
+                    repo_root, intent['expected_control_commit'], integration_manifest_path(repo_root)
+                )
+                if committed is None:
+                    raise SyncwheelError('integration reconciliation control manifest is missing')
+                try:
+                    apply_integration_reconciliation(repo_root, manifest_path, committed, intent)
+                except IntegrationReconciliationLeaseDrift:
+                    # Explicit re-planning may retire only an operation whose CAS
+                    # never landed. Post-CAS drift always keeps its pending intent.
+                    if not allow_new_operation or ref_tip(repo_root, branch) != intent['replay_tip']:
+                        raise
+                    current, _ = load_manifest(repo_root, manifest_path)
+                    if current is None:
+                        raise
+                    abandon_control_manifest_intent(
+                        repo_root, manifest_path, intent, intent['replay_tip'], 'superseded_before_cas'
+                    )
+                    return current
+                if recovery_state is not None:
+                    recovery_state.update({'recovered': True, 'control_commit': intent['expected_control_commit']})
+                return committed
             control_commit = intent.get('expected_control_commit')
             replay_tip = intent.get('replay_tip')
             parents = git(
@@ -23674,6 +24189,12 @@ def command_reconcile(args):
             )
         elif action['type'] == 'rebuild_integration':
             integration = manifest['integration']
+            if reconcile_integration_ancestry(
+                repo_root, manifest_path, manifest,
+                'syncwheel reconcile --apply', 'reconcile integration rebuild',
+            ):
+                control_manifest_restored = True
+                continue
             reset_destination_allowed_paths = control_manifest_source_allowance(
                 repo_root, manifest_path
             )
@@ -24104,6 +24625,7 @@ def command_int_rebuild(args):
             'int rebuild requires --reason for an ai-managed repository'
         )
     if not args.dry_run:
+        complete_pending_promote_intents(repo_root, manifest, manifest_path, apply=True)
         manifest = recover_incomplete_control_manifest_persistence(
             repo_root,
             manifest_path,
@@ -24126,6 +24648,11 @@ def command_int_rebuild(args):
         )
     if isinstance(reason, str):
         reason = reason.strip()
+    if not args.dry_run and reconcile_integration_ancestry(
+        repo_root, manifest_path, manifest, 'syncwheel int rebuild',
+        reason or 'rebuild integration while preserving published history',
+    ):
+        return 0
     mode, worktree = select_replay_mode(
         repo_root,
         manifest,

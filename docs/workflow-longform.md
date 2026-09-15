@@ -43,6 +43,21 @@ publish only when that tip has one persistence receipt and its tree is the exact
 current projection. An ineligible housekeeping tip remains local; every ref
 selected for publication still passes the shared successor guard.
 
+For an already published integration branch, rebuild first materializes the
+declared replay without moving integration. A reconciliation commit preserves
+the previous local tip as its first parent and the replay result as its second,
+while its tree contains the selected product and control bytes. Its version-2
+control intent binds the replay inputs, source and destination leases, and
+provenance transition before the single ref CAS. Recovery reuses that exact
+object; later checkout or provenance changes leave the intent pending instead
+of being overwritten. Existing version-1 control intents retain their recovery
+path. A fresh clone recognizes reconciliation through the published state and
+the commit's deterministic replay proof, not another clone's local ledger.
+If inputs change before the CAS, ordinary recovery refuses the stale intent;
+`int rebuild --reason "<reviewed change>"` retires that unapplied intent and
+plans from the current selection. This escape does not abandon an intent
+whose ref CAS already landed.
+
 ## What becomes deterministic
 
 With the manifest in place, the script can tell you:

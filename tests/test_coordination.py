@@ -2189,12 +2189,37 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(full['projection_status'], 'convergent')
         self.assertEqual(full['managed_refs']['refs/heads/pr/feature-a'], feature_sha)
 
+    def interrupt_legacy_control_persistence(self, repo, stage):
+        """Seed an actual version-1 interruption without the version-2 rebuild router."""
+        runner = self.tmp / 'interrupt-legacy-control.py'
+        runner.write_text(
+            'import importlib.util, sys\n'
+            'from pathlib import Path\n'
+            'cli, repo = map(Path, sys.argv[1:3])\n'
+            'spec = importlib.util.spec_from_file_location("syncwheel_legacy", cli)\n'
+            'module = importlib.util.module_from_spec(spec)\n'
+            'spec.loader.exec_module(module)\n'
+            'manifest, path = module.load_manifest(repo)\n'
+            'tip = module.ref_tip(repo, manifest["integration"]["branch"])\n'
+            'with module.manifest_write_transaction(repo, path, "legacy fixture"):\n'
+            '    module.restore_control_manifest_after_integration_rebuild(\n'
+            '        repo, path, manifest, tip, "control",\n'
+            '        reason="verify legacy interrupted persistence", command="legacy fixture")\n'
+        )
+        killed = subprocess.run(
+            ['python3', str(runner), str(CLI), str(repo)], cwd=repo,
+            text=True, capture_output=True,
+            env={**os.environ, **self.environment,
+                 'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
+        )
+        self.assertEqual(killed.returncode, -signal.SIGKILL, (killed.stdout, killed.stderr))
+
     def prepare_control_manifest_sigkill_recovery(self, name, stage):
         origin = self.create_remote(name=f'{name}-origin')
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
-        # Keep only the generated ignore policy in the replay base so the
-        # interrupted replay still exercises recovery of a removed manifest.
+        # The detached replay omits the control manifest; reconciliation must
+        # nevertheless preserve the selected source until checkout alignment.
         self.anchor_generated_ignore_without_control_manifest(repo)
         feature_sha = self.commit_on_branch(
             repo, 'pr/feature-a', f'{name}-feature.txt'
@@ -2209,20 +2234,29 @@ with module.coordination_publication_lock(Path(repo_path)):
         _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
         self.assertTrue(manifest_path.exists())
 
+        source_before = manifest_path.read_bytes()
+        ignore_before = (repo / '.gitignore').read_bytes()
+        index_before = self.git(repo, 'write-tree').stdout
+        head_before = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        remote_before = self.git(repo, 'ls-remote', 'origin').stdout
         killed = self.run_cli(
-            repo,
-            'int', 'rebuild', '--in-place',
+            repo, 'int', 'rebuild', '--in-place',
             '--reason', f'interrupt control persistence at {stage}',
             expected=-signal.SIGKILL,
             extra_env={'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
         )
         self.assertEqual(killed.returncode, -signal.SIGKILL)
-        self.assertFalse(manifest_path.exists())
+        self.assertEqual(manifest_path.read_bytes(), source_before)
+        self.assertEqual((repo / '.gitignore').read_bytes(), ignore_before)
+        self.assertEqual(self.git(repo, 'write-tree').stdout, index_before)
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_before)
         module = self.load_module()
         events = module.load_ledger_events(repo, manifest_path)
         pending = module.pending_control_manifest_intents(events)
         self.assertEqual(len(pending), 1)
         intent = pending[0]['payload']
+        self.assertEqual(intent['version'], 2)
+        self.assertEqual(intent['replay_tip'], head_before)
         current_tip = self.git(
             repo, 'rev-parse', 'integration/shared'
         ).stdout.strip()
@@ -2233,7 +2267,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(current_tip, expected_tip)
         return origin, repo, feature_sha, intent
 
-    def test_entrypoint_retries_recover_after_ref_sigkill_removed_manifest(self):
+    def test_entrypoint_retries_recover_after_ref_sigkill_preserved_manifest(self):
         retries = {
             'stack-push': ('stack', 'push', 'feature-a'),
             'int-rebuild': (
@@ -6209,6 +6243,173 @@ with module.coordination_publication_lock(Path(repo_path)):
         ))
         self.run_cli(repo, 'int', 'push')
 
+    def prepare_detached_reconciliation(self, label):
+        origin = self.create_remote(label)
+        repo = self.clone(origin, label)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/reconcile', 'reconcile.txt')
+        self.run_cli(repo, 'stack', 'create', 'reconcile', source, '--draft')
+        module = self.load_module()
+        manifest, path = module.load_manifest(repo)
+        manifest['integration']['stacks'] = ['reconcile']
+        self.assertEqual(manifest['stacks'][0]['commits'], [source])
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        return repo, module, manifest, path
+
+    def test_ancestry_reconciliation_recovers_the_same_prepared_commit(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-intent')
+        branch = manifest['integration']['branch']
+        before = module.ref_tip(repo, branch)
+        def interrupt(stage):
+            if stage == 'intent_saved':
+                raise module.SyncwheelError('test: interrupt after intent')
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
+                module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test recovery')
+        pending = module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path))
+        self.assertEqual(len(pending), 1)
+        intent = pending[0]['payload']
+        self.assertEqual(intent['version'], 2)
+        self.assertEqual(module.ref_tip(repo, branch), before)
+        recovered = module.recover_incomplete_control_manifest_persistence(repo, path, manifest)
+        self.assertEqual(module.ref_tip(repo, branch), intent['expected_control_commit'])
+        self.assertEqual(self.git(repo, 'show', '-s', '--format=%P', branch).stdout.split(),
+                         [before, intent['detached_replay_tip']])
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(manifest))
+        self.assertFalse(module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path)))
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+
+    def test_ancestry_reconciliation_can_explicitly_replace_a_pre_cas_proposal(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-new-proposal')
+        branch = manifest['integration']['branch']
+        before = module.ref_tip(repo, branch)
+        def interrupt(stage):
+            if stage == 'intent_saved':
+                raise module.SyncwheelError('test: interrupt after intent')
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
+                module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'old proposal')
+        manifest['integration']['stacks'] = []
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        selected = path.read_bytes()
+        index = self.git(repo, 'write-tree').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'lease changed before CAS'):
+            module.recover_incomplete_control_manifest_persistence(repo, path, manifest)
+        self.assertEqual(len(module.pending_control_manifest_intents(
+            module.load_control_manifest_events(repo, path))), 1)
+        recovered = module.recover_incomplete_control_manifest_persistence(
+            repo, path, manifest, allow_new_operation=True)
+        self.assertEqual(recovered, manifest)
+        self.assertEqual(module.ref_tip(repo, branch), before)
+        self.assertEqual(self.git(repo, 'write-tree').stdout, index)
+        self.assertEqual(path.read_bytes(), selected)
+        self.assertFalse(module.pending_control_manifest_intents(
+            module.load_control_manifest_events(repo, path)))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'use revised selection')
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        self.assertNotEqual(module.git(repo, 'cat-file', '-e', 'HEAD:reconcile.txt', check=False).returncode, 0)
+
+    def test_ancestry_reconciliation_preserves_post_cas_source_changes(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-drift')
+        changed = repo / 'later-proposal.txt'
+        def interrupt(stage):
+            if stage == 'ref_updated':
+                changed.write_text('later user proposal\n')
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'checkout changed'):
+                module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test drift')
+        branch = manifest['integration']['branch']
+        final = module.ref_tip(repo, branch)
+        index = self.git(repo, 'write-tree').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'checkout changed'):
+            module.recover_incomplete_control_manifest_persistence(repo, path, manifest)
+        self.assertEqual(module.ref_tip(repo, branch), final)
+        self.assertEqual(self.git(repo, 'write-tree').stdout, index)
+        self.assertEqual(changed.read_text(), 'later user proposal\n')
+        self.assertEqual(len(module.pending_control_manifest_intents(
+            module.load_control_manifest_events(repo, path))), 1)
+
+    def test_ancestry_reconciliation_is_repeatable_and_portable_after_publication(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-repeat')
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat'))
+        final = module.ref_tip(repo, manifest['integration']['branch'])
+        events = module.load_control_manifest_events(repo, path)
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat'))
+        self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
+        self.assertEqual(module.load_control_manifest_events(repo, path), events)
+        self.run_cli(repo, 'int', 'push')
+        origin = self.git(repo, 'remote', 'get-url', 'origin').stdout.strip()
+        peer = self.clone(origin, 'ancestry-fresh-peer')
+        self.git(peer, 'switch', '-q', '-c', manifest['integration']['branch'],
+                 'origin/' + manifest['integration']['branch'])
+        selected, peer_path = module.load_manifest(peer)
+        self.assertFalse(module.load_control_manifest_events(peer, peer_path))
+        self.assertTrue(module.reconcile_integration_ancestry(peer, peer_path, selected, 'test', 'fresh peer'))
+        self.assertEqual(module.ref_tip(peer, selected['integration']['branch']), final)
+        self.assertFalse(module.load_control_manifest_events(peer, peer_path))
+
+    def test_ancestry_reconciliation_preserves_merge_stack_replay(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-merge-stacks')
+        stack = manifest['stacks'][0]
+        self.git(repo, 'update-ref', 'refs/heads/' + stack['branch'], stack['commits'][0],
+                 module.ref_tip(repo, stack['branch']))
+        manifest['integration']['strategy'] = 'merge-stacks'
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        before = module.ref_tip(repo, manifest['integration']['branch'])
+        expected = module.materialize_integration_replay(repo, manifest)
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'merge stacks'))
+        final = module.ref_tip(repo, manifest['integration']['branch'])
+        self.assertEqual(self.git(repo, 'show', '-s', '--format=%P', final).stdout.split(), [before, expected])
+        self.assertEqual(self.git(repo, 'show', final + ':reconcile.txt').stdout, 'scratch/reconcile\n')
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat merge stacks'))
+        self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
+
+    def test_ancestry_reconciliation_rejects_a_replay_proof_for_different_product_bytes(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-invalid-proof')
+        self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'proof'))
+        final = module.ref_tip(repo, manifest['integration']['branch'])
+        message = self.git(repo, 'show', '-s', '--format=%B', final).stdout
+        parents = self.git(repo, 'show', '-s', '--format=%P', final).stdout.split()
+        different_tree = module.materialize_control_manifest_projection_tree(
+            repo, manifest, module.ref_tree(repo, 'origin/main'),
+            gitignore_bytes=(repo / '.gitignore').read_bytes(),
+        )
+        self.assertNotEqual(different_tree, module.ref_tree(repo, final))
+        forged = self.git(repo, 'commit-tree', different_tree, '-p', parents[0], '-p', parents[1],
+                          '-m', message).stdout.strip()
+        self.assertEqual(module.manifest_digest(module.manifest_from_tree(repo, forged, path)),
+                         module.manifest_digest(manifest))
+        self.assertIsNone(module.integration_reconciliation_proof(repo, forged, path,
+                          module.observe_published_integration_tip(repo, manifest)))
+        self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+
+    def test_ancestry_reconciliation_sigkill_retries_preserve_one_operation(self):
+        for stage in ('intent_saved', 'ref_updated', 'provenance_resolved',
+                      'checkout_aligned', 'manifest_saved', 'ledger_saved'):
+            with self.subTest(stage=stage):
+                repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-kill-' + stage)
+                remote_before = self.git(repo, 'ls-remote', 'origin').stdout
+                with mock.patch.dict(os.environ, {module.ENV_TEST_CONTROL_MANIFEST_SIGKILL: stage}):
+                    self.run_cli(repo, 'int', 'rebuild', '--reason', 'verify interrupted reconciliation',
+                                 expected=-signal.SIGKILL)
+                intents = [event['payload'] for event in module.load_control_manifest_events(repo, path)
+                           if event['type'] == 'control_manifest_persistence_intent'
+                           and event['payload'].get('version') == 2]
+                self.assertEqual(len(intents), 1)
+                intent = intents[0]
+                self.run_cli(repo, 'int', 'rebuild', '--reason', 'verify interrupted reconciliation')
+                self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']),
+                                 intent['expected_control_commit'])
+                self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+                self.assertEqual(self.git(repo, 'show', 'HEAD:reconcile.txt').stdout, 'scratch/reconcile\n')
+                records = [event for event in module.load_control_manifest_events(repo, path)
+                           if event['payload'].get('operation_id') == intent['operation_id']]
+                self.assertEqual([event['type'] for event in records],
+                                 ['control_manifest_persistence_intent', 'manifest_saved'])
+                self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_before)
+
     def test_a_promotion_killed_at_its_manifest_save_completes_on_retry(self):
         origin = self.create_remote('round8-promote-saved')
         repo = self.clone(origin, 'round8-promote-saved')
@@ -7666,19 +7867,13 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.run_cli(repo, 'stack', 'push', 'feature-a')
         _manifest, manifest_path = self.stage_owned_control_manifest_delta(repo)
-        killed = self.run_cli(
-            repo,
-            'int', 'rebuild', '--in-place',
-            '--reason', f'interrupt control persistence at {stage}',
-            expected=-signal.SIGKILL,
-            extra_env={'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL': stage},
-        )
-        self.assertEqual(killed.returncode, -signal.SIGKILL)
+        self.interrupt_legacy_control_persistence(repo, stage)
         module = self.load_module()
         pending = module.pending_control_manifest_intents(
             module.load_ledger_events(repo, manifest_path)
         )
         self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['payload'].get('version', 1), 1)
         return origin, repo, pending[0]['payload']
 
     def test_manifest_writer_outside_the_entrypoints_settles_a_pending_intent(self):
