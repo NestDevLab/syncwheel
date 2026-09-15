@@ -1,12 +1,12 @@
 {
   "changed_refs": {},
   "claims": {
-    "refs/heads/pr/mgt-0287-ci-sharding": "d02f22375442e645c54c1d004265afff71f0c5a0",
+    "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-15T20:44:38+00:00",
+  "created_at": "2026-09-15T20:45:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -65,9 +65,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "mgt-0287-ci-sharding"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -75,34 +73,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/mgt-0287-ci-sharding",
-        "commits": [
-          "c0e7e8aacef66f266ae7f0f9eb41abf4e9b61ba5",
-          "e1384eb9a0f8aa18d6011b3a7a44a62bb8658394",
-          "cbe0a02e9e86dc50324ad640208e3418ff373c90",
-          "4d9e7f6dc063a12b346ace3a0a817493ed6e91a7",
-          "fef0d9bf799393fecf34b838fae2ddbb806add0c"
-        ],
-        "id": "mgt-0287-ci-sharding",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "7428bc5b-53ba-4fca-b3f3-5af3f612d3b2",
-  "parent_state": "972378d9ad52d09236f795a569b33c1e1074de6e",
+  "operation_token": "d02dfb59-8b12-448a-b77d-84b99cfaf8da",
+  "parent_state": "aa29222b83f69478e9b859d01b9c0bf85580cb97",
   "projection_status": "partial",
-  "publication_id": "47029cb7-0ad3-490f-adf4-81d9e600ae45",
-  "publication_scope": "close:mgt-0287-sw1",
+  "publication_id": "f7788362-228a-4a85-bca3-d4fc0506e4b7",
+  "publication_scope": "close:mgt-0287-ci-sharding",
   "schema_version": 2,
   "syncwheel_version": "0.43.5",
   "tombstones": [
@@ -321,6 +300,14 @@
       "ref": "refs/heads/pr/mgt-0287-sw1",
       "remote_tip": null,
       "stack": "mgt-0287-sw1"
+    },
+    {
+      "branch": "pr/mgt-0287-ci-sharding",
+      "closed_at": "2026-09-15T20:44:54+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/mgt-0287-ci-sharding",
+      "remote_tip": null,
+      "stack": "mgt-0287-ci-sharding"
     }
   ]
 }
