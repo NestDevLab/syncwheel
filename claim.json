@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/mgt-0287-ci-sharding"
   ],
-  "claimed_at": "2026-09-15T18:11:51+00:00",
+  "claimed_at": "2026-09-15T18:34:25+00:00",
   "coordination_id": "default",
-  "operation_token": "ee73c3c3-78f1-44f9-8b5e-0bd647244fe1",
+  "operation_token": "f89140cf-38ec-4bf0-9a34-c4a0a161916b",
   "publication_scope": "stack:mgt-0287-ci-sharding",
   "source_ref": "refs/heads/pr/mgt-0287-ci-sharding",
   "syncwheel_version": "0.43.5"
