@@ -8136,8 +8136,18 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         github_blocker(blockers, 'base_observation_failed', str(exc))
     if target_base_sha is None:
         github_blocker(blockers, 'base_remote_missing', 'delivery base branch is absent on the target remote')
-    if pr and target_base_sha and pr.get('baseRefOid') and pr.get('baseRefOid') != target_base_sha:
-        github_blocker(blockers, 'base_changed', 'PR base SHA differs from the observed delivery base', pr=pr.get('baseRefOid'), observed=target_base_sha)
+    if pr and target_base_sha:
+        target_remote = stack.get('target_remote') or manifest['defaults']['publication_remote']
+        fetched = git(repo_root, 'fetch', '--quiet', target_remote, f'refs/heads/{base_branch}', check=False)
+        fetched_base_sha = ref_tip(repo_root, 'FETCH_HEAD') if fetched.returncode == 0 else None
+        if fetched_base_sha != target_base_sha:
+            github_blocker(blockers, 'base_fetch_failed', 'delivery base changed or could not be fetched at its observed revision', observed=target_base_sha, fetched=fetched_base_sha)
+        else:
+            historical_base_sha = pr.get('baseRefOid')
+            if historical_base_sha and not branch_contains(repo_root, target_base_sha, historical_base_sha):
+                github_blocker(blockers, 'base_changed', 'PR base is not an ancestor of the live delivery base', pr=historical_base_sha, observed=target_base_sha)
+            if source_revision and not branch_contains(repo_root, source_revision, target_base_sha):
+                github_blocker(blockers, 'base_not_in_head', 'PR head does not contain the live delivery base', head=source_revision, observed=target_base_sha)
     if not isinstance(pr, dict):
         pr = {}
     number = pr.get('number') or (int(pr_number) if pr_number is not None else None)
@@ -8164,7 +8174,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             'baseSha': pr.get('baseRefOid'),
         },
         'headSha': pr.get('headRefOid'),
-        'baseSha': pr.get('baseRefOid') or target_base_sha,
+        'baseSha': target_base_sha,
         'author': pr.get('author'),
         'commitAuthors': pr.get('commitAuthors') or [],
         'headRepository': pr.get('headRepository'),
@@ -8244,7 +8254,7 @@ def github_pr_merge_classify(plan, observation, command_ok):
     if isinstance(pr, dict) and pr.get('state') == 'MERGED' and pr.get('headRefOid') == plan.get('headSha'):
         return 'succeeded' if command_ok else 'succeeded-equivalent'
     if isinstance(pr, dict) and pr.get('state') == 'OPEN' and (
-        pr.get('headRefOid') == plan.get('headSha') and pr.get('baseRefOid') == plan.get('baseSha')
+        pr.get('headRefOid') == plan.get('headSha') and pr.get('baseRefOid') == (plan.get('pullRequest') or {}).get('baseSha')
     ):
         return 'failed'
     return 'unknown'

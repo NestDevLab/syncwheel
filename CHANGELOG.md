@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.10 - 2026-09-16
+
+- Verify the observed live GitHub PR base by fetching the exact remote tip
+  before checking ancestry. Accept historical `baseRefOid` values only when
+  the PR head contains the current base; fail closed on a changed or missing tip.
+
 ## 0.43.9 - 2026-09-16
 
 - Project a declared merge-tip stack against the unique merge parent already
