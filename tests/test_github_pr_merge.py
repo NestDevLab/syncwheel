@@ -175,6 +175,73 @@ class GithubPrMergeTest(unittest.TestCase):
         self.assertIn('--match-head-commit', first['command'])
         self.assertEqual(first['planDigest'], second['planDigest'])
 
+    def test_historical_pr_base_is_allowed_when_head_contains_live_base(self):
+        other = self.tmp / 'other'
+        subprocess.run(['git', 'clone', '-q', '-b', 'main', str(self.remote), str(other)], check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Fixture'], cwd=other, check=True)
+        subprocess.run(['git', 'config', 'user.email', 'fixture@example.invalid'], cwd=other, check=True)
+        (other / 'later.txt').write_text('later\n')
+        subprocess.run(['git', 'add', 'later.txt'], cwd=other, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'advance main'], cwd=other, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'main'], cwd=other, check=True)
+        live_base = subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=other, text=True, capture_output=True, check=True).stdout.strip()
+        self.assertEqual(self.git('rev-parse', 'origin/main'), self.base)
+        self.git('fetch', '-q', 'origin', 'refs/heads/main')
+        self.git('switch', 'pr/feature')
+        self.git('merge', '--no-edit', 'FETCH_HEAD')
+        self.head = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', 'pr/feature')
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = self.policy()
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(SYNCWHEEL, 'github_stack_git_preflight', return_value=(self.head, [self.head])), \
+             mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=self.observation()):
+            plan = SYNCWHEEL.build_github_pr_merge_plan(
+                self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+            )
+        self.assertEqual(plan['status'], 'ready')
+        self.assertEqual(plan['pullRequest']['baseSha'], self.base)
+        self.assertEqual(plan['baseSha'], live_base)
+
+    def test_base_change_between_observation_and_fetch_blocks_merge(self):
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = self.policy()
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        remote_ref_tips = SYNCWHEEL.remote_ref_tips
+        def changed_base(repo, remote, refs):
+            if refs == ['refs/heads/main']:
+                return {'refs/heads/main': '0' * 40}
+            return remote_ref_tips(repo, remote, refs)
+        with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=self.observation()), \
+             mock.patch.object(SYNCWHEEL, 'remote_ref_tips', side_effect=changed_base):
+            plan = SYNCWHEEL.build_github_pr_merge_plan(
+                self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+            )
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertTrue(any(item['code'] == 'base_fetch_failed' for item in plan['blockers']))
+
+    def test_advanced_live_base_not_in_head_blocks_merge(self):
+        self.git('switch', 'main')
+        (self.repo / 'later.txt').write_text('later\n')
+        self.git('add', 'later.txt')
+        self.git('commit', '-qm', 'advance main')
+        self.git('push', '-q', 'origin', 'main')
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = self.policy()
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=self.observation()):
+            plan = SYNCWHEEL.build_github_pr_merge_plan(
+                self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+            )
+        self.assertEqual(plan['status'], 'blocked')
+        self.assertTrue(any(item['code'] == 'base_not_in_head' for item in plan['blockers']))
+
     def test_failed_check_blocks_and_never_selects_bypass(self):
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
