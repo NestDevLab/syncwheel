@@ -1,15 +1,15 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "a53237026a329b97c2d894733b74da2d76737cca"
+    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "d09b401e08008b8943b145ad163bc59f6a66c748"
   },
   "claims": {
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
-    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "4e5abe9822fb0a65403c150fd8dc6162a7a26a40",
+    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "e452badbc153bc12cb136b4c299312ba3745a880",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T18:00:22+00:00",
+  "created_at": "2026-09-16T18:02:46+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -39,7 +39,7 @@
     "refs/heads/syncwheel/draft/auto-hook-bootstrap": "242ce4a13cbbf91418b677da038ada0e673177ac",
     "refs/heads/syncwheel/draft/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398",
-    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "a53237026a329b97c2d894733b74da2d76737cca",
+    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "d09b401e08008b8943b145ad163bc59f6a66c748",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48"
   },
@@ -87,7 +87,9 @@
           "role": "canonical"
         },
         "branch": "syncwheel/draft/mgt-0287-squash-absorbed",
-        "commits": [],
+        "commits": [
+          "2a2d5e84efb0c5756fbc15ae467091cf599257bc"
+        ],
         "id": "mgt-0287-squash-absorbed",
         "integration_branch": "main-integration",
         "state": "draft",
@@ -97,11 +99,11 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "d8482abd-7468-4737-a23b-13ed62182c51",
-  "parent_state": "5a4fb6e41511fe9d8eafd919ef490ce8c1c98428",
+  "operation_token": "bec1c9b3-b488-4b05-9b6e-703fa6475175",
+  "parent_state": "b3672abad9261c27a2b9e54b82f47190cbb3030c",
   "projection_status": "partial",
-  "publication_id": "2a6d8973-718b-4d90-82ee-a7b9f2a09eaa",
-  "publication_scope": "create:mgt-0287-squash-absorbed",
+  "publication_id": "5c75dc3d-a15d-4051-9d4b-567353ca7430",
+  "publication_scope": "stack:mgt-0287-squash-absorbed",
   "schema_version": 2,
   "syncwheel_version": "0.43.7",
   "tombstones": [
