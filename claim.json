@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/merge-tip-push-projection"
   ],
-  "claimed_at": "2026-09-16T18:46:17+00:00",
+  "claimed_at": "2026-09-16T18:47:53+00:00",
   "coordination_id": "default",
-  "operation_token": "2d2cddd5-d726-41de-aa8d-287dd26af3e6",
-  "publication_scope": "create:merge-tip-push-projection",
+  "operation_token": "87717d23-13e2-483e-9c81-c64dc1d51dee",
+  "publication_scope": "stack:merge-tip-push-projection",
   "source_ref": "refs/heads/syncwheel/draft/merge-tip-push-projection",
   "syncwheel_version": "0.43.7"
 }
