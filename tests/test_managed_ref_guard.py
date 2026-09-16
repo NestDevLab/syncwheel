@@ -1025,7 +1025,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertTrue(report['disabled'])
         self.assertEqual(report['disabledReason'], 'deliberate recovery')
 
-    def test_dirty_primary_blocks_mutation_but_read_only_commands_warn(self):
+    def test_unrelated_primary_dirt_allows_ref_only_mutation_and_read_only_warns(self):
         self._install_and_branch('main-integration')
         (self.repo / 'seed').write_text('changed\n')
         manifest_before = (self.repo / '.syncwheel' / 'manifest.json').read_text()
@@ -1034,12 +1034,19 @@ class ManagedRefGuardTests(unittest.TestCase):
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
         )
 
-        self.assertEqual(mutation.returncode, 2)
-        self.assertIn('primary checkout is dirty: 1 tracked file', mutation.stderr)
-        self.assertIn('not owned by the current user', mutation.stderr)
-        self.assertIn('syncwheel worktree open <lane> --into feature', mutation.stderr)
-        self.assertIn('syncwheel stack capture-integration feature HEAD', mutation.stderr)
-        self.assertEqual((self.repo / '.syncwheel' / 'manifest.json').read_text(), manifest_before)
+        self.assertEqual(mutation.returncode, 0, mutation.stderr)
+        self.assertNotEqual(
+            (self.repo / '.syncwheel' / 'manifest.json').read_text(),
+            manifest_before,
+        )
+        self.assertEqual((self.repo / 'seed').read_text(), 'changed\n')
+        self.assertNotIn(
+            'seed',
+            subprocess.run(
+                ['git', 'show', '--format=', '--name-only', 'HEAD'],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout.splitlines(),
+        )
 
         status = self.run_syncwheel('status', '--repo', str(self.repo))
         self.assertEqual(status.returncode, 0, status.stderr)
@@ -1051,7 +1058,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             'int', 'git', '--repo', str(self.repo), '--', 'add', 'seed',
         )
         self.assertEqual(passthrough_mutation.returncode, 2)
-        self.assertIn('syncwheel stack capture-integration feature HEAD', passthrough_mutation.stderr)
+        self.assertIn('primary checkout is dirty', passthrough_mutation.stderr)
         self.assertEqual(
             subprocess.run(
                 ['git', 'diff', '--cached', '--name-only'], cwd=self.repo,
@@ -1182,25 +1189,49 @@ class ManagedRefGuardTests(unittest.TestCase):
                 'events': syncwheel.load_ledger_events(self.repo),
             }
 
-        unchanged = mutation_snapshot()
-        blocked = self.run_syncwheel(
+        before = mutation_snapshot()
+        allowed = self.run_syncwheel(
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
         )
 
-        self.assertEqual(blocked.returncode, 2)
-        self.assertIn('primary checkout is dirty: 1 tracked file', blocked.stderr)
-        self.assertEqual(mutation_snapshot(), unchanged)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertNotIn(
+            'seed',
+            subprocess.run(
+                ['git', 'show', '--format=', '--name-only', 'HEAD'],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout.splitlines(),
+        )
+        after = mutation_snapshot()
+        self.assertEqual(after['seed'], before['seed'])
+        self.assertEqual(after['status'], before['status'])
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'diff', '--cached', '--name-only'],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout,
+            '',
+        )
+        self.assertNotEqual(after['refs'], before['refs'])
+        self.assertEqual(
+            subprocess.run(
+                ['git', 'show', '--format=', '--name-only', 'HEAD'],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout,
+            '.syncwheel/manifest.json\n',
+        )
 
-    def test_reasoned_disable_lifts_the_dirty_primary_refusal(self):
+    def test_reasoned_disable_explicitly_lifts_staged_primary_guard(self):
         self._install_and_branch('main-integration')
         (self.repo / 'seed').write_text('changed\n')
+        subprocess.run(['git', 'add', 'seed'], cwd=self.repo, check=True)
 
         blocked = self.run_syncwheel(
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
         )
 
         self.assertEqual(blocked.returncode, 2)
-        self.assertIn('primary checkout is dirty', blocked.stderr)
+        self.assertIn('unrelated staged paths: seed', blocked.stderr)
 
         disabled = self.run_syncwheel(
             'hooks', 'remove', '--disable', '--reason', 'external contribution clone',
@@ -1214,6 +1245,13 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
 
         self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertNotIn(
+            'seed',
+            subprocess.run(
+                ['git', 'show', '--format=', '--name-only', 'HEAD'],
+                cwd=self.repo, capture_output=True, text=True, check=True,
+            ).stdout.splitlines(),
+        )
 
     def test_guard_blocks_all_push_forms_targeting_managed_ref(self):
         zero = '0' * 40
@@ -2188,7 +2226,17 @@ class ManagedRefGuardTests(unittest.TestCase):
         subprocess.run(['git', 'add', 'seed'], cwd=self.repo, check=True)
         result = self.run_syncwheel('stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo))
         self.assertEqual(result.returncode, 2)
+        self.assertIn('unrelated staged paths: seed', result.stderr)
+
+    def test_checkout_rebuild_still_refuses_unrelated_primary_dirt(self):
+        self._install_and_branch('main-integration')
+        (self.repo / 'seed').write_text('unrelated work\n')
+        result = self.run_syncwheel(
+            'stack', 'rebuild', 'feature', '--repo', str(self.repo),
+        )
+        self.assertEqual(result.returncode, 2)
         self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertEqual((self.repo / 'seed').read_text(), 'unrelated work\n')
 
     def test_remove_apply_requires_disable_and_reason(self):
         self._install_and_branch('main-integration')
