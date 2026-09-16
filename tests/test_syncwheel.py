@@ -3940,6 +3940,13 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(module.materialize_stack_projection(self.repo, stack),
                          self.git('rev-parse', 'pr/merge-case^{tree}'))
         self.assertEqual(self.git('rev-parse', 'pr/merge-case^1'), feature_tip)
+        manifest = self.read_manifest()
+        manifest['stacks'][0]['branch'] = 'pr/merge-case'
+        manifest['stacks'][0]['base'] = 'main'
+        manifest['stacks'][0]['commits'] = []
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        self.run_cli('stack', 'add', 'feature-a', merge_tip, expected=0)
+        self.assertEqual(self.read_manifest()['stacks'][0]['commits'], [merge_tip])
         with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
             module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'ephemeral')
         self.assertEqual(self.git('rev-parse', 'pr/merge-case'), merge_tip)
