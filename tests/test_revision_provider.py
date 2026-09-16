@@ -4082,15 +4082,24 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
 
 class RevisionProviderRecoveryTest(unittest.TestCase):
     def test_manifest_ownership_recovery_preserves_unrelated_dirty_path(self):
+        fixture = RevisionProviderRepository()
+        unrelated = fixture.repo / 'unrelated.txt'
+        unrelated.write_text('keep local work\n')
+
         class FaultBackend(SYNCWHEEL.SyncwheelRevisionBackend):
+            def _ensure_clean(self, repo_root):
+                # Isolate the later ownership-recovery predicate on the base.
+                return None
+
+            def _ensure_after_scope(self, repo_root, request, *,
+                                    allowed_outside=()):
+                self._validate_hashes(repo_root, request, 'after')
+
             def checkpoint(self, phase):
                 if phase == 'manifest_replace_written':
                     raise protocol.RevisionProviderError('injected manifest write fault')
 
-        fixture = RevisionProviderRepository()
         try:
-            unrelated = fixture.repo / 'unrelated.txt'
-            unrelated.write_text('keep local work\n')
             payload = fixture.request('preflight', operation_id='dirty-recovery')
             request = protocol.parse_request(payload)
             fault_backend = FaultBackend(protocol)
@@ -5155,6 +5164,81 @@ class RevisionProviderPackagingTest(unittest.TestCase):
                 names = set(archive.namelist())
             self.assertIn('syncwheel.py', names)
             self.assertIn('syncwheel_revision_provider.py', names)
+
+
+class DirtyPathPhaseMarkerTest(unittest.TestCase):
+    """Isolate each provider predicate after the preceding phase has passed."""
+
+    def setUp(self):
+        self.fixture = RevisionProviderRepository()
+        self.backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        self.request = protocol.parse_request(
+            self.fixture.request('preflight', operation_id='phase-marker')
+        )
+
+    def tearDown(self):
+        self.fixture.close()
+
+    def _unrelated(self):
+        (self.fixture.repo / 'unrelated.txt').write_text('keep this work\n')
+
+    def _dirty_manifest(self):
+        manifest = self.fixture.repo / '.syncwheel' / 'manifest.json'
+        manifest.write_text(manifest.read_text() + '\n')
+
+    def test_sw4_after_scope_preserves_unrelated_dirt(self):
+        self._unrelated()
+        self.backend._ensure_after_scope(
+            self.fixture.repo, replace(self.request, paths=())
+        )
+
+    def test_sw6_control_worktree_allows_only_manifest_owned_write(self):
+        self._unrelated()
+        self._dirty_manifest()
+        with mock.patch.object(
+            self.backend, '_expire_if_operation_lease_changed'
+        ):
+            self.backend._assert_operation_worktree(
+                self.fixture.repo, self.request, {}, 'control'
+            )
+
+    def test_sw8_control_prepare_preserves_unrelated_dirt(self):
+        self._unrelated()
+        self._dirty_manifest()
+        journal = {'productCommitSha': self.fixture.git('rev-parse', 'HEAD')}
+        with mock.patch.object(self.backend, 'load_journal', return_value=journal), \
+             mock.patch.object(self.backend, '_prepare_exact_commit',
+                               return_value=None):
+            self.assertIsNone(
+                self.backend.prepare_control_commit(self.request, 'control')
+            )
+
+    def test_sw9_terminal_reaches_unchanged_dirt_check(self):
+        class Reached(Exception):
+            pass
+        self._unrelated()
+        with mock.patch.object(self.backend, 'verify_recovery_gate'), \
+             mock.patch.object(
+                 self.backend, '_assert_unowned_dirty_unchanged',
+                 side_effect=Reached, create=True
+             ):
+            with self.assertRaises(Reached):
+                self.backend._verify_invariants(
+                    self.fixture.repo, self.request, {},
+                    self.fixture.git('rev-parse', 'HEAD')
+                )
+
+    def test_sw10_no_delta_reaches_terminal_verification(self):
+        class Reached(Exception):
+            pass
+        self._unrelated()
+        with mock.patch.object(
+            self.backend, '_verify_invariants', side_effect=Reached
+        ):
+            with self.assertRaises(Reached):
+                self.backend.verify_no_repository_delta(
+                    self.request, {'observedManifestDigest': 'unchanged'}
+                )
 
 
 if __name__ == '__main__':

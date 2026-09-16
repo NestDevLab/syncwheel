@@ -4944,6 +4944,26 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(self.git('show', '--format=', '--name-only', 'pr/feature-b'),
                          'beta.txt')
 
+    def test_sw13_target_worktree_preserves_unrelated_dirty_path(self):
+        from argparse import Namespace
+        from tests.test_revision_provider import SYNCWHEEL
+
+        target = self.tmp / 'sw13-target'
+        self.git('worktree', 'add', '-q', str(target), 'pr/feature-b')
+        target_alpha = target / 'alpha.txt'
+        target_alpha.write_text(target_alpha.read_text() + 'target work\n')
+        source_beta = self.repo / 'beta.txt'
+        source_beta.write_text(source_beta.read_text() + 'absorbed\n')
+        args = Namespace(
+            repo=str(self.repo), manifest=None, personal=None,
+            stack='feature-b', force=False, paths=['beta.txt'],
+            staged=False, worktree=str(target), worktree_root=None,
+            amend=False, message=None,
+        )
+        SYNCWHEEL.command_stack_absorb(args)
+        self.assertIn('target work\n', target_alpha.read_text())
+        self.assertEqual(source_beta.read_text(), 'beta\n')
+
     def test_stack_absorb_refuses_dirty_target_patch_path(self):
         target = self.tmp / 'target-overlap'
         self.git('worktree', 'add', '-q', str(target), 'pr/feature-b')
