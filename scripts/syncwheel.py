@@ -2396,6 +2396,42 @@ def composed_stack_projection_tip(repo_root, stack):
     return projected_tip
 
 
+def merged_stack_tip_matches_delivery(repo_root, stack, delivery_tip):
+    """Prove a squash of an exact merge tip when deterministic replay is impossible.
+
+    A merge commit has no single patch to replay. Only accept its declared,
+    materialized tip when every declared source commit is in its ancestry and
+    all paths changed by those commits still have the same delivered content.
+    Inspect every merge parent so conflict resolutions cannot disappear.
+    """
+    commits = stack.get('commits') or []
+    if not commits:
+        return False
+    tip = ref_tip(repo_root, stack['branch'])
+    if not tip or tip != commit_full_sha(repo_root, commits[-1]):
+        return False
+    if commit_parent_count(repo_root, tip) < 2:
+        return False
+    if any(
+        git(repo_root, 'merge-base', '--is-ancestor', commit, tip, check=False).returncode != 0
+        for commit in commits
+    ):
+        return False
+    paths = set()
+    for commit in commits:
+        parents = git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()[1:]
+        for parent in parents:
+            changed = git(
+                repo_root, 'diff', '--name-only', '--no-renames', '-z', parent, commit
+            ).stdout
+            paths.update(path for path in changed.split('\0') if path)
+    if not paths:
+        return False
+    return git(
+        repo_root, 'diff', '--quiet', tip, delivery_tip, '--', *sorted(paths), check=False
+    ).returncode == 0
+
+
 def commit_short_sha(repo_root, commit):
     return git(repo_root, 'rev-parse', '--short', f'{commit}^{{commit}}').stdout.strip()
 
@@ -21560,12 +21596,11 @@ def command_stack_close(args):
         delivery_tip = fetch_observed_delivery_tip(
             repo_root, stack['target_remote'], stack['target_branch']
         )
-        if not projected_tip or not stack_content_is_present_at_delivery_tip(
-            repo_root,
-            stack,
-            delivery_tip,
-            projected_tip=projected_tip,
-        ):
+        if not (
+            projected_tip and stack_content_is_present_at_delivery_tip(
+                repo_root, stack, delivery_tip, projected_tip=projected_tip,
+            )
+        ) and not merged_stack_tip_matches_delivery(repo_root, stack, delivery_tip):
             raise SyncwheelError(
                 f"{args.stack}: cannot close as absorbed: content is not reachable from delivery base "
                 f"{delivery_base} at {delivery_tip}; rebuilding integration projection "
