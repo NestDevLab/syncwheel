@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "9d8368ebeb2771d1060227f9bcea8660c3485840"
+  },
   "claims": {
-    "refs/heads/main-integration": "ccd8a5e9f342348ac9ff817ecd08955a34ac66ce",
+    "refs/heads/main-integration": "5c39280577b36af4a24b828d880920b023a0146e",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
@@ -13,11 +15,11 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T20:12:36+00:00",
+  "created_at": "2026-09-16T20:13:26+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "4fc3fb8b6eb2de93434e9661d95e8a704d3d3909",
+    "refs/heads/main-integration": "9d8368ebeb2771d1060227f9bcea8660c3485840",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -90,11 +92,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "ac2579b9-fb91-4126-ab6d-bc0bcff0e31b",
-  "parent_state": "2034fa55667c18c1adea46a426a65fd4542685ea",
+  "operation_token": "acccb1c0-40ab-41ff-a10c-b660c9fb413a",
+  "parent_state": "afc3cd33ad09f4f42f8e02690453680ddfa0efc7",
   "projection_status": "partial",
-  "publication_id": "898b8434-c1c5-4f53-a7e9-e44adf8fdf50",
-  "publication_scope": "close:journal-scheduler-04311",
+  "publication_id": "b08b4f58-8dee-4e32-9a63-23f92404f092",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.43.10",
   "tombstones": [
