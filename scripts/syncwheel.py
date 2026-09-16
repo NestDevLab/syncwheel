@@ -15099,7 +15099,7 @@ def journal_unit_contents(repo_root, manifest):
     ])
     timer = '\n'.join([
         '[Unit]', 'Description=Run Syncwheel journal periodically', '',
-        '[Timer]', f'OnUnitInactiveSec={interval}', 'Persistent=true', '',
+        '[Timer]', f'OnActiveSec={interval}', f'OnUnitInactiveSec={interval}', '',
         '[Install]', 'WantedBy=timers.target', '',
     ])
     return service, timer
@@ -15115,6 +15115,12 @@ def command_journal_schedule(args):
     repo_root, manifest, _ = require_journal_manifest(args)
     unit_id, service_path, timer_path = journal_systemd_paths(repo_root)
     service, timer = journal_unit_contents(repo_root, manifest)
+    # The previous managed timer had no initial trigger. Accept only that exact
+    # template as an upgrade/removal candidate, never an arbitrary unit file.
+    old_timer = timer.replace(f'OnActiveSec={manifest["journal"]["interval"]}\n', '').replace(
+        'OnUnitInactiveSec=' + manifest['journal']['interval'] + '\n',
+        'OnUnitInactiveSec=' + manifest['journal']['interval'] + '\nPersistent=true\n',
+    )
     managed_files = ((service_path, service), (timer_path, timer))
     payload = {
         'mode': 'apply' if args.apply else 'plan', 'unit_id': unit_id,
@@ -15128,8 +15134,20 @@ def command_journal_schedule(args):
         payload['timer_installed'] = timer_path.read_text() == timer if timer_path.exists() else False
         enabled = journal_systemctl('is-enabled', f'{unit_id}.timer', check=False)
         payload['enabled'] = enabled.returncode == 0
+        active = journal_systemctl('is-active', f'{unit_id}.timer', check=False)
+        next_elapse = journal_systemctl(
+            'show', f'{unit_id}.timer', '--property=NextElapseUSecMonotonic', '--value', check=False
+        )
+        next_value = next_elapse.stdout.strip()
+        payload['armed'] = (
+            payload['enabled'] and active.returncode == 0 and next_elapse.returncode == 0
+            and next_value not in ('', '0', 'infinity')
+        )
+        payload['next_elapse_monotonic'] = next_value if next_elapse.returncode == 0 else None
     elif args.schedule_command == 'install' and args.apply:
-        conflicts = [str(path) for path, content in managed_files if path.exists() and path.read_text() != content]
+        upgrading_legacy = timer_path.exists() and timer_path.read_text() == old_timer
+        conflicts = [str(path) for path, content in managed_files if path.exists()
+                     and path.read_text() != content and not (path == timer_path and path.read_text() == old_timer)]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing overwrite: ' + ', '.join(conflicts))
         payload['managed_ref_guard'] = install_managed_push_hook(repo_root, apply=True)
@@ -15138,8 +15156,11 @@ def command_journal_schedule(args):
         timer_path.write_text(timer)
         journal_systemctl('daemon-reload')
         journal_systemctl('enable', '--now', f'{unit_id}.timer')
+        if upgrading_legacy:
+            journal_systemctl('restart', f'{unit_id}.timer')
     elif args.schedule_command == 'remove' and args.apply:
-        conflicts = [str(path) for path, content in managed_files if path.exists() and path.read_text() != content]
+        conflicts = [str(path) for path, content in managed_files if path.exists()
+                     and path.read_text() != content and not (path == timer_path and path.read_text() == old_timer)]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing removal: ' + ', '.join(conflicts))
         if not service_path.exists() and not timer_path.exists():
