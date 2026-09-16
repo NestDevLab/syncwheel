@@ -21,9 +21,7 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "pr-base-live-tip"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -32,29 +30,7 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/pr-base-live-tip",
-      "commits": [
-        "669e1a4c4f260272fa9b31043df1a58d5067ef61",
-        "1d4fd75417df70d1947de9b3711055c99060b1a8",
-        "d49df5db0271e43cb3ec37c1b35ae53121d583a7",
-        "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0"
-      ],
-      "id": "pr-base-live-tip",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Validate PR historical base against fetched live delivery tip"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2,
