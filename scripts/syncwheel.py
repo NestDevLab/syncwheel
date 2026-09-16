@@ -16490,6 +16490,9 @@ def execute_replay_steps(repo_root, plan):
                 env = step['env']
                 if target.get('skip_contained') and 'cherry-pick' in argv:
                     command_cwd = git_command_cwd(repo_root, argv)
+                    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', argv[-1]).stdout.split()[1:]
+                    if len(parents) > 1 and ref_tree(command_cwd, 'HEAD') == ref_tree(repo_root, argv[-1]):
+                        continue
                     if branch_contains(command_cwd, 'HEAD', argv[-1]):
                         continue
                 effective_argv = argv if env is not None else with_git_identity(repo_root, argv)

@@ -9274,7 +9274,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         finally:
             self.git(follower, 'worktree', 'remove', str(scratch))
 
-        self.run_cli(follower, 'stack', 'set', 's2', merge_tip)
+        self.run_cli(follower, 'stack', 'add', 's2', merge_tip)
         module = fixture['module']
         manifest, _ = module.load_manifest(follower)
         self.assertRegex(
