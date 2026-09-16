@@ -12385,6 +12385,9 @@ def deterministic_stack_projection(repo_root, base, commits):
     head = base
     for declared_commit in commits:
         commit = commit_full_sha(repo_root, declared_commit)
+        if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) > 2:
+            return {'status': 'unsupported', 'commit': commit, 'base': head,
+                    'detail': 'merge commit replay would rewrite its ancestry'}
         merge = git(
             repo_root,
             'merge-tree',
@@ -16135,6 +16138,25 @@ def replay_commit_message(repo_root, commit):
     return git(repo_root, 'show', '-s', '--format=%B', commit).stdout.rstrip('\n')
 
 
+def replay_cherry_pick_args(repo_root, commit, base, *, projection):
+    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()[1:]
+    if len(parents) <= 1:
+        return ['cherry-pick', commit]
+    if not projection:
+        raise SyncwheelError(
+            f'merge commit {commit} cannot be rebuilt by cherry-pick without losing its '
+            'fast-forward ancestry; preserve the declared merge tip and publish it directly'
+        )
+    contained = [index for index, parent in enumerate(parents, 1)
+                 if branch_contains(repo_root, base, parent)]
+    if len(contained) != 1:
+        raise SyncwheelError(
+            f'merge commit {commit} has no unique parent contained in stack base {base}; '
+            'cannot project its tree safely'
+        )
+    return ['cherry-pick', '-m', str(contained[0]), commit]
+
+
 def shell_ref(reference):
     if reference.startswith('$'):
         return f'"{reference}"'
@@ -16154,6 +16176,7 @@ def plumbing_replay_script(repo_root, branch, base, commits, expected_tip=None):
     head = base
     for declared_commit in commits:
         commit = commit_full_sha(repo_root, declared_commit)
+        replay_cherry_pick_args(repo_root, commit, base, projection=False)
         parent = shell_ref(head)
         merge_tree = ' '.join([
             quoted(['git', 'merge-tree', '--write-tree', f'--merge-base={commit}^']),
@@ -16369,7 +16392,7 @@ def replay_plan(repo_root, manifest, target, mode):
     if replay_kind == 'stack':
         for commit in commits:
             steps.append(replay_exec_step(
-                [*prefix, 'cherry-pick', commit],
+                [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                 replay_commit_env(repo_root, commit),
             ))
     elif integration.get('strategy', 'cherry-pick') == 'cherry-pick':
@@ -16377,13 +16400,13 @@ def replay_plan(repo_root, manifest, target, mode):
         for stack_id in integration['stacks']:
             for commit in stack_integration_base_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
-                    [*prefix, 'cherry-pick', commit],
+                    [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                     replay_commit_env(repo_root, commit),
                 ))
         for stack_id in integration['stacks']:
             for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
-                    [*prefix, 'cherry-pick', commit],
+                    [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                     replay_commit_env(repo_root, commit),
                 ))
     elif integration.get('strategy') == 'merge-stacks':
@@ -16467,6 +16490,9 @@ def execute_replay_steps(repo_root, plan):
                 env = step['env']
                 if target.get('skip_contained') and 'cherry-pick' in argv:
                     command_cwd = git_command_cwd(repo_root, argv)
+                    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', argv[-1]).stdout.split()[1:]
+                    if len(parents) > 1 and ref_tree(command_cwd, 'HEAD') == ref_tree(repo_root, argv[-1]):
+                        continue
                     if branch_contains(command_cwd, 'HEAD', argv[-1]):
                         continue
                 effective_argv = argv if env is not None else with_git_identity(repo_root, argv)
