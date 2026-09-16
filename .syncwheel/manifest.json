@@ -1,15 +1,15 @@
 {
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -27,9 +27,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -38,7 +38,8 @@
       "branch": "pr/pr-base-live-tip",
       "commits": [
         "669e1a4c4f260272fa9b31043df1a58d5067ef61",
-        "1d4fd75417df70d1947de9b3711055c99060b1a8"
+        "1d4fd75417df70d1947de9b3711055c99060b1a8",
+        "d49df5db0271e43cb3ec37c1b35ae53121d583a7"
       ],
       "id": "pr-base-live-tip",
       "integration_branch": "main-integration",
