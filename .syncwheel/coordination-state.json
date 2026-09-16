@@ -1,9 +1,7 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/merge-tip-push-projection": "b23621248f37612c2a75b1aa92672eea1b61d4da"
-  },
+  "changed_refs": {},
   "claims": {
-    "refs/heads/pr/merge-tip-push-projection": "7fe2b04ecfb26d18dde6ffa0bed34ffc2ac8608e",
+    "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
@@ -12,7 +10,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T19:13:21+00:00",
+  "created_at": "2026-09-16T19:26:32+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -75,9 +73,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "merge-tip-push-projection"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -85,37 +81,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/merge-tip-push-projection",
-        "commits": [
-          "b9870b4aa3286cdaa3e4bbf2392f21d3973eac12",
-          "98d87d54bb122da2ea66849f144bb684a6a4f4cf",
-          "f355e04f883bd5a9994d9ecb172ee765cc9ffa44",
-          "97512f98dae15759593a952f0cc9b4b81451f9cc",
-          "ca16bf24a44e110814ed7bbc8cf46733f0747959",
-          "b23621248f37612c2a75b1aa92672eea1b61d4da"
-        ],
-        "id": "merge-tip-push-projection",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "ac0057e2-83be-42df-81b9-a9cdd7d0bf9f",
-  "parent_state": "97d97e37261e60c6b4f3865bf9ec01381cfdbfc7",
+  "operation_token": "05ea78fd-3ac5-47f4-a099-cbce65c86101",
+  "parent_state": "9b620db6936ef7088d871e8bef09c35fe4dd4d85",
   "projection_status": "partial",
-  "publication_id": "5ad1f02a-0871-4c29-809e-608f1e9c33c2",
-  "publication_scope": "stack:merge-tip-push-projection",
+  "publication_id": "95b9f4aa-9ba1-4495-acee-c7e0ebcede8a",
+  "publication_scope": "close:merge-tip-push-projection",
   "schema_version": 2,
-  "syncwheel_version": "0.43.7",
+  "syncwheel_version": "0.43.9",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -363,6 +339,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/merge-tip-push-projection",
       "remote_tip": "98d87d54bb122da2ea66849f144bb684a6a4f4cf",
+      "stack": "merge-tip-push-projection"
+    },
+    {
+      "branch": "pr/merge-tip-push-projection",
+      "closed_at": "2026-09-16T19:26:28+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/merge-tip-push-projection",
+      "remote_tip": null,
       "stack": "merge-tip-push-projection"
     }
   ]
