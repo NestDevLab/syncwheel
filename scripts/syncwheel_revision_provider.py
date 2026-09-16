@@ -26,6 +26,7 @@ PHASES = (
     "control_committed",
     "verified",
 )
+TERMINAL_PHASES = frozenset({*PHASES, "expired"})
 REQUEST_FIELDS = frozenset(
     {
         "protocolVersion",
@@ -161,6 +162,10 @@ class RevisionBackend(Protocol):
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def verify_projection_route(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> None: ...
+
     def validate_prepared_commit(
         self, request: RevisionRequest, journal: dict[str, Any], kind: str
     ) -> None: ...
@@ -189,6 +194,10 @@ class RevisionBackend(Protocol):
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def verify_derived_final(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> dict[str, Any]: ...
+
     def verify_no_repository_delta(
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
@@ -202,6 +211,13 @@ class RevisionBackend(Protocol):
     ) -> None: ...
 
     def verify_release(self, request: RevisionRequest, journal: dict[str, Any]) -> None: ...
+
+    def expire_manifest_invalidated(
+        self,
+        request: RevisionRequest,
+        journal: dict[str, Any],
+        reason: str,
+    ) -> None: ...
 
     def checkpoint(self, phase: str) -> None: ...
 
@@ -525,6 +541,13 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "baseRefSha": observation["baseRefSha"],
         "baseRefObjectSha": observation["baseRefObjectSha"],
         "baseRefObservation": observation["baseRefObservation"],
+        "projectionBaseSha": observation["projectionBaseSha"],
+        "projectionBaseKind": observation["projectionBaseKind"],
+        "integrationCompositionDigest": observation.get("integrationCompositionDigest"),
+        "projectionRoute": None,
+        "derivedPaths": None,
+        "derivedPathsDigest": None,
+        "derivedContentDigest": None,
         "baselineIndexSha256": observation["indexSha256"],
         "productIndexSha256": None,
         "controlIndexSha256": None,
@@ -549,10 +572,22 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "controlCommitSha": None,
         "unmappedIntegrationCommits": list(observation["unmappedIntegrationCommits"]),
         "published": False,
+        "expiration": None,
     }
 
 
 def _assert_matching_journal(
+    request: RevisionRequest, journal: dict[str, Any] | None
+) -> dict[str, Any]:
+    journal = _assert_journal_envelope(request, journal)
+    if journal.get("planDigest") != request.plan_digest:
+        raise RevisionProviderError(
+            f"operationId collision for {request.operation_id}: intent digest differs"
+        )
+    return journal
+
+
+def _assert_journal_envelope(
     request: RevisionRequest, journal: dict[str, Any] | None
 ) -> dict[str, Any]:
     if journal is None:
@@ -561,16 +596,19 @@ def _assert_matching_journal(
         )
     if journal.get("providerId") != PROVIDER_ID or journal.get("schemaVersion") != 1:
         raise RevisionProviderError(f"operation {request.operation_id} has an incompatible journal")
-    if journal.get("planDigest") != request.plan_digest:
-        raise RevisionProviderError(
-            f"operationId collision for {request.operation_id}: intent digest differs"
-        )
     phase = journal.get("phase")
-    if phase not in PHASES:
+    if phase not in TERMINAL_PHASES:
         raise RevisionProviderError(
             f"operation {request.operation_id} has an unknown journal phase: {phase!r}"
         )
     return journal
+
+
+def _expired_message(request: RevisionRequest, journal: dict[str, Any]) -> str:
+    expiration = journal.get("expiration") or {}
+    reason = expiration.get("reason") or "the operation receipt was invalidated"
+    remedy = expiration.get("remedy") or "run a new Agentwheel update"
+    return f"operation {request.operation_id} expired: {reason}; {remedy}"
 
 
 def _persist_phase(
@@ -590,6 +628,12 @@ def _advance(
     journal: dict[str, Any],
 ) -> dict[str, Any]:
     backend.verify_recovery_gate(request, journal)
+    if journal["phase"] == "expired":
+        backend.expire_manifest_invalidated(
+            request, journal,
+            (journal.get("expiration") or {}).get("reason")
+            or "the operation receipt was invalidated",
+        )
     if journal["phase"] == "verified":
         status = journal.get("terminalStatus") or "verified"
         return _mutation_response(request, journal, status=status)
@@ -638,11 +682,22 @@ def _advance(
             backend.save_journal(request, journal)
             backend.checkpoint("product_objects_prepared")
 
-        if journal.get("candidateDraftCommitSha") is None:
+        if journal.get("projectionRoute") is None:
             projection = backend.prepare_draft_projection(request, journal)
             journal.update(projection)
+            candidate = journal["candidateProductCommitSha"]
             backend.save_journal(request, journal)
-            backend.checkpoint("draft_objects_prepared")
+            backend.checkpoint("route_decided")
+        elif journal.get("projectionRoute") == "manifest-base":
+            if not journal.get("candidateDraftCommitSha"):
+                raise RevisionProviderError(
+                    "journaled manifest-base route is missing its immutable draft candidate"
+                )
+        elif journal.get("projectionRoute") != "derived":
+            raise RevisionProviderError(
+                f"operation {request.operation_id} has an invalid projection route"
+            )
+        backend.verify_projection_route(request, journal)
 
         if not journal.get("productHooksValidated"):
             backend.validate_prepared_commit(request, journal, "product")
@@ -650,7 +705,7 @@ def _advance(
             backend.save_journal(request, journal)
             backend.checkpoint("product_hooks_validated")
 
-        if not journal.get("draftRefOwned"):
+        if journal.get("projectionRoute") != "derived" and not journal.get("draftRefOwned"):
             backend.ensure_draft_ref_owned(request, journal)
             journal["draftRefOwned"] = True
             journal["draftStackId"] = request.draft_stack_id
@@ -673,6 +728,13 @@ def _advance(
         _persist_phase(backend, request, journal, "product_committed")
 
     if journal["phase"] == "product_committed":
+        if journal.get("projectionRoute") == "derived":
+            verified = backend.verify_derived_final(request, journal)
+            journal.update(verified)
+            journal["terminalStatus"] = "verified"
+            journal["publicationState"] = "derived-unpublished"
+            _persist_phase(backend, request, journal, "verified")
+            return _mutation_response(request, journal, status="verified")
         ownership = backend.ensure_stack_owned(request, journal)
         journal.update(ownership)
         journal["draftStackId"] = request.draft_stack_id
@@ -728,7 +790,13 @@ def _advance(
 
 def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[str, Any]:
     if request.action == "check":
-        backend.check(request)
+        with backend.operation_lock(request):
+            existing = backend.load_journal(request)
+            if existing is not None:
+                existing = _assert_journal_envelope(request, existing)
+                if existing["phase"] == "expired":
+                    raise RevisionProviderError(_expired_message(request, existing))
+            backend.check(request)
         return _base_response(request.action, request.operation_id, True, "ready")
 
     with backend.operation_lock(request):
@@ -736,6 +804,8 @@ def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[s
         if request.action == "preflight":
             if existing is not None:
                 existing = _assert_matching_journal(request, existing)
+                if existing["phase"] == "expired":
+                    raise RevisionProviderError(_expired_message(request, existing))
                 backend.verify_recovery_gate(request, existing)
                 return _base_response(
                     request.action, request.operation_id, True, "prepared"
@@ -750,6 +820,8 @@ def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[s
         if request.action in MUTATING_ACTIONS:
             return _advance(backend, request, journal)
         if request.action == "release":
+            if journal["phase"] == "expired":
+                return _base_response(request.action, request.operation_id, True, "expired")
             if journal["phase"] != "prepared":
                 raise RevisionProviderError(
                     f"cannot release operation in phase {journal['phase']}; recover it instead"

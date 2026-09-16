@@ -2,6 +2,63 @@
 
 The preferred source of truth is `.syncwheel/manifest.json`.
 
+## Control commits after integration rebuilds
+
+Before a mutating integration rebuild, Syncwheel compares the on-disk manifest
+with the control manifest it loaded for the command. A mismatch stops before
+any rebuild, reports stack order, base, commits, and configuration differences,
+and prints an executable restore command.
+
+An integration replay can legitimately replace the checked-out manifest with
+an older copy from its base or a stack. After a successful replay, Syncwheel
+restores the command's final in-memory control manifest on the integration ref,
+including when `--manifest` names an external file. It creates a
+`chore: restore Syncwheel control manifest` commit containing only
+`.syncwheel/manifest.json` with an isolated temporary index and `commit-tree`.
+The object is verified before an exact ref CAS, so hooks and staged files cannot
+alter it. Its identity and dates are inherited deterministically from the replay
+parent; the same parent and manifest produce the same SHA. Before moving the
+ref, Syncwheel fsyncs a local ledger intent containing a fresh operation ID,
+the source preimage digest, and the expected control-commit SHA. After the ref
+moves, Syncwheel first aligns the checked-out index and files with `read-tree`
+without moving the branch ref, then saves the manifest source, and only then
+writes the keyed ledger receipt with the actual SHA, digest, actor, reason,
+command, and replay mode. The whole sequence is serialized by one clone-local
+lock keyed by repository and integration branch, independent of an external
+manifest path. The ref tip is checked immediately before and after checkout
+alignment; a concurrent advance terminally abandons the intent and is never
+rewound with `reset --hard`.
+
+A retry repairs an incomplete ledger tail under lock and reads pending intents
+before inspecting the current ref subject or requiring the manifest file. It
+can therefore complete the CAS and restore a manifest removed by an in-place
+replay. Only the current intent's source and expected digests authorize that
+recovery; a digest appearing in older ledger history is not authority, and a
+control commit learned from another clone never authorizes replacing a
+different local proposal. A receipt already durable at the crash boundary is
+not duplicated, while a later rebuild of the same deterministic SHA has a new
+operation ID and its own receipt.
+
+The integration checkout is probed before the intent and the CAS. Uncommitted
+work there that the alignment would overwrite refuses the command, names the
+checkout, the paths and the command to rerun, and moves nothing; work that
+appears only after the CAS lets the operation finish, aligns the control
+manifest path alone, and reports the rest as a warning.
+
+Any command that writes the manifest settles a pending intent first. When the
+source already holds a newer proposal, the interrupted operation is receipted
+if its control commit is already on the integration ref, and `int rebuild
+--reason` abandons it otherwise; the newer proposal is never replaced.
+
+External manifest files are written from the same desired in-memory manifest
+as the control commit. `int rebuild --reason TEXT` is required for an
+`ai-managed` repository and is the explicit path for adopting a reviewed local
+proposal after cross-clone divergence. That rebuild reads its own
+`.syncwheel/manifest.json` as input, so a divergent tracked manifest in the
+checkout does not block the remedy the refusal names. This control commit is
+part of the integration projection and is recreated on later rebuilds; do not
+treat it as a stack-owned product commit.
+
 ## Shape
 
 ```json
@@ -9,6 +66,11 @@ The preferred source of truth is `.syncwheel/manifest.json`.
   "version": 1,
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": ".syncwheel/wt",
+  "authority": {
+    "mode": "ai-managed",
+    "allow": ["source_change"],
+    "deny": ["destructive_rewrite"]
+  },
   "defaults": {
     "canonical_remote": "origin",
     "publication_remote": "fork",
@@ -305,6 +367,15 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `version` is `1` for legacy manifests, `2` for manifests with a required
   `coordination` block, or `3` for channel-aware delivery manifests
 - `syncwheel_tracking`, when present, must be `git-tracked` or `local-only`
+- `authority`, when present, declares how much of the delivery pipeline agents
+  may run without a human gate. `mode` is `human-gated` or `ai-managed`;
+  `allow` lists the classes granted (`source_change`: edit, test, commit, push,
+  PR, merge; `runtime_change`: release, deploy, service restart);
+  `destructive_rewrite` (force pushes, history rewrites, deleting work) is
+  always denied and can never be allowed. `human-gated` allows nothing;
+  `ai-managed` needs at least one allowed class. An absent block means
+  `human-gated`. Set it with `syncwheel repo authority set`; it is never
+  enabled automatically and is not part of coordination state
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
 - new manifests set `defaults.integration_membership` to `required`; legacy
   manifests without it remain compatible until explicitly migrated
@@ -359,6 +430,10 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `integration_commits`, when present, is the resolved projection used only for
   integration. Record it after a conflict creates new integration commits; it
   prevents Syncwheel from treating those commits as source-branch commits.
+- `integration_only_commits`, when present, contains commits owned by the stack
+  only in integration. They are excluded from source-branch rebuilds and are
+  replayed after the combined stack projection during integration rebuilds,
+  including after all stack merges under `merge-stacks`.
 - `integration.strategy` is optional and defaults to `cherry-pick`
 - supported integration strategies are:
   - `cherry-pick`: replay all declared commits into integration as a linear history
@@ -391,6 +466,21 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 Unmapped integration commits are reported as warnings plus a
 `classify_integration_commits` plan action. The tool can identify the commits,
 but a human or AI agent still needs to decide which stack owns each change.
+
+After choosing an existing owner, preview and apply the manifest-only
+classification with an exact plan digest:
+
+```bash
+syncwheel stack classify-integration feature-a <integration-commit>
+syncwheel stack classify-integration feature-a <integration-commit> \
+  --apply --plan-digest <digest-from-preview>
+```
+
+The operation requires the commit to be present on the configured integration
+branch and the owner to participate in that integration, refuses ownership
+already assigned to another stack, and updates no Git refs or worktrees. Use
+`stack capture-integration` instead when the commit must also be materialized on
+the stack source branch.
 
 ### Resolved integration projections
 

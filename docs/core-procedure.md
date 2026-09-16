@@ -246,7 +246,7 @@ the executable object-ID shell block.
 
 Apply:
 ```bash
-python3 scripts/syncwheel.py int rebuild
+python3 scripts/syncwheel.py int rebuild --reason "refresh integration projection"
 python3 scripts/syncwheel.py int push
 ```
 
@@ -256,7 +256,7 @@ python3 scripts/syncwheel.py int push
 If you are already on the integration branch and the checkout is clean:
 
 ```bash
-python3 scripts/syncwheel.py int rebuild --in-place
+python3 scripts/syncwheel.py int rebuild --in-place --reason "refresh integration projection"
 python3 scripts/syncwheel.py int push
 ```
 

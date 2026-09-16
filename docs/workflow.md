@@ -47,7 +47,7 @@ A rebuild leaves no worktree behind:
 
 ```bash
 syncwheel stack rebuild feature-a
-syncwheel int rebuild
+syncwheel int rebuild --reason "refresh integration projection"
 ```
 
 The default mode, `auto`, replays through Git plumbing when Git supports

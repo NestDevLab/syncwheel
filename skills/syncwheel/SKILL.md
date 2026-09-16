@@ -14,6 +14,93 @@ described in a manifest; Syncwheel reconciles Git to match it. Plain manual
 `git`/worktree surgery is the exception path, used only when Syncwheel is
 unavailable, blocked, or cannot express the needed recovery.
 
+## Ratified working rules (read this first)
+
+These four are ratified operating rules (MGT-0206), not suggestions. A real incident
+happened because an operator resolved a rebuild conflict with raw git instead of rule 2 —
+the mechanism already existed; only the visibility was missing. Read rule 2 twice.
+
+1. **Never author in the primary checkout.** It stays on `manifest.integration.branch` as
+   the shared test projection. Open a governed lane instead:
+   ```bash
+   syncwheel worktree open <lane> [--into <stack>] [--full]
+   ```
+   As of 0.42.4, where the guard hooks are installed, this is enforced: a manual commit on
+   the primary, or an unauthorized move of the integration ref there, is refused, and every
+   mutating Syncwheel command refuses to run while the primary has tracked changes. Arm the
+   guard once per clone:
+   ```bash
+   syncwheel hooks install --apply
+   ```
+   Opt out only with a reasoned, ledgered, clone-local disable:
+   ```bash
+   syncwheel hooks remove --disable --reason "<why>" --apply
+   ```
+
+2. **Never resolve a replay conflict with raw git.** A plumbing replay never descends
+   silently into a conflict; it names the exact retry:
+   ```bash
+   syncwheel stack rebuild <id> --replay-mode desk
+   ```
+   Resolve inside that worktree through the manifest, not through a manual merge commit:
+   ```bash
+   syncwheel stack absorb <stack> [<path>...|--staged]
+   syncwheel stack resolve-integration <stack> <resolved-commit>...
+   ```
+   A manual `git merge` or `git commit` on the integration branch during a conflict is
+   outside Syncwheel's bookkeeping. The next `stack rebuild` / `int rebuild` reconstructs
+   the branch from the manifest's own commit projection and never consults that resolution,
+   so the work is lost. `reconcile` refuses with the same conflict on every later run,
+   because its pre-check replays the declared stacks from scratch each time: the manual
+   resolution can never make it pass.
+
+3. **Integration composition is a declared, visible operation.** Before testing on
+   integration, or before blaming your own code for something that looks broken there,
+   check what is actually integrated:
+   ```bash
+   syncwheel int show
+   ```
+   Add a stack by declaring it — required-membership manifests include every declared stack
+   in `integration.stacks` by default — then rebuild:
+   ```bash
+   syncwheel stack create <id> [<commit-or-range>...] [--draft]
+   syncwheel int rebuild --reason "<why>"
+   ```
+   Remove one by closing it, then rebuild:
+   ```bash
+   syncwheel stack close <id> --reason "<why>"
+   syncwheel int rebuild --reason "<why>"
+   ```
+
+4. **Every mutating command carries `--reason`; it is mandatory in `ai-managed`
+   repositories.** Pass it always, not only on the commands that already refuse to run
+   without one (`int rebuild` in an ai-managed repo, `hooks remove --disable`,
+   `worktree release`, `coordination provenance reset`, among others). The reason lands in
+   the append-only ledger together with the actor and the exact command:
+   ```bash
+   syncwheel ledger show
+   ```
+
+### When something looks wrong
+
+Do not force a push, do not hand-edit `.syncwheel/manifest.json` or the coordination
+state, and do not fall back to raw git. Re-observe, then use the exact remedy the failing
+command names.
+
+For a managed ref that disagrees with the coordination state, `syncwheel coordination
+repair` is the family of named remedies, always plan-first then `--apply --plan-file
+<plan>`:
+
+| Situation | Backend |
+|---|---|
+| The ref is otherwise correct, only the recorded tip is wrong (ref repair) | default — `syncwheel coordination repair --ref <ref> > plan.json` |
+| Recorded and observed commits differ only in shape, same tree | `--freeze-backend tree-equivalent-state-cas` |
+| The ref advanced through an exact, reviewed fast-forward | `--freeze-backend fast-forward-state-cas` |
+| A state was published before 0.42.2 and carries the legacy manifest-digest form | `--freeze-backend state-digest-migration` (or let the next publish/push/compose migrate it automatically) |
+
+Each backend proves ancestry/tree/ownership before writing and only ever appends
+coordination state — none of them touch the managed branch itself.
+
 ## When to use (Syncwheel-first)
 
 **First, detect the regime.** Before branch, worktree, integration, PR, recovery,
@@ -60,16 +147,51 @@ The script owns: repo-state discovery, manifest validation, deterministic branch
 and integration reconstruction. The agent owns: judgment, communication,
 project-specific validation after a rebuild, and safe execution.
 
-The primary Git worktree stays on `manifest.integration.branch`, and you work there. Rebuilds no
-longer create a worktree: replay runs through Git plumbing where available, or a temporary worktree
-that is removed before the command returns. A clean, bounded integration operation may switch the
-primary checkout temporarily, but must restore and verify the integration branch before completion.
-Treat any other primary-checkout mismatch as a validation error and blocked handoff.
+The primary Git worktree stays on `manifest.integration.branch` as the shared test projection; do
+not author or commit there. Open a governed lane before authoring. Rebuilds no longer create a
+worktree: replay runs through Git plumbing where available, or a temporary worktree that is removed
+before the command returns. A clean, bounded integration operation may switch the primary checkout
+temporarily, but must restore and verify the integration branch before completion. Treat any other
+primary-checkout mismatch as a validation error and blocked handoff.
 
 Desk is an escalation/validation surface, not routine authoring: begin routine implementation,
 dependency installation, builds, and tests on integration. Use `--replay-mode desk` only to resolve a
 conflict or validate a non-empty materialized stack when integration cannot safely run it; it is never
 a side effect of rebuilding.
+
+When the primary checkout is explicitly owned by another agent and authoring
+must continue, use the explicit governed fallback instead of manual worktree
+surgery:
+
+```bash
+syncwheel worktree open <lane> [--into <existing-stack>] [--full]
+```
+
+The default light lane is for editing and committing only. It receives no
+dependency provisioning; use `--full` only for an explicitly necessary
+dependency, build, test, or debugging surface. This is not a security sandbox,
+so do not defeat the light-lane boundary with raw install/test commands. The
+lane is clone-local and bounded to four active entries. After its commits are
+owned through the existing `stack create`, `stack add`, or
+`stack capture-integration` flow, Syncwheel stores a local recovery ref and
+reaps only a clean lane. A missing lane with an expired lease or a known-dead
+local owner is eligible even if its retained registry path is outside the
+configured root; a dirty, unknown, or current-directory lane stays visible and
+requires explicit recovery. Check governed-worktree warnings before a mutating
+lifecycle command.
+
+To retire a named dead or abandoned lane, first preview and then explicitly
+apply the release:
+
+```bash
+syncwheel worktree release <lane> --reason "<why>"
+syncwheel worktree release <lane> --reason "<why>" --apply
+```
+
+The preview does not write. Applying stores a recovery ref for an existing lane
+branch tip, removes the registry record, and appends a ledger event. It refuses
+an existing dirty worktree and names the recovery remedy. `gc --apply` reaps
+eligible expired lanes even when active-active coordination is disabled.
 
 ## Locate the CLI
 
@@ -122,11 +244,38 @@ syncwheel handoff
 
 Use `publish`, `stack push`, or `int push` for that manifest's managed refs.
 They publish atomic state with exact leases; do not substitute a raw `git push`.
+The source ref's `refs/heads/syncwheel/claim/heads/...` claim is the cross-domain
+CAS authority and must advance in every publication that touches that source.
+An unchanged claim or a lease on a ref absent from the refspec proves nothing.
+Existing manifests default to `coordination.claims: advisory`; inspect and then
+apply `syncwheel coordination claims backfill --apply --reason <reason>` before
+an explicitly approved switch to `required`. Never overwrite a foreign claim.
+Every mutating coordinated publish records a durable intent token before its
+atomic push. That token in the published state chain is the only proof the
+operation landed; a retry that finds it completes without republishing, even
+after other clones advanced the same refs. An intent absent from that chain
+never landed and is abandoned as `coordination_publish_abandoned` by the next
+publication, `reconcile`, or `resume`, so neither a lost race nor a refused push
+blocks the clone. A promotion whose push landed before its manifest save is
+completed by the next coordinated command, which rebuilds the promoted branch
+from the published state instead of trusting the local branch layout. Draft create
+uses its `stack_create_intent` token in the claim and removes its token-derived
+temporary worktree registration on retry.
 Install the plan-first managed-ref guard in each clone with `syncwheel hooks
 install`, review the reported hook/chaining path and digest, then apply with
 `syncwheel hooks install --apply`. The guard is composable and catches accidental
 raw pushes, but `--no-verify` remains a local bypass and the hook is not a security
-boundary.
+boundary. A required guard is reported as pending until this explicit installation;
+normal Syncwheel commands do not install it implicitly. Once installed, an
+unresolvable stable CLI or an altered/partial hook bundle makes the guard fail closed
+and `hooks status` reports `degraded` with the cause. Syncwheel's guard runs before
+every chained user hook, both execute, and either failure rejects the operation.
+Use the same `--personal` or `--manifest` selector for `hooks install`, `status`, and
+reasoned removal. The clone has one effective guard target; another selected profile
+or a renamed integration branch is degraded until an installation with the same
+selector and `--reason "..."` retargets it. Retargeting appends an intent with actor,
+old target, new target, and reason to the selected ledger before changing
+`guard.json`.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.
@@ -187,9 +336,24 @@ through plumbing; older Git uses a self-removing temporary worktree.
 `syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
 wheel metaphor helps, but the manifest field remains `stacks`.
 
-Never mutate branches from a dirty checkout. Use `--dry-run` on rebuild/push commands. If the manifest
-and Git disagree, fix the manifest or call out the conflict — do not claim a repo is aligned while
-integration and PR branches still differ.
+Never run a built-in mutation while the shared primary checkout is dirty: it stops before side effects
+and names `worktree open` or `stack capture-integration` as the remedy. Read-only commands remain
+available and emit a yellow TTY warning with the dirty-file count; treat the changes as foreign to the
+invoking user. Use `--dry-run` on rebuild/push commands. If the manifest and Git disagree, fix the
+manifest or call out the conflict — do not claim a repo is aligned while integration and PR branches
+still differ. The named recovery commands remain executable while it is dirty. The
+primary guard is fail-closed and uses a single-use internal nonce; `hooks status`
+reports a degraded bundle and `hooks install --apply` repairs it explicitly. Guard
+state comes only from atomic `guard.json` under the Git common directory. Re-enable
+state precedes hook installation; reasoned disable is ledgered before hook removal.
+Every state read validates the branch, boolean enable flag, and required disable
+reason; missing, non-UTF-8, or invalid state fails closed, reports degraded, and is
+repairable by explicit installation. Nonces bind PID
+plus process-start identity, cleanup preserves other live processes, and stale
+malformed files are audit-recorded before removal. Mutation/read-only/remedy behavior
+is declared once in the entrypoint registry, including internal writers, so `--apply`
+previews remain read-only. Execute-mode stack push, integration rebuild, and
+integration push retain manifest-write classification for control-state persistence.
 
 ## Replay modes
 
@@ -248,7 +412,8 @@ syncwheel repo tracking status
 syncwheel repo tracking set git-tracked --apply # or local-only
 # 3. Declare the stack
 syncwheel stack create feature-a --branch pr/feature-a --base origin/main
-# 4. Author on the integration branch, in the checkout you are already in
+# 4. Author in a governed lane, never on the shared integration checkout
+# syncwheel worktree open feature-a --into feature-a
 #    ... make and commit your changes ...
 # 5. Record the commits into the manifest, then validate and push
 syncwheel stack set feature-a origin/main..HEAD
@@ -258,20 +423,27 @@ syncwheel stack push feature-a
 
 ## When you do not know which PR owns the change yet
 
-Commit on integration, then put the commit in a drawer and decide later. A draft stack owns its
-commits but is forbidden from becoming a pull request until you promote it, so the work is tracked from
-the first commit instead of sitting unowned until the next rebuild drops it.
+Create a draft, then author in a governed lane. A draft owns its commits but is forbidden from
+becoming a pull request until you promote it, so the work is tracked from the first commit instead of
+sitting unowned until the next rebuild drops it.
 
 ```bash
 syncwheel stack create --draft caching-experiment       # owned, not proposed
-syncwheel stack capture-integration caching-experiment HEAD
-#    ... keep working; capture more commits into the same draft, or start another ...
+syncwheel worktree open caching-experiment --into caching-experiment
+#    ... commit in that lane, then own it through the stack flow ...
 syncwheel stack promote caching-experiment --branch pr/caching   # now it is a real PR branch
 ```
 
 A draft refuses `stack push` to the target remote and names its state as the reason. Under
 active-active coordination its *source* ref does publish to the coordination remote, so another clone
-can rebuild it from the manifest alone. `syncwheel stack demote <id>` goes back, and refuses when the
+can rebuild it from the manifest alone. Closing an unpublished draft is also a
+remote operation: intent first, atomic tombstone claim plus state, manifest
+save, then terminal event. If the remote is unavailable, stop without saving;
+a retry after a crash completes only from its exact tombstone token, even when
+unrelated publications advanced the state meanwhile. If a newer claim has
+superseded that token, record `close_superseded` and stop without closing the
+newer stack generation.
+`syncwheel stack demote <id>` goes back, and refuses when the
 stack already has an open PR recorded.
 
 If `plan` reports integration commits that belong to no stack, that is exactly this situation: it now
@@ -370,6 +542,22 @@ syncwheel repo tracking set git-tracked --apply
 syncwheel repo tracking set local-only --apply
 ```
 
+Then read how far you may take a change without asking:
+
+```bash
+syncwheel repo authority status
+```
+
+`ai-managed` means the repository's configured Syncwheel pipeline runs
+unattended. The manifest defines the pipeline (stacks, PRs, landing, channels,
+or journal publish); `authority` only says whether you may run it without a
+human at each stage. `source_change` covers source delivery up to and including
+merge or `journal publish`; `runtime_change` covers the rollout that pipeline
+leads to (deployment channels, install, restart) and must be listed on its own.
+`destructive_rewrite`, external sends, money, and work outside the named scope
+stay gated whatever the block says. Missing block means `human-gated`. Never
+set or widen this policy yourself.
+
 ### `git-tracked` → commit the manifest
 
 Commit `.syncwheel/manifest.json` (and `.syncwheel/manifests/README.md`). Keep
@@ -443,9 +631,45 @@ A shared, committed manifest plus the append-only ledger is what lets many agent
 coordinate deterministically. On a fresh machine or a new agent, recover shared
 state with `syncwheel resume` instead of improvising branch ownership.
 
+## GitHub PR merge policy
+
+For an explicitly `ai-managed` repository whose authority allows
+`source_change`, a maintainer may opt a clone into the private GitHub merge
+path:
+
+```bash
+syncwheel repo pr-merge-policy status --json
+syncwheel repo pr-merge-policy set github --repository OWNER/REPO --base main \
+  --method squash --allow-bypass required_reviews --merge-actor LOGIN \
+  --pr-author LOGIN --commit-author LOGIN --head-repository OWNER/REPO
+```
+
+`set` and `clear` are dry-run until `--apply`; `profile.local.json` must be
+ignored and untracked. At least one provenance filter is required and all
+configured filters pass together. The shared manifest never carries this
+private policy.
+
+Plan first, then apply with the exact values from the plan:
+
+```bash
+syncwheel stack merge-pr STACK --json
+syncwheel stack merge-pr STACK --operation-id ID --plan-digest DIGEST --apply
+```
+
+The fixed `syncwheel-github` adapter is the only component that calls `gh`.
+It observes the exact PR, actor permissions, commit identities, repository
+rules, review threads, and checks. The core fails closed on drift, conflicts,
+CI states other than `SUCCESS`/`SKIPPED`, changes requested, unresolved
+threads, merge queues, unknown rules, or an unproven review-only block. It
+uses `--admin` only for a proven required-review bypass and always includes
+`--match-head-commit`; it never deletes the remote branch. An interrupted
+operation is reconciled by observation with the same operation id and digest,
+never by automatically retrying the merge.
+
 ## More
 
 See `docs/deployment-channels.md` for the channel lifecycle,
+`docs/github-pr-merge.md` for the GitHub PR merge policy,
 `docs/manifest-tracking.md` for the full tracking policy, `docs/ai-agents.md`
 and `docs/agent-procedure.md` for the agent contract, and `docs/core-procedure.md`
 for the canonical recovery procedure. An automated post-merge cleanup path is

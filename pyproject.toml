@@ -16,9 +16,10 @@ dependencies = []
 
 [project.scripts]
 syncwheel = "syncwheel:main"
+syncwheel-github = "syncwheel_github:main"
 
 [tool.setuptools]
-py-modules = ["syncwheel", "syncwheel_revision_provider"]
+py-modules = ["syncwheel", "syncwheel_revision_provider", "syncwheel_github"]
 package-dir = {"" = "scripts"}
 
 [tool.setuptools.dynamic]

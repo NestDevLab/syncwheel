@@ -43,9 +43,19 @@ from _replay_support import (
 class ReplayModesTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-replay-modes-'))
+        stable_bin = self.tmp / 'stable-bin'
+        stable_bin.mkdir()
+        stable_cli = stable_bin / 'syncwheel'
+        stable_cli.write_text(
+            '#!/bin/sh\nexec "' + sys.executable + '" "'
+            + str(Path(__file__).parents[1] / 'scripts' / 'syncwheel.py') + '" "$@"\n'
+        )
+        stable_cli.chmod(0o755)
+        environment = hermetic_environment(self.tmp)
+        environment['PATH'] = str(stable_bin) + os.pathsep + environment['PATH']
         self.environment_patch = mock.patch.dict(
             os.environ,
-            hermetic_environment(self.tmp),
+            environment,
             clear=True,
         )
         self.environment_patch.start()
@@ -159,6 +169,22 @@ class ReplayModesTest(unittest.TestCase):
                     replay_mode='plumbing',
                 )
                 self.assertEqual(plumbing, ephemeral)
+
+    def test_plumbing_rebuild_passes_the_installed_ref_guard_without_an_external_handshake(self):
+        source_repo, manifest, stack_id = build_linear_chain(self.tmp)
+        clone = clone_repo(source_repo, self.tmp / 'guarded-plumbing', manifest)
+        stack = next(item for item in manifest['stacks'] if item['id'] == stack_id)
+        run_cli(clone, 'hooks', 'install', '--apply')
+        run_cli(clone, 'stack', 'rebuild', stack_id, '--replay-mode', 'plumbing')
+        declared = git(clone, 'rev-parse', stack['branch']).stdout.strip()
+        tree = git(clone, 'rev-parse', f"{stack['branch']}^{{tree}}").stdout.strip()
+        extra = git(clone, 'commit-tree', tree, '-p', stack['branch'], '-m', 'undeclared').stdout.strip()
+        git(clone, 'update-ref', f"refs/heads/{stack['branch']}", extra)
+        self.assertNotIn('SYNCWHEEL_REF_MOVE_AUTH', os.environ)
+
+        run_cli(clone, 'stack', 'rebuild', stack_id, '--replay-mode', 'plumbing')
+
+        self.assertEqual(git(clone, 'rev-parse', stack['branch']).stdout.strip(), declared)
 
     def test_ephemeral_stack_rebuild_leaves_no_worktree(self):
         source_repo, manifest, stack_id = build_linear_chain(self.tmp)

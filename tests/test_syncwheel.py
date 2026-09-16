@@ -1,9 +1,14 @@
+import contextlib
 import importlib.util
+import io
 import json
 import os
+import shlex
+import signal
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 from unittest import mock
 from pathlib import Path
@@ -64,6 +69,270 @@ class SyncwheelFixtureTest(unittest.TestCase):
                 f"STDERR:\n{result.stderr}"
             )
         return result
+
+    def run_cli_until_cleanup_sigkill(self, stage, *args):
+        script = r'''
+import importlib.util
+import json
+import os
+import signal
+import sys
+
+cli_path, repo_path, checkpoint, raw_args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_sigkill_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def kill_at(stage):
+    if stage == checkpoint:
+        os.kill(os.getpid(), signal.SIGKILL)
+
+module.governed_worktree_cleanup_checkpoint = kill_at
+os.chdir(repo_path)
+sys.argv = [cli_path, *json.loads(raw_args)]
+raise SystemExit(module.main())
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        result = subprocess.run(
+            [
+                'python3', '-c', script, str(CLI), str(self.repo), stage,
+                json.dumps(list(args)),
+            ],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(
+            result.returncode,
+            -signal.SIGKILL,
+            f'checkpoint {stage!r} was not reached\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}',
+        )
+        return result
+
+    def run_cli_until_registry_lock_sigkill(self, lock_state, *args):
+        script = r'''
+import importlib.util
+import json
+import os
+import signal
+import sys
+from pathlib import Path
+
+cli_path, repo_path, lock_state, raw_args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_registry_lock_sigkill_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lock_path = module.governed_worktree_lock_path(Path(repo_path)).resolve(strict=False)
+
+if lock_state == 'empty':
+    original_open = module.os.open
+
+    def kill_after_exclusive_create(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            flags & os.O_EXCL
+            and Path(path).resolve(strict=False) == lock_path
+        ):
+            os.kill(os.getpid(), signal.SIGKILL)
+        return descriptor
+
+    module.os.open = kill_after_exclusive_create
+elif lock_state == 'truncated':
+    original_write_all = module._write_all
+
+    def kill_during_metadata_write(descriptor, payload):
+        descriptor_path = Path(f'/proc/self/fd/{descriptor}').resolve(strict=False)
+        if descriptor_path == lock_path:
+            os.write(descriptor, payload[:max(1, len(payload) // 2)])
+            os.fsync(descriptor)
+            os.kill(os.getpid(), signal.SIGKILL)
+        return original_write_all(descriptor, payload)
+
+    module._write_all = kill_during_metadata_write
+else:
+    raise AssertionError(lock_state)
+
+os.chdir(repo_path)
+sys.argv = [cli_path, *json.loads(raw_args)]
+raise SystemExit(module.main())
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        result = subprocess.run(
+            [
+                'python3', '-c', script, str(CLI), str(self.repo), lock_state,
+                json.dumps(list(args)),
+            ],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=20,
+        )
+        self.assertEqual(
+            result.returncode,
+            -signal.SIGKILL,
+            f'lock state {lock_state!r} was not reached\n'
+            f'STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}',
+        )
+        return result
+
+    def start_registry_lock_holder(self, ready_path):
+        script = r'''
+import importlib.util
+import os
+import signal
+import sys
+from pathlib import Path
+
+cli_path, repo_path, ready_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_registry_lock_holder_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with module.governed_worktree_registry_lock(Path(repo_path)):
+    Path(ready_path).write_text(str(os.getpid()), encoding='utf-8')
+    signal.pause()
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        holder = subprocess.Popen(
+            ['python3', '-c', script, str(CLI), str(self.repo), str(ready_path)],
+            cwd=self.repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+        deadline = time.monotonic() + 10
+        while not ready_path.exists():
+            if time.monotonic() >= deadline:
+                stdout, stderr = holder.communicate(timeout=5)
+                self.fail(
+                    f'registry lock holder did not become ready\n'
+                    f'STDOUT:\n{stdout}\nSTDERR:\n{stderr}'
+                )
+            time.sleep(0.01)
+        return holder
+
+    def run_cli_pair_concurrently(self, first, second):
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        processes = [
+            subprocess.Popen(
+                ['python3', str(CLI), *args],
+                cwd=self.repo,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=env,
+            )
+            for args in (first, second)
+        ]
+        results = []
+        for process in processes:
+            stdout, stderr = process.communicate(timeout=120)
+            results.append(SimpleNamespace(
+                returncode=process.returncode, stdout=stdout, stderr=stderr,
+            ))
+        return results
+
+    def lane_release_reason_recorded(self, module, lane_id, reason):
+        for event in module.load_ledger_events(self.repo):
+            if event['type'] not in {
+                'governed_worktree_released', 'governed_worktree_release_noted',
+            }:
+                continue
+            payload = event.get('payload') or {}
+            if payload.get('lane') == lane_id and payload.get('reason') == reason:
+                return True
+        return False
+
+    def start_registry_lock_race(self, label, trace_path, hold, ready_path=None):
+        script = r'''
+import importlib.util
+import os
+import signal
+import sys
+import time
+from pathlib import Path
+
+cli_path, repo_path, label, trace_path, hold, ready_path = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_registry_lock_race_test', cli_path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+lock_path = module.governed_worktree_lock_path(Path(repo_path)).resolve(strict=False)
+original_open = module.os.open
+
+
+def trace(mark):
+    descriptor = original_open(trace_path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, (mark + '\n').encode('utf-8'))
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+if ready_path:
+    stopped = []
+
+    def stop_after_exclusive_create(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = original_open(path, flags, mode)
+        else:
+            descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if (
+            not stopped
+            and flags & os.O_EXCL
+            and Path(path).resolve(strict=False) == lock_path
+        ):
+            stopped.append(True)
+            Path(ready_path).write_text(str(os.getpid()), encoding='utf-8')
+            os.kill(os.getpid(), signal.SIGSTOP)
+        return descriptor
+
+    module.os.open = stop_after_exclusive_create
+
+with module.governed_worktree_registry_lock(Path(repo_path)):
+    trace(label + '-enter')
+    time.sleep(float(hold))
+    trace(label + '-exit')
+'''
+        env = dict(os.environ)
+        env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        return subprocess.Popen(
+            [
+                'python3', '-c', script, str(CLI), str(self.repo), label,
+                str(trace_path), str(hold), str(ready_path or ''),
+            ],
+            cwd=self.repo,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+        )
+
+    def await_condition(self, predicate, message, timeout=20):
+        deadline = time.monotonic() + timeout
+        while not predicate():
+            if time.monotonic() >= deadline:
+                self.fail(message)
+            time.sleep(0.01)
+
+    def process_state(self, pid):
+        try:
+            raw = Path(f'/proc/{pid}/stat').read_text(encoding='utf-8')
+        except FileNotFoundError:
+            return None
+        closing = raw.rfind(')')
+        fields = raw[closing + 2:].split() if closing >= 0 else []
+        return fields[0] if fields else None
 
     def run_script(self, script_path, *args, expected=0, cwd=None):
         result = subprocess.run(
@@ -149,6 +418,138 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
     def assert_path_equal(self, left, right):
         self.assertEqual(Path(left).resolve(), Path(right).resolve())
+
+    def exercise_external_manifest_lane_capture(self, operation):
+        manifest_path = self.tmp / f'{operation}-manifest.json'
+        manifest = self.read_manifest()
+        if operation == 'capture':
+            stack_id = 'external-capture-stack'
+            integration_branch = 'integration/external-capture'
+            manifest['defaults']['integration_membership'] = 'required'
+            manifest['integration'] = {
+                'branch': integration_branch,
+                'base': 'main',
+                'stacks': [],
+            }
+            manifest['stacks'] = []
+            self.git('branch', integration_branch, 'main')
+            self.git('switch', '-q', integration_branch)
+        elif operation == 'create':
+            stack_id = 'external-created-stack'
+        else:
+            stack_id = 'feature-a'
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2) + '\n',
+            encoding='utf-8',
+        )
+        if operation == 'capture':
+            self.run_cli(
+                'stack', 'create', stack_id, '--draft',
+                '--manifest', str(manifest_path),
+            )
+        lane_id = f'external-{operation}'
+        target = None if operation == 'create' else stack_id
+        open_args = [
+            'worktree', 'open', lane_id,
+            '--manifest', str(manifest_path),
+            '--json',
+        ]
+        if target:
+            open_args.extend(['--into', target])
+        opened = json.loads(self.run_cli(*open_args).stdout)
+        original_generation = opened['lane']['generation_token']
+        lane_path = Path(opened['lane']['path'])
+        filename = f'{operation}-owned.txt'
+        (lane_path / filename).write_text(
+            f'{operation} owns this lane\n',
+            encoding='utf-8',
+        )
+        subprocess.run(['git', 'add', filename], cwd=lane_path, check=True)
+        subprocess.run(
+            ['git', 'commit', '-qm', f'feat: exercise external {operation} capture'],
+            cwd=lane_path,
+            check=True,
+        )
+        commit = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'],
+            cwd=lane_path,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+
+        if operation == 'create':
+            self.run_cli(
+                'stack', 'create', stack_id, commit,
+                '--branch', 'pr/external-created-stack',
+                '--manifest', str(manifest_path),
+            )
+        elif operation == 'add':
+            self.run_cli(
+                'stack', 'add', stack_id, commit,
+                '--manifest', str(manifest_path),
+            )
+        elif operation == 'capture':
+            self.run_cli(
+                'stack', 'capture-integration', stack_id, commit,
+                '--manifest', str(manifest_path),
+            )
+        else:
+            self.fail(f'unknown capture operation: {operation}')
+
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        captured = next(item for item in registry['lanes'] if item['id'] == lane_id)
+        self.assertEqual(captured['state'], 'reaped')
+        self.assertEqual(captured['pending_reason'], 'ledger_pending')
+        self.assertFalse(lane_path.exists())
+        default_cleanup = [
+            event for event in module.governed_worktree_cleanup_ledger(self.repo)['events']
+            if event['type'].startswith('governed_worktree_')
+        ]
+        self.assertEqual(default_cleanup, [])
+        external_cleanup = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'].startswith('governed_worktree_')
+        ]
+        self.assertEqual(
+            [event['type'] for event in external_cleanup],
+            ['governed_worktree_cleanup_intent'],
+        )
+
+        self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json',
+            '--manifest', str(manifest_path),
+        )
+
+        external_cleanup = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'].startswith('governed_worktree_')
+        ]
+        self.assertEqual(
+            [event['type'] for event in external_cleanup],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
+        )
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+        reopen_args = [
+            'worktree', 'open', lane_id,
+            '--manifest', str(manifest_path),
+            '--json', '--into', stack_id,
+        ]
+        reopened = json.loads(self.run_cli(*reopen_args).stdout)
+        self.assertNotEqual(reopened['lane']['generation_token'], original_generation)
+        shared_retry = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json'
+        ).stdout)
+        self.assertEqual(shared_retry['governed_worktree_failures'], [])
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 1)
+        self.assertEqual(registry['lanes'][0]['id'], lane_id)
+        self.assertEqual(
+            registry['lanes'][0]['generation_token'],
+            reopened['lane']['generation_token'],
+        )
 
     def tracked_status(self):
         return self.git('status', '--porcelain', '--untracked-files=no')
@@ -264,6 +665,203 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_validate_passes_for_fixture(self):
         result = self.run_cli('validate', expected=0)
         self.assertIn('OK', result.stdout)
+
+    def test_derived_commit_is_classified_not_unmapped(self):
+        base = self.git('rev-parse', 'HEAD')
+        self.git('branch', 'derived-base', base)
+        self.git('switch', '-q', '-c', 'derived-integration', 'derived-base')
+        manifest = self.read_manifest()
+        manifest['version'] = 3
+        manifest['repository_mode'] = 'delivery'
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest['integration'].update(
+            {
+                'branch': 'derived-integration',
+                'base': 'derived-base',
+                'strategy': 'cherry-pick',
+                'derived_paths': ['locks/'],
+            }
+        )
+        manifest['coordination'] = {
+            'mode': 'disabled',
+            'id': 'derived-classification',
+            'remote': manifest['defaults']['publication_remote'],
+            'state_branch': 'syncwheel/state/derived-classification',
+        }
+        manifest.setdefault('channels', [])
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: configure derived projections')
+        (self.repo / 'locks').mkdir()
+        (self.repo / 'locks' / 'codex.lock').write_text('derived\n')
+        self.git('add', 'locks/codex.lock')
+        module = self.load_syncwheel_module()
+        blob = self.git('rev-parse', ':locks/codex.lock')
+        paths_digest = module.derived_projection_paths_digest(
+            {'locks/codex.lock': blob}
+        )
+        self.git(
+            'commit', '-q', '-m', 'test: derived projection', '-m',
+            'Syncwheel-Derived-Projection: classified-derived\n'
+            f'Syncwheel-Derived-Paths: {paths_digest}',
+        )
+        derived = self.git('rev-parse', 'HEAD')
+        derived_record = {
+            'operation_id': 'classified-derived',
+            'commit': derived,
+            'paths': ['locks/codex.lock'],
+            'paths_digest': paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, derived_record
+        )
+        module.append_ledger_event(
+            self.repo, 'revision_provider_derived_commit', derived_record
+        )
+        (self.repo / 'locks' / 'path-only.lock').write_text('not derived\n')
+        self.git('add', 'locks/path-only.lock')
+        self.git('commit', '-q', '-m', 'test: path-only lock commit')
+        path_only = self.git('rev-parse', 'HEAD')
+        (self.repo / 'locks' / 'digest-mismatch.lock').write_text('not derived\n')
+        self.git('add', 'locks/digest-mismatch.lock')
+        digest_mismatch_blob = self.git(
+            'rev-parse', ':locks/digest-mismatch.lock'
+        )
+        digest_mismatch_paths_digest = module.derived_projection_paths_digest(
+            {'locks/digest-mismatch.lock': digest_mismatch_blob}
+        )
+        self.git(
+            'commit', '-q', '-m', 'test: mismatched derived digest', '-m',
+            'Syncwheel-Derived-Projection: mismatched-derived\n'
+            f"Syncwheel-Derived-Paths: {'0' * 64}",
+        )
+        digest_mismatch = self.git('rev-parse', 'HEAD')
+        mismatched_record = {
+            'operation_id': 'mismatched-derived',
+            'commit': digest_mismatch,
+            'paths': ['locks/digest-mismatch.lock'],
+            'paths_digest': digest_mismatch_paths_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, mismatched_record
+        )
+        module.append_ledger_event(
+            self.repo, 'revision_provider_derived_commit', mismatched_record
+        )
+        loaded, _ = module.load_manifest(self.repo)
+
+        validation = module.validate_manifest(self.repo, loaded)
+
+        self.assertEqual(validation['errors'], [])
+        with self.subTest(classification='complete'):
+            self.assertTrue(
+                module.is_derived_projection_commit(self.repo, loaded, derived)
+            )
+        with self.subTest(classification='path-only'):
+            self.assertFalse(
+                module.is_derived_projection_commit(self.repo, loaded, path_only)
+            )
+        with self.subTest(classification='content-bound'):
+            self.assertFalse(
+                module.is_derived_projection_commit(
+                    self.repo, loaded, digest_mismatch
+                )
+            )
+        self.assertEqual(
+            validation['details']['integration']['derived_commits'], [derived]
+        )
+        self.assertEqual(
+            validation['details']['integration']['unmapped_commits'],
+            [path_only, digest_mismatch],
+        )
+
+    def test_commit_changed_files_preserves_newline_and_leading_space(self):
+        paths = ['odd/line\nbreak.txt', ' leading.txt']
+        (self.repo / 'odd').mkdir()
+        for path in paths:
+            (self.repo / path).write_text(path + '\n')
+        self.git('add', '--', *paths)
+        self.git('commit', '-q', '-m', 'test: exact Git path parsing')
+        commit = self.git('rev-parse', 'HEAD')
+        module = self.load_syncwheel_module()
+
+        self.assertEqual(
+            set(module.commit_changed_files(self.repo, commit)),
+            set(paths),
+        )
+
+    def test_leading_space_path_cannot_be_stripped_into_a_derived_prefix(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        manifest['version'] = 3
+        manifest['repository_mode'] = 'delivery'
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest['integration'].update(
+            {
+                'branch': 'main',
+                'base': 'main^',
+                'strategy': 'cherry-pick',
+                'derived_paths': ['locks/'],
+            }
+        )
+        manifest['coordination'] = {
+            'mode': 'disabled',
+            'id': 'leading-space-classification',
+            'remote': manifest['defaults']['publication_remote'],
+            'state_branch': 'syncwheel/state/leading-space-classification',
+        }
+        manifest.setdefault('channels', [])
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps(manifest, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: configure derived prefix')
+        actual_path = ' locks/leading.lock'
+        transformed_path = 'locks/leading.lock'
+        (self.repo / ' locks').mkdir()
+        (self.repo / actual_path).write_text('derived\n')
+        self.git('add', '--', actual_path)
+        malicious_digest = module.derived_projection_paths_digest(
+            {transformed_path: None}
+        )
+        self.git(
+            'commit',
+            '-q',
+            '-m',
+            'test: leading-space path',
+            '-m',
+            'Syncwheel-Derived-Projection: leading-space\n'
+            f'Syncwheel-Derived-Paths: {malicious_digest}',
+        )
+        commit = self.git('rev-parse', 'HEAD')
+        misleading_record = {
+            'operation_id': 'leading-space',
+            'commit': commit,
+            'paths': [transformed_path],
+            'paths_digest': malicious_digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(
+            self.repo, manifest, misleading_record
+        )
+        module.append_ledger_event(
+            self.repo, 'revision_provider_derived_commit', misleading_record
+        )
+        loaded, _ = module.load_manifest(self.repo)
+
+        self.assertFalse(
+            module.is_derived_projection_commit(self.repo, loaded, commit)
+        )
+        self.assertIn(
+            commit,
+            module.validate_manifest(self.repo, loaded)['details']['integration'][
+                'unmapped_commits'
+            ],
+        )
 
     def test_plan_reports_no_actions_when_fixture_is_aligned(self):
         result = self.run_cli('plan', '--json', expected=0)
@@ -412,6 +1010,1999 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['snapshot']['primary_checkout']['branch'], 'main')
         self.assertTrue(data['snapshot']['primary_checkout']['compliant'])
 
+    def test_worktree_open_registers_a_light_lane_under_the_configured_root(self):
+        result = self.run_cli('worktree', 'open', 'quick-fix', '--json')
+        data = json.loads(result.stdout)
+        lane = data['lane']
+
+        self.assertEqual(lane['id'], 'quick-fix')
+        self.assertFalse(lane['full'])
+        self.assertEqual(lane['branch'], 'syncwheel/lane/quick-fix')
+        self.assertTrue(Path(lane['path']).is_dir())
+        self.assertTrue(Path(lane['path']).is_relative_to(self.repo / '.syncwheel' / 'wt'))
+        registry = json.loads(Path(data['registry_path']).read_text())
+        self.assertEqual(registry['version'], 1)
+        self.assertEqual(registry['lanes'], [lane])
+
+    def test_worktree_open_enforces_capacity_without_creating_a_fifth_lane(self):
+        for number in range(4):
+            self.run_cli('worktree', 'open', f'lane-{number}', '--json')
+
+        result = self.run_cli('worktree', 'open', 'lane-4', '--json', expected=2)
+
+        self.assertIn('capacity reached (4)', result.stderr)
+        base = self.git('rev-parse', 'main')
+        self.assertIn(
+            f'syncwheel stack add feature-a {base}..syncwheel/lane/lane-0', result.stderr
+        )
+        self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'syncwheel-lane-lane-4').exists())
+
+    def test_expired_clean_lane_is_reaped_with_a_recovery_ref_before_next_open(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'expired', '--into', 'feature-a', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        expired_status = status['governed_worktrees']['lanes'][0]
+        self.assertEqual(expired_status['code'], 'expired')
+        self.assertIn(
+            f"syncwheel stack add feature-a {opened['lane']['base']}..syncwheel/lane/expired",
+            expired_status['remedy'],
+        )
+
+        self.run_cli('worktree', 'open', 'next', '--json')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertFalse(any(item['id'] == 'expired' for item in registry['lanes']))
+        self.assertFalse(Path(opened['lane']['path']).exists())
+        branch = subprocess.run(
+            ['git', 'show-ref', '--verify', '--quiet', 'refs/heads/syncwheel/lane/expired'],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+        )
+        self.assertNotEqual(branch.returncode, 0)
+
+    def test_expired_committed_lane_is_reaped_only_after_anchoring_its_tip(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'expired-commit', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: recoverable lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('worktree', 'open', 'after-expiry', '--json')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertFalse(any(item['id'] == 'expired-commit' for item in registry['lanes']))
+        event = next(event for event in self.read_ledger_state()['recent_events'] if event['type'] == 'governed_worktree_reaped')
+        self.assertEqual(self.git('rev-parse', event['payload']['recovery_ref']), tip)
+        self.assertFalse(lane_path.exists())
+
+    def test_dry_run_does_not_reap_an_expired_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dry-run-expired', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('stack', 'rebuild', 'feature-a', '--dry-run')
+
+        self.assertTrue(Path(opened['lane']['path']).is_dir())
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['state'], 'active')
+
+    def test_reconcile_preview_does_not_reap_an_expired_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'reconcile-preview', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, registry_path = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        registry_before = registry_path.read_bytes()
+        branch_tip = module.ref_tip(self.repo, opened['lane']['branch'])
+
+        preview = json.loads(self.run_cli('reconcile', '--no-fetch', '--json').stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), branch_tip)
+        self.assertEqual(self.read_ledger_state()['recent_events'], [])
+
+    def test_stack_git_auto_worktree_is_an_explicit_reaping_mutation(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'before-stack-git', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('stack', 'git', 'feature-a', '--auto-worktree', '--', 'status', '--short')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertFalse(any(lane['id'] == 'before-stack-git' for lane in registry['lanes']))
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        events = self.read_ledger_state()['recent_events']
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
+        )
+
+    def test_reaping_gate_uses_apply_and_explicit_worktree_creation(self):
+        module = self.load_syncwheel_module()
+        for command in (
+            module.command_reconcile,
+            module.command_resume,
+            module.command_stack_classify_integration,
+            module.command_stack_land,
+        ):
+            with self.subTest(command=command.__name__, apply=False):
+                self.assertFalse(module.governed_worktree_reaping_requested(
+                    SimpleNamespace(func=command, apply=False)
+                ))
+            with self.subTest(command=command.__name__, apply=True):
+                self.assertTrue(module.governed_worktree_reaping_requested(
+                    SimpleNamespace(func=command, apply=True)
+                ))
+        for command in (module.command_stack_git, module.command_int_git):
+            with self.subTest(command=command.__name__, existing=True):
+                self.assertFalse(module.governed_worktree_reaping_requested(
+                    SimpleNamespace(func=command, auto_worktree=False, worktree=None)
+                ))
+            with self.subTest(command=command.__name__, auto=True):
+                self.assertTrue(module.governed_worktree_reaping_requested(
+                    SimpleNamespace(func=command, auto_worktree=True, worktree=None)
+                ))
+
+    def test_expired_lane_can_be_reaped_through_repo_flag_outside_a_repository(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('worktree', 'open', 'next-outside', '--json', '-r', str(self.repo), cwd=self.tmp)
+
+        self.assertFalse(Path(opened['lane']['path']).exists())
+
+    def test_branch_advanced_pending_lane_blocks_a_mutating_rebuild(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'advanced', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['state'] = 'captured_pending_cleanup'
+        registry['lanes'][0]['pending_reason'] = 'branch_advanced'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        result = self.run_cli('stack', 'rebuild', 'feature-a', expected=2)
+
+        self.assertIn('governed worktree recovery is required', result.stderr)
+        self.assertTrue(Path(opened['lane']['path']).is_dir())
+
+    def test_linked_worktree_uses_the_primary_configured_root(self):
+        linked = self.tmp / 'linked'
+        self.git('worktree', 'add', '-q', '-b', 'feature/linked', str(linked), 'main')
+
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'linked-root', '--json', '-r', str(self.repo), cwd=linked
+        ).stdout)
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        lane = next(item for item in status['governed_worktrees']['lanes'] if item['id'] == 'linked-root')
+
+        self.assertTrue(Path(opened['lane']['path']).is_relative_to(self.repo / '.syncwheel' / 'wt'))
+        self.assertIsNone(lane['code'])
+
+    def test_worktree_open_honours_a_declared_nondefault_root(self):
+        manifest = self.read_manifest()
+        manifest['syncwheel_worktree_root'] = 'var/syncwheel'
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+
+        opened = json.loads(self.run_cli('worktree', 'open', 'declared-root', '--json').stdout)
+
+        self.assertTrue(Path(opened['lane']['path']).is_relative_to(self.repo / 'var' / 'syncwheel'))
+
+    def test_missing_expired_lane_outside_root_is_reaped_with_a_recovery_ref(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'missing-expired', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: recover dead lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['path'] = str(self.tmp / 'outside-configured-root' / 'missing-expired')
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        reported = status['governed_worktrees']['lanes'][0]
+        self.assertEqual(reported['code'], 'expired')
+        self.run_cli('worktree', 'open', 'after-missing-expired', '--json')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertFalse(any(item['id'] == 'missing-expired' for item in registry['lanes']))
+        event = next(event for event in self.read_ledger_state()['recent_events'] if event['type'] == 'governed_worktree_reaped')
+        self.assertEqual(self.git('rev-parse', event['payload']['recovery_ref']), tip)
+        self.assertIsNone(module.ref_tip(self.repo, 'syncwheel/lane/missing-expired'))
+
+    def test_dead_owner_with_a_missing_lane_is_expired(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dead-owner', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['owner'] = f'agent@{module.socket.gethostname()}:999999999'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+
+        self.assertEqual(status['governed_worktrees']['lanes'][0]['code'], 'expired')
+
+    def test_worktree_release_removes_an_abandoned_clean_record_and_keeps_recovery(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'abandoned', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: abandoned lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'abandoned', '--reason', 'superseded work', '--apply', '--json'
+        ).stdout)
+
+        self.assertEqual(released['lane']['id'], 'abandoned')
+        self.assertEqual(released['reason'], 'superseded work')
+        self.assertNotIn('pending_reason', released['lane'])
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'], [])
+        self.assertFalse(lane_path.exists())
+        ledger = self.read_ledger_state()
+        self.assertEqual(ledger['recent_events'][-1]['type'], 'governed_worktree_released')
+
+    def test_worktree_release_accepts_a_clean_record_with_a_missing_path(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'missing-release', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this release\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: recover missing release'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        self.git('worktree', 'remove', str(lane_path))
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        self.assertEqual(status['governed_worktrees']['lanes'][0]['code'], 'unregistered_worktree')
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'missing-release',
+            '--reason', 'worktree removed outside Syncwheel', '--apply', '--json'
+        ).stdout)
+
+        module = self.load_syncwheel_module()
+        self.assertEqual(module.ref_tip(self.repo, released['lane']['recovery_ref']), tip)
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+        self.assertNotIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
+        events = self.read_ledger_state()['recent_events']
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'worktree removed outside Syncwheel')
+
+    def test_worktree_release_is_a_dry_run_until_apply(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'release-preview', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+
+        preview = json.loads(self.run_cli(
+            'worktree', 'release', 'release-preview', '--reason', 'no longer needed', '--json'
+        ).stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertTrue(lane_path.is_dir())
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['state'], 'active')
+        self.assertEqual(self.read_ledger_state()['recent_events'], [])
+
+    def test_worktree_release_retry_returns_the_terminal_after_lost_response_sigkill(self):
+        self.run_cli('worktree', 'open', 'lost-response', '--json')
+        reason = 'lost response'
+
+        self.run_cli_until_cleanup_sigkill(
+            'after_cleanup_record_removed',
+            'worktree', 'release', 'lost-response',
+            '--reason', reason, '--apply', '--json',
+        )
+
+        module = self.load_syncwheel_module()
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+        terminal = next(
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_released'
+        )
+        retried = self.run_cli(
+            'worktree', 'release', 'lost-response',
+            '--reason', reason, '--apply', '--json',
+        )
+        output = json.loads(retried.stdout)
+
+        self.assertTrue(output['applied'])
+        self.assertTrue(output['idempotent'])
+        self.assertEqual(output['terminal'], terminal)
+        self.assertEqual(output['lane']['id'], 'lost-response')
+        self.assertIn('recovered stale governed worktree registry lock', retried.stderr)
+
+    def test_two_identical_worktree_releases_return_the_same_terminal(self):
+        self.run_cli('worktree', 'open', 'release-twice', '--json')
+        reason = 'same completed release'
+
+        first = json.loads(self.run_cli(
+            'worktree', 'release', 'release-twice',
+            '--reason', reason, '--apply', '--json',
+        ).stdout)
+        terminal = next(
+            event for event in self.load_syncwheel_module().load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_released'
+        )
+        second = json.loads(self.run_cli(
+            'worktree', 'release', 'release-twice',
+            '--reason', reason, '--apply', '--json',
+        ).stdout)
+
+        self.assertTrue(first['applied'])
+        self.assertTrue(second['applied'])
+        self.assertTrue(second['idempotent'])
+        self.assertEqual(second['terminal'], terminal)
+        self.assertEqual(
+            second['terminal']['payload']['idempotency_key'],
+            terminal['payload']['idempotency_key'],
+        )
+
+    def test_worktree_release_refuses_a_dirty_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dirty-release', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'draft.txt').write_text('keep me\n')
+
+        result = self.run_cli(
+            'worktree', 'release', 'dirty-release', '--reason', 'cannot discard', expected=2
+        )
+
+        self.assertIn('dirty', result.stderr)
+        self.assertTrue(lane_path.is_dir())
+        self.assertEqual((lane_path / 'draft.txt').read_text(), 'keep me\n')
+
+    def test_gc_reaps_an_expired_missing_lane_without_active_active_coordination(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gc-expired', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('recover this commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: gc recovery lane'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        self.git('worktree', 'remove', str(lane_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        gc = json.loads(self.run_cli('gc', '--apply', '--no-fetch', '--json').stdout)
+
+        self.assertFalse(gc['enabled'])
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'], [])
+        self.assertEqual(self.git('rev-parse', gc['governed_worktree_reaped'][0]['id'] and next(
+            event['payload']['recovery_ref'] for event in self.read_ledger_state()['recent_events']
+            if event['type'] == 'governed_worktree_reaped'
+        )), tip)
+
+    def test_dirty_lane_is_reported_but_not_reaped(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dirty', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'draft.txt').write_text('keep me\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        result = self.run_cli('status', '--json')
+        status = json.loads(result.stdout)
+        reported = status['governed_worktrees']['lanes'][0]
+
+        self.assertEqual(reported['code'], 'dirty')
+        self.assertNotIn('\x1b', result.stdout + result.stderr)
+        self.assertTrue(lane_path.is_dir())
+        self.assertEqual((lane_path / 'draft.txt').read_text(), 'keep me\n')
+        strict = json.loads(self.run_cli('check', '--no-fetch', '--strict', '--json', expected=1).stdout)
+        self.assertIn('governed_worktree_warnings', strict['readiness']['blockers'])
+
+    def test_expired_existing_lane_outside_the_current_root_is_never_reaped(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'external-live', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'ignored.txt').write_text('must survive\n')
+        manifest = self.read_manifest()
+        manifest['syncwheel_worktree_root'] = 'var/syncwheel'
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('worktree', 'open', 'another-lane', '--json')
+
+        self.assertTrue((lane_path / 'ignored.txt').exists())
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        self.assertEqual(status['governed_worktrees']['lanes'][0]['code'], 'outside_root')
+
+    def test_moved_dirty_lane_is_resolved_by_branch_before_expiry_cleanup(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'moved-dirty', '--json').stdout)
+        old_path = Path(opened['lane']['path'])
+        moved_path = old_path.with_name('syncwheel-lane-moved-dirty-current')
+        self.git('worktree', 'move', str(old_path), str(moved_path))
+        (moved_path / 'draft.txt').write_text('must survive\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        branch_tip = module.ref_tip(self.repo, opened['lane']['branch'])
+
+        self.run_cli('worktree', 'lock', 'feature-a')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = next(item for item in registry['lanes'] if item['id'] == 'moved-dirty')
+        self.assertEqual(Path(lane['path']).resolve(), moved_path.resolve())
+        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), branch_tip)
+        self.assertEqual((moved_path / 'draft.txt').read_text(), 'must survive\n')
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        reported = next(item for item in status['governed_worktrees']['lanes'] if item['id'] == 'moved-dirty')
+        self.assertEqual(reported['code'], 'dirty')
+
+    def test_moved_locked_lane_is_resolved_by_branch_before_expiry_cleanup(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'moved-locked', '--json').stdout)
+        old_path = Path(opened['lane']['path'])
+        moved_path = old_path.with_name('syncwheel-lane-moved-locked-current')
+        self.git('worktree', 'move', str(old_path), str(moved_path))
+        self.git('worktree', 'lock', '--reason', 'still in use', str(moved_path))
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        branch_tip = module.ref_tip(self.repo, opened['lane']['branch'])
+
+        self.run_cli('worktree', 'lock', 'feature-a')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = next(item for item in registry['lanes'] if item['id'] == 'moved-locked')
+        self.assertEqual(Path(lane['path']).resolve(), moved_path.resolve())
+        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), branch_tip)
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        reported = next(item for item in status['governed_worktrees']['lanes'] if item['id'] == 'moved-locked')
+        self.assertEqual(reported['code'], 'locked')
+
+    def test_missing_default_owner_with_a_valid_lease_is_not_expired(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'default-owner', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+
+        status = json.loads(self.run_cli('status', '--json').stdout)
+
+        self.assertEqual(status['governed_worktrees']['lanes'][0]['code'], 'unregistered_worktree')
+
+    def test_release_anchors_the_base_tip_too(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'base-anchor', '--json').stdout)
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'base-anchor', '--reason', 'finished', '--apply', '--json'
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), opened['lane']['base'])
+
+    def test_automatic_reap_removes_the_record_and_writes_the_ledger(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'automatic-ledger', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('worktree', 'lock', 'feature-a')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'], [])
+        self.assertEqual(self.read_ledger_state()['recent_events'][-1]['type'], 'governed_worktree_reaped')
+
+    def test_gc_preview_lists_an_eligible_governed_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gc-preview', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        preview = json.loads(self.run_cli('gc', '--no-fetch', '--json').stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertEqual(preview['governed_worktree_candidates'][0]['id'], 'gc-preview')
+
+    def test_gc_preview_and_apply_share_pending_cleanup_candidates(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gc-pending', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        tip = module.ref_tip(self.repo, lane['branch'])
+        recovery_ref = 'refs/syncwheel/recovery/lanes/gc-pending-fixed'
+        self.git('update-ref', recovery_ref, tip)
+        lane.update({
+            'state': 'captured_pending_cleanup',
+            'pending_reason': 'branch_delete_failed',
+            'branch_delete_tip': tip,
+            'recovery_ref': recovery_ref,
+        })
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        preview = json.loads(self.run_cli('gc', '--no-fetch', '--json').stdout)
+        applied = json.loads(self.run_cli('gc', '--apply', '--no-fetch', '--json').stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertEqual(
+            [(item['id'], item['code']) for item in preview['governed_worktree_candidates']],
+            [('gc-pending', 'branch_delete_failed')],
+        )
+        self.assertTrue(applied['applied'])
+        self.assertEqual(
+            {item['id'] for item in preview['governed_worktree_candidates']},
+            {item['id'] for item in applied['governed_worktree_reaped']},
+        )
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_huge_owner_pid_is_not_treated_as_dead(self):
+        module = self.load_syncwheel_module()
+        owner = f'agent@{module.socket.gethostname()}:999999999999999999999999'
+        self.assertFalse(module.governed_worktree_owner_is_dead(owner))
+
+    def test_lease_expiry_honours_a_non_utc_offset(self):
+        module = self.load_syncwheel_module()
+        lane = {'lease_expires_at': '2030-01-01T00:30:00-07:00'}
+        now = module.datetime.datetime(2030, 1, 1, 4, 0, tzinfo=module.datetime.timezone.utc)
+
+        self.assertFalse(module.governed_worktree_lane_lease_expired(lane, now))
+
+    def test_gc_apply_never_reaps_a_dirty_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gc-dirty', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'keep.txt').write_text('keep\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+        self.assertTrue((lane_path / 'keep.txt').exists())
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['state'], 'active')
+
+    def test_gc_returns_nonzero_when_governed_cleanup_fails(self):
+        module = self.load_syncwheel_module()
+        module.governed_worktree_cleanup_candidates = lambda *args, **kwargs: [{'id': 'failed-lane'}]
+        module.reconcile_governed_worktrees = lambda *args, **kwargs: {
+            'reaped': [],
+            'failures': [{'id': 'failed-lane', 'code': 'branch_advanced'}],
+        }
+        module.run_coordination_gc = lambda *args, **kwargs: {
+            'enabled': False,
+            'candidates': [],
+        }
+        module.governed_worktree_diagnostics = lambda *args, **kwargs: {'lanes': []}
+
+        with mock.patch('builtins.print'):
+            result = module.command_gc(SimpleNamespace(
+                repo=str(self.repo), manifest=None, personal=None,
+                apply=True, fetch=False, json=True,
+            ))
+
+        self.assertEqual(result, 1)
+
+    def test_gc_apply_reselects_candidates_under_the_registry_lock(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'reused-generation', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        original_candidates = module.governed_worktree_cleanup_candidates
+        calls = []
+
+        def stale_then_current(repo_root, manifest, registry=None):
+            calls.append(registry is not None)
+            if len(calls) == 1:
+                return [{
+                    'id': 'reused-generation',
+                    'code': 'expired',
+                    'path': opened['lane']['path'],
+                }]
+            return original_candidates(repo_root, manifest, registry)
+
+        module.governed_worktree_cleanup_candidates = stale_then_current
+        try:
+            with mock.patch('builtins.print'):
+                result = module.command_gc(SimpleNamespace(
+                    repo=str(self.repo), manifest=None, personal=None,
+                    apply=True, fetch=False, json=True,
+                ))
+        finally:
+            module.governed_worktree_cleanup_candidates = original_candidates
+
+        self.assertEqual(calls, [False, True])
+        self.assertEqual(result, 0)
+        self.assertTrue(Path(opened['lane']['path']).exists())
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['generation_token'], opened['lane']['generation_token'])
+
+    def test_missing_expired_directory_prunes_git_metadata_before_followup_rebuild(self):
+        self.prepare_replay_stack()
+        opened = json.loads(self.run_cli('worktree', 'open', 'missing-directory', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        shutil.rmtree(lane_path)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.assertIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
+
+        self.run_cli('worktree', 'lock', 'replay')
+
+        self.assertNotIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        self.assertFalse(any(
+            item.get('branch') == opened['lane']['branch']
+            and item.get('code') == 'unregistered_worktree'
+            for item in status['governed_worktrees']['lanes']
+        ))
+        self.run_cli(
+            'stack', 'rebuild', 'replay', '--worktree', str(self.tmp / 'replay-worktree')
+        )
+
+    def test_cleanup_takes_the_git_worktree_lock_first_and_treats_failure_as_lane_in_use(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'lock-first', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_git = module.git
+        mutations = []
+
+        def refuse_cleanup_lock(repo_root, *args, **kwargs):
+            if args[:2] == ('worktree', 'lock'):
+                mutations.append(args)
+                return module.subprocess.CompletedProcess(args, 1, '', 'already locked')
+            if args[:2] == ('update-ref', '--stdin') or args[:1] == ('update-ref',):
+                mutations.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = refuse_cleanup_lock
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.git = original_git
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'lock-first', 'code': 'lane_in_use'}])
+        self.assertEqual(mutations[0][:2], ('worktree', 'lock'))
+        self.assertEqual(len(mutations), 1)
+        self.assertTrue(lane_path.is_dir())
+        self.assertIsNotNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        persisted, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(persisted['lanes'][0]['state'], 'active')
+        self.assertNotIn('recovery_ref', persisted['lanes'][0])
+
+    def test_reaper_resumes_its_lock_after_a_crash_before_registry_intent(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'lock-crash', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        reason = module.governed_worktree_cleanup_lock_reason(lane)
+        self.git('worktree', 'lock', '--reason', reason, opened['lane']['path'])
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'lock-crash'}])
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_sigkill_at_all_nine_cleanup_boundaries_is_resumed_by_plain_gc_retry(self):
+        stages = (
+            'after_git_worktree_lock',
+            'before_cleanup_intent',
+            'after_cleanup_intent',
+            'after_recovery_anchor',
+            'after_ref_transaction',
+            'before_worktree_remove',
+            'after_worktree_remove',
+            'before_terminal_ledger',
+            'after_terminal_ledger',
+        )
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+
+        for index, stage in enumerate(stages):
+            with self.subTest(stage=stage):
+                lane_id = f'sigkill-{index}'
+                opened = json.loads(self.run_cli(
+                    'worktree', 'open', lane_id, '--json'
+                ).stdout)
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                self.run_cli_until_cleanup_sigkill(
+                    stage,
+                    'gc', '--apply', '--no-fetch', '--json',
+                )
+
+                metadata = json.loads(lock_path.read_text())
+                self.assertGreater(metadata['pid'], 0)
+                self.assertTrue(metadata['process_start_time'])
+                self.assertTrue(metadata['token'])
+                retry = self.run_cli('gc', '--apply', '--no-fetch', '--json')
+                self.assertIn('recovered stale governed worktree registry lock', retry.stderr)
+                self.assertFalse(Path(opened['lane']['path']).exists())
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+
+        self.assertEqual(list(lock_path.parent.glob(f'{lock_path.name}.stale-*')), [])
+        recoveries = [json.loads(line) for line in recovery_log.read_text().splitlines()]
+        self.assertEqual(len(recoveries), len(stages))
+        self.assertTrue(all(item['reason'] == 'pid_not_alive' for item in recoveries))
+
+    def test_registry_lock_recovers_a_reused_pid_with_a_different_start_time(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path.write_text(json.dumps({
+            'pid': os.getpid(),
+            'process_start_time': 'definitely-not-this-process',
+            'token': 'stale-token',
+            'acquired_at': '2000-01-01T00:00:00+00:00',
+        }) + '\n')
+
+        with module.governed_worktree_registry_lock(self.repo):
+            acquired = json.loads(lock_path.read_text())
+            self.assertEqual(acquired['pid'], os.getpid())
+            self.assertNotEqual(acquired['token'], 'stale-token')
+
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+        recovery = json.loads(recovery_log.read_text().splitlines()[-1])
+        self.assertEqual(recovery['reason'], 'process_start_time_mismatch')
+
+    def test_registry_lock_recovers_empty_and_truncated_files_after_sigkill(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+
+        for index, lock_state in enumerate(('empty', 'truncated')):
+            with self.subTest(lock_state=lock_state):
+                lane_id = f'incomplete-lock-{index}'
+                opened = json.loads(self.run_cli(
+                    'worktree', 'open', lane_id, '--json'
+                ).stdout)
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                self.run_cli_until_registry_lock_sigkill(
+                    lock_state,
+                    'gc', '--apply', '--no-fetch', '--json',
+                )
+
+                payload = lock_path.read_bytes()
+                if lock_state == 'empty':
+                    self.assertEqual(payload, b'')
+                else:
+                    self.assertTrue(payload)
+                    with self.assertRaises(json.JSONDecodeError):
+                        json.loads(payload)
+                retry = self.run_cli('gc', '--apply', '--no-fetch', '--json')
+                self.assertIn('incomplete_metadata', retry.stderr)
+                self.assertFalse(Path(opened['lane']['path']).exists())
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+
+        recoveries = [json.loads(line) for line in recovery_log.read_text().splitlines()]
+        self.assertEqual(
+            [item['reason'] for item in recoveries[-2:]],
+            ['incomplete_metadata', 'incomplete_metadata'],
+        )
+
+    def test_registry_lock_recovers_an_unreaped_zombie_owner(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'zombie-lock', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        ready_path = self.tmp / 'registry-lock-holder.ready'
+        holder = self.start_registry_lock_holder(ready_path)
+        try:
+            os.kill(holder.pid, signal.SIGKILL)
+            deadline = time.monotonic() + 10
+            observed_state = None
+            while time.monotonic() < deadline:
+                try:
+                    raw_stat = Path(f'/proc/{holder.pid}/stat').read_text(encoding='utf-8')
+                except FileNotFoundError:
+                    break
+                closing_paren = raw_stat.rfind(')')
+                fields = raw_stat[closing_paren + 2:].split() if closing_paren >= 0 else []
+                observed_state = fields[0] if fields else None
+                if observed_state == 'Z':
+                    break
+                time.sleep(0.01)
+            self.assertEqual(observed_state, 'Z')
+            self.assertIsNone(holder.returncode)
+
+            retry = self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+            self.assertIn('process_zombie', retry.stderr)
+            self.assertFalse(Path(opened['lane']['path']).exists())
+            self.assertFalse(lock_path.exists())
+            persisted, _ = module.load_governed_worktree_registry(self.repo)
+            self.assertEqual(persisted['lanes'], [])
+        finally:
+            holder.wait(timeout=10)
+            holder.stdout.close()
+            holder.stderr.close()
+
+    def test_worktree_release_is_idempotent_after_gc_reaped_the_same_lane(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'reaped-first', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'reaped-first',
+            '--reason', 'operator release', '--apply', '--json',
+        ).stdout)
+
+        self.assertTrue(released['applied'])
+        self.assertTrue(released['idempotent'])
+        self.assertEqual(released['terminal_type'], 'governed_worktree_reaped')
+        self.assertEqual(released['terminal_reason'], 'expired')
+        self.assertEqual(released['note']['payload']['reason'], 'operator release')
+        self.assertEqual(released['note']['payload']['terminal_seq'], released['terminal']['seq'])
+        self.assertFalse(Path(opened['lane']['path']).exists())
+
+        repeated = json.loads(self.run_cli(
+            'worktree', 'release', 'reaped-first',
+            '--reason', 'operator release', '--apply', '--json',
+        ).stdout)
+
+        self.assertEqual(repeated['terminal'], released['terminal'])
+        notes = [
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_release_noted'
+        ]
+        self.assertEqual(len(notes), 1)
+
+    def test_worktree_release_preview_never_writes_a_note_for_a_reaped_lane(self):
+        self.run_cli('worktree', 'open', 'reaped-preview', '--json')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+        before = len(module.load_ledger_events(self.repo))
+
+        preview = json.loads(self.run_cli(
+            'worktree', 'release', 'reaped-preview', '--reason', 'operator release', '--json',
+        ).stdout)
+
+        self.assertFalse(preview['applied'])
+        self.assertTrue(preview['idempotent'])
+        self.assertNotIn('note', preview)
+        self.assertEqual(len(module.load_ledger_events(self.repo)), before)
+
+    def test_release_racing_gc_never_reports_an_unknown_lane(self):
+        module = self.load_syncwheel_module()
+        reason = 'operator release'
+
+        for index in range(6):
+            with self.subTest(iteration=index):
+                lane_id = f'race-gc-{index}'
+                self.run_cli('worktree', 'open', lane_id, '--json')
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                release, collector = self.run_cli_pair_concurrently(
+                    ['worktree', 'release', lane_id, '--reason', reason, '--apply', '--json'],
+                    ['gc', '--apply', '--no-fetch', '--json'],
+                )
+
+                self.assertNotIn('unknown governed worktree lane', release.stderr)
+                self.assertEqual(release.returncode, 0, release.stderr)
+                self.assertEqual(collector.returncode, 0, collector.stderr)
+                self.assertTrue(self.lane_release_reason_recorded(module, lane_id, reason))
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+
+    def test_release_racing_worktree_open_never_reports_an_unknown_lane(self):
+        module = self.load_syncwheel_module()
+        reason = 'operator release'
+
+        for index in range(6):
+            with self.subTest(iteration=index):
+                lane_id = f'race-open-{index}'
+                self.run_cli('worktree', 'open', lane_id, '--json')
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                release, reopen = self.run_cli_pair_concurrently(
+                    ['worktree', 'release', lane_id, '--reason', reason, '--apply', '--json'],
+                    ['worktree', 'open', lane_id, '--json'],
+                )
+
+                self.assertNotIn('unknown governed worktree lane', release.stderr)
+                self.assertEqual(release.returncode, 0, release.stderr)
+                self.assertEqual(reopen.returncode, 0, reopen.stderr)
+                self.assertTrue(self.lane_release_reason_recorded(module, lane_id, reason))
+                self.run_cli(
+                    'worktree', 'release', lane_id,
+                    '--reason', 'iteration cleanup', '--apply', '--json',
+                )
+
+    def test_release_completes_a_reap_interrupted_by_sigkill(self):
+        module = self.load_syncwheel_module()
+        stages = ('after_cleanup_intent', 'after_ref_transaction', 'before_worktree_remove')
+
+        for stage in stages:
+            with self.subTest(stage=stage):
+                lane_id = f'crashed-{stage.replace("_", "-")}'
+                opened = json.loads(self.run_cli('worktree', 'open', lane_id, '--json').stdout)
+                registry, _ = module.load_governed_worktree_registry(self.repo)
+                lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
+                lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+                module.save_governed_worktree_registry(self.repo, registry)
+
+                self.run_cli_until_cleanup_sigkill(stage, 'gc', '--apply', '--no-fetch', '--json')
+
+                pending, _ = module.load_governed_worktree_registry(self.repo)
+                record = next(item for item in pending['lanes'] if item['id'] == lane_id)
+                self.assertEqual(record['cleanup_event_type'], 'governed_worktree_reaped')
+                self.assertEqual(record['pending_reason'], 'reaping')
+
+                released = json.loads(self.run_cli(
+                    'worktree', 'release', lane_id,
+                    '--reason', 'operator takeover', '--apply', '--json',
+                ).stdout)
+
+                self.assertTrue(released['applied'])
+                self.assertEqual(released['terminal_type'], 'governed_worktree_reaped')
+                self.assertFalse(Path(opened['lane']['path']).exists())
+                self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
+                self.assertTrue(
+                    self.lane_release_reason_recorded(module, lane_id, 'operator takeover')
+                )
+                intents = [
+                    event for event in module.load_ledger_events(self.repo)
+                    if event['type'] == 'governed_worktree_cleanup_intent'
+                    and (event['payload'] or {}).get('lane') == lane_id
+                ]
+                terminals = [
+                    event for event in module.load_ledger_events(self.repo)
+                    if event['type'] in {
+                        'governed_worktree_reaped', 'governed_worktree_released',
+                    }
+                    and (event['payload'] or {}).get('lane') == lane_id
+                ]
+                self.assertEqual(len(intents), 1)
+                self.assertEqual(len(terminals), 1)
+                self.assertEqual(
+                    terminals[0]['payload']['idempotency_key'],
+                    intents[0]['payload']['idempotency_key'],
+                )
+
+    def test_registry_lock_never_steals_a_lock_younger_than_the_initialization_grace(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        os.close(os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600))
+
+        started = time.monotonic()
+        with module.governed_worktree_registry_lock(self.repo):
+            waited = time.monotonic() - started
+
+        self.assertGreaterEqual(waited, 0.2)
+        recovery = json.loads(
+            lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+            .read_text().splitlines()[-1]
+        )
+        self.assertEqual(recovery['reason'], 'incomplete_metadata')
+
+    def test_a_stolen_uninitialized_lock_keeps_its_creator_out_of_the_critical_section(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        recovery_log = lock_path.with_name('governed-worktrees-lock-recovery.jsonl')
+        trace_path = self.tmp / 'registry-lock-race.trace'
+        ready_path = self.tmp / 'registry-lock-race.ready'
+
+        creator = self.start_registry_lock_race('A', trace_path, 0.2, ready_path=ready_path)
+        contender = None
+        try:
+            self.await_condition(
+                ready_path.exists, 'the lock creator never created the lock file'
+            )
+            self.await_condition(
+                lambda: self.process_state(creator.pid) == 'T',
+                'the lock creator never stopped between creation and flock',
+            )
+            contender = self.start_registry_lock_race('B', trace_path, 1.0)
+            self.await_condition(
+                lambda: trace_path.exists() and 'B-enter' in trace_path.read_text(),
+                'the contender never recovered the uninitialized lock',
+            )
+            os.kill(creator.pid, signal.SIGCONT)
+            contender_stdout, contender_stderr = contender.communicate(timeout=60)
+            creator_stdout, creator_stderr = creator.communicate(timeout=60)
+        finally:
+            for process in (creator, contender):
+                if process is not None and process.poll() is None:
+                    os.kill(process.pid, signal.SIGCONT)
+                    process.kill()
+                    process.wait(timeout=10)
+
+        self.assertEqual(contender.returncode, 0, contender_stderr)
+        self.assertEqual(creator.returncode, 0, creator_stderr)
+        self.assertEqual(
+            trace_path.read_text().split(),
+            ['B-enter', 'B-exit', 'A-enter', 'A-exit'],
+        )
+        self.assertIn('incomplete_metadata', contender_stderr)
+        self.assertIn('uninitialized governed worktree registry lock', contender_stderr)
+        self.assertNotIn('recovered stale governed worktree registry lock', contender_stderr)
+        recovery = json.loads(recovery_log.read_text().splitlines()[-1])
+        self.assertEqual(recovery['reason'], 'incomplete_metadata')
+
+    def test_retained_stale_registry_locks_are_pruned_by_the_next_cleanup(self):
+        module = self.load_syncwheel_module()
+        lock_path = module.governed_worktree_lock_path(self.repo)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        stale_path = lock_path.with_name(f'{lock_path.name}.stale-20000101T000000Z-0123456789ab')
+        stale_path.write_text('{}\n')
+
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+
+        self.assertFalse(stale_path.exists())
+        pruned = [
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_stale_locks_pruned'
+        ]
+        self.assertEqual(len(pruned), 1)
+        self.assertEqual(pruned[0]['payload']['files'], [stale_path.name])
+
+    def test_reaper_refuses_when_the_lane_path_reappears(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'path-reappeared', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        shutil.rmtree(lane_path)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        tip = module.ref_tip(self.repo, opened['lane']['branch'])
+        original_delete = module.delete_governed_worktree_branch_with_anchor
+
+        def recreate_after_ref_transaction(repo_root, lane, expected_tip):
+            deleted, detail = original_delete(repo_root, lane, expected_tip)
+            if deleted:
+                lane_path.mkdir(parents=True)
+                (lane_path / 'late-draft.txt').write_text('must survive\n')
+            return deleted, detail
+
+        module.delete_governed_worktree_branch_with_anchor = recreate_after_ref_transaction
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.delete_governed_worktree_branch_with_anchor = original_delete
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'path-reappeared', 'code': 'path_reappeared'}])
+        self.assertEqual((lane_path / 'late-draft.txt').read_text(), 'must survive\n')
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        persisted, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(persisted['lanes'][0]['pending_reason'], 'worktree_remove_failed')
+        self.assertEqual(module.ref_tip(self.repo, persisted['lanes'][0]['recovery_ref']), tip)
+        self.assertIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
+
+    def test_cleanup_targets_only_the_registration_whose_gitdir_matches(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'targeted-registration', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        unrelated_path = self.tmp / 'unrelated-prunable-worktree'
+        self.git('worktree', 'add', '-q', '-b', 'unrelated-prunable', str(unrelated_path), 'main')
+        shutil.rmtree(lane_path)
+        shutil.rmtree(unrelated_path)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        before = self.git('worktree', 'list', '--porcelain')
+        self.assertIn(str(lane_path), before)
+        self.assertIn(str(unrelated_path), before)
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'targeted-registration'}])
+        after = self.git('worktree', 'list', '--porcelain')
+        self.assertNotIn(str(lane_path), after)
+        self.assertIn(str(unrelated_path), after)
+
+    def test_cleanup_never_removes_a_worktree_whose_gitdir_does_not_match_the_record(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'gitdir-mismatch', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        admin_dir = module.governed_worktree_admin_dir_for_path(self.repo, lane_path)
+        gitdir_path = admin_dir / 'gitdir'
+        original_gitdir = gitdir_path.read_text()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_delete = module.delete_governed_worktree_branch_with_anchor
+
+        def change_gitdir_after_ref_transaction(repo_root, lane, tip):
+            deleted, detail = original_delete(repo_root, lane, tip)
+            if deleted:
+                gitdir_path.write_text(str(self.tmp / 'foreign-worktree' / '.git') + '\n')
+            return deleted, detail
+
+        module.delete_governed_worktree_branch_with_anchor = change_gitdir_after_ref_transaction
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.delete_governed_worktree_branch_with_anchor = original_delete
+            gitdir_path.write_text(original_gitdir)
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'gitdir-mismatch', 'code': 'registration_mismatch'}])
+        self.assertTrue(lane_path.is_dir())
+        persisted, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(persisted['lanes'][0]['pending_reason'], 'worktree_remove_failed')
+
+    def test_reaper_reports_when_a_worktree_becomes_dirty_before_remove(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'dirty-race', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_delete = module.delete_governed_worktree_branch_with_anchor
+
+        def dirty_after_ref_transaction(repo_root, lane, tip):
+            deleted, detail = original_delete(repo_root, lane, tip)
+            if deleted:
+                (lane_path / 'late-draft.txt').write_text('keep late change\n')
+            return deleted, detail
+
+        module.delete_governed_worktree_branch_with_anchor = dirty_after_ref_transaction
+        try:
+            completed, detail = module.reap_governed_worktree_lane(
+                self.repo,
+                self.read_manifest(),
+                registry['lanes'][0],
+                persist=lambda: module.save_governed_worktree_registry(self.repo, registry),
+            )
+        finally:
+            module.delete_governed_worktree_branch_with_anchor = original_delete
+
+        self.assertFalse(completed)
+        self.assertEqual(detail['code'], 'dirty')
+        self.assertIn('became dirty before removal', detail['remedy'])
+        self.assertEqual((lane_path / 'late-draft.txt').read_text(), 'keep late change\n')
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'worktree_remove_failed')
+        self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), registry['lanes'][0]['cleanup_tip'])
+
+    def test_registry_records_pending_delete_before_the_ref_transaction_starts(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'delete-retry', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_git = module.git
+        observed = []
+
+        def inspect_delete_intent(repo_root, *args, **kwargs):
+            if args[:2] == ('update-ref', '--stdin'):
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                pending = persisted['lanes'][0]
+                self.assertEqual(pending['state'], 'captured_pending_cleanup')
+                self.assertEqual(pending['pending_reason'], 'reaping')
+                self.assertEqual(pending['cleanup_tip'], module.ref_tip(self.repo, opened['lane']['branch']))
+                self.assertTrue(pending['recovery_ref'].startswith('refs/syncwheel/recovery/lanes/'))
+                self.assertTrue(pending['cleanup_idempotency_key'].startswith('governed-worktree-cleanup:'))
+                self.assertTrue(pending['cleanup_lock_reason'].startswith('syncwheel-cleanup:delete-retry:'))
+                observed.append(True)
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = inspect_delete_intent
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.git = original_git
+
+        self.assertEqual(observed, [True])
+        self.assertEqual(result['reaped'], [{'id': 'delete-retry'}])
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_cleanup_intent_is_fsynced_before_the_first_ref_effect(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'durable-intent', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_fsync = module._LEDGER_FSYNC
+        original_git = module.git
+        ledger_fsyncs = []
+        observed_refs = []
+
+        def record_ledger_fsync(descriptor):
+            ledger_fsyncs.append(descriptor)
+            return original_fsync(descriptor)
+
+        def inspect_first_ref_effect(repo_root, *args, **kwargs):
+            if args[:1] == ('update-ref',):
+                intents = [
+                    event for event in module.load_ledger_events(self.repo)
+                    if event['type'] == 'governed_worktree_cleanup_intent'
+                ]
+                self.assertTrue(ledger_fsyncs)
+                self.assertEqual(len(intents), 1)
+                payload = intents[0]['payload']
+                self.assertEqual(payload['lane'], 'durable-intent')
+                self.assertEqual(payload['cleanup_tip'], module.ref_tip(
+                    self.repo, opened['lane']['branch']
+                ))
+                self.assertTrue(payload['operation_token'])
+                self.assertTrue(payload['recovery_ref'].startswith(
+                    'refs/syncwheel/recovery/lanes/durable-intent-'
+                ))
+                self.assertEqual(
+                    payload['idempotency_key'],
+                    payload['lane_record']['cleanup_idempotency_key'],
+                )
+                observed_refs.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        module._LEDGER_FSYNC = record_ledger_fsync
+        module.git = inspect_first_ref_effect
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module._LEDGER_FSYNC = original_fsync
+            module.git = original_git
+
+        self.assertTrue(observed_refs)
+        self.assertEqual(result['reaped'], [{'id': 'durable-intent'}])
+
+    def test_registry_save_fsyncs_temp_and_directory_and_refuses_a_stale_preimage(self):
+        self.run_cli('worktree', 'open', 'registry-cas', '--json')
+        module = self.load_syncwheel_module()
+        registry, registry_path = module.load_governed_worktree_registry(self.repo)
+        expected_digest = module.governed_worktree_registry_file_digest(registry_path)
+        intended = json.loads(json.dumps(registry))
+        intended['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        original_fsync = module.os.fsync
+        fsynced_modes = []
+
+        def record_fsync(descriptor):
+            fsynced_modes.append(module.os.fstat(descriptor).st_mode)
+            return original_fsync(descriptor)
+
+        module.os.fsync = record_fsync
+        try:
+            module.save_governed_worktree_registry(
+                self.repo,
+                intended,
+                expected_digest=expected_digest,
+            )
+        finally:
+            module.os.fsync = original_fsync
+
+        self.assertTrue(any(module.stat.S_ISREG(mode) for mode in fsynced_modes))
+        self.assertTrue(any(module.stat.S_ISDIR(mode) for mode in fsynced_modes))
+        stale_digest = expected_digest
+        competing = json.loads(registry_path.read_text())
+        competing['competing_writer'] = True
+        registry_path.write_text(json.dumps(competing, indent=2, sort_keys=True) + '\n')
+        before = registry_path.read_bytes()
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'registry changed after its decision snapshot',
+        ):
+            module.save_governed_worktree_registry(
+                self.repo,
+                registry,
+                expected_digest=stale_digest,
+            )
+
+        self.assertEqual(registry_path.read_bytes(), before)
+
+    def test_restart_recovers_cleanup_from_fsynced_intent_after_registry_rollback(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'registry-rollback', '--json'
+        ).stdout)
+        module = self.load_syncwheel_module()
+        registry, registry_path = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        previous_registry = registry_path.read_bytes()
+        tip = module.ref_tip(self.repo, lane['branch'])
+
+        self.run_cli_until_cleanup_sigkill(
+            'after_ref_transaction',
+            'gc', '--apply', '--no-fetch', '--json',
+        )
+        intent = next(
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_cleanup_intent'
+        )
+        registry_path.write_bytes(previous_registry)
+
+        retried = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json'
+        ).stdout)
+
+        self.assertEqual(retried['governed_worktree_failures'], [])
+        self.assertFalse(Path(opened['lane']['path']).exists())
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        terminal = next(
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_reaped'
+        )
+        self.assertEqual(
+            terminal['payload']['idempotency_key'],
+            intent['payload']['idempotency_key'],
+        )
+        self.assertEqual(terminal['payload']['recovery_ref'], intent['payload']['recovery_ref'])
+        self.assertEqual(module.ref_tip(self.repo, terminal['payload']['recovery_ref']), tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_recovery_ref_conflict_fails_before_the_worktree_is_touched(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'anchor-moved', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'saved.txt').write_text('unique anchored commit\n')
+        subprocess.run(['git', 'add', 'saved.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: unique anchored commit'], cwd=lane_path, check=True)
+        tip = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_git = module.git
+        injected = {'done': False}
+
+        def move_ref_before_transaction(repo_root, *args, **kwargs):
+            if args[:2] == ('update-ref', '--stdin') and not injected['done']:
+                injected['done'] = True
+                persisted, _ = module.load_governed_worktree_registry(self.repo)
+                recovery_ref = persisted['lanes'][0]['recovery_ref']
+                original_git(repo_root, 'update-ref', recovery_ref, opened['lane']['base'], tip)
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = move_ref_before_transaction
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.git = original_git
+
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'anchor-moved', 'code': 'recovery_ref_moved'}])
+        self.assertTrue(lane_path.is_dir())
+        self.assertEqual((lane_path / 'saved.txt').read_text(), 'unique anchored commit\n')
+        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), tip)
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'recovery_ref_moved')
+        self.assertEqual(module.ref_tip(self.repo, registry['lanes'][0]['recovery_ref']), opened['lane']['base'])
+        self.assertEqual(
+            [event['type'] for event in self.read_ledger_state()['recent_events']],
+            ['governed_worktree_cleanup_intent'],
+        )
+
+    def test_automatic_branch_advanced_remedy_reanchors_and_completes_with_gc(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'post-anchor-advance', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        anchored_tip = self.git('rev-parse', opened['lane']['branch'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_ensure = module.ensure_governed_worktree_recovery_ref
+        injected = {'done': False}
+
+        def advance_branch_after_anchor(repo_root, recovery_ref, expected_tip):
+            original_ensure(repo_root, recovery_ref, expected_tip)
+            if not injected['done']:
+                injected['done'] = True
+                (lane_path / 'late-commit.txt').write_text('advance after anchor\n')
+                subprocess.run(['git', 'add', 'late-commit.txt'], cwd=lane_path, check=True)
+                subprocess.run(
+                    ['git', 'commit', '-qm', 'feat: advance after anchor'],
+                    cwd=lane_path,
+                    check=True,
+                )
+
+        module.ensure_governed_worktree_recovery_ref = advance_branch_after_anchor
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.ensure_governed_worktree_recovery_ref = original_ensure
+
+        advanced_tip = module.ref_tip(self.repo, opened['lane']['branch'])
+        self.assertNotEqual(advanced_tip, anchored_tip)
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(result['failures'], [{'id': 'post-anchor-advance', 'code': 'branch_advanced'}])
+        self.assertTrue(lane_path.is_dir())
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        pending = registry['lanes'][0]
+        self.assertEqual(pending['pending_reason'], 'branch_advanced')
+        old_recovery_ref = pending['recovery_ref']
+        old_key = pending['cleanup_idempotency_key']
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+        remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
+        self.assertIn('syncwheel gc --apply', remedy)
+
+        retried = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json'
+        ).stdout)
+
+        self.assertEqual(retried['governed_worktree_failures'], [])
+        self.assertEqual(retried['governed_worktree_reaped'], [{'id': 'post-anchor-advance'}])
+        self.assertFalse(lane_path.exists())
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+        events = module.load_ledger_events(self.repo)
+        intents = [
+            event for event in events
+            if event['type'] == 'governed_worktree_cleanup_intent'
+        ]
+        terminal = next(event for event in events if event['type'] == 'governed_worktree_reaped')
+        self.assertEqual(len(intents), 2)
+        self.assertEqual(intents[-1]['payload']['supersedes'], old_key)
+        self.assertEqual(
+            terminal['payload']['idempotency_key'],
+            intents[-1]['payload']['idempotency_key'],
+        )
+        self.assertEqual(module.ref_tip(self.repo, terminal['payload']['recovery_ref']), advanced_tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_automatic_branch_advanced_remedy_reanchors_and_completes_with_release(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'actual-advanced-release', '--json'
+        ).stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        anchored_tip = module.ref_tip(self.repo, lane['branch'])
+        lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_ensure = module.ensure_governed_worktree_recovery_ref
+        injected = {'done': False}
+
+        def advance_branch_after_anchor(repo_root, recovery_ref, expected_tip):
+            original_ensure(repo_root, recovery_ref, expected_tip)
+            if not injected['done']:
+                injected['done'] = True
+                (lane_path / 'advanced.txt').write_text('advanced but clean\n')
+                subprocess.run(['git', 'add', 'advanced.txt'], cwd=lane_path, check=True)
+                subprocess.run(
+                    ['git', 'commit', '-qm', 'feat: advance release lane'],
+                    cwd=lane_path,
+                    check=True,
+                )
+
+        module.ensure_governed_worktree_recovery_ref = advance_branch_after_anchor
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.ensure_governed_worktree_recovery_ref = original_ensure
+
+        advanced_tip = module.ref_tip(self.repo, opened['lane']['branch'])
+        self.assertNotEqual(advanced_tip, anchored_tip)
+        self.assertEqual(result['reaped'], [])
+        self.assertEqual(
+            result['failures'],
+            [{'id': 'actual-advanced-release', 'code': 'branch_advanced'}],
+        )
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        pending = registry['lanes'][0]
+        self.assertEqual(pending['pending_reason'], 'branch_advanced')
+        self.assertEqual(pending['cleanup_event_type'], 'governed_worktree_reaped')
+        old_recovery_ref = pending['recovery_ref']
+        old_key = pending['cleanup_idempotency_key']
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+
+        remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
+        self.assertIn('syncwheel gc --apply', remedy)
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'actual-advanced-release',
+            '--reason', 'operator release', '--apply', '--json',
+        ).stdout)
+
+        self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
+        self.assertEqual(module.ref_tip(self.repo, released['lane']['recovery_ref']), advanced_tip)
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertFalse(lane_path.exists())
+        events = module.load_ledger_events(self.repo)
+        intents = [
+            event for event in events
+            if event['type'] == 'governed_worktree_cleanup_intent'
+        ]
+        terminals = [
+            event for event in events
+            if event['type'] in {'governed_worktree_reaped', 'governed_worktree_released'}
+        ]
+        self.assertEqual(len(intents), 2)
+        self.assertEqual(intents[-1]['payload']['supersedes'], old_key)
+        self.assertEqual(intents[-1]['payload']['terminal_type'], 'governed_worktree_released')
+        self.assertEqual(intents[-1]['payload']['reason'], 'operator release')
+        self.assertEqual([event['type'] for event in terminals], ['governed_worktree_released'])
+        self.assertEqual(terminals[0]['payload']['reason'], 'operator release')
+        self.assertEqual(
+            terminals[0]['payload']['idempotency_key'],
+            intents[-1]['payload']['idempotency_key'],
+        )
+
+    def test_lane_branch_cannot_be_reattached_while_cleanup_holds_the_lock(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'locked-reattach', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        reattached_path = lane_path.with_name('syncwheel-lane-locked-reattach-second')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_ensure = module.ensure_governed_worktree_recovery_ref
+        attempts = []
+
+        def try_reattach_while_locked(repo_root, recovery_ref, expected_tip):
+            worktree = module.governed_worktree_record_for_path(repo_root, lane_path)
+            self.assertTrue(str(worktree.get('locked')).startswith('syncwheel-cleanup:locked-reattach:'))
+            attempts.append(subprocess.run(
+                ['git', 'worktree', 'add', str(reattached_path), opened['lane']['branch']],
+                cwd=repo_root,
+                text=True,
+                capture_output=True,
+            ))
+            original_ensure(repo_root, recovery_ref, expected_tip)
+
+        module.ensure_governed_worktree_recovery_ref = try_reattach_while_locked
+        try:
+            result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.ensure_governed_worktree_recovery_ref = original_ensure
+
+        self.assertEqual(len(attempts), 1)
+        self.assertNotEqual(attempts[0].returncode, 0)
+        self.assertIn('already used by worktree', attempts[0].stderr)
+        self.assertEqual(result['reaped'], [{'id': 'locked-reattach'}])
+        self.assertEqual(result['failures'], [])
+        self.assertFalse(reattached_path.exists())
+
+    def test_release_retry_accepts_branch_delete_failed_and_preserves_reason(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'release-delete-retry', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_git = module.git
+
+        def fail_delete(repo_root, *args, **kwargs):
+            if args[:2] == ('update-ref', '--stdin'):
+                return module.subprocess.CompletedProcess(args, 1, '', 'injected')
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = fail_delete
+        try:
+            with self.assertRaises(module.SyncwheelError):
+                module.command_worktree_release(SimpleNamespace(
+                    repo=str(self.repo), manifest=None, personal=None,
+                    lane='release-delete-retry', reason='original release reason',
+                    apply=True, json=True,
+                ))
+        finally:
+            module.git = original_git
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'branch_delete_failed')
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'release-delete-retry',
+            '--reason', 'original release reason', '--apply', '--json'
+        ).stdout)
+
+        self.assertNotIn('pending_reason', released['lane'])
+        events = self.read_ledger_state()['recent_events']
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'original release reason')
+
+    def test_reaper_recovers_after_branch_delete_succeeds_before_state_persist(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'delete-crash', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        tip = module.ref_tip(self.repo, lane['branch'])
+        recovery_ref = 'refs/syncwheel/recovery/lanes/delete-crash-fixed'
+        self.git('update-ref', recovery_ref, tip)
+        lane.update({
+            'state': 'captured_pending_cleanup',
+            'pending_reason': 'branch_delete_failed',
+            'branch_delete_tip': tip,
+            'cleanup_tip': tip,
+            'recovery_ref': recovery_ref,
+        })
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.git('update-ref', '-d', f"refs/heads/{lane['branch']}", tip)
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'delete-crash'}])
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+        events = module.load_ledger_events(self.repo)
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
+        )
+        self.assertEqual(module.ref_tip(self.repo, recovery_ref), tip)
+
+    def test_reaper_recovers_after_worktree_remove_succeeds_before_state_persist(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'remove-crash', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_run = module.run
+
+        def stop_after_remove(command, *args, **kwargs):
+            result = original_run(command, *args, **kwargs)
+            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[-1]) == lane_path:
+                raise SystemExit('injected crash after worktree removal')
+            return result
+
+        module.run = stop_after_remove
+        try:
+            with self.assertRaisesRegex(SystemExit, 'injected crash'):
+                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.run = original_run
+
+        self.assertFalse(lane_path.exists())
+        pending, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(pending['lanes'][0]['state'], 'captured_pending_cleanup')
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+
+        result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(result['reaped'], [{'id': 'remove-crash'}])
+        self.assertEqual(result['failures'], [])
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_reaper_retry_reuses_an_existing_matching_recovery_ref(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'remove-retry', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_run = module.run
+
+        def fail_remove(command, *args, **kwargs):
+            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[-1]) == lane_path:
+                raise module.SyncwheelError('injected worktree remove failure')
+            return original_run(command, *args, **kwargs)
+
+        module.run = fail_remove
+        try:
+            with self.assertRaises(module.SyncwheelError):
+                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.run = original_run
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        recovery_ref = registry['lanes'][0]['recovery_ref']
+        recovery_tip = module.ref_tip(self.repo, recovery_ref)
+        module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(module.ref_tip(self.repo, recovery_ref), recovery_tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_reaper_names_a_conflicting_existing_recovery_ref(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'recovery-conflict', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_run = module.run
+
+        def fail_remove(command, *args, **kwargs):
+            if command[:3] == ['git', 'worktree', 'remove'] and Path(command[-1]) == lane_path:
+                raise module.SyncwheelError('injected worktree remove failure')
+            return original_run(command, *args, **kwargs)
+
+        module.run = fail_remove
+        try:
+            with self.assertRaises(module.SyncwheelError):
+                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.run = original_run
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        recovery_ref = registry['lanes'][0]['recovery_ref']
+        expected_tip = module.ref_tip(self.repo, recovery_ref)
+        conflicting_tip = self.git('rev-parse', 'HEAD~1')
+        self.git('update-ref', recovery_ref, conflicting_tip, expected_tip)
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            rf'recovery ref {recovery_ref} points to {conflicting_tip} instead of {expected_tip}',
+        ):
+            module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+    def test_cleanup_ref_transaction_is_committed_not_aborted(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'anchor-order', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        tip = module.ref_tip(self.repo, opened['lane']['branch'])
+        calls = []
+        original_git = module.git
+
+        def record_git(repo_root, *args, **kwargs):
+            calls.append((args, kwargs))
+            return original_git(repo_root, *args, **kwargs)
+
+        module.git = record_git
+        try:
+            module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.git = original_git
+
+        recovery_index = next(
+            index for index, (args, _) in enumerate(calls)
+            if args[0] == 'update-ref' and args[1].startswith('refs/syncwheel/recovery/')
+        )
+        transaction_index = next(
+            index for index, (args, _) in enumerate(calls)
+            if args[:2] == ('update-ref', '--stdin')
+        )
+        self.assertLess(recovery_index, transaction_index)
+        transaction = calls[transaction_index][1]['input_text']
+        recovery_ref = calls[recovery_index][0][1]
+        self.assertIn(f'update {recovery_ref} {tip} {tip}\n', transaction)
+        self.assertIn(f'delete refs/heads/{opened["lane"]["branch"]} {tip}\n', transaction)
+        self.assertIn('prepare\ncommit\n', transaction)
+        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
+        self.assertEqual(module.ref_tip(self.repo, recovery_ref), tip)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_reaper_keeps_a_retryable_record_when_ledger_append_fails(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'ledger-retry', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_append = module.append_ledger_event
+
+        def fail_terminal(repo_root, event_type, *args, **kwargs):
+            if event_type == 'governed_worktree_reaped':
+                raise OSError('injected')
+            return original_append(repo_root, event_type, *args, **kwargs)
+
+        module.append_ledger_event = fail_terminal
+        try:
+            with self.assertRaises(OSError):
+                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.append_ledger_event = original_append
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'ledger_pending')
+        module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_release_ledger_retry_preserves_original_event_type_and_reason(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'release-ledger-retry', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_append = module.append_ledger_event
+
+        def fail_terminal(repo_root, event_type, *args, **kwargs):
+            if event_type == 'governed_worktree_released':
+                raise OSError('injected')
+            return original_append(repo_root, event_type, *args, **kwargs)
+
+        module.append_ledger_event = fail_terminal
+        try:
+            with self.assertRaises(OSError):
+                module.command_worktree_release(SimpleNamespace(
+                    repo=str(self.repo), manifest=None, personal=None,
+                    lane='release-ledger-retry', reason='original release reason',
+                    apply=True, json=True,
+                ))
+        finally:
+            module.append_ledger_event = original_append
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['state'], 'reaped')
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'ledger_pending')
+
+        module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+        events = module.load_ledger_events(self.repo)
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'original release reason')
+
+    def test_release_command_accepts_its_ledger_pending_state(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'release-ledger-command', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_append = module.append_ledger_event
+
+        def fail_terminal(repo_root, event_type, *args, **kwargs):
+            if event_type == 'governed_worktree_released':
+                raise OSError('injected')
+            return original_append(repo_root, event_type, *args, **kwargs)
+
+        module.append_ledger_event = fail_terminal
+        try:
+            with self.assertRaises(OSError):
+                module.command_worktree_release(SimpleNamespace(
+                    repo=str(self.repo), manifest=None, personal=None,
+                    lane='release-ledger-command', reason='same release reason',
+                    apply=True, json=True,
+                ))
+        finally:
+            module.append_ledger_event = original_append
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'release-ledger-command',
+            '--reason', 'same release reason', '--apply', '--json'
+        ).stdout)
+
+        self.assertTrue(released['applied'])
+        self.assertNotIn('pending_reason', released['lane'])
+        events = self.read_ledger_state()['recent_events']
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['governed_worktree_cleanup_intent', 'governed_worktree_released'],
+        )
+        self.assertEqual(events[-1]['payload']['reason'], 'same release reason')
+
+    def test_reaper_ledger_append_is_idempotent_after_fsync_failure(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'ledger-fsync-retry', '--json').stdout)
+        self.git('worktree', 'remove', opened['lane']['path'])
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_checkpoint = module.ledger_io_checkpoint
+        original_cleanup_append = module.append_governed_worktree_cleanup_event
+        injected = {'raised': False, 'terminal': False}
+
+        def fail_after_fsync(stage):
+            if stage == 'event_fsynced' and injected['terminal'] and not injected['raised']:
+                injected['raised'] = True
+                raise OSError('injected after fsync')
+            return original_checkpoint(stage)
+
+        def mark_terminal(*args, **kwargs):
+            injected['terminal'] = True
+            return original_cleanup_append(*args, **kwargs)
+
+        module.ledger_io_checkpoint = fail_after_fsync
+        module.append_governed_worktree_cleanup_event = mark_terminal
+        try:
+            with self.assertRaises(OSError):
+                module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+        finally:
+            module.ledger_io_checkpoint = original_checkpoint
+            module.append_governed_worktree_cleanup_event = original_cleanup_append
+
+        events = [
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_reaped'
+        ]
+        self.assertEqual(len(events), 1)
+
+        module.reconcile_governed_worktrees(self.repo, self.read_manifest())
+
+        events = [
+            event for event in module.load_ledger_events(self.repo)
+            if event['type'] == 'governed_worktree_reaped'
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(module.load_governed_worktree_registry(self.repo)[0]['lanes'], [])
+
+    def test_stack_create_captures_a_clean_lane_after_its_commit_is_owned(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'captured', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        (lane_path / 'lane.txt').write_text('owned lane commit\n')
+        subprocess.run(['git', 'add', 'lane.txt'], cwd=lane_path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: lane work'], cwd=lane_path, check=True)
+        commit = subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=lane_path, text=True, capture_output=True, check=True
+        ).stdout.strip()
+
+        self.run_cli('stack', 'create', 'lane-stack', commit, '--branch', 'pr/lane-stack')
+
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        lane = registry['lanes'][0]
+        self.assertEqual(lane['state'], 'reaped')
+        self.assertTrue(lane['recovery_ref'].startswith('refs/syncwheel/recovery/lanes/captured-'))
+        self.assertEqual(self.git('rev-parse', lane['recovery_ref']), commit)
+        self.assertFalse(lane_path.exists())
+
+    def test_stack_create_keeps_external_manifest_lane_cleanup_in_one_ledger(self):
+        self.exercise_external_manifest_lane_capture('create')
+
+    def test_stack_add_keeps_external_manifest_lane_cleanup_in_one_ledger(self):
+        self.exercise_external_manifest_lane_capture('add')
+
+    def test_stack_capture_keeps_external_manifest_lane_cleanup_in_one_ledger(self):
+        self.exercise_external_manifest_lane_capture('capture')
+
     def test_env_repo_allows_running_outside_target_repo(self):
         result = self.run_cli(
             'ck',
@@ -488,6 +3079,85 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(data['coordination']['mode'], 'disabled')
         self.assertEqual(data['syncwheel_worktree_root'], 'var/syncwheel')
 
+    def test_manifest_without_authority_defaults_to_human_gated(self):
+        module = self.load_syncwheel_module()
+
+        manifest, _ = module.load_manifest(self.repo)
+
+        self.assertNotIn('authority', manifest)
+        self.assertEqual(
+            module.manifest_authority(manifest),
+            {'mode': 'human-gated', 'allow': [], 'deny': ['destructive_rewrite']},
+        )
+        self.assertFalse(module.authority_allows(manifest, 'source_change'))
+        self.assertNotIn('authority', module.coordination_manifest_snapshot(manifest))
+
+    def test_repo_authority_status_reports_undeclared_policy(self):
+        result = self.run_cli('repo', 'authority', 'status', '--json', expected=0)
+        data = json.loads(result.stdout)
+
+        self.assertFalse(data['authority_present'])
+        self.assertEqual(data['authority']['mode'], 'human-gated')
+        self.assertIn('authority is not declared', data['warnings'][0])
+
+    def test_repo_authority_set_dry_run_does_not_write(self):
+        before = (self.repo / '.syncwheel' / 'manifest.json').read_text()
+
+        result = self.run_cli('repo', 'authority', 'set', 'ai-managed', '--allow', 'source_change', expected=0)
+
+        self.assertIn('proposed_authority: ai-managed allow=source_change deny=destructive_rewrite', result.stdout)
+        self.assertIn('dry_run', result.stdout)
+        self.assertEqual((self.repo / '.syncwheel' / 'manifest.json').read_text(), before)
+
+    def test_repo_authority_set_ai_managed_writes_policy_and_stages_tracked_manifest(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'chore: track manifest')
+
+        result = self.run_cli(
+            'repo', 'authority', 'set', 'ai-managed', '--allow', 'source_change', '--apply', '--json',
+            expected=0,
+        )
+        data = json.loads(result.stdout)
+
+        self.assertTrue(data['authority_present'])
+        self.assertEqual(
+            self.read_manifest()['authority'],
+            {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': ['destructive_rewrite']},
+        )
+        self.assertNotIn('.syncwheel/manifest.json', self.git('status', '--porcelain'))
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        tracking = json.loads(self.run_cli('repo', 'tracking', 'status', '--json', expected=0).stdout)
+        self.assertEqual(tracking['authority']['mode'], 'ai-managed')
+        status = json.loads(self.run_cli('status', '--json').stdout)
+        self.assertEqual(status['authority']['allow'], ['source_change'])
+
+    def test_repo_authority_set_refuses_destructive_rewrite(self):
+        result = self.run_cli(
+            'repo', 'authority', 'set', 'ai-managed', '--allow', 'destructive_rewrite', '--apply', expected=2
+        )
+
+        self.assertIn('invalid choice', result.stderr)
+        self.assertNotIn('authority', self.read_manifest())
+
+    def test_manifest_authority_is_validated_on_load(self):
+        data = self.read_manifest()
+        cases = [
+            ({'mode': 'ai-managed', 'allow': [], 'deny': []}, 'requires at least one allowed class'),
+            ({'mode': 'human-gated', 'allow': ['source_change'], 'deny': []}, 'cannot allow any class'),
+            ({'mode': 'ai-managed', 'allow': ['destructive_rewrite'], 'deny': []}, 'may never contain'),
+            ({'mode': 'ai-managed', 'allow': ['deploy'], 'deny': []}, 'unknown classes'),
+            ({'mode': 'autonomous', 'allow': [], 'deny': []}, 'authority.mode must be one of'),
+        ]
+        for policy, message in cases:
+            with self.subTest(policy=policy):
+                data['authority'] = policy
+                (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+                result = self.run_cli('repo', 'authority', 'status', expected=2)
+                self.assertIn(message, result.stderr)
+
     def test_repo_tracking_status_reports_missing_policy(self):
         result = self.run_cli('repo', 'tracking', 'status', '--json', expected=0)
         data = json.loads(result.stdout)
@@ -513,6 +3183,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('.gitignore', tracked)
         self.assertIn('# syncwheel managed metadata', gitignore)
         self.assertIn('.syncwheel/ledger/', gitignore)
+        self.assertIn('.syncwheel/manifests/*.local-ledger/', gitignore)
         self.assertIn('.syncwheel/wt/', gitignore)
         self.assertNotIn('var/syncwheel/', gitignore)
         self.assertNotIn('.syncwheel/', exclude)
@@ -670,6 +3341,136 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('feature-c', ledger['manifest']['active_stacks'])
         self.assertEqual(ledger['stacks']['feature-c']['branch'], 'pr/alice/feature-c')
 
+    def test_git_tracked_stack_create_commits_only_manifest_and_leaves_worktree_clean(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+
+        before = self.git('rev-parse', 'HEAD')
+        self.run_cli('stack', 'create', 'tracked-clean', '--branch', 'pr/tracked-clean')
+
+        self.assertNotEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_git_tracked_stack_create_commits_managed_ignore_upgrade_and_stays_clean(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+        gitignore_path = self.repo / '.gitignore'
+        gitignore_path.write_text(
+            gitignore_path.read_text().replace(
+                '.syncwheel/manifests/*.local-ledger/\n',
+                '',
+            )
+        )
+        self.git('add', '.gitignore')
+        self.git('commit', '-qm', 'test: simulate pre-upgrade managed ignore block')
+
+        self.run_cli('stack', 'create', 'tracked-upgrade', '--branch', 'pr/tracked-upgrade')
+
+        self.assertEqual(
+            set(self.git('show', '--format=', '--name-only', 'HEAD').splitlines()),
+            {'.gitignore', '.syncwheel/manifest.json'},
+        )
+        self.assertIn(
+            '.syncwheel/manifests/*.local-ledger/',
+            gitignore_path.read_text(),
+        )
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_local_only_stack_create_does_not_commit(self):
+        self.run_cli('repo', 'tracking', 'set', 'local-only', '--apply', expected=0)
+        before = self.git('rev-parse', 'HEAD')
+
+        self.run_cli('stack', 'create', 'local-only', '--branch', 'pr/local-only')
+
+        self.assertEqual(self.git('rev-parse', 'HEAD'), before)
+        self.assertEqual(self.git('ls-files', '.syncwheel/manifest.json'), '')
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_git_tracked_manifest_commit_never_includes_unrelated_dirty_files(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+        (self.repo / 'alpha.txt').write_text('other unstaged work\n')
+        (self.repo / 'beta.txt').write_text('other staged work\n')
+        self.git('add', 'beta.txt')
+
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'isolated-manifest',
+            'branch': 'pr/isolated-manifest',
+            'base': 'main',
+            'target_remote': 'origin',
+            'target_branch': 'main',
+            'integration_branch': 'main',
+            'commits': [],
+        })
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            module.save_manifest_with_ledger(
+                self.repo,
+                manifest_path,
+                manifest,
+                'stack_create',
+                {'stack': 'isolated-manifest', 'branch': 'pr/isolated-manifest'},
+            )
+
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.git('diff', '--name-only'), 'alpha.txt')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'beta.txt')
+
+    def test_concurrent_git_tracked_stack_creates_converge(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
+
+        results = self.run_cli_pair_concurrently(
+            ('stack', 'create', 'concurrent-a', '--branch', 'pr/concurrent-a'),
+            ('stack', 'create', 'concurrent-b', '--branch', 'pr/concurrent-b'),
+        )
+
+        self.assertEqual([result.returncode for result in results], [0, 0])
+        self.assertEqual(
+            {stack['id'] for stack in self.read_manifest()['stacks']},
+            {'feature-a', 'feature-b', 'concurrent-a', 'concurrent-b'},
+        )
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_reconcile_preflight_allows_modified_syncwheel_paths(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['syncwheel_tracking'] = 'git-tracked'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-qm', 'test: track syncwheel manifest')
+        manifest['meta'] = {'normal_syncwheel_write': True}
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        module = self.load_syncwheel_module()
+
+        module.preflight_reconcile_mutation_targets(
+            self.repo,
+            manifest,
+            [{'type': 'rebuild_integration'}],
+            None,
+        )
+
+    def test_personal_local_ledger_directories_are_ignored(self):
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
+        ledger = self.repo / '.syncwheel' / 'manifests' / 'alice.local-ledger' / 'events'
+        ledger.mkdir(parents=True)
+        event = ledger / '0001.jsonl'
+        event.write_text('{}\n')
+
+        self.assertEqual(
+            self.git('check-ignore', event.relative_to(self.repo).as_posix()),
+            '.syncwheel/manifests/alice.local-ledger/events/0001.jsonl',
+        )
+
     def test_stack_create_includes_stack_by_default_when_membership_is_required(self):
         gamma = self.git('rev-parse', 'HEAD')
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
@@ -809,7 +3610,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('merge-base', '--is-ancestor', gamma, 'integration/capture-merge'), '')
         self.git('worktree', 'remove', '--force', str(integration_worktree))
 
-    def test_integration_diagnostics_offer_capture_into_a_new_draft(self):
+    def test_integration_plan_offers_declarative_classification_or_capture(self):
         self.git('branch', 'integration/capture-diagnostics', 'main')
         self.git('switch', '-q', 'integration/capture-diagnostics')
         Path(self.repo / 'gamma.txt').write_text('gamma\n')
@@ -826,8 +3627,9 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         plan = json.loads(self.run_cli('plan', '--json').stdout)
         action = plan[-1]
-        self.assertEqual(action['remedy']['type'], 'capture_integration_into_new_draft')
-        self.assertIn('stack capture-integration <new-stack-id>', action['remedy']['commands'][1])
+        self.assertEqual(action['remedy']['type'], 'declare_integration_ownership')
+        self.assertIn('stack classify-integration <stack-id>', action['remedy']['commands'][0])
+        self.assertIn('stack capture-integration <stack-id>', action['remedy']['commands'][1])
 
         check = self.run_cli('check', '--no-fetch')
         self.assertIn('remedy: capture into a new draft stack:', check.stdout)
@@ -1007,7 +3809,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--worktree', str(worktree), '--dry-run', expected=0)
         self.assertIn('git fetch --all --prune', result.stdout)
         self.assertIn('git branch backup/pr/feature-a-before-syncwheel-', result.stdout)
-        self.assertIn('git worktree add -B pr/feature-a', result.stdout)
+        self.assertIn('git update-ref refs/heads/pr/feature-a main', result.stdout)
+        self.assertIn(f'git worktree add {worktree} pr/feature-a', result.stdout)
         self.assertIn('git -C', result.stdout)
 
     def test_stack_rebuild_reuses_existing_stack_worktree(self):
@@ -1040,7 +3843,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertIn('git fetch --all --prune', result.stdout)
         self.assertIn('git branch backup/integration/test-before-syncwheel-', result.stdout)
-        self.assertIn('git worktree add -B integration/test', result.stdout)
+        self.assertIn('git update-ref refs/heads/integration/test main', result.stdout)
+        self.assertIn(f'git worktree add {worktree} integration/test', result.stdout)
         self.assertIn("git -C", result.stdout)
         self.assertIn("merge --no-ff pr/feature-a -m 'Merge stack '", result.stdout)
         self.assertIn("merge --no-ff pr/feature-b -m 'Merge stack '", result.stdout)
@@ -1108,6 +3912,59 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(len(cherry_pick_lines), 2)
         self.assertTrue(all('GIT_COMMITTER_DATE=' in line for line in cherry_pick_lines))
 
+    def test_merge_tip_projection_preserves_fast_forward_branch_and_rebuild_refuses_early(self):
+        module = self.load_syncwheel_module()
+        self.git('branch', 'pr/merge-case', 'main')
+        self.git('switch', '-q', 'pr/merge-case')
+        (self.repo / 'feature.txt').write_text('feature\n')
+        self.git('add', 'feature.txt')
+        self.git('commit', '-q', '-m', 'feature')
+        feature_tip = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+        (self.repo / 'base.txt').write_text('base\n')
+        self.git('add', 'base.txt')
+        self.git('commit', '-q', '-m', 'new base')
+        self.git('switch', '-q', 'pr/merge-case')
+        self.git('merge', '--no-ff', '-m', 'integrate base', 'main')
+        merge_tip = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+
+        stack = {
+            'id': 'merge-case', 'branch': 'pr/merge-case', 'base': 'main',
+            'commits': [merge_tip],
+        }
+        self.assertEqual(
+            module.replay_cherry_pick_args(self.repo, merge_tip, 'main', projection=True),
+            ['cherry-pick', '-m', '2', merge_tip],
+        )
+        self.assertEqual(module.materialize_stack_projection(self.repo, stack),
+                         self.git('rev-parse', 'pr/merge-case^{tree}'))
+        self.assertEqual(self.git('rev-parse', 'pr/merge-case^1'), feature_tip)
+        manifest = self.read_manifest()
+        manifest['stacks'][0]['branch'] = 'pr/merge-case'
+        manifest['stacks'][0]['base'] = 'main'
+        manifest['stacks'][0]['commits'] = []
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+        self.run_cli('stack', 'add', 'feature-a', merge_tip, expected=0)
+        manifest = self.read_manifest()
+        self.assertEqual(manifest['stacks'][0]['commits'], [merge_tip])
+        manifest['integration']['base'] = 'main'
+        manifest['integration']['stacks'] = ['feature-a']
+        self.assertEqual(module.materialize_integration_projection(self.repo, manifest),
+                         self.git('rev-parse', 'pr/merge-case^{tree}'))
+        with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
+            module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'ephemeral')
+        with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
+            module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'plumbing')
+        self.assertEqual(
+            module.deterministic_stack_projection(self.repo, 'main', [merge_tip])['status'],
+            'unsupported',
+        )
+        with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
+            module.replay_plan(self.repo, manifest,
+                               module.replay_target(integration=manifest['integration']), 'ephemeral')
+        self.assertEqual(self.git('rev-parse', 'pr/merge-case'), merge_tip)
+
     def test_stack_rebuild_disables_configured_gpg_signing(self):
         _, original_commits = self.prepare_replay_stack()
         worktree = self.tmp / 'wt-replay'
@@ -1144,6 +4001,15 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_in_place_apply_requires_current_target_branch(self):
         result = self.run_cli('stack', 'rebuild', 'feature-a', '--in-place', expected=2)
         self.assertIn('requires current branch', result.stderr)
+        self.assertIn('syncwheel worktree open <lane> --into feature-a', result.stderr)
+
+    def test_int_rebuild_in_place_names_manifest_capture_remedy(self):
+        self.git('switch', '-qc', 'feature/wrong-primary')
+
+        result = self.run_cli('int', 'rebuild', '--in-place', expected=2)
+
+        self.assertIn('requires current branch', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
 
     def test_stack_sync_updates_manifest_from_branch(self):
         self.git('switch', '-q', 'pr/feature-a')
@@ -1196,6 +4062,55 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(validation['warnings'], [])
         self.assertEqual(json.loads(self.run_cli('plan', '--json', expected=0).stdout), [])
 
+    def test_stack_classify_integration_is_manifest_only_and_survives_merge_rebuild(self):
+        self.git('switch', '-q', '-c', 'integration/test', 'main')
+        Path(self.repo / 'gamma.txt').write_text('integration only\n')
+        self.git('add', 'gamma.txt')
+        self.git('commit', '-q', '-m', 'docs: integration-only classification')
+        classified = self.git('rev-parse', 'HEAD')
+
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['integration'] = {
+            'branch': 'integration/test',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-b'],
+        }
+        manifest['stacks'] = [manifest['stacks'][1]]
+        manifest['stacks'][0]['integration_branch'] = 'integration/test'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        refs_before = self.git('show-ref', '--heads')
+        stack_before = self.git('rev-parse', 'pr/feature-b')
+        preview = json.loads(self.run_cli(
+            'stack', 'classify-integration', 'feature-b', classified, expected=0,
+        ).stdout)
+        self.assertEqual(preview['refUpdates'], [])
+        self.assertEqual(preview['worktreeUpdates'], [])
+        self.assertEqual(refs_before, self.git('show-ref', '--heads'))
+
+        self.run_cli(
+            'stack', 'classify-integration', 'feature-b', classified,
+            '--apply', '--plan-digest', preview['planDigest'], expected=0,
+        )
+        self.assertEqual(refs_before, self.git('show-ref', '--heads'))
+        self.assertEqual(stack_before, self.git('rev-parse', 'pr/feature-b'))
+        updated = self.read_manifest()
+        stack = updated['stacks'][0]
+        self.assertEqual(stack['integration_only_commits'], [classified])
+        self.assertEqual(len(stack['commits']), 2)
+        validation = json.loads(self.run_cli('validate', '--json', expected=0).stdout)
+        self.assertEqual(validation['details']['integration']['unmapped_commits'], [])
+
+        self.git('switch', '-q', 'main')
+        worktree = self.tmp / 'wt-classified-integration'
+        self.run_cli('int', 'rebuild', '--worktree', str(worktree), expected=0)
+        self.assertEqual(stack_before, self.git('rev-parse', 'pr/feature-b'))
+        rebuilt_validation = json.loads(self.run_cli('validate', '--json', expected=1).stdout)
+        self.assertEqual(rebuilt_validation['details']['integration']['unmapped_commits'], [])
+        self.assertTrue((worktree / 'gamma.txt').exists())
+
     def test_stack_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork pr/feature-a', result.stdout)
@@ -1207,6 +4122,286 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def test_int_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('int', 'push', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork main', result.stdout)
+
+    def test_int_push_publishes_the_frozen_oid_when_the_local_ref_advances(self):
+        module = self.load_syncwheel_module()
+        branch = 'integration/frozen-push'
+        integration_ref = f'refs/heads/{branch}'
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'frozen-push-manifest.json'
+        selected = self.read_manifest()
+        selected['defaults']['publication_remote'] = 'origin'
+        selected['integration'] = {
+            'branch': branch,
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        selected['stacks'] = []
+        manifest_path.write_text(json.dumps(selected, indent=2) + '\n')
+        selected, selected_path = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+        manifest_before = manifest_path.read_bytes()
+
+        self.git('branch', branch, base)
+        origin = self.tmp / 'frozen-push-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('switch', '-q', branch)
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(selected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist selected control state')
+        frozen_tip = self.git('rev-parse', branch)
+        self.assertEqual(self.git('rev-parse', f'{frozen_tip}^'), base)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                base, frozen_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        manifest_entry = module.tree_path_entry(
+            self.repo, frozen_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(manifest_entry['mode'], '100644')
+        committed = json.loads(
+            module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')
+        )
+        self.assertEqual(
+            module.manifest_digest(committed), module.manifest_digest(selected)
+        )
+
+        advanced_tip = self.git(
+            'commit-tree', f'{frozen_tip}^{{tree}}', '-p', frozen_tip,
+            '-m', 'test: concurrent same-tree local advance',
+        )
+        self.assertEqual(
+            module.ref_tree(self.repo, advanced_tip),
+            module.ref_tree(self.repo, frozen_tip),
+        )
+        original_push = module.run_authorized_push
+        push_observations = []
+
+        def advance_then_push(repo_root, command, remote, refs, check=True):
+            self.assertEqual(module.ref_tip(repo_root, branch), frozen_tip)
+            module.git(
+                repo_root, 'update-ref', integration_ref,
+                advanced_tip, frozen_tip,
+            )
+            push_observations.append({
+                'command': list(command),
+                'remote': remote,
+                'refs': list(refs),
+            })
+            return original_push(
+                repo_root, command, remote, refs, check=check
+            )
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'push', '--repo', str(self.repo),
+            '--manifest', str(manifest_path), '--remote', 'origin',
+        ])
+        args.git_args = []
+        with mock.patch.object(
+            module, 'run_authorized_push', side_effect=advance_then_push
+        ):
+            returncode = args.func(args)
+
+        remote_tip = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', integration_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        pushed_events = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, manifest_path
+            )
+            if event['type'] == 'integration_pushed'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'push_calls': len(push_observations),
+                'refspec': push_observations[0]['command'][-1],
+                'remote': push_observations[0]['remote'],
+                'authorized_refs': push_observations[0]['refs'],
+                'remote_tip': remote_tip,
+                'local_tip': self.git('rev-parse', branch),
+                'ledger_tips': [event['tip'] for event in pushed_events],
+                'manifest_unchanged': manifest_path.read_bytes() == manifest_before,
+                'worktree_clean': self.git('status', '--porcelain=v1') == '',
+            },
+            {
+                'returncode': 0,
+                'push_calls': 1,
+                'refspec': f'{frozen_tip}:{integration_ref}',
+                'remote': 'origin',
+                'authorized_refs': [integration_ref],
+                'remote_tip': frozen_tip,
+                'local_tip': advanced_tip,
+                'ledger_tips': [frozen_tip],
+                'manifest_unchanged': True,
+                'worktree_clean': True,
+            },
+            'NONCOORDINATED_INT_PUSH_FROZEN_OID',
+        )
+
+    def test_reconcile_push_publishes_the_frozen_oid_when_the_local_ref_advances(self):
+        module = self.load_syncwheel_module()
+        branch = 'integration/reconcile-frozen-push'
+        integration_ref = f'refs/heads/{branch}'
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'reconcile-frozen-push-manifest.json'
+        selected = self.read_manifest()
+        selected['defaults']['publication_remote'] = 'origin'
+        selected['integration'] = {
+            'branch': branch,
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        selected['stacks'] = []
+        manifest_path.write_text(json.dumps(selected, indent=2) + '\n')
+        selected, selected_path = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+        manifest_before = manifest_path.read_bytes()
+
+        self.git('branch', branch, base)
+        origin = self.tmp / 'reconcile-frozen-push-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin')
+        self.assertEqual(self.git('rev-parse', f'origin/{branch}'), base)
+        self.git('switch', '-q', branch)
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(selected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist selected reconcile control')
+        frozen_tip = self.git('rev-parse', branch)
+        self.assertEqual(self.git('rev-parse', f'{frozen_tip}^'), base)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                base, frozen_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        manifest_entry = module.tree_path_entry(
+            self.repo, frozen_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(manifest_entry['mode'], '100644')
+        committed = json.loads(
+            module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')
+        )
+        self.assertEqual(
+            module.manifest_digest(committed), module.manifest_digest(selected)
+        )
+        remote_before = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', integration_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        self.assertEqual(remote_before, base)
+
+        advanced_tip = self.git(
+            'commit-tree', f'{frozen_tip}^{{tree}}', '-p', frozen_tip,
+            '-m', 'test: concurrent same-tree reconcile advance',
+        )
+        self.assertEqual(
+            module.ref_tree(self.repo, advanced_tip),
+            module.ref_tree(self.repo, frozen_tip),
+        )
+        original_push = module.run_authorized_push
+        push_observations = []
+
+        def advance_then_push(repo_root, command, remote, refs, check=True):
+            self.assertEqual(module.ref_tip(repo_root, branch), frozen_tip)
+            module.git(
+                repo_root, 'update-ref', integration_ref,
+                advanced_tip, frozen_tip,
+            )
+            push_observations.append({
+                'command': list(command),
+                'remote': remote,
+                'refs': list(refs),
+            })
+            return original_push(
+                repo_root, command, remote, refs, check=check
+            )
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(self.repo),
+            '--manifest', str(manifest_path), '--remote', 'origin',
+            '--no-fetch', '--apply', '--push', '--skip-integration',
+            '--rebuild', 'none',
+        ])
+        args.git_args = []
+        with mock.patch.object(
+            module, 'reconcile_actions', return_value=[{
+                'type': 'push_integration',
+                'branch': branch,
+                'remote_ref': f'origin/{branch}',
+            }]
+        ), mock.patch.object(
+            module, 'run_authorized_push', side_effect=advance_then_push
+        ):
+            returncode = args.func(args)
+
+        remote_tip = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', integration_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        pushed_events = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, manifest_path
+            )
+            if event['type'] == 'integration_pushed'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'push_calls': len(push_observations),
+                'refspec': push_observations[0]['command'][-1],
+                'force_with_lease': any(
+                    part.startswith('--force-with-lease')
+                    for part in push_observations[0]['command']
+                ),
+                'remote': push_observations[0]['remote'],
+                'authorized_refs': push_observations[0]['refs'],
+                'remote_tip': remote_tip,
+                'local_tip': self.git('rev-parse', branch),
+                'ledger_tips': [event['tip'] for event in pushed_events],
+                'manifest_unchanged': manifest_path.read_bytes() == manifest_before,
+                'worktree_clean': self.git('status', '--porcelain=v1') == '',
+            },
+            {
+                'returncode': 0,
+                'push_calls': 1,
+                'refspec': f'{frozen_tip}:{integration_ref}',
+                'force_with_lease': True,
+                'remote': 'origin',
+                'authorized_refs': [integration_ref],
+                'remote_tip': frozen_tip,
+                'local_tip': advanced_tip,
+                'ledger_tips': [frozen_tip],
+                'manifest_unchanged': True,
+                'worktree_clean': True,
+            },
+            'NONCOORDINATED_RECONCILE_FROZEN_OID',
+        )
 
     def test_reconcile_push_uses_force_with_lease_by_default(self):
         origin = self.tmp / 'origin.git'
@@ -1376,6 +4571,311 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(report['actions'][0]['reason'], 'local_branch_differs_from_manifest_projection')
         self.assertIn('working_tree_status', report['snapshot'])
 
+    def test_reconcile_accepts_stack_already_absorbed_by_base(self):
+        module = self.load_syncwheel_module()
+        absorbed = self.git('rev-parse', 'main~1')
+        manifest = self.read_manifest()
+        stack = next(item for item in manifest['stacks'] if item['id'] == 'feature-a')
+        stack['base'] = 'main'
+        stack['commits'] = [absorbed]
+
+        report = module.stack_reconcile_report(self.repo, manifest, stack)
+
+        self.assertTrue(report['absorbed'])
+        self.assertTrue(report['local_matches_projection'])
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, 'main'))
+
+    def test_convergence_accepts_stack_already_absorbed_by_base(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        absorbed = self.git('rev-parse', 'main~1')
+        stack = next(item for item in manifest['stacks'] if item['id'] == 'feature-a')
+        stack['base'] = 'main'
+        stack['commits'] = [absorbed]
+        manifest['stacks'] = [stack]
+        manifest['integration'] = {
+            'branch': 'main',
+            'base': 'main',
+            'strategy': 'merge-stacks',
+            'stacks': ['feature-a'],
+        }
+
+        # Full convergence also requires the selected control manifest in Git.
+        self.assertFalse(module.local_manifest_projection_is_convergent(self.repo, manifest))
+        (self.repo / '.syncwheel/manifest.json').write_text(module.canonical_manifest_file_text(manifest))
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: bind selected control state')
+        self.assertTrue(module.local_manifest_projection_is_convergent(self.repo, manifest))
+
+    def test_integration_projection_accepts_manifest_only_control_tree(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/control')
+        manifest['integration'] = {
+            'branch': 'integration/control',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text(
+            json.dumps({**manifest, 'control': 'recorded'}, indent=2) + '\n'
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record control state')
+
+        report = module.integration_sync_report(self.repo, manifest)
+
+        self.assertTrue(report['local_matches_projection'])
+
+    def test_integration_report_separates_product_projection_from_selected_control(self):
+        module = self.load_syncwheel_module()
+        selected_manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/control-authority')
+        selected_manifest['stacks'] = []
+        selected_manifest['integration'] = {
+            'branch': 'integration/control-authority',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        candidate_manifest = {**selected_manifest, 'control': 'unselected'}
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(
+            module.canonical_manifest_file_text(candidate_manifest)
+        )
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist unselected control state')
+
+        report = module.integration_sync_report(self.repo, selected_manifest)
+
+        for field in (
+            'local_oid',
+            'remote_oid',
+            'local_matches_product_projection',
+            'remote_matches_product_projection',
+            'local_control_manifest_matches_selected',
+            'remote_control_manifest_matches_selected',
+        ):
+            self.assertIn(field, report)
+        self.assertEqual(
+            report['local_oid'],
+            self.git('rev-parse', 'integration/control-authority'),
+        )
+        self.assertIsNone(report['remote_oid'])
+        self.assertTrue(report['local_matches_product_projection'])
+        self.assertTrue(report['local_matches_projection'])
+        self.assertFalse(report['local_control_manifest_matches_selected'])
+        self.assertIsNone(report['remote_matches_product_projection'])
+        self.assertIsNone(report['remote_control_manifest_matches_selected'])
+        self.assertFalse(
+            module.local_manifest_projection_is_convergent(
+                self.repo, selected_manifest
+            )
+        )
+
+        selected_report = module.integration_sync_report(
+            self.repo, candidate_manifest
+        )
+
+        for field in (
+            'local_matches_product_projection',
+            'local_control_manifest_matches_selected',
+        ):
+            self.assertIn(field, selected_report)
+        self.assertTrue(selected_report['local_matches_product_projection'])
+        self.assertTrue(selected_report['local_matches_projection'])
+        self.assertTrue(selected_report['local_control_manifest_matches_selected'])
+        self.assertTrue(
+            module.local_manifest_projection_is_convergent(
+                self.repo, candidate_manifest
+            )
+        )
+
+    def test_integration_projection_rejects_invalid_json_control_manifest(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/invalid-json')
+        manifest['integration'] = {
+            'branch': 'integration/invalid-json',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text('{invalid\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record invalid control state')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, base))
+        self.assertEqual(manifest_entry['mode'], '100644')
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertIsNone(report['local_matches_projection'])
+        self.assertIn('integration control manifest is invalid', report['projection_error'])
+
+    def test_integration_projection_rejects_non_object_control_manifest(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/non-object-manifest')
+        manifest['integration'] = {
+            'branch': 'integration/non-object-manifest',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text('[]\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record non-object control state')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, base))
+        self.assertEqual(manifest_entry['mode'], '100644')
+        self.assertEqual(
+            json.loads(module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')),
+            [],
+        )
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertFalse(report['local_matches_projection'])
+        self.assertNotIn('projection_error', report)
+
+    def test_integration_projection_rejects_non_regular_control_manifest_path(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/symlink-manifest')
+        manifest['integration'] = {
+            'branch': 'integration/symlink-manifest',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.unlink()
+        manifest_path.symlink_to(module.canonical_manifest_json(manifest))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: record symlink control state')
+        self.git('switch', '-q', 'main')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+
+        self.assertEqual(manifest_entry['mode'], '120000')
+        self.assertEqual(
+            json.loads(module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')),
+            manifest,
+        )
+        self.assertEqual(report['projected_tree'], module.ref_tree(self.repo, base))
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertFalse(report['local_matches_projection'])
+
+    def test_integration_projection_rejects_unmanaged_gitignore_bytes(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/unmanaged-gitignore')
+        manifest['integration'] = {
+            'branch': 'integration/unmanaged-gitignore',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / '.syncwheel' / 'manifest.json').write_text(
+            module.canonical_manifest_file_text(manifest)
+        )
+        expected_managed = '\n'.join([
+            module.SYNCWHEEL_GITIGNORE_MARKER,
+            *module.syncwheel_gitignore_patterns(module.syncwheel_worktree_root(manifest)),
+            module.SYNCWHEEL_GITIGNORE_END_MARKER,
+            '',
+        ])
+        gitignore_text = 'user-owned candidate bytes\n' + expected_managed
+        Path(self.repo / '.gitignore').write_text(gitignore_text)
+        self.git('add', '.syncwheel/manifest.json', '.gitignore')
+        self.git('commit', '-q', '-m', 'syncwheel: record changed unmanaged ignore bytes')
+
+        report = module.integration_sync_report(self.repo, manifest)
+        manifest_entry = module.tree_path_entry(
+            self.repo, report['local_tree'], '.syncwheel/manifest.json'
+        )
+        candidate_gitignore = module.tree_path_entry(
+            self.repo, report['local_tree'], '.gitignore'
+        )
+        product_gitignore = module.tree_path_entry(
+            self.repo, report['projected_tree'], '.gitignore'
+        )
+        split = module.split_syncwheel_managed_gitignore(
+            gitignore_text, module.syncwheel_worktree_root(manifest)
+        )
+
+        self.assertEqual(manifest_entry['mode'], '100644')
+        self.assertEqual(
+            json.loads(module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')),
+            manifest,
+        )
+        self.assertEqual(candidate_gitignore['mode'], '100644')
+        self.assertIsNone(product_gitignore)
+        self.assertEqual(
+            module.integration_tree_changed_paths(
+                self.repo, report['local_tree'], report['projected_tree']
+            ),
+            ['.gitignore', '.syncwheel/manifest.json'],
+        )
+        self.assertIsNotNone(split)
+        self.assertEqual(split['managed'], expected_managed)
+        self.assertEqual(split['unmanaged'], 'user-owned candidate bytes\n')
+        self.assertNotEqual(
+            split['unmanaged'].encode('utf-8'),
+            module.tree_path_bytes(self.repo, product_gitignore),
+        )
+        self.assertFalse(report['local_matches_projection'])
+
+    def test_integration_projection_rejects_product_tree_difference(self):
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        base = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', '-c', 'integration/product')
+        manifest['integration'] = {
+            'branch': 'integration/product',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        Path(self.repo / 'product.txt').write_text('drift\n')
+        self.git('add', 'product.txt')
+        self.git('commit', '-q', '-m', 'feat: unprojected product change')
+
+        report = module.integration_sync_report(self.repo, manifest)
+
+        self.assertFalse(report['local_matches_projection'])
+
     def test_reconcile_reports_dirty_working_tree_status(self):
         Path(self.repo / 'dirty.txt').write_text('dirty\n')
 
@@ -1389,29 +4889,32 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertTrue(report['snapshot']['working_tree_dirty'])
         self.assertIn('?? dirty.txt', report['snapshot']['working_tree_status'])
 
-    def test_stack_absorb_moves_integration_changes_to_stack(self):
+    def test_stack_absorb_refuses_a_dirty_primary_before_moving_changes(self):
         Path(self.repo / 'beta.txt').write_text('beta\nabsorbed\n')
+        before_stack = self.git('rev-parse', 'pr/feature-b')
 
-        result = self.run_cli('stack', 'absorb', 'feature-b', 'beta.txt', expected=0)
+        result = self.run_cli('stack', 'absorb', 'feature-b', 'beta.txt', expected=2)
 
-        self.assertIn('feature-b: absorbed changes into pr/feature-b', result.stdout)
-        self.assertEqual(self.tracked_status(), '')
-        self.assertEqual(self.git('show', 'pr/feature-b:beta.txt'), 'beta\nabsorbed')
-        manifest = self.read_manifest()
-        feature_b = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
-        self.assertEqual(feature_b['commits'], self.git('rev-list', 'main..pr/feature-b').splitlines())
+        self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
+        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), 'beta\nabsorbed\n')
 
-    def test_stack_absorb_can_absorb_staged_hunks_only(self):
+    def test_stack_absorb_refuses_staged_hunks_in_a_dirty_primary(self):
         original = Path(self.repo / 'beta.txt').read_text()
         Path(self.repo / 'beta.txt').write_text(original + 'staged\n')
         self.git('add', 'beta.txt')
         Path(self.repo / 'alpha.txt').write_text('alpha\nunstaged\n')
 
-        self.run_cli('stack', 'absorb', 'feature-b', '--staged', expected=0)
+        result = self.run_cli('stack', 'absorb', 'feature-b', '--staged', expected=2)
 
-        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), original)
+        self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertIn('syncwheel worktree open <lane> --into feature-b', result.stderr)
+        self.assertEqual(Path(self.repo / 'beta.txt').read_text(), original + 'staged\n')
         self.assertEqual(Path(self.repo / 'alpha.txt').read_text(), 'alpha\nunstaged\n')
-        self.assertEqual(self.tracked_status(), 'M alpha.txt')
+        status = self.tracked_status()
+        self.assertIn('alpha.txt', status)
+        self.assertIn('beta.txt', status)
 
     def test_reconcile_apply_rebuilds_stack_updates_manifest_and_rebuilds_integration(self):
         beta = self.git('rev-parse', 'main')
@@ -1462,7 +4965,15 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(updated_commit, self.git('rev-parse', 'pr/feature-b'))
         self.assertEqual(self.git('rev-list', '--count', f'{base}..pr/feature-b'), '1')
         self.assertEqual(self.git('rev-parse', 'pr/feature-b:beta.txt'), self.git('rev-parse', f'{updated_commit}:beta.txt'))
-        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '3')
+        module = self.load_syncwheel_module()
+        committed = json.loads(self.git('show', 'integration/reconcile:.syncwheel/manifest.json'))
+        normalized, _ = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(normalized))
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', 'integration/reconcile'),
+            'chore: restore Syncwheel control manifest',
+        )
 
     def prepare_reconcile_apply_worktree_scenario(self, worktree_root=None):
         beta = self.git('rev-parse', 'main')
@@ -1520,6 +5031,35 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
 
+    def test_stack_rebuild_uses_the_configured_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
+
+        self.run_cli('stack', 'rebuild', 'feature-b', '--replay-mode', 'desk', expected=0)
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
+        self.assertFalse((self.repo.parent / f'{self.repo.name}-wt-pr-feature-b').exists())
+
+    def test_int_rebuild_uses_the_configured_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
+        self.git('switch', '-q', 'main')
+
+        self.run_cli('int', 'rebuild', '--replay-mode', 'desk', expected=0)
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'integration-reconcile').exists())
+        self.assertFalse(
+            (self.repo.parent / f'{self.repo.name}-wt-integration-reconcile').exists()
+        )
+
+    def test_auto_worktree_uses_the_configured_worktree_root(self):
+        self.prepare_reconcile_apply_worktree_scenario('var/syncwheel')
+
+        self.run_cli(
+            'stack', 'git', 'feature-b', '--auto-worktree', '--', 'status', '--short', expected=0
+        )
+
+        self.assertTrue((self.repo / 'var' / 'syncwheel' / 'pr-feature-b').exists())
+        self.assertFalse((self.repo.parent / f'{self.repo.name}-wt-pr-feature-b').exists())
+
     def test_reconcile_apply_leaves_no_worktree_by_default(self):
         self.prepare_reconcile_apply_worktree_scenario()
         before = self.git('worktree', 'list', '--porcelain')
@@ -1529,7 +5069,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('worktree', 'list', '--porcelain'), before)
         self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'pr-feature-b').exists())
 
-    def test_reconcile_apply_preflights_dirty_integration_before_rebuilding_a_stack(self):
+    def test_reconcile_apply_preflights_a_dirty_primary_before_rebuilding_a_stack(self):
         self.prepare_reconcile_apply_worktree_scenario()
         manifest = self.repo / '.syncwheel' / 'manifest.json'
         before_manifest = manifest.read_text()
@@ -1540,7 +5080,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         result = self.run_cli('reconcile', '--no-fetch', '--apply', expected=2)
 
-        self.assertIn(f'{self.repo} is not clean', result.stderr)
+        self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
         self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
         self.assertEqual(manifest.read_text(), before_manifest)
         self.assertFalse(ledger.exists())
@@ -1605,17 +5146,39 @@ class SyncwheelFixtureTest(unittest.TestCase):
             expected=0,
         )
         updated = json.loads(manifest_path.read_text())
+        module = self.load_syncwheel_module()
         ledger_root = self.expected_external_ledger_root(manifest_path)
         ledger_state = self.run_cli('ledger', 'show', '--manifest', str(manifest_path), '--json', expected=0)
+        integration_tip = self.git('rev-parse', 'integration/reconcile')
+        committed_manifest = module.manifest_from_tree(
+            self.repo, integration_tip, self.repo / '.syncwheel' / 'manifest.json'
+        )
 
         self.assertNotIn('git push', result.stdout)
         self.assertEqual(updated['stacks'][0]['commits'][0], self.git('rev-parse', 'pr/feature-b'))
-        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '2')
+        # The third commit is the required manifest-only control commit. The old
+        # assertion of two commits encoded the persistence bug fixed here.
+        self.assertEqual(self.git('rev-list', '--count', f'{base}..integration/reconcile'), '3')
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', integration_tip),
+            'chore: restore Syncwheel control manifest',
+        )
+        self.assertEqual(module.manifest_digest(committed_manifest), module.manifest_digest(updated))
         self.assertTrue((ledger_root / 'events').exists())
         self.assertFalse((self.repo / '.syncwheel' / 'ledger').exists())
         self.assertNotIn('.syncwheel/', self.repo_exclude_path().read_text())
         self.assertEqual(self.git('status', '--short', '--untracked-files=all', '--', '.syncwheel/ledger'), '')
         self.assertGreater(json.loads(ledger_state.stdout)['last_seq'], 0)
+
+    def commit_selected_integration_control(self, manifest_path):
+        """Prepare valid control state for product-history equivalence tests."""
+        module = self.load_syncwheel_module()
+        manifest, _ = module.load_manifest(self.repo, manifest_path)
+        control_path = self.repo / '.syncwheel' / 'manifest.json'
+        control_path.parent.mkdir(parents=True, exist_ok=True)
+        control_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: persist selected integration control')
 
     def test_reconcile_aligns_local_to_remote_when_remote_matches_projection(self):
         beta = self.git('rev-parse', 'main')
@@ -1646,6 +5209,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.git('branch', 'integration/reconcile', base)
         self.git('switch', '-q', 'integration/reconcile')
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
 
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -1723,6 +5287,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.git('branch', '-f', 'pr/feature-b', 'HEAD')
         self.git('switch', '-q', '-c', 'integration/reconcile', base)
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
 
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -1782,6 +5347,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.git('branch', '-f', 'pr/feature-b', remote_stack)
         self.git('switch', '-q', '-c', 'integration/reconcile', base)
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
         remote_integration = self.git('rev-parse', 'HEAD')
 
         origin = self.tmp / 'origin.git'
@@ -1798,6 +5364,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.git('switch', '-q', 'integration/reconcile')
         self.git('reset', '--hard', base)
         self.git('merge', '--no-ff', 'pr/feature-b', '-m', "Merge stack 'feature-b' into integration/reconcile")
+        self.commit_selected_integration_control(manifest_path)
         local_integration = self.git('rev-parse', 'HEAD')
         self.git('switch', '-q', 'main')
         self.git('clean', '-fd')
@@ -1853,6 +5420,142 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'pr/feature-b'), remote_stack)
         self.assertEqual(self.git('rev-parse', 'integration/reconcile'), remote_integration)
         self.assertEqual(manifest_path.read_text(), before_manifest)
+
+    def test_reconcile_pushes_manifest_only_control_commit_instead_of_aligning_back(self):
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'control-ahead-manifest.json'
+        data = self.read_manifest()
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/control-ahead',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        data['stacks'] = []
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('branch', 'integration/control-ahead', base)
+
+        origin = self.tmp / 'origin.git'
+        subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin', '--prune')
+        self.git('switch', '-q', 'integration/control-ahead')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked = json.loads(tracked_manifest.read_text())
+        tracked['control'] = 'new ownership'
+        tracked_manifest.write_text(json.dumps(tracked, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist control ownership')
+
+        result = self.run_cli(
+            'reconcile', '--manifest', str(manifest_path), '--no-fetch', '--push', '--json', expected=0
+        )
+        report = json.loads(result.stdout)
+
+        self.assertTrue(report['integration']['local_control_only_ahead'])
+        self.assertEqual([action['type'] for action in report['actions']], ['push_integration'])
+
+    def test_reconcile_apply_refuses_an_unselected_control_only_ahead_tip(self):
+        module = self.load_syncwheel_module()
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / 'unselected-control-ahead-manifest.json'
+        data = self.read_manifest()
+        data['defaults']['publication_remote'] = 'origin'
+        data['integration'] = {
+            'branch': 'integration/unselected-control-ahead',
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        data['stacks'] = []
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        self.git('branch', 'integration/unselected-control-ahead', base)
+
+        origin = self.tmp / 'unselected-control-ahead-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', 'origin', '--prune')
+        remote_ref = 'refs/heads/integration/unselected-control-ahead'
+        remote_before = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', remote_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+        self.git('switch', '-q', 'integration/unselected-control-ahead')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked = json.loads(tracked_manifest.read_text())
+        tracked['control'] = 'not selected by the external manifest'
+        tracked_manifest.write_text(json.dumps(tracked, indent=2) + '\n')
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist unselected control ownership')
+        local_tip = self.git('rev-parse', 'integration/unselected-control-ahead')
+        manifest_before = manifest_path.read_bytes()
+        self.assertEqual(self.git('rev-parse', f'{local_tip}^'), remote_before)
+        self.git('merge-base', '--is-ancestor', remote_before, local_tip)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                remote_before, local_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        manifest_entry = module.tree_path_entry(
+            self.repo, local_tip, '.syncwheel/manifest.json'
+        )
+        self.assertEqual(manifest_entry['mode'], '100644')
+        committed_manifest = json.loads(
+            module.tree_path_bytes(self.repo, manifest_entry).decode('utf-8')
+        )
+        self.assertIsInstance(committed_manifest, dict)
+        selected_manifest = json.loads(manifest_before)
+        self.assertIsInstance(selected_manifest, dict)
+        self.assertNotEqual(
+            module.manifest_digest(committed_manifest),
+            module.manifest_digest(selected_manifest),
+        )
+
+        environment = dict(os.environ)
+        environment['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        refused = subprocess.run(
+            [
+                'python3', str(CLI), 'reconcile', '--manifest', str(manifest_path),
+                '--no-fetch', '--apply', '--push',
+            ],
+            cwd=self.repo,
+            text=True,
+            capture_output=True,
+            env=environment,
+        )
+        remote_after = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', remote_ref],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+
+        self.assertEqual(
+            {
+                'returncode': refused.returncode,
+                'named_refusal': 'selected control manifest' in refused.stderr,
+                'remote_unchanged': remote_after == remote_before,
+                'local_unchanged': self.git(
+                    'rev-parse', 'integration/unselected-control-ahead'
+                ) == local_tip,
+                'manifest_unchanged': manifest_path.read_bytes() == manifest_before,
+            },
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'remote_unchanged': True,
+                'local_unchanged': True,
+                'manifest_unchanged': True,
+            },
+            'UNSELECTED_CONTROL_AHEAD_APPLY_REFUSED',
+        )
 
     def test_version_bump_guard_fails_for_cli_change_without_version_files(self):
         base = self.git('rev-parse', 'HEAD')
@@ -1974,6 +5677,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.git('switch', '-q', '-c', 'integration/shared', 'main')
         self.git('merge', '--no-ff', 'pr/feature-c', '-m', "Merge stack 'feature-c' into integration/shared")
+        self.commit_selected_integration_control(manifest_path)
 
         origin = self.tmp / 'origin.git'
         subprocess.run(['git', 'clone', '--bare', str(self.repo), str(origin)], check=True)
@@ -2212,6 +5916,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
         data['integration']['base'] = 'main'
         data['integration']['stacks'] = ['feature-b']
         data['stacks'] = [data['stacks'][1]]
+        data['stacks'][0]['commits'] = []
         manifest.write_text(json.dumps(data, indent=2) + '\n')
 
         result = self.run_cli('reconcile', '--mode', 'resume', '--no-fetch', '--json', expected=0)
@@ -2319,8 +6024,19 @@ class SyncwheelFixtureTest(unittest.TestCase):
 
         self.run_cli('resume', '--no-fetch', '--apply', expected=0)
         self.run_cli('reconcile', '--no-fetch', '--apply', expected=0)
-        self.assertEqual(self.git('rev-parse', 'integration/test'), self.git('rev-parse', 'main'))
-        self.assertNotEqual(self.git('rev-parse', 'integration/test'), duplicate)
+        integration_tip = self.git('rev-parse', 'integration/test')
+        # Integration now has a manifest-only control commit above main. Exact
+        # tip equality was the pre-persistence behavior, not the real invariant.
+        self.assertEqual(self.git('rev-parse', f'{integration_tip}^'), self.git('rev-parse', 'main'))
+        self.assertEqual(
+            self.git('show', '-s', '--format=%s', integration_tip),
+            'chore: restore Syncwheel control manifest',
+        )
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', integration_tip),
+            '.syncwheel/manifest.json',
+        )
+        self.assertNotEqual(integration_tip, duplicate)
 
     def test_resume_keeps_a_patch_equivalent_closed_stack_for_manual_review(self):
         self.git('switch', '-q', '-c', 'pr/feature-gamma', 'main')
@@ -2428,6 +6144,794 @@ class SyncwheelFixtureTest(unittest.TestCase):
                 manifest,
                 self.git('rev-parse', 'HEAD'),
             )
+
+    def test_int_rebuild_restores_and_commits_the_control_manifest_after_merge_stacks(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        old_manifest = self.read_manifest()
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: track stack manifest')
+        base = self.git('rev-parse', 'HEAD')
+        stack_ids = []
+        for name in ('control-a', 'control-b'):
+            branch = f'pr/{name}'
+            stack_ids.append((name, branch))
+            self.git('branch', branch, base)
+            self.git('switch', '-q', branch)
+            Path(self.repo / f'{name}.txt').write_text(f'{name}\n')
+            self.git('add', f'{name}.txt')
+            self.git('commit', '-q', '-m', f'feat: add {name}')
+        self.git('switch', '-q', 'main')
+
+        control_manifest = json.loads(json.dumps(old_manifest))
+        control_manifest['integration'] = {
+            'branch': 'integration/control-manifest',
+            'base': base,
+            'strategy': 'merge-stacks',
+            'stacks': [name for name, _branch in stack_ids],
+        }
+        control_manifest['stacks'] = [
+            {
+                'id': name,
+                'branch': branch,
+                'base': base,
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'integration/control-manifest',
+                'commits': [self.git('rev-parse', branch)],
+            }
+            for name, branch in stack_ids
+        ]
+        manifest_path.write_text(json.dumps(control_manifest, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: update control manifest')
+        self.git('branch', 'integration/control-manifest', 'main')
+        self.git('switch', '-q', 'integration/control-manifest')
+        module = self.load_syncwheel_module()
+        expected_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        expected_digest = module.manifest_digest(expected_manifest)
+
+        self.run_cli(
+            'int', 'rebuild', '--in-place',
+            '--reason', 'first reviewed projection rebuild',
+            expected=0,
+        )
+
+        restored_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(module.manifest_digest(restored_manifest), expected_digest)
+        self.assertEqual(self.git('show', '-s', '--format=%s', 'HEAD'), 'chore: restore Syncwheel control manifest')
+        first_control_commit = self.git('rev-parse', 'HEAD')
+        self.assertEqual(
+            self.git('show', '--format=', '--name-only', 'HEAD'),
+            '.syncwheel/manifest.json',
+        )
+        self.assertEqual(self.tracked_status(), '')
+        events = module.load_ledger_events(self.repo, manifest_path)
+        self.assertIn(
+            'first reviewed projection rebuild',
+            [event['payload'].get('reason') for event in events if event['type'] == 'manifest_saved'],
+        )
+
+        self.run_cli(
+            'int', 'rebuild', '--in-place',
+            '--reason', 'second reviewed projection rebuild',
+            expected=0,
+        )
+        self.assertEqual(self.git('rev-parse', 'HEAD'), first_control_commit)
+        repeated_receipts = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == first_control_commit
+        ]
+        self.assertEqual(len(repeated_receipts), 2)
+        self.assertEqual(
+            {event['payload']['reason'] for event in repeated_receipts},
+            {
+                'first reviewed projection rebuild',
+                'second reviewed projection rebuild',
+            },
+        )
+        self.assertEqual(
+            len({event['payload']['operation_id'] for event in repeated_receipts}),
+            2,
+        )
+
+    def test_control_manifest_preflight_rejects_unexplained_divergence(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        module = self.load_syncwheel_module()
+        control_manifest, _ = module.load_manifest(self.repo, manifest_path)
+        divergent = json.loads(manifest_path.read_text())
+        divergent['stacks'] = divergent['stacks'][:1]
+        manifest_path.write_text(json.dumps(divergent, indent=2) + '\n')
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'control manifest differs before integration rebuild.*missing stacks.*feature-b.*Restore the control manifest',
+        ):
+            module.preflight_control_manifest_digest(
+                self.repo, manifest_path, control_manifest
+            )
+
+    def test_control_manifest_commit_targets_integration_tree_for_external_manifest(self):
+        module = self.load_syncwheel_module()
+        external = self.tmp / 'external-manifest.json'
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        parent = self.git('rev-parse', 'HEAD')
+        control['integration'] = {
+            'branch': 'integration/external-control',
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        control['stacks'] = []
+        external.write_text(json.dumps(control, indent=2) + '\n')
+        self.git('branch', 'integration/external-control', parent)
+
+        with module.manifest_write_transaction(self.repo, external):
+            changed = module.restore_control_manifest_after_integration_rebuild(
+                self.repo, external, control, parent, 'plumbing',
+            )
+
+        commit = self.git('rev-parse', 'integration/external-control')
+        self.assertTrue(changed)
+        self.assertNotEqual(commit, parent)
+        committed = json.loads(self.git('show', f'{commit}:.syncwheel/manifest.json'))
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(control))
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(control))
+
+    def test_control_manifest_commit_never_uses_the_shared_index(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        Path(self.repo / 'alpha.txt').write_text('unrelated staged content\n')
+        self.git('add', 'alpha.txt')
+        parent = self.git('rev-parse', 'HEAD')
+
+        commit = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        self.assertEqual(self.git('show', '--format=', '--name-only', commit), '.syncwheel/manifest.json')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'alpha.txt')
+
+    def test_control_manifest_commit_is_deterministic_from_its_parent_and_manifest(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        reordered = dict(reversed(list(control.items())))
+        parent = self.git('rev-parse', 'HEAD')
+
+        first = module.materialize_control_manifest_commit(self.repo, control, parent)
+        self.git('config', 'user.name', 'Different Fixture Identity')
+        self.git('config', 'user.email', 'different@example.com')
+        second = module.materialize_control_manifest_commit(self.repo, reordered, parent)
+
+        self.assertEqual(module.manifest_digest(control), module.manifest_digest(reordered))
+        self.assertEqual(first, second)
+
+    def test_control_manifest_object_is_verified_before_the_ref_cas(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        control, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        original_manifest_from_tree = module.manifest_from_tree
+        update_ref_calls = []
+        original_git = module.git
+
+        def corrupted_control_object(repo_root, commit, path):
+            observed = original_manifest_from_tree(repo_root, commit, path)
+            if commit != parent and observed is not None:
+                observed['integration']['branch'] = 'corrupted-integration'
+            return observed
+
+        def observed_git(repo_root, *args, **kwargs):
+            if args and args[0] == 'update-ref':
+                update_ref_calls.append(args)
+            return original_git(repo_root, *args, **kwargs)
+
+        with mock.patch.object(
+            module, 'manifest_from_tree', side_effect=corrupted_control_object,
+        ), mock.patch.object(module, 'git', side_effect=observed_git):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'digest differs in the object prepared',
+            ):
+                module.restore_control_manifest_after_integration_rebuild(
+                    self.repo, manifest_path, control, parent, 'plumbing',
+                )
+
+        self.assertEqual(update_ref_calls, [])
+
+    def test_control_manifest_retry_finishes_ref_checkout_and_external_file(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        desired['integration'] = {
+            'branch': 'integration/control-retry',
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        self.git('branch', 'integration/control-retry', parent)
+        self.git('switch', '-q', 'integration/control-retry')
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-main'
+        external = self.tmp / 'retry-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        internal.unlink()
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place',
+                    )
+
+        control_commit = self.git('rev-parse', 'integration/control-retry')
+        self.assertNotEqual(control_commit, parent)
+        self.assertNotEqual(self.git('status', '--short'), '')
+        observed_stale, _ = module.load_manifest(self.repo, external)
+        self.assertNotEqual(module.manifest_digest(observed_stale), module.manifest_digest(desired))
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, observed_stale
+            )
+
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(desired))
+        self.assertEqual(self.git('status', '--short'), '')
+        events = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'manifest_saved'
+            and (event.get('payload') or {}).get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(events), 1)
+
+    def test_control_manifest_event_retry_is_idempotent_after_fsync(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        event_fsyncs = 0
+
+        def crash_after_fsync(stage):
+            nonlocal event_fsyncs
+            if stage == 'event_fsynced':
+                event_fsyncs += 1
+                if event_fsyncs == 2:
+                    raise RuntimeError('simulated crash after ledger fsync')
+
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            with mock.patch.object(
+                module, 'ledger_io_checkpoint', side_effect=crash_after_fsync,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ledger fsync'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, manifest_path, desired, parent, 'plumbing',
+                    )
+
+        control_commit = self.git('rev-parse', 'main')
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, manifest_path, desired
+            )
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+
+        events = [
+            event for event in module.load_ledger_events(self.repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+            and (event.get('payload') or {}).get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(events), 1)
+        self.assertTrue(events[0]['idempotency_key'].startswith('control-manifest:'))
+
+    def test_control_manifest_retry_after_checkout_alignment_keeps_external_source(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        desired['integration'] = {
+            'branch': 'integration/control-checkout-retry',
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        self.git('branch', 'integration/control-checkout-retry', parent)
+        self.git('switch', '-q', 'integration/control-checkout-retry')
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-main'
+        external = self.tmp / 'checkout-retry-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        internal.unlink()
+
+        def crash_after_checkout(stage):
+            if stage == 'checkout_aligned':
+                raise RuntimeError('simulated crash after checkout alignment')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module,
+                'control_manifest_io_checkpoint',
+                side_effect=crash_after_checkout,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after checkout alignment'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place',
+                    )
+
+        control_commit = self.git('rev-parse', 'integration/control-checkout-retry')
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(stale))
+        self.assertEqual(self.git('status', '--short'), '')
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, persisted
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        persisted, _ = module.load_manifest(self.repo, external)
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(desired))
+        events = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'manifest_saved'
+            and (event.get('payload') or {}).get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(events), 1)
+
+    def test_control_manifest_alignment_never_rewinds_a_concurrent_ref_advance(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/control-cas-race'
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-before-cas-race'
+        external = self.tmp / 'cas-race-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, desired, parent
+        )
+        control_tree = self.git('rev-parse', f'{control_commit}^{{tree}}')
+        concurrent_tip = self.git(
+            'commit-tree', control_tree, '-p', control_commit,
+            '-m', 'test: concurrent integration advance',
+        )
+        before = external.read_bytes()
+
+        def advance_before_alignment(stage):
+            if stage == 'before_checkout_alignment':
+                self.git(
+                    'update-ref', f'refs/heads/{branch}', concurrent_tip, control_commit
+                )
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module,
+                'control_manifest_io_checkpoint',
+                side_effect=advance_before_alignment,
+            ):
+                with self.assertRaisesRegex(
+                    module.ControlManifestAlignmentDrift,
+                    'advanced beyond.*without moving the ref',
+                ):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place'
+                    )
+
+        self.assertEqual(self.git('rev-parse', branch), concurrent_tip)
+        self.assertEqual(external.read_bytes(), before)
+        abandoned = [
+            event for event in module.load_ledger_events(self.repo, external)
+            if event['type'] == 'control_manifest_persistence_abandoned'
+        ]
+        self.assertEqual(len(abandoned), 1)
+        self.assertEqual(
+            abandoned[0]['payload']['outcome'], 'checkout_alignment_ref_drift'
+        )
+
+    def test_alignment_keeps_a_foreign_manifest_in_the_integration_checkout(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/foreign-checkout-manifest'
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        external = self.tmp / 'foreign-checkout-source.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        foreign = json.loads(json.dumps(desired))
+        foreign['defaults']['base_branch'] = 'foreign-local-proposal'
+        internal.write_text(json.dumps(foreign, indent=2) + '\n')
+        before = internal.read_bytes()
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, desired, parent
+        )
+
+        stderr = io.StringIO()
+        with module.manifest_write_transaction(self.repo, external):
+            with contextlib.redirect_stderr(stderr):
+                persisted = module.restore_control_manifest_after_integration_rebuild(
+                    self.repo, external, desired, parent, 'in-place',
+                    reason='keep a foreign checkout manifest',
+                    command='syncwheel int rebuild',
+                )
+
+        self.assertTrue(persisted)
+        self.assertIn('still carries uncommitted changes', stderr.getvalue())
+        self.assertEqual(internal.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', branch), control_commit)
+        self.assertEqual(
+            module.pending_control_manifest_intents(
+                module.load_ledger_events(self.repo, external)
+            ),
+            [],
+        )
+
+    def test_control_manifest_recovery_requires_local_intent_for_external_proposal(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        baseline, _ = module.load_manifest(self.repo, internal)
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/external-proposal'
+        remote_control = json.loads(json.dumps(baseline))
+        remote_control['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        remote_control['stacks'] = []
+        remote_control['defaults']['replay_mode'] = 'plumbing'
+        local_proposal = json.loads(json.dumps(remote_control))
+        local_proposal['defaults']['replay_mode'] = 'ephemeral'
+        external = self.tmp / 'proposal-manifest.json'
+        external.write_text(json.dumps(local_proposal, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, remote_control, parent
+        )
+        self.git('update-ref', f'refs/heads/{branch}', control_commit, parent)
+        before = external.read_bytes()
+
+        with module.manifest_write_transaction(self.repo, external):
+            with self.assertRaises(module.SyncwheelError) as raised:
+                module.recover_incomplete_control_manifest_persistence(
+                    self.repo, external, local_proposal
+                )
+
+        message = str(raised.exception)
+        self.assertIn('no local persistence intent', message)
+        self.assertIn('syncwheel int rebuild', message)
+        self.assertIn('--reason', message)
+        self.assertEqual(external.read_bytes(), before)
+        remedy = shlex.split(message.rsplit('run: ', 1)[1])
+        self.run_cli(*remedy[1:], expected=0)
+        persisted, _ = module.load_manifest(self.repo, external)
+        committed = module.manifest_from_tree(
+            self.repo,
+            self.git('rev-parse', branch),
+            module.integration_manifest_path(self.repo),
+        )
+        self.assertEqual(module.manifest_digest(persisted), module.manifest_digest(local_proposal))
+        self.assertEqual(module.manifest_digest(committed), module.manifest_digest(local_proposal))
+
+    def test_historical_manifest_digest_does_not_authorize_control_divergence(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/historical-proposal'
+        local_proposal = json.loads(json.dumps(baseline))
+        local_proposal['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        local_proposal['stacks'] = []
+        local_proposal['defaults']['replay_mode'] = 'ephemeral'
+        foreign_control = json.loads(json.dumps(local_proposal))
+        foreign_control['defaults']['replay_mode'] = 'plumbing'
+        external = self.tmp / 'historical-proposal-manifest.json'
+        external.write_text(json.dumps(local_proposal, indent=2) + '\n')
+        self.git('branch', branch, parent)
+        with module.manifest_write_transaction(self.repo, external):
+            module.save_manifest_with_ledger(
+                self.repo,
+                external,
+                local_proposal,
+                'record historical local proposal',
+            )
+        control_commit = module.materialize_control_manifest_commit(
+            self.repo, foreign_control, parent
+        )
+        self.git('update-ref', f'refs/heads/{branch}', control_commit, parent)
+        before = external.read_bytes()
+
+        with module.manifest_write_transaction(self.repo, external):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'no local persistence intent'
+            ):
+                module.recover_incomplete_control_manifest_persistence(
+                    self.repo, external, local_proposal
+                )
+
+        self.assertEqual(external.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', branch), control_commit)
+
+    def test_control_manifest_retry_accepts_control_index_and_replay_worktree(self):
+        module = self.load_syncwheel_module()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        replay, _ = module.load_manifest(self.repo, internal)
+        replay['defaults']['base_branch'] = 'replay-version'
+        internal.write_text(json.dumps(replay, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: track replay manifest')
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/index-control-retry'
+        replay['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        replay['stacks'] = []
+        internal.write_text(json.dumps(replay, indent=2) + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'test: bind replay integration branch')
+        parent = self.git('rev-parse', 'HEAD')
+        self.git('branch', branch, parent)
+        self.git('switch', '-q', branch)
+        desired = json.loads(json.dumps(replay))
+        desired['defaults']['base_branch'] = 'control-version'
+        external = self.tmp / 'index-control-manifest.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'in-place'
+                    )
+
+        control_commit = self.git('rev-parse', branch)
+        self.git('read-tree', control_commit)
+        self.assertEqual(self.git('write-tree'), module.ref_tree(self.repo, control_commit))
+        worktree_manifest = json.loads(internal.read_text())
+        self.assertEqual(
+            module.manifest_digest(worktree_manifest), module.manifest_digest(replay)
+        )
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, desired
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertEqual(self.tracked_status(), '')
+        aligned = json.loads(internal.read_text())
+        self.assertEqual(module.manifest_digest(aligned), module.manifest_digest(desired))
+
+    def test_control_manifest_recovery_repairs_incomplete_ledger_tail_before_read(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/ledger-tail-retry'
+        desired = json.loads(json.dumps(baseline))
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-before-retry'
+        external = self.tmp / 'ledger-tail-manifest.json'
+        external.write_text(json.dumps(stale, indent=2) + '\n')
+        self.git('branch', branch, parent)
+
+        def crash_after_ref(stage):
+            if stage == 'ref_updated':
+                raise RuntimeError('simulated crash after ref CAS')
+
+        with module.manifest_write_transaction(self.repo, external):
+            with mock.patch.object(
+                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+            ):
+                with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
+                    module.restore_control_manifest_after_integration_rebuild(
+                        self.repo, external, desired, parent, 'plumbing'
+                    )
+
+        segment = sorted(module.ledger_events_dir(self.repo, external).glob('*.jsonl'))[-1]
+        with segment.open('ab') as handle:
+            handle.write(b'{"type":"manifest_saved"')
+
+        with module.manifest_write_transaction(self.repo, external):
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, stale
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertTrue(segment.read_bytes().endswith(b'\n'))
+        events = module.load_ledger_events(self.repo, external)
+        self.assertEqual(
+            [event['type'] for event in events],
+            ['control_manifest_persistence_intent', 'manifest_saved'],
+        )
+
+    def test_control_manifest_receipts_distinguish_identical_rebuild_operations(self):
+        module = self.load_syncwheel_module()
+        baseline, _ = module.load_manifest(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json'
+        )
+        parent = self.git('rev-parse', 'HEAD')
+        branch = 'integration/repeated-control'
+        desired = json.loads(json.dumps(baseline))
+        desired['integration'] = {
+            'branch': branch,
+            'base': parent,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        desired['stacks'] = []
+        external = self.tmp / 'repeated-control-manifest.json'
+        external.write_text(json.dumps(desired, indent=2) + '\n')
+        self.git('branch', branch, parent)
+
+        with module.manifest_write_transaction(self.repo, external):
+            module.restore_control_manifest_after_integration_rebuild(
+                self.repo, external, desired, parent, 'plumbing',
+                reason='first reviewed rebuild', command='syncwheel int rebuild',
+            )
+        control_commit = self.git('rev-parse', branch)
+        self.git('update-ref', f'refs/heads/{branch}', parent, control_commit)
+        with module.manifest_write_transaction(self.repo, external):
+            module.restore_control_manifest_after_integration_rebuild(
+                self.repo, external, desired, parent, 'plumbing',
+                reason='second reviewed rebuild', command='syncwheel int rebuild',
+            )
+        with module.manifest_write_transaction(self.repo, external):
+            module.recover_incomplete_control_manifest_persistence(
+                self.repo, external, desired
+            )
+
+        events = module.load_ledger_events(self.repo, external)
+        receipts = [
+            event for event in events
+            if event['type'] == 'manifest_saved'
+            and event['payload'].get('control_commit') == control_commit
+        ]
+        self.assertEqual(len(receipts), 2)
+        self.assertEqual(
+            {event['payload']['reason'] for event in receipts},
+            {'first reviewed rebuild', 'second reviewed rebuild'},
+        )
+        self.assertEqual(len({event['payload']['operation_id'] for event in receipts}), 2)
+        self.assertEqual(len({event['idempotency_key'] for event in receipts}), 2)
+
+    def test_every_parser_command_declares_its_entrypoint_behavior(self):
+        module = self.load_syncwheel_module()
+        parser = module.build_parser()
+        table = module.entrypoint_behavior_table()
+        commands = module.command_behavior_table()
+        functions = set()
+        for node in module.command_parser_nodes(parser):
+            function = node.get_default('func')
+            if function is not None:
+                functions.add(function)
+
+        self.assertTrue(functions)
+        self.assertEqual(functions - set(table), set())
+        self.assertEqual(set(commands), functions)
+        for function in functions:
+            with self.subTest(command=function.__qualname__):
+                for rule in ('mutates', 'manifestMutates'):
+                    module.mutation_rule_requested(
+                        table[function][rule], SimpleNamespace()
+                    )
+
+    def test_int_rebuild_is_classified_as_a_manifest_mutation(self):
+        module = self.load_syncwheel_module()
+
+        self.assertTrue(module.manifest_mutation_requested(SimpleNamespace(
+            func=module.command_int_rebuild, dry_run=False,
+        )))
+
+    def test_ai_managed_int_rebuild_requires_an_operator_reason(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = self.read_manifest()
+        manifest['authority'] = {
+            'mode': 'ai-managed',
+            'allow': ['source_change'],
+            'deny': ['destructive_rewrite'],
+        }
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        result = self.run_cli('int', 'rebuild', '--in-place', expected=2)
+
+        self.assertIn('requires --reason for an ai-managed repository', result.stderr)
+
+    def test_control_manifest_event_has_actor_reason_and_command(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+
+        payload = module.control_manifest_event_payload(
+            self.repo, self.repo / '.syncwheel' / 'manifest.json', control,
+            'abc123', 'in-place', 'operator-request', 'int rebuild', None,
+        )
+
+        self.assertEqual(payload['actor'], 'Syncwheel Fixture <syncwheel@example.com>')
+        self.assertEqual(payload['reason'], 'operator-request')
+        self.assertEqual(payload['command'], 'int rebuild')
+        self.assertEqual(payload['control_commit'], 'abc123')
+
+    def test_control_manifest_difference_reports_order_base_commit_and_configuration(self):
+        module = self.load_syncwheel_module()
+        expected, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        observed = json.loads(json.dumps(expected))
+        observed['stacks'].reverse()
+        observed['stacks'][0]['base'] = 'different-base'
+        observed['stacks'][0]['commits'] = ['different-commit']
+        observed['stacks'][0]['state'] = 'draft'
+
+        detail = module.control_manifest_difference(expected, observed)
+
+        self.assertIn('stack order differs', detail)
+        self.assertIn('base differs', detail)
+        self.assertIn('commits differ', detail)
+        self.assertIn('configuration differs', detail)
+
+    def test_control_manifest_preflight_names_an_executable_restore_command(self):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, manifest_path)
+        divergent = json.loads(manifest_path.read_text())
+        divergent['stacks'].reverse()
+        manifest_path.write_text(json.dumps(divergent, indent=2) + '\n')
+
+        with self.assertRaises(module.SyncwheelError) as raised:
+            module.preflight_control_manifest_digest(self.repo, manifest_path, control)
+
+        message = str(raised.exception)
+        self.assertIn('expected=$(mktemp', message)
+        self.assertIn('diff -u', message)
+        self.assertIn(str(manifest_path), message)
+        self.assertIn(module.manifest_digest(control), message)
+        self.assertNotIn('cp ', message)
 
     def test_validate_fails_for_unknown_integration_strategy(self):
         manifest = self.repo / '.syncwheel' / 'manifest.json'
@@ -2870,6 +7374,406 @@ class SyncwheelFixtureTest(unittest.TestCase):
         )
         self.assertIn('syncwheel auto-updated 0.6.0 -> 0.7.0', result.stderr)
         self.assertEqual((fixture['install'] / 'VERSION').read_text().strip(), '0.7.0')
+
+    def prepare_selected_control_alignment(self, label):
+        module = self.load_syncwheel_module()
+        branch = f'integration/{label}'
+        integration_ref = f'refs/heads/{branch}'
+        base = self.git('rev-parse', 'main')
+        manifest_path = self.tmp / f'{label}-manifest.json'
+        selected = self.read_manifest()
+        selected['defaults']['publication_remote'] = 'origin'
+        selected['integration'] = {
+            'branch': branch,
+            'base': base,
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        selected['stacks'] = []
+        manifest_path.write_text(json.dumps(selected, indent=2) + '\n')
+        selected, selected_path = module.load_manifest(self.repo, manifest_path)
+        self.assertEqual(selected_path, manifest_path)
+        manifest_path.write_text(module.canonical_manifest_file_text(selected))
+
+        self.git('branch', branch, base)
+        self.git('switch', '-q', branch)
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(selected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist selected alignment control')
+        selected_tip = self.git('rev-parse', branch)
+
+        unselected = json.loads(json.dumps(selected))
+        unselected['control'] = 'not selected by the external manifest'
+        tracked_manifest.write_text(module.canonical_manifest_file_text(unselected))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'syncwheel: persist unselected alignment control')
+        unselected_tip = self.git('rev-parse', branch)
+        self.git('reset', '--hard', selected_tip)
+
+        origin = self.tmp / f'{label}-origin.git'
+        subprocess.run(
+            ['git', 'clone', '--bare', str(self.repo), str(origin)], check=True
+        )
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('push', 'origin', f'{unselected_tip}:refs/syncwheel/test/unselected')
+        subprocess.run(
+            [
+                'git', '--git-dir', str(origin), 'update-ref', '-d',
+                'refs/syncwheel/test/unselected',
+            ],
+            check=True,
+        )
+        self.git('fetch', 'origin', '--prune')
+        Path(self.repo / 'local-only.txt').write_text(f'{label} local only\n')
+        self.git('add', 'local-only.txt')
+        self.git('commit', '-q', '-m', 'test: local alignment obstruction')
+        local_tip = self.git('rev-parse', branch)
+
+        self.assertEqual(self.git('rev-parse', f'{selected_tip}^'), base)
+        self.assertEqual(self.git('rev-parse', f'{unselected_tip}^'), selected_tip)
+        self.assertEqual(self.git('rev-parse', f'{local_tip}^'), selected_tip)
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                base, selected_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        self.assertEqual(
+            self.git(
+                'diff-tree', '--no-commit-id', '--name-only', '-r',
+                selected_tip, unselected_tip,
+            ).splitlines(),
+            ['.syncwheel/manifest.json'],
+        )
+        for tip in (selected_tip, unselected_tip):
+            entry = module.tree_path_entry(
+                self.repo, tip, '.syncwheel/manifest.json'
+            )
+            self.assertEqual(entry['mode'], '100644')
+        selected_committed = module.manifest_from_tree(
+            self.repo, selected_tip, tracked_manifest
+        )
+        unselected_committed = module.manifest_from_tree(
+            self.repo, unselected_tip, tracked_manifest
+        )
+        self.assertEqual(
+            module.manifest_digest(selected_committed),
+            module.manifest_digest(selected),
+        )
+        self.assertNotEqual(
+            module.manifest_digest(unselected_committed),
+            module.manifest_digest(selected),
+        )
+        self.assertEqual(
+            subprocess.run(
+                ['git', '--git-dir', str(origin), 'rev-parse', integration_ref],
+                check=True,
+                text=True,
+                capture_output=True,
+            ).stdout.strip(),
+            selected_tip,
+        )
+        return {
+            'module': module,
+            'branch': branch,
+            'integration_ref': integration_ref,
+            'manifest_path': manifest_path,
+            'manifest': selected,
+            'manifest_bytes': manifest_path.read_bytes(),
+            'origin': origin,
+            'base': base,
+            'selected_tip': selected_tip,
+            'unselected_tip': unselected_tip,
+            'local_tip': local_tip,
+        }
+
+
+    def test_reconcile_preserves_unselected_control_ahead_of_a_selected_remote(self):
+        fixture = self.prepare_selected_control_alignment('control-ahead-selected-remote')
+        self.git('reset', '--hard', fixture['unselected_tip'])
+        module = fixture['module']
+        before = self.git('show-ref', '--heads')
+        source = (self.repo / '.syncwheel/manifest.json').read_bytes()
+        args = module.build_parser().parse_args([
+            'reconcile', '--repo', str(self.repo), '--manifest', str(fixture['manifest_path']),
+            '--no-fetch', '--apply', '--push',
+        ])
+        args.git_args = []
+        with self.assertRaisesRegex(module.SyncwheelError, 'selected control manifest'):
+            args.func(args)
+        self.assertEqual(self.git('show-ref', '--heads'), before)
+        self.assertEqual((self.repo / '.syncwheel/manifest.json').read_bytes(), source)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_int_align_remote_uses_the_observed_control_oid_when_the_remote_moves(self):
+        fixture = self.prepare_selected_control_alignment('int-align-pinned')
+        module = fixture['module']
+        original_report = module.integration_sync_report
+        original_run_command_list = module.run_command_list
+        observations = []
+        reset_targets = []
+
+        def report_then_move_remote(*args, **kwargs):
+            report = original_report(*args, **kwargs)
+            self.assertEqual(
+                module.ref_tip(self.repo, report['remote_ref']),
+                fixture['selected_tip'],
+            )
+            subprocess.run(
+                [
+                    'git', '--git-dir', str(fixture['origin']), 'update-ref',
+                    fixture['integration_ref'], fixture['unselected_tip'],
+                    fixture['selected_tip'],
+                ],
+                check=True,
+            )
+            observations.append(report['remote_ref'])
+            return report
+
+        def record_command_list(commands, repo_root, apply):
+            for entry in commands:
+                command, _ = module.command_argv_env(entry)
+                if command[:3] == ['git', 'reset', '--hard']:
+                    reset_targets.append(command[3])
+            return original_run_command_list(commands, repo_root, apply)
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'align-remote', '--repo', str(self.repo),
+            '--manifest', str(fixture['manifest_path']), '--remote', 'origin',
+        ])
+        args.git_args = []
+        with mock.patch.object(
+            module, 'integration_sync_report', side_effect=report_then_move_remote
+        ), mock.patch.object(
+            module, 'run_command_list', side_effect=record_command_list
+        ):
+            returncode = args.func(args)
+
+        aligned = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, fixture['manifest_path']
+            )
+            if event['type'] == 'integration_aligned_remote'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'report_calls': len(observations),
+                'reset_targets': reset_targets,
+                'local_tip': self.git('rev-parse', fixture['branch']),
+                'remote_tracking_tip': self.git(
+                    'rev-parse', f"origin/{fixture['branch']}"
+                ),
+                'bare_remote_tip': subprocess.run(
+                    [
+                        'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                        fixture['integration_ref'],
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+                'ledger_after_tips': [event['after_tip'] for event in aligned],
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+                'worktree_clean': self.git('status', '--porcelain=v1') == '',
+            },
+            {
+                'returncode': 0,
+                'report_calls': 1,
+                'reset_targets': [fixture['selected_tip']],
+                'local_tip': fixture['selected_tip'],
+                'remote_tracking_tip': fixture['selected_tip'],
+                'bare_remote_tip': fixture['unselected_tip'],
+                'ledger_after_tips': [fixture['selected_tip']],
+                'manifest_unchanged': True,
+                'worktree_clean': True,
+            },
+            'INT_ALIGN_USES_PINNED_SELECTED_CONTROL_OID',
+        )
+
+
+    def test_int_align_remote_refuses_an_unselected_control_oid(self):
+        fixture = self.prepare_selected_control_alignment('int-align-selected')
+        module = fixture['module']
+        subprocess.run(
+            [
+                'git', '--git-dir', str(fixture['origin']), 'update-ref',
+                fixture['integration_ref'], fixture['unselected_tip'],
+                fixture['selected_tip'],
+            ],
+            check=True,
+        )
+        refs_before = self.git('show-ref', '--heads')
+        index_before = self.git('write-tree')
+        status_before = self.git('status', '--porcelain=v1')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_before = tracked_manifest.read_bytes()
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'int', 'align-remote', '--repo', str(self.repo),
+            '--manifest', str(fixture['manifest_path']), '--remote', 'origin',
+        ])
+        args.git_args = []
+        refusal = None
+        returncode = 0
+        try:
+            returncode = args.func(args)
+        except module.SyncwheelError as exc:
+            returncode = 2
+            refusal = str(exc)
+
+        aligned = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, fixture['manifest_path']
+            )
+            if event['type'] == 'integration_aligned_remote'
+        ]
+        self.assertEqual(
+            {
+                'returncode': returncode,
+                'named_refusal': bool(
+                    refusal and 'selected control manifest' in refusal
+                ),
+                'remote_tip': subprocess.run(
+                    [
+                        'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                        fixture['integration_ref'],
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+                'refs_unchanged': self.git('show-ref', '--heads') == refs_before,
+                'index_unchanged': self.git('write-tree') == index_before,
+                'status_unchanged': self.git('status', '--porcelain=v1')
+                == status_before,
+                'tracked_manifest_unchanged': tracked_manifest.read_bytes()
+                == tracked_before,
+                'external_manifest_unchanged': fixture[
+                    'manifest_path'
+                ].read_bytes() == fixture['manifest_bytes'],
+                'alignment_receipts': len(aligned),
+            },
+            {
+                'returncode': 2,
+                'named_refusal': True,
+                'remote_tip': fixture['unselected_tip'],
+                'refs_unchanged': True,
+                'index_unchanged': True,
+                'status_unchanged': True,
+                'tracked_manifest_unchanged': True,
+                'external_manifest_unchanged': True,
+                'alignment_receipts': 0,
+            },
+            'INT_ALIGN_REFUSES_UNSELECTED_CONTROL_OID',
+        )
+
+
+    def test_reconcile_align_refuses_a_newly_fetched_unselected_control_oid(self):
+        fixture = self.prepare_selected_control_alignment('reconcile-align-selected')
+        module = fixture['module']
+        original_actions = module.reconcile_actions
+        planned = []
+        refs_before = self.git('show-ref', '--heads')
+        index_before = self.git('write-tree')
+        status_before = self.git('status', '--porcelain=v1')
+        tracked_manifest = self.repo / '.syncwheel' / 'manifest.json'
+        tracked_before = tracked_manifest.read_bytes()
+
+        def plan_then_move_remote(*args, **kwargs):
+            actions = original_actions(*args, **kwargs)
+            self.assertEqual(
+                [action['type'] for action in actions],
+                ['align_integration_to_remote'],
+            )
+            subprocess.run(
+                [
+                    'git', '--git-dir', str(fixture['origin']), 'update-ref',
+                    fixture['integration_ref'], fixture['unselected_tip'],
+                    fixture['selected_tip'],
+                ],
+                check=True,
+            )
+            planned.extend(actions)
+            return actions
+
+        parser = module.build_parser()
+        args = parser.parse_args([
+            'reconcile', '--repo', str(self.repo),
+            '--manifest', str(fixture['manifest_path']), '--remote', 'origin',
+            '--no-fetch', '--apply', '--rebuild', 'none',
+        ])
+        args.git_args = []
+        refusal = None
+        returncode = 0
+        with mock.patch.object(
+            module, 'reconcile_actions', side_effect=plan_then_move_remote
+        ):
+            try:
+                returncode = args.func(args)
+            except module.SyncwheelError as exc:
+                returncode = 2
+                refusal = str(exc)
+
+        aligned = [
+            event['payload'] for event in module.load_ledger_events(
+                self.repo, fixture['manifest_path']
+            )
+            if event['type'] == 'integration_aligned_remote'
+        ]
+        self.assertEqual(
+            {
+                'planned': len(planned),
+                'returncode': returncode,
+                'named_refusal': bool(
+                    refusal and 'selected control manifest' in refusal
+                ),
+                'local_tip': self.git('rev-parse', fixture['branch']),
+                'remote_tracking_tip': self.git(
+                    'rev-parse', f"origin/{fixture['branch']}"
+                ),
+                'bare_remote_tip': subprocess.run(
+                    [
+                        'git', '--git-dir', str(fixture['origin']), 'rev-parse',
+                        fixture['integration_ref'],
+                    ],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                ).stdout.strip(),
+                'alignment_receipts': len(aligned),
+                'heads_unchanged': self.git('show-ref', '--heads')
+                == refs_before,
+                'index_unchanged': self.git('write-tree') == index_before,
+                'status_unchanged': self.git('status', '--porcelain=v1')
+                == status_before,
+                'tracked_manifest_unchanged': tracked_manifest.read_bytes()
+                == tracked_before,
+                'manifest_unchanged': fixture['manifest_path'].read_bytes()
+                == fixture['manifest_bytes'],
+            },
+            {
+                'planned': 1,
+                'returncode': 2,
+                'named_refusal': True,
+                'local_tip': fixture['local_tip'],
+                'remote_tracking_tip': fixture['unselected_tip'],
+                'bare_remote_tip': fixture['unselected_tip'],
+                'alignment_receipts': 0,
+                'heads_unchanged': True,
+                'index_unchanged': True,
+                'status_unchanged': True,
+                'tracked_manifest_unchanged': True,
+                'manifest_unchanged': True,
+            },
+            'RECONCILE_ALIGN_REVALIDATES_SELECTED_CONTROL_OID',
+        )
+
 
 
 if __name__ == '__main__':

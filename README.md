@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.36.1`
+Current version: `0.43.9`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -40,6 +40,9 @@ Syncwheel adds that missing control plane:
 - one manifest declares commit ownership
 - each stack maps to one PR branch
 - integration is a disposable projection of the manifest
+- a rebuild restores and records a deterministic, manifest-only control commit
+  when its projected tree carries an older manifest; `int rebuild --reason` is
+  required for `ai-managed` repositories
 - deployment channels pin selected stack revisions into ordered, rebuildable
   branch compositions
 - `reconcile` compares local branches, remote tips, and manifest projections
@@ -94,6 +97,13 @@ tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
 through `.git/info/exclude`. New managed worktrees default to repo-relative
 `.syncwheel/wt/`.
 
+`authority` declares how far agents may take a change on their own. A repo
+with `mode=ai-managed` and `source_change` allowed lets an agent edit, test,
+commit, push, open and merge the PR without asking at each step; `runtime_change`
+must be granted separately; `destructive_rewrite` can never be granted. An
+absent block means `human-gated`. Inspect and set it with
+`syncwheel repo authority status` and `syncwheel repo authority set`.
+
 ## Active-active coordination
 
 Manifest versions 2 and 3 can safely coordinate the same integration branch from
@@ -113,6 +123,76 @@ push support and never falls back to serial pushes. See
 [the active-active protocol](docs/design/active-active-coordination.md) for the
 state model, lease handling, explicit merge acceptance, privacy contract, and
 local cleanup safeguards.
+
+Every managed source ref has one CAS authority at
+`refs/heads/syncwheel/claim/heads/...`. Each coordinated publication advances
+that claim in the same atomic push as the source and state refs; an unchanged
+claim is not accepted as lease evidence. Existing manifests normalize
+`coordination.claims` to `advisory`. In that mode Syncwheel still creates claims
+and reports gaps. Prepare an explicit switch to `required` with:
+
+```bash
+syncwheel coordination claims backfill
+syncwheel coordination claims backfill --apply --reason "claim migration"
+```
+
+Backfill uses create-only leases and never overwrites a foreign claim.
+`required` refuses published state that lists an owned source without a claim.
+Syncwheel covers concurrent Syncwheel commands, process death, ordinary Git on
+unowned refs, and arbitrary readers. It fails closed on a detectable CAS,
+ordering, intent, or recovery violation, and it never leaves state that a retry
+of the recorded operation, or the next coordinated command, cannot resolve;
+forced/raw mutation of Syncwheel-owned refs and hostile remotes remain outside
+that guarantee.
+
+Every mutating coordinated publisher records a durable operation token before
+the atomic push. If process death occurs after remote success, the retry accepts
+only state and claims carrying that token and completes without republishing,
+including when later publications have moved the shared state on. Draft create
+uses the same token in its create intent and remote claim, and cleans up its
+token-derived temporary worktree registration on retry.
+
+One publication cycle runs at a time in a clone. Every coordinated command takes
+`<git-common-dir>/syncwheel/coordination-publication.lock` around its whole
+intent, push, local remainder and terminal event, and a second command refuses
+with the live owner's pid rather than deciding anything about its intent; a
+plain retry after it finishes succeeds. Process death releases the lock, so a
+dead owner's intent is recovered by the next command. Dry runs and `handoff`
+take no lock and are never refused.
+
+A publication intent is always terminal, and a token has exactly one terminal
+record; a second terminal is refused when it is written, never when the ledger
+is read. Landing is proved by a state commit inside the intent's own window that
+declares this operation's token, scope, changed refs, projection status and
+manifest digest, together with a claim carrying that token for every touched
+source ref; never by current ref tips, so another clone legitimately advancing
+the same ref cannot turn a landed operation into an abandoned one, and a token
+reused for another operation cannot prove this one. An intent with no recorded
+expected state tip is never proved landed by the chain. Recovery, and only
+recovery, accepts a second form after that one fails: every changed ref, and no
+other, carrying a claim that declares this operation's token, scope and whole
+ref set. That form has no window and no manifest digest, so it still holds when
+a state ref is rewritten backwards, and a claim carrying the token under another
+scope or another ref set proves a different operation, not this one. The digest
+in both forms ignores `integration.derived_provenance`, which the two sides
+resolve from different sources by design. An intent absent from that evidence
+never reached the remote and is recorded as
+`coordination_publish_abandoned` by the next publication, `reconcile`, or
+`resume`, with reason `not_landed` when nothing else published meanwhile and
+`superseded` when the reviewed state tip was overtaken; the local rename of an
+abandoned promotion is undone only when the remote carries neither the promoted
+ref nor a claim bearing its token. A promotion whose push landed before its
+manifest save owes only that save: the next coordinated command, `stack
+rebuild`, `stack sync` and `stack add` included, completes it from the published
+state and rebuilds the promoted branch, so an intervening `sync` cannot strand
+it, and a draft branch that came back with commits of its own is anchored under
+`refs/syncwheel/recovery/drafts/` before it is dropped. A clone that lost a
+publication race, was refused by the remote, or died before its push keeps
+publishing after a plain retry. A coordination remote that is unreachable, or
+that refuses the atomic push without changing anything, fails closed and names
+the retry command for `stack push`, `int push`, `stack promote`, `stack create
+--draft`, `publish`, `reconcile --apply --push`, and `coordination claims
+backfill`.
 
 When a managed branch is correct but coordination state recorded the wrong tip,
 generate a digest-bound repair plan. The default backend remains non-mutating:
@@ -145,6 +225,18 @@ under the same exact state-ref lease. It never updates the managed branch and
 refuses non-descendants, intervals above 1024 commits, plan drift, ownership
 uncertainty, or concurrent ref changes.
 
+A coordination state records the digest of `.syncwheel/manifest.json` on its
+integration tip. States published before 0.42.2 recorded the digest of the
+normalized public snapshot of that same manifest instead, so the guard accepts
+either form and reports which one matched; anything else still fails closed.
+The first publish, push, or compose over a legacy state rewrites the state with
+the control-manifest digest and records a `coordination_state_digest_migrated`
+ledger event. To migrate without publishing anything else, plan and apply with
+`--freeze-backend state-digest-migration`: the plan reports
+`digest-migration-required` instead of `noop`, binds both digests, and apply
+appends a state child that changes only the recorded digest under the same
+exact state-ref lease.
+
 When the remote state and a stale local manifest independently added stacks,
 compose the proposals explicitly instead of weakening `stack push`:
 
@@ -152,7 +244,7 @@ compose the proposals explicitly instead of weakening `stack push`:
 syncwheel coordination compose \
   --stack new-stack \
   --known-base-state <state-sha> \
-  --known-base-snapshot-digest <snapshot-digest> > compose-plan.json
+  --known-base-manifest-digest <integration-control-manifest-digest> > compose-plan.json
 syncwheel coordination compose --apply --plan-file compose-plan.json
 ```
 
@@ -209,6 +301,123 @@ already on the target branch, and an existing worktree when the branch has one.
 Pin a mode with `--replay-mode`, with `syncwheel replay-mode <mode>` for a
 repo-local default, or with `defaults.replay_mode` in the manifest.
 
+When another agent has explicitly locked or owns the primary checkout, continue
+authoring only by asking for a governed lane. This is an explicit fallback, not
+an automatic reaction to a lock:
+
+```bash
+syncwheel worktree open concise-change
+syncwheel worktree open dependency-repair --full
+```
+
+`open` creates one clone-local, registered worktree below the configured
+`syncwheel_worktree_root` and prints its path. A light lane is for authoring and
+committing only; Syncwheel does not provision dependencies there. `--full` is
+the explicit, bounded choice when dependency installation, builds, tests, or
+debugging are necessary. It is a lifecycle declaration, not a sandbox: a raw
+shell can still bypass it, so agents must keep that boundary in their procedure.
+
+Each clone permits four active lanes. The local registry records the owner,
+lease, base, branch, target stack, mode, and any recovery ref in Git's common
+directory, never in the shared manifest. Use `--into <existing-stack>` when the
+destination is already known. Otherwise, after committing, use the existing
+`stack create`, `stack add`, or `stack capture-integration` workflow from a
+different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
+the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
+worktree and local lane branch. A dirty, unavailable, or current-directory lane
+is retained and reported; it is never removed automatically. A missing lane
+whose lease expired, or whose local owner PID is known to be dead, is reaped on
+the next applicable mutation even when an old registry path is outside the
+current configured root. If Git reports that the branch's worktree moved,
+Syncwheel resolves and checks the current path before deciding whether the lane
+is eligible, and retains moved dirty or externally locked worktrees.
+
+The clone-local registry mutex records its PID, process start time, and a unique
+token. A successor first obtains the old inode's non-blocking `flock`, then
+atomically renames and logs it when the metadata proves owner death, PID reuse,
+or an unreaped zombie. An empty or truncated lock is recovered only after a
+brief initialization grace, so a plain retry can resume even when `SIGKILL`
+lands between exclusive creation and metadata fsync. The creator verifies that
+its inode still owns the lock path before entering the critical section, so a
+stolen uninitialized lock never puts two processes inside it. That recovery is
+reported as an uninitialized lock rather than a dead owner, because its creator
+may be alive and merely descheduled, and the renamed inode is pruned by the next
+cleanup once nobody holds it; the durable recovery log keeps the evidence. While
+holding that mutex, cleanup takes a Git worktree lock with a deterministic
+Syncwheel token before classifying the lane or changing a ref. A lock failure is
+reported as a lane in use and stops the operation.
+
+Under both locks, Syncwheel verifies the exact Git admin directory and its
+`gitdir`, fsyncs a ledger `governed_worktree_cleanup_intent`, and saves the
+pending registry state through a temp-file and parent-directory fsync guarded by
+the observed pre-image digest. Stack create, add, and capture keep that intent
+and its terminal event in the ledger selected by the effective shared,
+personal, or external manifest. Only then may cleanup create the recovery ref
+and commit one expected-old ref transaction that verifies the recovery ref
+while deleting the lane branch. A restart rebuilds missing or rolled-back
+registry state from the durable intent. A final tracked/untracked probe precedes
+removal of the exact verified registration; cleanup never uses a global `git
+worktree prune`.
+
+A reappearing path, changed registration, or moved recovery ref fails closed
+with a retryable record. If a clean lane branch advanced after its first anchor,
+the recorded `gc --apply` remedy anchors the new tip and completes while
+retaining the earlier recovery ref. The locks cover concurrent Syncwheel cleanup
+and ordinary non-forced Git worktree operations. Raw mutation of
+Syncwheel-owned refs, double-force worktree operations, and direct non-owner
+writes into a lane during cleanup are outside the supported concurrency model
+and fail closed when their effects are detectable.
+
+To retire a known dead or abandoned lane deliberately, preview the operation
+first and provide a durable reason:
+
+```bash
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example"
+syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --apply
+```
+
+`release` is dry-run by default. With `--apply`, it creates a recovery ref for
+an existing lane-branch tip, removes the registry record, and appends a ledger
+event. An explicitly abandoned record whose path is already missing can still
+be released; any remaining Git worktree registration is removed before the
+registry record. It refuses an existing dirty lane and names the recovery
+remedy instead of removing it. Pending cleanup, including a branch that advanced
+before its expected-old transaction, and ledger writes are retryable and
+idempotent. An explicit release may supersede the automatic `branch_advanced`
+intent, retain its earlier recovery ref, anchor the new tip, and close with the
+operator's release reason; a release-originated retry retains its original
+reason. A release also completes any other pending reap state, including one
+left by `SIGKILL`, terminalizing it under the intent already fsynced for it. If
+another Syncwheel command already terminalized the lane, or the first release
+completed but its response was lost, the release reports that terminal ledger
+event instead of an unknown lane. Whenever the recorded terminal is not this
+operator's own release reason, `--apply` records that reason as a
+`governed_worktree_release_noted` ledger event, once per terminal; the dry run
+records nothing. `gc` reselects eligible lanes while holding the registry lock,
+avoids stale lane-id reuse, and also works when active-active coordination is
+disabled.
+
+Automatic lane reaping runs only before an explicitly mutating lifecycle
+operation. Status, check, handoff, `gc` without `--apply`, `reconcile` or
+`resume` without `--apply`, and every other preview leave the registry,
+branches, recovery refs, and ledger unchanged. `stack git` and `int git` join
+that mutation allowlist only when `--auto-worktree` or `--worktree` explicitly
+authorizes worktree creation; passthrough Git commands in an existing worktree
+do not implicitly trigger lane reaping.
+
+`status`, `check`, `handoff`, and `gc` include structured governed-worktree
+diagnostics in JSON. Repo-aware terminal commands show actionable yellow
+warnings for unfinished lanes when stderr is a TTY; `NO_COLOR` removes ANSI
+color and JSON output remains free of ANSI sequences.
+
+When an occupied primary checkout stops a mutating command, Syncwheel names
+manifest-derived capture and queue commands in the error. Capture committed
+primary work with `syncwheel stack capture-integration <stack> HEAD`, or leave
+another agent's primary checkout unchanged and use
+`syncwheel worktree open <lane> --into <stack>`. Capacity and expired-lane
+diagnostics name the corresponding `syncwheel stack add <stack> <base>..<lane>`
+queue command.
+
 ## Owning a commit before you know its PR
 
 A commit made on the integration branch has to belong to a stack to reach the base branch. Until it
@@ -225,11 +434,43 @@ syncwheel stack promote caching-experiment --branch pr/caching
 
 A draft refuses `stack push` to the target remote and names its state as the reason. Under
 active-active coordination its source ref does publish to the coordination remote, so another clone
-can rebuild the draft from the manifest alone. `stack demote` reverses the promotion, and refuses when
-the stack already records an open pull request.
+can rebuild the draft from the manifest alone. Draft creation uses a create-only ref CAS and rechecks
+cross-domain ownership at publication, so a concurrently created local ref or coordination claim is
+preserved and reported instead of replaced. A retry adopts an equivalent completed remote create
+before probing whether a new atomic push is possible. `stack demote` reverses the promotion, and
+refuses when the stack already records an open pull request.
+
+Closing a never-published draft is remote-first under active coordination. It
+records `stack_close_intent`, atomically publishes a tombstone claim plus state,
+saves the manifest, and only then records `stack_closed`. A retry after a crash
+between push and save recognizes its operation token in the tombstone and
+completes idempotently; an unreachable remote fails closed without changing the
+manifest, including during recovery. If a later create has advanced the claim,
+the old close is terminalized as `close_superseded` and cannot close the new
+generation. A close whose tombstone already landed completes from its intent
+even when unrelated publications have advanced the state, instead of publishing
+a second tombstone. `stack close --reason absorbed` first fetches and records
+the observed delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
+path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
 
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.
+
+When the owning stack already exists and its source branch must remain
+unchanged, classify the commit declaratively instead. Preview is the default;
+apply requires the exact digest printed by the preview:
+
+```bash
+plan=$(syncwheel stack classify-integration caching-experiment HEAD)
+digest=$(printf '%s' "$plan" | jq -r .planDigest)
+syncwheel stack classify-integration caching-experiment HEAD --apply --plan-digest "$digest"
+```
+
+This writes only the manifest and ledger. The commit is recorded in
+`integration_only_commits` and remains part of future integration rebuilds,
+including `merge-stacks`, without being projected onto the stack branch. These
+commits replay after the combined stack projection so they retain the context in
+which integration-first work was created.
 
 ## Direct landing after local validation
 
@@ -345,6 +586,8 @@ Practical meaning:
 - A **PR stack** is one logical change stream mapped to one `pr/*` branch with an explicit commit list.
 - `stack sync`, `stack set`, and `stack add` update commit ownership without
   hand-editing SHA lists.
+- `stack classify-integration` records integration-only ownership through a
+  digest-bound manifest plan without rebuilding a stack or integration ref.
 - `stack absorb` moves dirty or staged integration-branch changes into a stack
   branch, updates the manifest, and removes the absorbed patch from the
   integration checkout.
@@ -406,6 +649,11 @@ Practical meaning:
 
 3. **AI-operated (recommended)**  
    Let an AI agent run the syncwheel flow through prompts, with a human supervising intent and approval boundaries. In practice this gives the best speed/consistency balance for ongoing maintenance.
+
+For repositories that explicitly use `ai-managed` source delivery, the
+optional digest-bound GitHub PR merge path is documented in
+[`docs/github-pr-merge.md`](docs/github-pr-merge.md). Its private policy stays
+clone-local and its admin bypass is limited to required reviews.
 
 ## Install Methods
 
@@ -814,7 +1062,7 @@ python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
 python3 scripts/syncwheel.py stack rebuild feature-a --worktree ../wt-pr-feature-a
 python3 scripts/syncwheel.py stack push feature-a
 python3 scripts/syncwheel.py stack git feature-a --worktree ../wt-pr-feature-a -- status
-python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration
+python3 scripts/syncwheel.py int rebuild --worktree ../wt-integration --reason "refresh integration projection"
 python3 scripts/syncwheel.py int push
 python3 scripts/syncwheel.py int git --auto-worktree -- status
 python3 scripts/syncwheel.py int sync-status --json
@@ -851,17 +1099,26 @@ syncwheel hooks remove --disable --reason "external contribution clone"
 syncwheel hooks remove --disable --reason "external contribution clone" --apply
 ```
 
-The `pre-push` guard derives owned refs from the manifest and published coordination state,
-including integration, stack and draft sources, channels, coordination state, and
-an owned journal branch. It blocks direct, aliased, multi-ref, delete, force, and
-`HEAD:<managed>` pushes, then names the corresponding Syncwheel publisher. Existing
+The `pre-push` guard derives guarded refs from the manifest and published coordination state,
+including integration, stack and draft sources, channels, coordination state, an
+owned journal branch, and the delivery branches that only `stack land` may publish.
+It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes,
+then names the corresponding Syncwheel publisher. Existing
 hooks are chained and restored on removal; `core.hooksPath` is honored.
 
-The same bundle installs `post-checkout` and `pre-commit` guards for the primary
-checkout. A switch away from the manifest integration branch returns a visible
-failure after Git completes the switch; the following commit is blocked. Dedicated
-feature worktrees remain valid. The checkout hook cannot undo Git's completed branch
-switch, so restore a mismatched checkout losslessly rather than resetting dirty work.
+The same bundle installs `post-checkout`, `pre-commit`, and `reference-transaction` guards
+for the primary checkout (0.42.4+). `post-checkout` compares the worktree with the declared
+branch and reports a visible failure if a checkout moved it elsewhere — Git has already
+completed the switch, so restore a mismatched checkout losslessly rather than resetting
+dirty work. `pre-commit` blocks both that mismatch and a manual commit while the primary is
+correctly on the integration branch. `reference-transaction` blocks every unauthorized
+update to the integration ref, including a fast-forward, rewind, creation, or deletion, that
+did not go through Syncwheel. Syncwheel's own control and in-place rebuild commits pass
+through a short-lived, single-use, per-process nonce; dedicated feature worktrees and
+plumbing-materialized branches are unaffected. A refusal names `syncwheel worktree open
+<lane> --into <stack>` for new work or `syncwheel stack capture-integration <stack> HEAD`
+for work already committed on the primary. Every built-in mutation also refuses to start
+while the primary has tracked changes, naming the same remedies.
 
 For `git-tracked` repositories the bundle is required by default. Every normal
 repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
@@ -928,7 +1185,12 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `docs/workflow.md`: concise workflow model
 - `docs/core-procedure.md`: deterministic recovery procedure
 - `docs/manual-git-flow.md`: raw Git equivalent of the Syncwheel lifecycle
-- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract
+- `docs/revision-provider.md`: Agentwheel revisioning protocol and recovery contract,
+  including blob-exact manifest-base/derived routing, NUL-safe Git paths,
+  Git-common-dir and coordinated content-bound provenance, snapshot precedence
+  over the clone-local cache, stale/narrowed projection repair, the single-clone
+  limit of uncoordinated `derived_paths`, and the accepted derived-route
+  delivery cost
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
@@ -1014,6 +1276,19 @@ Common aliases:
 ## AI agent usage
 
 Agents should not infer stack ownership from memory when the repository is meant to be maintained via `syncwheel`.
+
+Four ratified working rules (MGT-0206), in full in
+[the skill](skills/syncwheel/SKILL.md#ratified-working-rules-read-this-first) and
+[docs/ai-agents.md](docs/ai-agents.md#ratified-working-rules-read-this-first):
+
+1. never author or commit in the primary checkout — open a governed lane with
+   `syncwheel worktree open <lane> [--into <stack>] [--full]`
+2. never resolve a replay conflict with raw git — retry with `--replay-mode desk`, then
+   resolve through `stack absorb` / `stack resolve-integration`
+3. integration composition is declared and visible — check `syncwheel int show` before
+   testing there or blaming your own code
+4. every mutating command carries `--reason`, mandatory in `ai-managed` repositories,
+   surfaced in `syncwheel ledger show` with the actor and command
 
 Recommended sequence:
 1. `repo tracking status`

@@ -1,6 +1,8 @@
 import importlib.util
 import json
 import os
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,14 @@ class JournalModeTest(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.remote = self.root / 'origin.git'
         self.repo = self.root / 'repo'
+        self.stable_cli_dir = self.root / 'stable-cli'
+        self.stable_cli_dir.mkdir()
+        stable_cli = self.stable_cli_dir / 'syncwheel'
+        stable_cli.write_text(
+            '#!/bin/sh\nexec '
+            + shlex.quote(sys.executable) + ' ' + shlex.quote(str(CLI)) + ' "$@"\n'
+        )
+        stable_cli.chmod(0o755)
         subprocess.run(['git', 'init', '--bare', '-q', str(self.remote)], check=True)
         subprocess.run(['git', 'init', '-q', '-b', 'journal', str(self.repo)], check=True)
         self.git('config', 'user.name', 'Journal Test')
@@ -65,6 +75,9 @@ class JournalModeTest(unittest.TestCase):
     def cli(self, *args, expected=0, env=None):
         command_env = os.environ.copy()
         command_env['SYNCWHEEL_UPDATE_MODE'] = 'off'
+        command_env['PATH'] = os.pathsep.join(
+            (str(self.stable_cli_dir), command_env.get('PATH', ''))
+        )
         if env:
             command_env.update(env)
         result = subprocess.run(
@@ -300,6 +313,17 @@ class JournalModeTest(unittest.TestCase):
         self.assertTrue(Path(plan['service_path']).exists())
         self.cli('journal', 'schedule', 'remove', '--apply', env=env)
         self.assertFalse(Path(plan['service_path']).exists())
+
+    def test_scheduler_install_refuses_an_unresolvable_cli(self):
+        bare_bin = self.root / 'bare-bin'
+        bare_bin.mkdir()
+        (bare_bin / 'git').symlink_to(shutil.which('git'))
+        (bare_bin / 'python3').symlink_to(sys.executable)
+        result = self.cli(
+            'journal', 'schedule', 'install', '--apply', expected=2,
+            env={'PATH': str(bare_bin)},
+        )
+        self.assertIn('stable syncwheel CLI is not resolvable', result.stderr)
 
     def test_scheduler_disable_failure_preserves_units(self):
         unit_dir = self.root / 'systemd-failure'
