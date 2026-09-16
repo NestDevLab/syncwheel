@@ -4054,6 +4054,37 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
 
 
 class RevisionProviderRecoveryTest(unittest.TestCase):
+    def test_manifest_ownership_recovery_preserves_unrelated_dirty_path(self):
+        class FaultBackend(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(self, phase):
+                if phase == 'manifest_replace_written':
+                    raise protocol.RevisionProviderError('injected manifest write fault')
+
+        fixture = RevisionProviderRepository()
+        try:
+            unrelated = fixture.repo / 'unrelated.txt'
+            unrelated.write_text('keep local work\n')
+            payload = fixture.request('preflight', operation_id='dirty-recovery')
+            request = protocol.parse_request(payload)
+            fault_backend = FaultBackend(protocol)
+            protocol.handle_request(
+                fault_backend, protocol.parse_request(fixture.check_request(payload))
+            )
+            (fixture.repo / 'feature.txt').write_text('feature\n')
+            protocol.handle_request(fault_backend, request)
+            with self.assertRaisesRegex(protocol.RevisionProviderError,
+                                        'injected manifest write fault'):
+                protocol.handle_request(fault_backend, replace(request, action='finalize'))
+            recovered = protocol.handle_request(
+                SYNCWHEEL.SyncwheelRevisionBackend(protocol),
+                replace(request, action='recover'),
+            )
+            self.assertEqual(recovered['status'], 'verified')
+            self.assertEqual(unrelated.read_text(), 'keep local work\n')
+            self.assertEqual(fixture.git('status', '--porcelain'), '?? unrelated.txt')
+        finally:
+            fixture.close()
+
     def test_unowned_index_lock_is_never_removed_during_recovery(self):
         fixture = RevisionProviderRepository()
         try:
