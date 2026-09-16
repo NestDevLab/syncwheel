@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.9 - 2026-09-16
+
+- Project a declared merge-tip stack against the unique merge parent already
+  contained in its base, preserving the original fast-forward branch history.
+  Refuse merge-tip rebuilds before mutation when replay would rewrite ancestry.
+
 ## 0.43.8 - 2026-09-16
 
 - Recognize an absorbed squash of a declared merge-tip stack when deterministic
