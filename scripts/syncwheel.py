@@ -29854,7 +29854,18 @@ def primary_checkout_preflight(args):
         and not primary_guard_remedy_requested(args)
         and not managed_push_guard_policy(primary_root, manifest)['disabled']
     ):
-        if args.func in {command_stack_create, command_stack_absorb}:
+        # These commands own manifest/ref metadata or an explicit absorb patch;
+        # they do not rewrite unrelated primary product paths. Commands that
+        # rebuild or align the integration checkout retain the global guard.
+        scoped_primary_commands = {
+            command_stack_create,
+            command_stack_add,
+            command_stack_set,
+            command_stack_promote,
+            command_stack_demote,
+            command_stack_absorb,
+        }
+        if args.func in scoped_primary_commands:
             if git(primary_root, 'ls-files', '-u').stdout.strip():
                 raise SyncwheelError('primary checkout has index conflicts')
             staged = set(item for item in git(
