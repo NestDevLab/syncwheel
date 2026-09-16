@@ -9250,6 +9250,42 @@ with module.coordination_publication_lock(Path(repo_path)):
             'pr/a14-s2\n',
         )
 
+    def test_stack_push_merge_tip_dry_run_and_apply_use_same_projection(self):
+        fixture = self.a14_published_tip_reuse_fixture('merge-tip-push')
+        follower = fixture['follower']
+        branch = 'pr/merge-tip-s2'
+        source = self.commit_on_branch(follower, branch, 'merge-tip-s2.txt')
+        self.run_cli(follower, 'stack', 'create', 's2', source, '--branch', branch)
+        self.run_cli(
+            follower, 'int', 'rebuild',
+            '--reason', 'adopt reviewed control manifest proposal',
+        )
+        self.run_cli(follower, 'stack', 'push', 's2')
+        (follower / 'advanced-base.txt').write_text('advanced base\n')
+        self.git(follower, 'add', 'advanced-base.txt')
+        self.git(follower, 'commit', '-q', '-m', 'advance base')
+        self.git(follower, 'push', 'origin', 'main')
+        self.git(follower, 'fetch', '-q', 'origin')
+        scratch = self.tmp / 'merge-tip-s2-worktree'
+        self.git(follower, 'worktree', 'add', '-q', str(scratch), branch)
+        try:
+            self.git(scratch, 'merge', '--no-ff', '-m', 'integrate advanced base', 'origin/main')
+            merge_tip = self.git(scratch, 'rev-parse', 'HEAD').stdout.strip()
+        finally:
+            self.git(follower, 'worktree', 'remove', str(scratch))
+
+        self.run_cli(follower, 'stack', 'set', 's2', merge_tip)
+        module = fixture['module']
+        manifest, _ = module.load_manifest(follower)
+        self.assertRegex(
+            module.materialize_integration_projection(follower, manifest),
+            r'^[0-9a-f]{40}$',
+        )
+        self.run_cli(follower, 'stack', 'push', 's2', '--dry-run')
+        self.run_cli(follower, 'stack', 'push', 's2')
+        remote_tip = self.git(follower, 'rev-parse', f'origin/{branch}').stdout.strip()
+        self.assertEqual(remote_tip, merge_tip)
+
     def test_a14_preserves_concurrent_tracked_edit_before_replay_reset(self):
         fixture = self.a14_published_tip_reuse_fixture(
             'a14-reset-window', integration_strategy='cherry-pick'

@@ -3946,13 +3946,23 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         manifest['stacks'][0]['commits'] = []
         (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
         self.run_cli('stack', 'add', 'feature-a', merge_tip, expected=0)
-        self.assertEqual(self.read_manifest()['stacks'][0]['commits'], [merge_tip])
+        manifest = self.read_manifest()
+        self.assertEqual(manifest['stacks'][0]['commits'], [merge_tip])
+        manifest['integration']['base'] = 'main'
+        manifest['integration']['stacks'] = ['feature-a']
+        self.assertEqual(module.materialize_integration_projection(self.repo, manifest),
+                         self.git('rev-parse', 'pr/merge-case^{tree}'))
         with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
             module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'ephemeral')
         with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
             module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'plumbing')
+        self.assertEqual(
+            module.deterministic_stack_projection(self.repo, 'main', [merge_tip])['status'],
+            'unsupported',
+        )
         with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
-            module.deterministic_stack_projection(self.repo, 'main', [merge_tip])
+            module.replay_plan(self.repo, manifest,
+                               module.replay_target(integration=manifest['integration']), 'ephemeral')
         self.assertEqual(self.git('rev-parse', 'pr/merge-case'), merge_tip)
 
     def test_stack_rebuild_disables_configured_gpg_signing(self):

@@ -12385,7 +12385,9 @@ def deterministic_stack_projection(repo_root, base, commits):
     head = base
     for declared_commit in commits:
         commit = commit_full_sha(repo_root, declared_commit)
-        replay_cherry_pick_args(repo_root, commit, base, projection=False)
+        if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) > 2:
+            return {'status': 'unsupported', 'commit': commit, 'base': head,
+                    'detail': 'merge commit replay would rewrite its ancestry'}
         merge = git(
             repo_root,
             'merge-tree',
@@ -16398,13 +16400,13 @@ def replay_plan(repo_root, manifest, target, mode):
         for stack_id in integration['stacks']:
             for commit in stack_integration_base_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
-                    [*prefix, 'cherry-pick', commit],
+                    [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                     replay_commit_env(repo_root, commit),
                 ))
         for stack_id in integration['stacks']:
             for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
-                    [*prefix, 'cherry-pick', commit],
+                    [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                     replay_commit_env(repo_root, commit),
                 ))
     elif integration.get('strategy') == 'merge-stacks':
