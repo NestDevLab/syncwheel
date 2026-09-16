@@ -278,7 +278,12 @@ class JournalModeTest(unittest.TestCase):
         fake_bin.mkdir()
         log = self.root / 'systemctl.log'
         systemctl = fake_bin / 'systemctl'
-        systemctl.write_text(f'#!/bin/sh\necho "$@" >> "{log}"\nexit 0\n')
+        unarmed = self.root / 'unarmed'
+        systemctl.write_text(
+            f'#!/bin/sh\necho "$@" >> "{log}"\n'
+            f'if [ "$2" = show ]; then if [ -e "{unarmed}" ]; '
+            'then echo infinity; else echo 123456; fi; fi\nexit 0\n'
+        )
         systemctl.chmod(0o755)
         unit_dir = self.root / 'systemd'
         odd_executable = self.root / 'bin % space' / 'sync"wheel'
@@ -299,9 +304,20 @@ class JournalModeTest(unittest.TestCase):
         self.assertIn('bin %% space', service)
         self.assertIn('sync\\"wheel', service)
         self.assertIn(str(self.repo.resolve()), service)
+        self.assertIn('OnActiveSec=30m', timer)
         self.assertIn('OnUnitInactiveSec=30m', timer)
-        self.assertIn('Persistent=true', timer)
+        self.assertNotIn('Persistent=true', timer)
+        legacy_timer = timer.replace('OnActiveSec=30m\n', '').replace(
+            'OnUnitInactiveSec=30m\n', 'OnUnitInactiveSec=30m\nPersistent=true\n'
+        )
+        Path(plan['timer_path']).write_text(legacy_timer)
         self.cli('journal', 'schedule', 'install', '--apply', env=env)
+        self.assertEqual(Path(plan['timer_path']).read_text(), timer)
+        self.assertIn(f'--user restart {plan["unit_id"]}.timer', log.read_text())
+        Path(plan['timer_path']).write_text('foreign\n')
+        collision = self.cli('journal', 'schedule', 'install', '--apply', expected=2, env=env)
+        self.assertIn('collision', collision.stderr)
+        Path(plan['timer_path']).write_text(timer)
         Path(plan['service_path']).write_text('foreign\n')
         collision = self.cli('journal', 'schedule', 'remove', '--apply', expected=2, env=env)
         self.assertIn('collision', collision.stderr)
@@ -309,6 +325,13 @@ class JournalModeTest(unittest.TestCase):
         status = json.loads(self.cli('journal', 'schedule', 'status', env=env).stdout)
         self.assertTrue(status['installed'])
         self.assertTrue(status['enabled'])
+        self.assertTrue(status['armed'])
+        unarmed.touch()
+        status = json.loads(self.cli('journal', 'schedule', 'status', env=env).stdout)
+        self.assertTrue(status['enabled'])
+        self.assertFalse(status['armed'])
+        self.assertEqual(status['next_elapse_monotonic'], 'infinity')
+        unarmed.unlink()
         self.cli('journal', 'schedule', 'remove', env=env)
         self.assertTrue(Path(plan['service_path']).exists())
         self.cli('journal', 'schedule', 'remove', '--apply', env=env)
