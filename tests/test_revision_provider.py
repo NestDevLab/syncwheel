@@ -2179,14 +2179,15 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         self.assertIn(f'base {journal["projectionBaseSha"]}', message)
         self.assertNotRegex(message, r'conflicts: [0-9a-f]{40}')
 
-    def test_preflight_rejects_dirty_checkout_and_operation_id_collision(self):
+    def test_preflight_rejects_dirty_owned_path_and_operation_id_collision(self):
         dirty = self.fixture.request('preflight', operation_id='dirty-op')
-        (self.fixture.repo / 'unrelated.txt').write_text('dirty\n')
+        (self.fixture.repo / 'feature.txt').write_text('dirty\n')
+        self.fixture.protocol_request(self.fixture.check_request(dirty))
         response, _ = self.fixture.protocol_request(
-            self.fixture.check_request(dirty), expected=2
+            dirty, expected=2
         )
-        self.assertIn('completely clean', response['error'])
-        (self.fixture.repo / 'unrelated.txt').unlink()
+        self.assertIn('after SHA-256 mismatch', response['error'])
+        (self.fixture.repo / 'feature.txt').unlink()
 
         request = self.fixture.request('preflight', operation_id='collision-op')
         self.fixture.protocol_request(self.fixture.check_request(request))
@@ -2196,15 +2197,25 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         response, _ = self.fixture.protocol_request(collision, expected=2)
         self.assertIn('operationId collision', response['error'])
 
-    def test_preflight_rejects_changes_outside_exact_path_scope(self):
+    def test_unrelated_dirty_path_is_preserved_by_no_delta_operation(self):
+        unrelated = self.fixture.repo / 'unrelated.txt'
+        unrelated.write_text('preserve this work\n')
+        request = self.fixture.request('preflight', operation_id='unrelated-no-delta')
+        request['paths'] = []
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        self.fixture.protocol_request(request)
+        response, _ = self.fixture.protocol_request({**request, 'action': 'finalize'})
+        self.assertEqual(response['status'], 'no-repository-delta')
+        self.assertEqual(unrelated.read_text(), 'preserve this work\n')
+
+    def test_preflight_preserves_unrelated_path_outside_exact_scope(self):
         request = self.fixture.request('preflight', operation_id='scope-op')
         self.fixture.protocol_request(self.fixture.check_request(request))
         (self.fixture.repo / 'feature.txt').write_text('feature\n')
         (self.fixture.repo / 'outside.txt').write_text('outside\n')
-        response, _ = self.fixture.protocol_request(
-            request, expected=2
-        )
-        self.assertIn('outside the declared allowlist', response['error'])
+        response, _ = self.fixture.protocol_request(request)
+        self.assertEqual(response['status'], 'prepared')
+        self.assertEqual((self.fixture.repo / 'outside.txt').read_text(), 'outside\n')
         self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), request['expectedHead'])
         journal = (
             Path(self.fixture.git('rev-parse', '--git-common-dir'))
@@ -2212,7 +2223,36 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         )
         if not journal.is_absolute():
             journal = self.fixture.repo / journal
-        self.assertFalse(journal.exists())
+        self.assertTrue(journal.exists())
+
+    def test_unrelated_dirty_path_change_after_preflight_is_rejected(self):
+        unrelated = self.fixture.repo / 'unrelated.txt'
+        unrelated.write_text('original dirty bytes\n')
+        request = self.fixture.request('preflight', operation_id='outside-drift')
+        request['paths'] = []
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        self.fixture.protocol_request(request)
+        unrelated.write_text('changed dirty bytes\n')
+        response, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}, expected=2
+        )
+        self.assertIn('unowned dirty paths changed', response['error'])
+
+    def test_full_revision_preserves_unrelated_dirty_path(self):
+        unrelated = self.fixture.repo / 'unrelated.txt'
+        unrelated.write_text('unrelated work\n')
+        request = self.fixture.request('preflight', operation_id='full-dirty-scope')
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        (self.fixture.repo / 'feature.txt').write_text('feature\n')
+        self.fixture.protocol_request(request)
+        result, _ = self.fixture.protocol_request({**request, 'action': 'finalize'})
+        self.assertEqual(result['status'], 'verified')
+        self.assertEqual(unrelated.read_text(), 'unrelated work\n')
+        self.assertEqual(self.fixture.git('status', '--porcelain'), '?? unrelated.txt')
+        self.assertEqual(
+            self.fixture.git('show', '--format=', '--name-only', result['productCommitSha']),
+            'feature.txt',
+        )
 
     def test_no_repository_delta_creates_no_empty_stack(self):
         request = self.fixture.request(
