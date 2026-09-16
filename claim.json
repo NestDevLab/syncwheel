@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/mgt-0287-squash-absorbed"
-  ],
-  "claimed_at": "2026-09-16T18:06:48+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-16T18:45:37+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "02d5d71b-f5e4-4d41-a4c0-8ee57c9e2fb5",
-  "publication_scope": "stack:mgt-0287-squash-absorbed",
+  "operation_token": "baca03fc-bc0f-4c98-a174-52d4f923af10",
+  "publication_scope": "close:mgt-0287-squash-absorbed",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/mgt-0287-squash-absorbed",
-  "syncwheel_version": "0.43.7"
+  "syncwheel_version": "0.43.8"
 }
