@@ -25871,6 +25871,33 @@ class SyncwheelRevisionBackend:
             paths.update(item for item in output.split('\0') if item)
         return paths
 
+    def _dirty_snapshot(self, repo_root, paths):
+        snapshot = {}
+        for path in sorted(paths):
+            observed = self._read_product_path(repo_root, path)
+            snapshot[path] = (
+                None if observed is None else
+                [observed['sha256'], observed['mode']]
+            )
+        return snapshot
+
+    def _assert_unowned_dirty_unchanged(self, repo_root, request, *, allowed_outside=()):
+        allowed = {item.path for item in request.paths} | set(allowed_outside)
+        outside = self._dirty_paths(repo_root) - allowed
+        journal = self.load_journal(request)
+        baseline = (journal or {}).get('baselineUnownedDirty')
+        if baseline is None:
+            return self._dirty_snapshot(repo_root, outside)
+        actual = self._dirty_snapshot(repo_root, outside)
+        if actual != baseline:
+            changed = sorted(set(actual) ^ set(baseline) | {
+                path for path in set(actual) & set(baseline)
+                if actual[path] != baseline[path]
+            })
+            self._fail('unowned dirty paths changed during revision operation: '
+                       + ', '.join(changed))
+        return actual
+
     def _ensure_clean(self, repo_root):
         if self._index_conflicts(repo_root):
             self._fail('revision provider requires a conflict-free index')
@@ -25890,11 +25917,9 @@ class SyncwheelRevisionBackend:
         if not self._index_is_clean(repo_root):
             self._fail('revision provider refuses pre-staged changes')
         self._validate_hashes(repo_root, request, 'after')
-        allowed = {item.path for item in request.paths}
-        allowed.update(allowed_outside)
-        outside = sorted(self._dirty_paths(repo_root) - allowed)
-        if outside:
-            self._fail('mutation changed paths outside the declared allowlist: ' + ', '.join(outside))
+        self._assert_unowned_dirty_unchanged(
+            repo_root, request, allowed_outside=allowed_outside
+        )
         for item in request.paths:
             tracked = git(
                 repo_root, 'ls-files', '--error-unmatch', '--', item.path, check=False
@@ -26291,7 +26316,14 @@ class SyncwheelRevisionBackend:
                 'integration already contains unmapped commits: ' + ', '.join(unmapped)
             )
         if require_clean:
-            self._ensure_clean(repo_root)
+            if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+                self._fail('revision provider preflight requires a clean, conflict-free index')
+            forbidden = self._dirty_paths(repo_root) & (
+                {item.path for item in request.paths} | {self.MANIFEST_PRODUCT_PATH}
+            )
+            if forbidden:
+                self._fail('revision provider preflight has dirty owned paths: '
+                           + ', '.join(sorted(forbidden)))
             self._validate_hashes(repo_root, request, 'before')
         coordination = self._fresh_coordination_handoff(repo_root, manifest)
         remote_refs = self._remote_refs(repo_root)
@@ -26545,6 +26577,9 @@ class SyncwheelRevisionBackend:
         )
         self._validate_before_hashes_at_head(observation['repoRoot'], request)
         self._ensure_after_scope(observation['repoRoot'], request)
+        observation['unownedDirty'] = self._assert_unowned_dirty_unchanged(
+            observation['repoRoot'], request
+        )
         stacks = stack_map(observation['manifest'])
         if request.draft_stack_id in stacks:
             self._fail(f'draft stack id already exists: {request.draft_stack_id}')
@@ -26915,11 +26950,14 @@ class SyncwheelRevisionBackend:
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control ref update requires a clean, conflict-free index')
         dirty = self._dirty_paths(repo_root)
-        if dirty != {self.MANIFEST_PRODUCT_PATH}:
+        if self.MANIFEST_PRODUCT_PATH not in dirty:
             self._fail(
-                'control ref update requires only .syncwheel/manifest.json; found: '
+                'control ref update requires .syncwheel/manifest.json; found: '
                 + ', '.join(sorted(dirty))
             )
+        self._assert_unowned_dirty_unchanged(
+            repo_root, request, allowed_outside=(self.MANIFEST_PRODUCT_PATH,)
+        )
         self._expire_if_operation_lease_changed(request, journal, manifest)
 
     def _assert_ref_leases(self, repo_root, expected):
@@ -27902,10 +27940,9 @@ class SyncwheelRevisionBackend:
                     self._fail('owned draft stack branch is missing')
                 if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
                     self._fail('manifest recovery requires a clean, conflict-free index')
-                if self._dirty_paths(repo_root) != {self.MANIFEST_PRODUCT_PATH}:
-                    self._fail(
-                        'manifest recovery found changes beyond the journaled manifest'
-                    )
+                self._assert_unowned_dirty_unchanged(
+                    repo_root, request, allowed_outside=(self.MANIFEST_PRODUCT_PATH,)
+                )
                 self._assert_draft_branch(repo_root, desired, journal)
                 context = {
                     'operation_id': request.operation_id,
@@ -27929,7 +27966,7 @@ class SyncwheelRevisionBackend:
                 self.expire_manifest_invalidated(
                     request, journal, 'manifest changed before draft ownership'
                 )
-            self._ensure_clean(repo_root)
+            self._ensure_after_scope(repo_root, request)
             if any(stack['branch'] == request.draft_branch for stack in manifest['stacks']):
                 self._fail(f'draft branch is owned by another stack: {request.draft_branch}')
             if ref_tip(repo_root, request.draft_branch) != journal.get(
@@ -28009,11 +28046,14 @@ class SyncwheelRevisionBackend:
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control commit requires a clean, conflict-free index')
         dirty = self._dirty_paths(repo_root)
-        if dirty != {self.MANIFEST_PRODUCT_PATH}:
+        if self.MANIFEST_PRODUCT_PATH not in dirty:
             self._fail(
-                'control commit must contain only .syncwheel/manifest.json; found: '
+                'control commit requires .syncwheel/manifest.json; found: '
                 + ', '.join(sorted(dirty))
             )
+        self._assert_unowned_dirty_unchanged(
+            repo_root, request, allowed_outside=(self.MANIFEST_PRODUCT_PATH,)
+        )
         path_objects = self._capture_path_objects(
             repo_root, request, paths=[self.MANIFEST_PRODUCT_PATH]
         )
@@ -28038,22 +28078,13 @@ class SyncwheelRevisionBackend:
         if journal.get('projectionRoute') == 'derived':
             if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
                 self._fail('derived revision-provider operation left index changes behind')
-            outside = self._dirty_paths(repo_root) - {self.MANIFEST_PRODUCT_PATH}
-            if outside:
-                self._fail(
-                    'derived revision-provider operation left product changes behind: '
-                    + ', '.join(sorted(outside))
-                )
+            self._assert_unowned_dirty_unchanged(
+                repo_root, request, allowed_outside=(self.MANIFEST_PRODUCT_PATH,)
+            )
         else:
-            status = git(
-                repo_root,
-                'status',
-                '--porcelain',
-                '--untracked-files=all',
-                env={'GIT_OPTIONAL_LOCKS': '0'},
-            ).stdout
-            if status.strip():
-                self._fail('revision-provider operation left repository changes behind')
+            if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+                self._fail('revision-provider operation left index changes behind')
+            self._assert_unowned_dirty_unchanged(repo_root, request)
         manifest, _ = self._manifest(repo_root)
         digest = manifest_digest(manifest)
         if (
@@ -28147,8 +28178,7 @@ class SyncwheelRevisionBackend:
 
     def verify_no_repository_delta(self, request, journal):
         repo_root = self._repo_root(request)
-        if self._dirty_paths(repo_root):
-            self._fail('no-delta operation still has working tree changes')
+        self._assert_unowned_dirty_unchanged(repo_root, request)
         journal['manifestDigest'] = journal['observedManifestDigest']
         return self._verify_invariants(repo_root, request, journal, request.expected_head)
 
