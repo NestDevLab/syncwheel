@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/journal-scheduler-04311"
+  ],
+  "claimed_at": "2026-09-16T20:01:32+00:00",
+  "coordination_id": "default",
+  "operation_token": "e4123e96-9b0c-4133-bae0-fd492beda2e4",
+  "publication_scope": "stack:journal-scheduler-04311",
+  "source_ref": "refs/heads/pr/journal-scheduler-04311",
+  "syncwheel_version": "0.43.10"
+}
