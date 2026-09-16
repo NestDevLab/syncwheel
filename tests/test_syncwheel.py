@@ -3912,6 +3912,38 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(len(cherry_pick_lines), 2)
         self.assertTrue(all('GIT_COMMITTER_DATE=' in line for line in cherry_pick_lines))
 
+    def test_merge_tip_projection_preserves_fast_forward_branch_and_rebuild_refuses_early(self):
+        module = self.load_syncwheel_module()
+        self.git('branch', 'pr/merge-case', 'main')
+        self.git('switch', '-q', 'pr/merge-case')
+        (self.repo / 'feature.txt').write_text('feature\n')
+        self.git('add', 'feature.txt')
+        self.git('commit', '-q', '-m', 'feature')
+        feature_tip = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+        (self.repo / 'base.txt').write_text('base\n')
+        self.git('add', 'base.txt')
+        self.git('commit', '-q', '-m', 'new base')
+        self.git('switch', '-q', 'pr/merge-case')
+        self.git('merge', '--no-ff', '-m', 'integrate base', 'main')
+        merge_tip = self.git('rev-parse', 'HEAD')
+        self.git('switch', '-q', 'main')
+
+        stack = {
+            'id': 'merge-case', 'branch': 'pr/merge-case', 'base': 'main',
+            'commits': [merge_tip],
+        }
+        self.assertEqual(
+            module.replay_cherry_pick_args(self.repo, merge_tip, 'main', projection=True),
+            ['cherry-pick', '-m', '2', merge_tip],
+        )
+        self.assertEqual(module.materialize_stack_projection(self.repo, stack),
+                         self.git('rev-parse', 'pr/merge-case^{tree}'))
+        self.assertEqual(self.git('rev-parse', 'pr/merge-case^1'), feature_tip)
+        with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
+            module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'ephemeral')
+        self.assertEqual(self.git('rev-parse', 'pr/merge-case'), merge_tip)
+
     def test_stack_rebuild_disables_configured_gpg_signing(self):
         _, original_commits = self.prepare_replay_stack()
         worktree = self.tmp / 'wt-replay'
