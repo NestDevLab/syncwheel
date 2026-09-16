@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/merge-tip-push-projection"
+    "refs/heads/pr/merge-tip-push-projection"
   ],
-  "claimed_at": "2026-09-16T18:53:05+00:00",
+  "claimed_at": "2026-09-16T18:53:23+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "40526a3b-6abe-460f-9207-91c22f4da0e6",
-  "publication_scope": "stack:merge-tip-push-projection",
+  "operation_token": "f6854086-50b3-4a50-a2ab-344808ca44e7",
+  "publication_scope": "promote:merge-tip-push-projection",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/merge-tip-push-projection",
   "syncwheel_version": "0.43.7"
 }
