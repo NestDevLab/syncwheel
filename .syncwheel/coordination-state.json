@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "2100ea536b3883dae9cb7b36fa3ee107f73becbd"
+    "refs/heads/pr/pr-base-live-tip": "d49df5db0271e43cb3ec37c1b35ae53121d583a7"
   },
   "claims": {
     "refs/heads/main-integration": "bb893a3835df9706e62ac733b455ecbabfac106c",
@@ -8,13 +8,13 @@
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
-    "refs/heads/pr/pr-base-live-tip": "df8f2df474500c779cb91813dc1cf295a884bc83",
+    "refs/heads/pr/pr-base-live-tip": "1c04b5dba724bc6722ff45ed2d918292399cf8e4",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T19:32:20+00:00",
+  "created_at": "2026-09-16T19:34:13+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -34,7 +34,7 @@
     "refs/heads/pr/mgt-0287-ci-sharding": "bbec5e736a31d8a55280ac8699e4b82b65174626",
     "refs/heads/pr/mgt-0287-squash-absorbed": "46629f243cc46a4b916ecd7c9222c42d691184b5",
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
-    "refs/heads/pr/pr-base-live-tip": "1d4fd75417df70d1947de9b3711055c99060b1a8",
+    "refs/heads/pr/pr-base-live-tip": "d49df5db0271e43cb3ec37c1b35ae53121d583a7",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
     "refs/heads/pr/reconcile-replay-mode-args": "6f51bb1b92e689043a0055d806b4f9fc2ff5ce36",
@@ -98,7 +98,8 @@
         "branch": "pr/pr-base-live-tip",
         "commits": [
           "669e1a4c4f260272fa9b31043df1a58d5067ef61",
-          "1d4fd75417df70d1947de9b3711055c99060b1a8"
+          "1d4fd75417df70d1947de9b3711055c99060b1a8",
+          "d49df5db0271e43cb3ec37c1b35ae53121d583a7"
         ],
         "id": "pr-base-live-tip",
         "integration_branch": "main-integration",
@@ -108,11 +109,11 @@
     "version": 2
   },
   "manifest_digest": "c45e2915239415d5a41fbb961e428e3abdf64b4b7f3bf58ce6b5e90a8166f137",
-  "operation_token": "c4f696c0-bdc4-42eb-941b-d440385f1dbf",
-  "parent_state": "c4334d0a529b088a5fc3e68397aa82e0e953c8b3",
+  "operation_token": "7600b369-7abf-4736-8210-fe748b79d9d9",
+  "parent_state": "5e252c8f6f4c773d41aa69dadaba3af372bafdc2",
   "projection_status": "partial",
-  "publication_id": "a74fee08-4323-4638-a0a9-db90c9c53dfb",
-  "publication_scope": "integration",
+  "publication_id": "f4d17664-c3da-40b7-90ad-4b22a9ea16fd",
+  "publication_scope": "stack:pr-base-live-tip",
   "schema_version": 2,
   "syncwheel_version": "0.43.9",
   "tombstones": [
