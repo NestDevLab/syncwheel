@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/mgt-0287-sw2-dirty-path": "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a"
+    "refs/heads/pr/mgt-0287-sw2-dirty-path": "2c3641e311b145284edf8d65f66db61d83c7c490"
   },
   "claims": {
     "refs/heads/main-integration": "5c39280577b36af4a24b828d880920b023a0146e",
@@ -9,14 +9,14 @@
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
-    "refs/heads/pr/mgt-0287-sw2-dirty-path": "0d87cd292ab763c5750eeb5b35765abb1daae642",
+    "refs/heads/pr/mgt-0287-sw2-dirty-path": "fceb532511cb3942b0b3cd7c6226997026f0a9ba",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T20:51:20+00:00",
+  "created_at": "2026-09-16T21:00:06+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -37,7 +37,7 @@
     "refs/heads/pr/mgt-0287-ci-sharding": "bbec5e736a31d8a55280ac8699e4b82b65174626",
     "refs/heads/pr/mgt-0287-squash-absorbed": "46629f243cc46a4b916ecd7c9222c42d691184b5",
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
-    "refs/heads/pr/mgt-0287-sw2-dirty-path": "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a",
+    "refs/heads/pr/mgt-0287-sw2-dirty-path": "2c3641e311b145284edf8d65f66db61d83c7c490",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
@@ -107,7 +107,8 @@
           "b28c00149223230fb6e474d28cb38f01ad931b5d",
           "20942dfb36dc4096a3059803161cf4e8f5b0e017",
           "e7e1b933cc5f070a9b9a6f42e2755a09a8b3adeb",
-          "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a"
+          "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a",
+          "2c3641e311b145284edf8d65f66db61d83c7c490"
         ],
         "id": "mgt-0287-sw2-dirty-path",
         "integration_branch": "main-integration",
@@ -117,10 +118,10 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "971bf91b-79ae-409d-8bd7-23c538133f83",
-  "parent_state": "002cb384432beb0e3b34768ae0ab3c8fe7d11810",
+  "operation_token": "22caa7dc-0f30-418c-a4cf-d1684094be9e",
+  "parent_state": "5e8083f21803e79b8a93f35a1da1ebae4f7a40f7",
   "projection_status": "partial",
-  "publication_id": "8b2e092a-1351-4ed5-b5e3-5d6731f4d201",
+  "publication_id": "95d8ccde-4937-48ac-a29e-f4d11b95e215",
   "publication_scope": "stack:mgt-0287-sw2-dirty-path",
   "schema_version": 2,
   "syncwheel_version": "0.43.11",
