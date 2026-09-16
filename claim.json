@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed"
+  ],
+  "claimed_at": "2026-09-16T18:00:22+00:00",
+  "coordination_id": "default",
+  "operation_token": "d8482abd-7468-4737-a23b-13ed62182c51",
+  "publication_scope": "create:mgt-0287-squash-absorbed",
+  "source_ref": "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed",
+  "syncwheel_version": "0.43.7"
+}
