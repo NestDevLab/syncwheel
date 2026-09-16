@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/mgt-0287-sw2-dirty-path"
   ],
-  "claimed_at": "2026-09-16T20:41:10+00:00",
+  "claimed_at": "2026-09-16T20:51:20+00:00",
   "coordination_id": "default",
-  "operation_token": "c33bec0e-d85a-4a0f-8f74-09f98f82f166",
+  "operation_token": "971bf91b-79ae-409d-8bd7-23c538133f83",
   "publication_scope": "stack:mgt-0287-sw2-dirty-path",
   "source_ref": "refs/heads/pr/mgt-0287-sw2-dirty-path",
   "syncwheel_version": "0.43.11"
