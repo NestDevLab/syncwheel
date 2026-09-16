@@ -1,59 +1,59 @@
 {
-  "version": 2,
+  "channels": [],
+  "coordination": {
+    "gc": {
+      "backup_keep": 2,
+      "backup_retention_days": 30,
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
+  },
   "defaults": {
-    "canonical_remote": "origin",
-    "publication_remote": "origin",
     "base_branch": "main",
     "base_ref": "origin/main",
-    "integration_membership": "required"
+    "canonical_remote": "origin",
+    "integration_membership": "required",
+    "publication_remote": "origin"
   },
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "strategy": "cherry-pick",
     "stacks": [
       "pr-base-live-tip"
-    ]
+    ],
+    "strategy": "cherry-pick"
   },
+  "landing": {
+    "checks": null,
+    "mode": "disabled",
+    "strategy": "merge"
+  },
+  "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "pr-base-live-tip",
-      "branch": "pr/pr-base-live-tip",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/pr-base-live-tip",
       "commits": [
         "669e1a4c4f260272fa9b31043df1a58d5067ef61",
         "1d4fd75417df70d1947de9b3711055c99060b1a8"
       ],
-      "state": "published",
+      "id": "pr-base-live-tip",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Validate PR historical base against fetched live delivery tip"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Validate PR historical base against fetched live delivery tip"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
-  "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked",
-  "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
-    "gc": {
-      "worktree_grace_days": 7,
-      "backup_retention_days": 30,
-      "backup_keep": 2
-    }
-  },
-  "landing": {
-    "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
-  },
-  "repository_mode": "delivery",
-  "channels": []
+  "syncwheel_worktree_root": "var/syncwheel",
+  "version": 2
 }
