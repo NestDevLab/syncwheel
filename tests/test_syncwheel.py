@@ -4946,7 +4946,12 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
     def test_sw13_target_worktree_preserves_unrelated_dirty_path(self):
         from argparse import Namespace
-        from tests.test_revision_provider import SYNCWHEEL
+        import importlib.util
+
+        script = Path(__file__).resolve().parents[1] / 'scripts' / 'syncwheel.py'
+        spec = importlib.util.spec_from_file_location('sw2_target_phase', script)
+        syncwheel = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(syncwheel)
 
         target = self.tmp / 'sw13-target'
         self.git('worktree', 'add', '-q', str(target), 'pr/feature-b')
@@ -4960,7 +4965,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             staged=False, worktree=str(target), worktree_root=None,
             amend=False, message=None,
         )
-        SYNCWHEEL.command_stack_absorb(args)
+        syncwheel.command_stack_absorb(args)
         self.assertIn('target work\n', target_alpha.read_text())
         self.assertEqual(source_beta.read_text(), 'beta\n')
 
