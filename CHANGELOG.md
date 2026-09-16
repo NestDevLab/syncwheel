@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.43.8 - 2026-09-16
+
+- Recognize an absorbed squash of a declared merge-tip stack when deterministic
+  replay cannot reconstruct the merge. Require the exact materialized tip,
+  declared commit ancestry, and matching delivered content on every path
+  changed against each commit parent; reject missing content and stale branches.
+
 ## 0.43.7 - 2026-09-15
 
 - Allow an explicit `private_free_rules` merge-policy fallback when GitHub Free

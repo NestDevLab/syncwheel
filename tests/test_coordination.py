@@ -779,6 +779,27 @@ with module.coordination_publication_lock(Path(repo_path)):
         module.save_manifest(manifest_path, manifest)
         return stack
 
+    def add_legacy_merge_draft(self, repo, stack_id, commits):
+        """Model an already-registered historical stack ending in a merge."""
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        stack = {
+            'id': stack_id,
+            'branch': f'syncwheel/draft/{stack_id}',
+            'base': manifest['defaults']['base_ref'],
+            'target_remote': manifest['defaults']['canonical_remote'],
+            'target_branch': manifest['defaults']['base_branch'],
+            'integration_branch': manifest['integration']['branch'],
+            'commits': commits,
+            'state': 'draft',
+            'publication': {'enabled': False},
+            'meta': {},
+        }
+        self.git(repo, 'branch', stack['branch'], commits[-1])
+        manifest['stacks'].append(stack)
+        module.save_manifest(manifest_path, manifest)
+        return stack
+
     def draft_create_args(self, repo, stack_id, commit):
         return SimpleNamespace(
             repo=str(repo), manifest=None, personal=None, stack=stack_id,
@@ -3226,6 +3247,102 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertNotIn('compositional', [stack['id'] for stack in manifest['stacks']])
+
+    def test_absorbed_close_accepts_exact_squash_of_declared_merge_tip(self):
+        origin = self.create_remote('absorbed-merge-squash')
+        repo = self.clone(origin, 'absorbed-merge-squash')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-q', '-c', 'scratch/merged-source', 'origin/main')
+        (repo / 'first.txt').write_text('first\n')
+        self.git(repo, 'add', 'first.txt')
+        self.git(repo, 'commit', '-qm', 'first source')
+        first = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', '-c', 'scratch/merged-side', 'origin/main')
+        (repo / 'second.txt').write_text('second\n')
+        self.git(repo, 'add', 'second.txt')
+        self.git(repo, 'commit', '-qm', 'second source')
+        second = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'scratch/merged-source')
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge sources', second)
+        merged = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', previous)
+        stack = self.add_legacy_merge_draft(repo, 'merged-squash', [first, second, merged])
+        publisher = self.clone(origin, 'absorbed-merge-publisher')
+        (publisher / 'first.txt').write_text('first\n')
+        (publisher / 'second.txt').write_text('second\n')
+        self.git(publisher, 'add', 'first.txt', 'second.txt')
+        self.git(publisher, 'commit', '-qm', 'squash merged sources')
+        (publisher / 'unrelated.txt').write_text('later delivery change\n')
+        self.git(publisher, 'add', 'unrelated.txt')
+        self.git(publisher, 'commit', '-qm', 'unrelated delivery change')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+
+        delivered = self.git(publisher, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'fetch', '-q', 'origin', 'main')
+        module = self.load_module()
+        self.assertIsNone(module.composed_stack_projection_tip(repo, stack))
+        self.assertTrue(module.merged_stack_tip_matches_delivery(repo, stack, delivered))
+        self.run_cli(repo, 'stack', 'close', 'merged-squash', '--reason', 'absorbed')
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('merged-squash', [item['id'] for item in manifest['stacks']])
+        _, state = self.remote_state(origin)
+        self.assertNotIn('merged-squash', [item['id'] for item in state['manifest']['stacks']])
+
+    def test_merge_tip_absorption_rejects_missing_content_and_changed_branch(self):
+        origin = self.create_remote('absorbed-merge-reject')
+        repo = self.clone(origin, 'absorbed-merge-reject')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-q', '-c', 'scratch/merge-reject', 'origin/main')
+        (repo / 'first.txt').write_text('first\n')
+        self.git(repo, 'add', 'first.txt')
+        self.git(repo, 'commit', '-qm', 'first source')
+        first = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', '-c', 'scratch/merge-reject-side', 'origin/main')
+        (repo / 'second.txt').write_text('second\n')
+        self.git(repo, 'add', 'second.txt')
+        self.git(repo, 'commit', '-qm', 'second source')
+        second = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'scratch/merge-reject')
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge sources', second)
+        merged = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', previous)
+        stack = self.add_legacy_merge_draft(repo, 'merge-reject', [first, second, merged])
+        publisher = self.clone(origin, 'absorbed-merge-reject-publisher')
+        (publisher / 'first.txt').write_text('first\n')
+        self.git(publisher, 'add', 'first.txt')
+        self.git(publisher, 'commit', '-qm', 'incomplete squash')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        module = self.load_module()
+        delivered = self.git(publisher, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'fetch', '-q', 'origin', 'main')
+        self.assertFalse(module.merged_stack_tip_matches_delivery(repo, stack, delivered))
+        failed = self.run_cli(
+            repo, 'stack', 'close', 'merge-reject', '--reason', 'absorbed', expected=2
+        )
+        self.assertIn('would drop it', failed.stderr)
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('merge-reject', [item['id'] for item in manifest['stacks']])
+
+        (publisher / 'second.txt').write_text('second\n')
+        self.git(publisher, 'add', 'second.txt')
+        self.git(publisher, 'commit', '-qm', 'complete squash')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        same_tree = self.git(repo, 'rev-parse', f'{merged}^{{tree}}').stdout.strip()
+        undeclared = self.git(
+            repo, 'commit-tree', same_tree, '-p', merged, '-m', 'undeclared branch tip'
+        ).stdout.strip()
+        self.git(repo, 'branch', '-f', stack['branch'], undeclared)
+        delivered = self.git(publisher, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'fetch', '-q', 'origin', 'main')
+        self.assertFalse(module.merged_stack_tip_matches_delivery(repo, stack, delivered))
+        failed = self.run_cli(
+            repo, 'stack', 'close', 'merge-reject', '--reason', 'absorbed', expected=2
+        )
+        self.assertIn('would drop it', failed.stderr)
 
     def test_reused_stack_id_starts_a_new_generation_and_abandons_the_old_intent(self):
         origin = self.create_remote('draft-generation-token')
