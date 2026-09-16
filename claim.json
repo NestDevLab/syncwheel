@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/main-integration"
+  ],
+  "claimed_at": "2026-09-16T19:32:20+00:00",
+  "coordination_id": "default",
+  "operation_token": "c4f696c0-bdc4-42eb-941b-d440385f1dbf",
+  "publication_scope": "integration",
+  "source_ref": "refs/heads/main-integration",
+  "syncwheel_version": "0.43.9"
+}
