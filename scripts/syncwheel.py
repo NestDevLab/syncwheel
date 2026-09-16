@@ -25746,7 +25746,11 @@ class SyncwheelRevisionBackend:
                     raise
                 descriptors.append(current)
             try:
-                descriptor = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=current)
+                # A FIFO must never block before fstat can reject its type.
+                descriptor = os.open(
+                    parts[-1], os.O_RDONLY | nofollow | os.O_NONBLOCK,
+                    dir_fd=current,
+                )
             except FileNotFoundError:
                 return None
             except OSError as exc:
@@ -25894,11 +25898,54 @@ class SyncwheelRevisionBackend:
     def _dirty_snapshot(self, repo_root, paths):
         snapshot = {}
         for path in sorted(paths):
-            observed = self._read_product_path(repo_root, path)
-            snapshot[path] = (
-                None if observed is None else
-                [observed['sha256'], observed['mode']]
-            )
+            directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
+            nofollow = getattr(os, 'O_NOFOLLOW', 0)
+            descriptors = []
+            try:
+                current = os.open(str(repo_root), directory_flags | nofollow)
+                descriptors.append(current)
+                parts = path.split('/')
+                for part in parts[:-1]:
+                    current = os.open(
+                        part, directory_flags | nofollow, dir_fd=current
+                    )
+                    descriptors.append(current)
+                try:
+                    before = os.stat(
+                        parts[-1], dir_fd=current, follow_symlinks=False
+                    )
+                except FileNotFoundError:
+                    snapshot[path] = None
+                    continue
+                if stat.S_ISREG(before.st_mode):
+                    observed = self._read_product_path(repo_root, path)
+                    snapshot[path] = (
+                        None if observed is None else
+                        ['regular', observed['sha256'], observed['mode']]
+                    )
+                    continue
+                target = (
+                    os.readlink(parts[-1], dir_fd=current)
+                    if stat.S_ISLNK(before.st_mode) else None
+                )
+                after = os.stat(
+                    parts[-1], dir_fd=current, follow_symlinks=False
+                )
+                fingerprint = lambda value: (
+                    value.st_mode, value.st_dev, value.st_ino, value.st_size,
+                    value.st_mtime_ns, value.st_ctime_ns,
+                )
+                if fingerprint(before) != fingerprint(after):
+                    self._fail(
+                        f'unowned dirty path changed while inspected: {path}'
+                    )
+                snapshot[path] = [
+                    'symlink' if target is not None else 'special',
+                    target, *fingerprint(after),
+                ]
+            finally:
+                for descriptor in reversed(descriptors):
+                    os.close(descriptor)
         return snapshot
 
     def _assert_unowned_dirty_unchanged(self, repo_root, request, *, allowed_outside=()):
