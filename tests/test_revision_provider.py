@@ -2208,6 +2208,33 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         self.assertEqual(response['status'], 'no-repository-delta')
         self.assertEqual(unrelated.read_text(), 'preserve this work\n')
 
+    def test_unrelated_symlink_is_preserved_by_no_delta_operation(self):
+        unrelated = self.fixture.repo / 'unrelated-link'
+        unrelated.symlink_to('feature.txt')
+        request = self.fixture.request('preflight', operation_id='unrelated-link')
+        request['paths'] = []
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        self.fixture.protocol_request(request)
+        response, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+        self.assertEqual(response['status'], 'no-repository-delta')
+        self.assertTrue(unrelated.is_symlink())
+        self.assertEqual(os.readlink(unrelated), 'feature.txt')
+
+    def test_unrelated_fifo_is_preserved_without_blocking(self):
+        unrelated = self.fixture.repo / 'unrelated-fifo'
+        os.mkfifo(unrelated)
+        request = self.fixture.request('preflight', operation_id='unrelated-fifo')
+        request['paths'] = []
+        self.fixture.protocol_request(self.fixture.check_request(request))
+        self.fixture.protocol_request(request)
+        response, _ = self.fixture.protocol_request(
+            {**request, 'action': 'finalize'}
+        )
+        self.assertEqual(response['status'], 'no-repository-delta')
+        self.assertTrue(unrelated.is_fifo())
+
     def test_preflight_preserves_unrelated_path_outside_exact_scope(self):
         request = self.fixture.request('preflight', operation_id='scope-op')
         self.fixture.protocol_request(self.fixture.check_request(request))
