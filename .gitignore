@@ -7,5 +7,6 @@ __pycache__/
 .syncwheel/ledger/
 .syncwheel/profile.local.json
 .syncwheel/manifests/*.local.json
+.syncwheel/manifests/*.local-ledger/
 var/syncwheel/
 # end syncwheel managed metadata

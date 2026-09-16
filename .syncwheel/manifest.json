@@ -11,9 +11,30 @@
     "base": "origin/main",
     "branch": "main-integration",
     "strategy": "cherry-pick",
-    "stacks": []
+    "stacks": [
+      "pr-base-live-tip"
+    ]
   },
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "pr-base-live-tip",
+      "branch": "pr/pr-base-live-tip",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "941815ed992540056b9b26554064a0db7fb69d0b"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Validate PR historical base against fetched live delivery tip"
+      }
+    }
+  ],
   "syncwheel_worktree_root": "var/syncwheel",
   "syncwheel_tracking": "git-tracked",
   "coordination": {
