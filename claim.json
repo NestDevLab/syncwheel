@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/journal-scheduler-04311"
-  ],
-  "claimed_at": "2026-09-16T20:01:32+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-16T20:12:36+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "e4123e96-9b0c-4133-bae0-fd492beda2e4",
-  "publication_scope": "stack:journal-scheduler-04311",
+  "operation_token": "ac2579b9-fb91-4126-ab6d-bc0bcff0e31b",
+  "publication_scope": "close:journal-scheduler-04311",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/journal-scheduler-04311",
   "syncwheel_version": "0.43.10"
 }
