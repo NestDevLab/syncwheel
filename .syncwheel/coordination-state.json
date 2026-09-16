@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "4fc3fb8b6eb2de93434e9661d95e8a704d3d3909"
+  },
   "claims": {
-    "refs/heads/main-integration": "2ec06fa6b2cc1f5d1837d7c405b7ee7fe213ab44",
+    "refs/heads/main-integration": "ccd8a5e9f342348ac9ff817ecd08955a34ac66ce",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
@@ -12,11 +14,11 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T19:48:19+00:00",
+  "created_at": "2026-09-16T19:58:33+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "b894762bd5109f3078559cd325099e5016305fad",
+    "refs/heads/main-integration": "4fc3fb8b6eb2de93434e9661d95e8a704d3d3909",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -87,14 +89,14 @@
     "stacks": [],
     "version": 2
   },
-  "manifest_digest": "a0742961741944ee36085991b17a74fb535dff8258152521ae3c9cf7f4415c01",
-  "operation_token": "3e6d0a6b-1435-4c88-80a8-a4e5cce013e2",
-  "parent_state": "566fec45e2e3da1dc862feb97471c466784d1f14",
+  "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
+  "operation_token": "cebbc218-9054-458e-895f-a2deb15cfc46",
+  "parent_state": "62df3f34fe3e5edb82cbd25669fcbb28e4b01032",
   "projection_status": "partial",
-  "publication_id": "8f07b664-0acb-499c-ae75-be0b51e390ba",
-  "publication_scope": "close:pr-base-live-tip",
+  "publication_id": "41501b87-5e98-4df9-b73d-ef1511f25a5f",
+  "publication_scope": "integration",
   "schema_version": 2,
-  "syncwheel_version": "0.43.9",
+  "syncwheel_version": "0.43.10",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
