@@ -3949,6 +3949,10 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(self.read_manifest()['stacks'][0]['commits'], [merge_tip])
         with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
             module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'ephemeral')
+        with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
+            module.replay_plan(self.repo, None, module.replay_target(stack=stack), 'plumbing')
+        with self.assertRaisesRegex(module.SyncwheelError, 'cannot be rebuilt by cherry-pick'):
+            module.deterministic_stack_projection(self.repo, 'main', [merge_tip])
         self.assertEqual(self.git('rev-parse', 'pr/merge-case'), merge_tip)
 
     def test_stack_rebuild_disables_configured_gpg_signing(self):

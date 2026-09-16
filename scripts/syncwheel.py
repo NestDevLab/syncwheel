@@ -12385,6 +12385,7 @@ def deterministic_stack_projection(repo_root, base, commits):
     head = base
     for declared_commit in commits:
         commit = commit_full_sha(repo_root, declared_commit)
+        replay_cherry_pick_args(repo_root, commit, base, projection=False)
         merge = git(
             repo_root,
             'merge-tree',
@@ -16173,6 +16174,7 @@ def plumbing_replay_script(repo_root, branch, base, commits, expected_tip=None):
     head = base
     for declared_commit in commits:
         commit = commit_full_sha(repo_root, declared_commit)
+        replay_cherry_pick_args(repo_root, commit, base, projection=False)
         parent = shell_ref(head)
         merge_tree = ' '.join([
             quoted(['git', 'merge-tree', '--write-tree', f'--merge-base={commit}^']),
