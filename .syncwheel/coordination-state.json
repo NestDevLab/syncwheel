@@ -1,16 +1,14 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/mgt-0287-squash-absorbed": "46629f243cc46a4b916ecd7c9222c42d691184b5"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
-    "refs/heads/pr/mgt-0287-squash-absorbed": "eba3d6d6878edc1199b8765293dd7cc03342dc92",
+    "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T18:06:48+00:00",
+  "created_at": "2026-09-16T18:45:37+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -71,9 +69,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "mgt-0287-squash-absorbed"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -81,33 +77,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/mgt-0287-squash-absorbed",
-        "commits": [
-          "2a2d5e84efb0c5756fbc15ae467091cf599257bc",
-          "677df697bdfff656f025274190514fbe3e6be6c7"
-        ],
-        "id": "mgt-0287-squash-absorbed",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "02d5d71b-f5e4-4d41-a4c0-8ee57c9e2fb5",
-  "parent_state": "b1a2e5d6529c164e6a057349972318aad9a09fa0",
+  "operation_token": "baca03fc-bc0f-4c98-a174-52d4f923af10",
+  "parent_state": "6b2bcfc3953fb5920a16dd019d02676a7e161d2f",
   "projection_status": "partial",
-  "publication_id": "2df56a83-2fde-40a3-a768-bd3bb1101456",
-  "publication_scope": "stack:mgt-0287-squash-absorbed",
+  "publication_id": "e8ec8cd3-da05-4e97-be67-3cc975b5c942",
+  "publication_scope": "close:mgt-0287-squash-absorbed",
   "schema_version": 2,
-  "syncwheel_version": "0.43.7",
+  "syncwheel_version": "0.43.8",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -339,6 +319,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed",
       "remote_tip": "d09b401e08008b8943b145ad163bc59f6a66c748",
+      "stack": "mgt-0287-squash-absorbed"
+    },
+    {
+      "branch": "pr/mgt-0287-squash-absorbed",
+      "closed_at": "2026-09-16T18:45:33+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/mgt-0287-squash-absorbed",
+      "remote_tip": null,
       "stack": "mgt-0287-squash-absorbed"
     }
   ]
