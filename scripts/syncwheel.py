@@ -22934,7 +22934,27 @@ def command_stack_absorb(args):
 
     require_manifest_transaction_current(manifest_path)
     stack_worktree = resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, args)
-    ensure_clean_worktree(stack_worktree)
+    # The patch and commit touch only selected paths. Unrelated unstaged work
+    # in the stack worktree remains outside this operation, but the real index
+    # and patch paths must be clean before `git apply --index`.
+    if git(stack_worktree, 'ls-files', '-u').stdout.strip() or git(
+        stack_worktree, 'diff', '--cached', '--quiet', check=False
+    ).returncode != 0:
+        raise SyncwheelError(f'{stack_worktree} has index changes or conflicts')
+    patch_paths = set(item for item in git(
+        repo_root, 'diff', *(['--cached'] if args.staged else []),
+        '--name-only', '--no-renames', '-z', *separator,
+    ).stdout.split('\0') if item)
+    target_dirty = set(item for item in git(
+        stack_worktree, 'diff', '--name-only', '-z'
+    ).stdout.split('\0') if item)
+    target_dirty.update(item for item in git(
+        stack_worktree, 'ls-files', '--others', '--exclude-standard', '-z'
+    ).stdout.split('\0') if item)
+    overlap = sorted(patch_paths & target_dirty)
+    if overlap:
+        raise SyncwheelError('stack absorb target patch paths are dirty: '
+                             + ', '.join(overlap))
     apply_patch = run(['git', '-C', str(stack_worktree), 'apply', '--index'], input_text=patch, check=False)
     if apply_patch.returncode != 0:
         raise SyncwheelError(apply_patch.stderr.strip() or apply_patch.stdout.strip() or 'failed to apply patch to stack worktree')
@@ -29834,6 +29854,27 @@ def primary_checkout_preflight(args):
         and not primary_guard_remedy_requested(args)
         and not managed_push_guard_policy(primary_root, manifest)['disabled']
     ):
+        if args.func in {command_stack_create, command_stack_absorb}:
+            if git(primary_root, 'ls-files', '-u').stdout.strip():
+                raise SyncwheelError('primary checkout has index conflicts')
+            staged = set(item for item in git(
+                primary_root, 'diff', '--cached', '--name-only', '-z'
+            ).stdout.split('\0') if item)
+            if args.func == command_stack_absorb and args.staged:
+                selected = set(item for item in git(
+                    primary_root, 'diff', '--cached', '--name-only', '-z',
+                    *(['--', *args.paths] if args.paths else []),
+                ).stdout.split('\0') if item)
+                staged -= selected
+            if staged:
+                raise SyncwheelError('primary checkout has unrelated staged paths: '
+                                     + ', '.join(sorted(staged)))
+            if '.syncwheel/manifest.json' in {
+                path for entry in primary_checkout_dirty_entries(primary_root)
+                for path in status_line_paths(entry)
+            }:
+                raise SyncwheelError('primary checkout control manifest is dirty')
+            return
         require_clean_primary_checkout(primary_root, manifest)
 
 
