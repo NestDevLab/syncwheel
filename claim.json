@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/pr-base-live-tip"
-  ],
-  "claimed_at": "2026-09-16T19:35:55+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-16T19:48:19+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "867d1dce-4506-4866-b6d7-c96659afe375",
-  "publication_scope": "stack:pr-base-live-tip",
+  "operation_token": "3e6d0a6b-1435-4c88-80a8-a4e5cce013e2",
+  "publication_scope": "close:pr-base-live-tip",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/pr-base-live-tip",
   "syncwheel_version": "0.43.9"
 }
