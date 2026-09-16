@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.11 - 2026-09-16
+
+- Arm newly installed journal timers on the first interval, report whether an
+  installed timer has a pending trigger, and upgrade only the exact legacy
+  timer template without overwriting foreign systemd units.
+
 ## 0.43.10 - 2026-09-16
 
 - Verify the observed live GitHub PR base by fetching the exact remote tip
