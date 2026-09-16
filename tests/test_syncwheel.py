@@ -4916,6 +4916,16 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                          [self.git('rev-parse', commit) for commit in existing])
         self.assertNotIn('alpha.txt', self.git('show', '--format=', '--name-only', 'HEAD'))
 
+    def test_stack_push_preserves_unrelated_tracked_primary_dirt(self):
+        fork = self.tmp / 'fork.git'
+        subprocess.run(['git', 'init', '--bare', '-q', str(fork)], check=True)
+        self.git('remote', 'add', 'fork', str(fork))
+        alpha = self.repo / 'alpha.txt'
+        alpha.write_text(alpha.read_text() + 'unrelated work\n')
+        self.run_cli('stack', 'push', 'feature-b')
+        self.assertIn('unrelated work\n', alpha.read_text())
+        self.assertNotIn('alpha.txt', self.git('show', '--format=', '--name-only', 'HEAD'))
+
     def test_stack_absorb_preserves_unrelated_target_dirt(self):
         target = self.tmp / 'target-worktree'
         self.git('worktree', 'add', '-q', str(target), 'pr/feature-b')
