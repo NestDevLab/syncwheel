@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/merge-tip-push-projection": "98d87d54bb122da2ea66849f144bb684a6a4f4cf"
+    "refs/heads/pr/merge-tip-push-projection": "97512f98dae15759593a952f0cc9b4b81451f9cc"
   },
   "claims": {
-    "refs/heads/pr/merge-tip-push-projection": "09b6e2e27ccf72a1eb032d800639090c9a1d41c3",
+    "refs/heads/pr/merge-tip-push-projection": "1c6f2513011c9b389043ae6eb5e752835f2c989f",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
@@ -12,7 +12,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-16T18:53:23+00:00",
+  "created_at": "2026-09-16T18:57:49+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -28,7 +28,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
-    "refs/heads/pr/merge-tip-push-projection": "98d87d54bb122da2ea66849f144bb684a6a4f4cf",
+    "refs/heads/pr/merge-tip-push-projection": "97512f98dae15759593a952f0cc9b4b81451f9cc",
     "refs/heads/pr/mgt-0287-ci-sharding": "bbec5e736a31d8a55280ac8699e4b82b65174626",
     "refs/heads/pr/mgt-0287-squash-absorbed": "46629f243cc46a4b916ecd7c9222c42d691184b5",
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
@@ -95,7 +95,9 @@
         "branch": "pr/merge-tip-push-projection",
         "commits": [
           "c5515f0ea346c2b30d4ffb7c7ff582bace143d00",
-          "98d87d54bb122da2ea66849f144bb684a6a4f4cf"
+          "98d87d54bb122da2ea66849f144bb684a6a4f4cf",
+          "f355e04f883bd5a9994d9ecb172ee765cc9ffa44",
+          "97512f98dae15759593a952f0cc9b4b81451f9cc"
         ],
         "id": "merge-tip-push-projection",
         "integration_branch": "main-integration",
@@ -105,11 +107,11 @@
     "version": 2
   },
   "manifest_digest": "29570a9d096d5875e37623070925f7d8c707bce6adfb55b6a1cd5096bd5d738d",
-  "operation_token": "f6854086-50b3-4a50-a2ab-344808ca44e7",
-  "parent_state": "b853183f7f1b0eb3565bfa73daf21865e6d3c9fe",
+  "operation_token": "72e3efdd-ca64-4763-adcb-bb934433985b",
+  "parent_state": "3124beb493e67175f01e6327f7fd530c4d34675f",
   "projection_status": "partial",
-  "publication_id": "6263eac8-bcb4-4a60-81d7-27285193282f",
-  "publication_scope": "promote:merge-tip-push-projection",
+  "publication_id": "c88642d2-8a23-41ca-89fa-896bdbf3c95e",
+  "publication_scope": "stack:merge-tip-push-projection",
   "schema_version": 2,
   "syncwheel_version": "0.43.7",
   "tombstones": [
