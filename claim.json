@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/merge-tip-push-projection"
+  ],
+  "claimed_at": "2026-09-16T18:53:23+00:00",
+  "coordination_id": "default",
+  "operation_token": "f6854086-50b3-4a50-a2ab-344808ca44e7",
+  "publication_scope": "promote:merge-tip-push-projection",
+  "source_ref": "refs/heads/pr/merge-tip-push-projection",
+  "syncwheel_version": "0.43.7"
+}
