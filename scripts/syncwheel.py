@@ -29865,6 +29865,23 @@ def primary_checkout_preflight(args):
             command_stack_demote,
             command_stack_absorb,
         }
+        bounded_publication_commands = {
+            command_stack_push,
+            command_int_push,
+            command_coordination_compose,
+            command_stack_merge_pr,
+        }
+        if args.func in bounded_publication_commands:
+            if git(primary_root, 'ls-files', '-u').stdout.strip() or git(
+                primary_root, 'diff', '--cached', '--quiet', check=False
+            ).returncode != 0:
+                raise SyncwheelError('primary checkout has index changes or conflicts')
+            if '.syncwheel/manifest.json' in {
+                path for entry in primary_checkout_dirty_entries(primary_root)
+                for path in status_line_paths(entry)
+            }:
+                raise SyncwheelError('primary checkout control manifest is dirty')
+            return
         if args.func in scoped_primary_commands:
             if git(primary_root, 'ls-files', '-u').stdout.strip():
                 raise SyncwheelError('primary checkout has index conflicts')
