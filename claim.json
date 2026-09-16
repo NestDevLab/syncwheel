@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/pr-base-live-tip"
   ],
-  "claimed_at": "2026-09-16T19:34:13+00:00",
+  "claimed_at": "2026-09-16T19:35:55+00:00",
   "coordination_id": "default",
-  "operation_token": "7600b369-7abf-4736-8210-fe748b79d9d9",
+  "operation_token": "867d1dce-4506-4866-b6d7-c96659afe375",
   "publication_scope": "stack:pr-base-live-tip",
   "source_ref": "refs/heads/pr/pr-base-live-tip",
   "syncwheel_version": "0.43.9"
