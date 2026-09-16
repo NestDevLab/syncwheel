@@ -12,6 +12,7 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import shutil
 import shlex
 import socket
@@ -2313,22 +2314,148 @@ def commit_first_parent(repo_root, commit):
 
 
 def commit_patch_id(repo_root, commit):
-    if commit_parent_count(repo_root, commit) != 1:
-        return None
-    show = git(repo_root, 'show', '--format=', commit)
-    patch_id = run(['git', 'patch-id', '--stable'], input_text=show.stdout)
-    line = patch_id.stdout.strip()
-    if not line:
-        return None
-    return line.split()[0]
+    full_sha = (
+        commit if re.fullmatch(r'[0-9a-f]+', commit) and len(commit) == git_object_id_length(repo_root)
+        else commit_full_sha(repo_root, commit)
+    )
+    return commit_patch_ids(repo_root, [full_sha])[full_sha]
+
+
+@functools.lru_cache(maxsize=16)
+def git_object_id_length(repo_root):
+    algorithm = git(repo_root, 'config', '--get', 'extensions.objectformat', check=False).stdout.strip()
+    return 64 if algorithm == 'sha256' else 40
+
+
+@functools.lru_cache(maxsize=16)
+def patch_id_semantics_key(repo_root):
+    """Snapshot Git diff semantics once per CLI process and repository."""
+    config = git(repo_root, 'config', '--list', '--null').stdout
+    digest = hashlib.sha256(b'stable:git-log-p:no-walk:no-merges:v1\0')
+    digest.update(config.encode('utf-8', 'surrogateescape'))
+    digest.update(git(repo_root, '--version').stdout.encode())
+    # Legacy git patch-id inherits the CLI's cwd, which can select a different
+    # object format from the target repository (notably SHA-1 versus SHA-256).
+    digest.update(run(['git', 'rev-parse', '--show-object-format'], cwd=Path.cwd(),
+                      check=False).stdout.encode())
+    digest.update(run(['git', 'config', '--list', '--null'], cwd=Path.cwd()).stdout.encode())
+    for key, value in sorted(os.environ.items()):
+        if key.startswith('GIT_'):
+            digest.update(key.encode() + b'=' + value.encode('utf-8', 'surrogateescape') + b'\0')
+    common_dir = git_common_dir(repo_root)
+    attributes = [('info/attributes', common_dir / 'info' / 'attributes')]
+    tracked = git(repo_root, 'ls-files', '-z', '--cached', '--others',
+                  '--', '.gitattributes', '**/.gitattributes').stdout
+    attributes.extend((name, Path(repo_root) / name) for name in tracked.split('\0') if name)
+    global_attributes = git(repo_root, 'config', '--path', '--get', 'core.attributesfile',
+                            check=False).stdout.strip()
+    if global_attributes:
+        global_path = Path(global_attributes).expanduser()
+        attributes.append(('core.attributesfile', global_path if global_path.is_absolute()
+                           else Path(repo_root) / global_path))
+    else:
+        config_home = Path(os.environ.get('XDG_CONFIG_HOME', Path.home() / '.config'))
+        attributes.append(('global/attributes', config_home / 'git' / 'attributes'))
+    for name, path in attributes:
+        digest.update(name.encode('utf-8', 'surrogateescape') + b'\0')
+        try:
+            digest.update(hashlib.sha256(path.read_bytes()).digest())
+        except FileNotFoundError:
+            digest.update(b'absent\0')
+    return digest.hexdigest()
+
+
+def patch_id_cache_connection(repo_root):
+    path = git_common_dir(repo_root) / 'syncwheel' / 'patch-ids-v1.sqlite3'
+    path.parent.mkdir(parents=True, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=30)
+    connection.execute('CREATE TABLE IF NOT EXISTS patch_ids ('
+                       'semantics TEXT NOT NULL, commit_sha TEXT NOT NULL, '
+                       'patch_id TEXT, PRIMARY KEY (semantics, commit_sha))')
+    return connection
+
+
+def batch_uncached_patch_ids(repo_root, commits):
+    """One parent walk and one streaming log/patch-id pipeline for all misses."""
+    if not commits:
+        return {}
+    input_text = ''.join(commit + '\n' for commit in commits)
+    parents = git(repo_root, 'rev-list', '--parents', '--no-walk=unsorted', '--stdin',
+                  input_text=input_text)
+    result = {}
+    eligible = []
+    for line in parents.stdout.splitlines():
+        parts = line.split()
+        result[parts[0]] = None
+        if len(parts) == 2:
+            eligible.append(parts[0])
+    if not eligible:
+        return result
+    header_lookup = {}
+    for sha in eligible:
+        for header in {sha, sha[:40]}:
+            header_lookup[header] = sha if header not in header_lookup else None
+    with tempfile.TemporaryFile(mode='w+t') as revisions, tempfile.TemporaryFile(mode='w+t') as log_errors:
+        revisions.write(''.join(commit + '\n' for commit in eligible))
+        revisions.seek(0)
+        log = subprocess.Popen(
+            ['git', 'log', '-p', '--no-walk=unsorted', '--no-merges', '--format=medium', '--stdin'],
+            cwd=repo_root, stdin=revisions, stdout=subprocess.PIPE, stderr=log_errors,
+            text=True,
+        )
+        patch = subprocess.Popen(
+            ['git', 'patch-id', '--stable'], stdin=log.stdout, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        log.stdout.close()
+        patch_stdout, patch_stderr = patch.communicate()
+        log_status = log.wait()
+        log_errors.seek(0)
+        log_stderr = log_errors.read()
+    if log_status or patch.returncode:
+        raise SyncwheelError(log_stderr.strip() or patch_stderr.strip() or 'patch-id batch failed')
+    for line in patch_stdout.splitlines():
+        patch_id, commit = line.split()
+        # git patch-id truncates the commit header to its cwd object format.
+        matching = header_lookup.get(commit)
+        if not matching or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', patch_id):
+            raise SyncwheelError('unexpected git patch-id batch output')
+        result[matching] = patch_id
+    return result
+
+
+def commit_patch_ids(repo_root, commits):
+    commits = list(dict.fromkeys(commits))
+    if not commits:
+        return {}
+    semantics = patch_id_semantics_key(repo_root)
+    found = {}
+    try:
+        with contextlib.closing(patch_id_cache_connection(repo_root)) as connection, connection:
+            for commit in commits:
+                row = connection.execute(
+                    'SELECT patch_id FROM patch_ids WHERE semantics=? AND commit_sha=?',
+                    (semantics, commit),
+                ).fetchone()
+                if row and (row[0] is None or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0])):
+                    found[commit] = row[0]
+            missing = [commit for commit in commits if commit not in found]
+            if missing:
+                computed = batch_uncached_patch_ids(repo_root, missing)
+                connection.executemany(
+                    'INSERT OR REPLACE INTO patch_ids VALUES (?, ?, ?)',
+                    [(semantics, commit, computed[commit]) for commit in missing],
+                )
+                found.update(computed)
+    except sqlite3.DatabaseError:
+        # A damaged cache is never authoritative; recompute without relying on it.
+        return batch_uncached_patch_ids(repo_root, commits)
+    return found
 
 
 def patch_ids_reachable_from_ref(repo_root, ref):
-    return {
-        patch_id
-        for commit in rev_list(repo_root, ref)
-        if (patch_id := commit_patch_id(repo_root, commit))
-    }
+    return {patch_id for patch_id in commit_patch_ids(repo_root, rev_list(repo_root, ref)).values()
+            if patch_id}
 
 
 def fetch_observed_delivery_tip(repo_root, remote, branch):
