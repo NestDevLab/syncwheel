@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/merge-tip-push-projection"
   ],
-  "claimed_at": "2026-09-16T18:57:49+00:00",
+  "claimed_at": "2026-09-16T19:09:12+00:00",
   "coordination_id": "default",
-  "operation_token": "72e3efdd-ca64-4763-adcb-bb934433985b",
+  "operation_token": "58df9243-b3cc-4530-8283-58e109d9f9ef",
   "publication_scope": "stack:merge-tip-push-projection",
   "source_ref": "refs/heads/pr/merge-tip-push-projection",
   "syncwheel_version": "0.43.7"
