@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/mgt-0287-sw2-dirty-path"
-  ],
-  "claimed_at": "2026-09-16T21:00:06+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-17T10:50:13+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "22caa7dc-0f30-418c-a4cf-d1684094be9e",
-  "publication_scope": "stack:mgt-0287-sw2-dirty-path",
+  "operation_token": "c3d4b25a-15ea-4f32-908a-93bc574f690a",
+  "publication_scope": "close:mgt-0287-sw2-dirty-path",
+  "reason": "merged",
   "source_ref": "refs/heads/pr/mgt-0287-sw2-dirty-path",
   "syncwheel_version": "0.43.11"
 }
