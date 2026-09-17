@@ -2334,6 +2334,10 @@ def patch_id_semantics_key(repo_root):
     digest = hashlib.sha256(b'stable:git-log-p:no-walk:no-merges:v1\0')
     digest.update(config.encode('utf-8', 'surrogateescape'))
     digest.update(git(repo_root, '--version').stdout.encode())
+    # Replace refs and grafts can change a commit's effective parents or diff
+    # without changing its object ID.
+    digest.update(git(repo_root, 'for-each-ref',
+                      '--format=%(refname) %(objectname)', 'refs/replace/').stdout.encode())
     # Legacy git patch-id inherits the CLI's cwd, which can select a different
     # object format from the target repository (notably SHA-1 versus SHA-256).
     digest.update(run(['git', 'rev-parse', '--show-object-format'], cwd=Path.cwd(),
@@ -2343,7 +2347,9 @@ def patch_id_semantics_key(repo_root):
         if key.startswith('GIT_'):
             digest.update(key.encode() + b'=' + value.encode('utf-8', 'surrogateescape') + b'\0')
     common_dir = git_common_dir(repo_root)
-    attributes = [('info/attributes', common_dir / 'info' / 'attributes')]
+    attributes = [('info/attributes', common_dir / 'info' / 'attributes'),
+                  ('info/grafts', common_dir / 'info' / 'grafts'),
+                  ('shallow', common_dir / 'shallow')]
     tracked = git(repo_root, 'ls-files', '-z', '--cached', '--others',
                   '--', '.gitattributes', '**/.gitattributes').stdout
     attributes.extend((name, Path(repo_root) / name) for name in tracked.split('\0') if name)
@@ -2366,13 +2372,23 @@ def patch_id_semantics_key(repo_root):
 
 
 def patch_id_cache_connection(repo_root):
-    path = git_common_dir(repo_root) / 'syncwheel' / 'patch-ids-v1.sqlite3'
+    path = git_common_dir(repo_root) / 'syncwheel' / 'patch-ids-v2.sqlite3'
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
     connection.execute('CREATE TABLE IF NOT EXISTS patch_ids ('
                        'semantics TEXT NOT NULL, commit_sha TEXT NOT NULL, '
-                       'patch_id TEXT, PRIMARY KEY (semantics, commit_sha))')
+                       'patch_id TEXT, row_digest TEXT NOT NULL, '
+                       'PRIMARY KEY (semantics, commit_sha))')
     return connection
+
+
+def patch_id_row_digest(semantics, commit, patch_id):
+    digest = hashlib.sha256(b'patch-id-row-v2\0')
+    for value in (semantics, commit, patch_id):
+        encoded = value.encode() if value is not None else b''
+        digest.update((len(encoded) if value is not None else -1).to_bytes(8, 'big', signed=True))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def batch_uncached_patch_ids(repo_root, commits):
@@ -2401,11 +2417,11 @@ def batch_uncached_patch_ids(repo_root, commits):
         log = subprocess.Popen(
             ['git', 'log', '-p', '--no-walk=unsorted', '--no-merges', '--format=medium', '--stdin'],
             cwd=repo_root, stdin=revisions, stdout=subprocess.PIPE, stderr=log_errors,
-            text=True,
+            text=True, env=managed_process_env(),
         )
         patch = subprocess.Popen(
             ['git', 'patch-id', '--stable'], stdin=log.stdout, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
+            stderr=subprocess.PIPE, text=True, env=managed_process_env(),
         )
         log.stdout.close()
         patch_stdout, patch_stderr = patch.communicate()
@@ -2434,21 +2450,24 @@ def commit_patch_ids(repo_root, commits):
         with contextlib.closing(patch_id_cache_connection(repo_root)) as connection, connection:
             for commit in commits:
                 row = connection.execute(
-                    'SELECT patch_id FROM patch_ids WHERE semantics=? AND commit_sha=?',
+                    'SELECT patch_id, row_digest FROM patch_ids WHERE semantics=? AND commit_sha=?',
                     (semantics, commit),
                 ).fetchone()
-                if row and (row[0] is None or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0])):
+                if (row and (row[0] is None or (isinstance(row[0], str)
+                                            and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0])))
+                        and row[1] == patch_id_row_digest(semantics, commit, row[0])):
                     found[commit] = row[0]
             missing = [commit for commit in commits if commit not in found]
             if missing:
                 computed = batch_uncached_patch_ids(repo_root, missing)
                 connection.executemany(
-                    'INSERT OR REPLACE INTO patch_ids VALUES (?, ?, ?)',
-                    [(semantics, commit, computed[commit]) for commit in missing],
+                    'INSERT OR REPLACE INTO patch_ids VALUES (?, ?, ?, ?)',
+                    [(semantics, commit, computed[commit],
+                      patch_id_row_digest(semantics, commit, computed[commit])) for commit in missing],
                 )
                 found.update(computed)
-    except sqlite3.DatabaseError:
-        # A damaged cache is never authoritative; recompute without relying on it.
+    except (sqlite3.DatabaseError, OSError):
+        # A damaged or unwritable cache is never authoritative; recompute without it.
         return batch_uncached_patch_ids(repo_root, commits)
     return found
 
@@ -6253,6 +6272,25 @@ def published_integration_has_no_unique_product(repo_root, manifest, tip, observ
     return True
 
 
+def historically_delivered_integration_boundary(repo_root, manifest, tip, observation, delivery_tip):
+    """Find a witnessed integration prefix whose final product is on main."""
+    if not observation or observation.get('status') != 'current' or not delivery_tip:
+        return None
+    integration_ref = observation.get('integration_ref')
+    if not integration_ref:
+        return None
+    for state in integration_reconciliation_publishing_states(repo_root, observation):
+        candidate = (state.get('changed_refs') or {}).get(integration_ref)
+        if not candidate or not branch_contains(repo_root, tip, candidate):
+            continue
+        if published_integration_has_no_unique_product(
+            repo_root, manifest, candidate,
+            {'status': 'current', 'published_tip': candidate}, delivery_tip,
+        ):
+            return candidate
+    return None
+
+
 def integration_reconciliation_history(
     repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
     detached_replay=False, delivery_tip=None,
@@ -6263,6 +6301,11 @@ def integration_reconciliation_history(
     ):
         return
     base = manifest['integration']['base']
+    history_base = base
+    if not detached_replay:
+        history_base = historically_delivered_integration_boundary(
+            repo_root, manifest, tip, observation, delivery_tip,
+        ) or base
     declared = {
         commit_full_sha(repo_root, commit)
         for stack in manifest['stacks']
@@ -6271,7 +6314,7 @@ def integration_reconciliation_history(
     patches = {commit_patch_id(repo_root, commit) for commit in declared}
     patches.discard(None)
     patches.update(patch_ids_reachable_from_ref(repo_root, base))
-    history = rev_list(repo_root, f'{base}..{tip}')
+    history = rev_list(repo_root, f'{history_base}..{tip}')
     proofs = {commit: proof for commit in history
               if commit_parent_count(repo_root, commit) > 1
               and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}

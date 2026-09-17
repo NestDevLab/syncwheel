@@ -6737,6 +6737,68 @@ with module.coordination_publication_lock(Path(repo_path)):
             observation, delivery_tip,
         ))
 
+    def test_squashed_published_prefix_allows_only_later_declared_product(self):
+        origin = self.create_remote('squashed-prefix-with-new-stack')
+        repo = self.clone(origin, 'squashed-prefix-with-new-stack')
+        module = self.load_module()
+        base = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        patterns = module.syncwheel_gitignore_patterns('.syncwheel/wt')
+        managed = ('# syncwheel managed metadata\n' + '\n'.join(patterns)
+                   + '\n# end syncwheel managed metadata\n')
+        self.git(repo, 'switch', '-q', '-c', 'integration/shared', base)
+        (repo / 'README.md').write_text('delivered product\n')
+        (repo / '.gitignore').write_text(managed)
+        self.git(repo, 'add', 'README.md', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: old integration product')
+        absorbed_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'README.md').write_text('delivered product\n')
+        (repo / '.gitignore').write_text(managed.replace(
+            '.syncwheel/manifests/*.local-ledger/\n', '', 1))
+        self.git(repo, 'add', 'README.md', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: squash old product')
+        delivery_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        (repo / 'new.txt').write_text('new declared product\n')
+        self.git(repo, 'add', 'new.txt')
+        self.git(repo, 'commit', '-q', '-m', 'test: new stack product')
+        stack_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        manifest = {
+            'syncwheel_worktree_root': '.syncwheel/wt',
+            'integration': {'base': delivery_tip, 'branch': 'integration/shared',
+                            'stacks': ['new']},
+            'stacks': [{'id': 'new', 'commits': [stack_tip]}],
+        }
+        observation = {'status': 'current', 'published_tip': stack_tip,
+                       'integration_ref': 'refs/heads/integration/shared'}
+        witness = {'changed_refs': {observation['integration_ref']: absorbed_tip},
+                   'manifest': {'integration': {'derived_provenance': []}}}
+        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+                               side_effect=lambda *_: iter([])):
+            with self.assertRaisesRegex(module.SyncwheelError,
+                                        'unexplained product paths: README.md'):
+                module.integration_reconciliation_history(
+                    repo, manifest, stack_tip, {}, observation=observation,
+                    delivery_tip=delivery_tip,
+                )
+        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+                               return_value=iter([witness])):
+            module.integration_reconciliation_history(
+                repo, manifest, stack_tip, {}, observation=observation,
+                delivery_tip=delivery_tip,
+            )
+        (repo / 'unmapped.txt').write_text('must remain blocked\n')
+        self.git(repo, 'add', 'unmapped.txt')
+        self.git(repo, 'commit', '-q', '-m', 'test: unowned product')
+        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+                               side_effect=lambda *_: iter([witness])):
+            with self.assertRaisesRegex(module.SyncwheelError,
+                                        'unexplained product paths: unmapped.txt'):
+                module.integration_reconciliation_history(
+                    repo, manifest, self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+                    {}, observation=observation, delivery_tip=delivery_tip,
+                )
+
     def test_ancestry_reconciliation_rejects_a_replay_proof_for_different_product_bytes(self):
         repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-invalid-proof')
         self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'proof'))
