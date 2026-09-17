@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "99a329bd83195e913374fd6b22e44548db9c1d59"
+    "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
   },
   "claims": {
     "refs/heads/main-integration": "2e5bac01b1017e485c92d4b588cbc81b9ca350e4",
@@ -12,14 +12,14 @@
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "3508004b3efcf5e0a3b3d2b5b98a48510b9abcd0",
-    "refs/heads/pr/patch-id-cache-04314": "20a3e4ec05234b9e01c95ef614dac6ffea2d7e9e",
+    "refs/heads/pr/patch-id-cache-04314": "1de2d687a9cd9c6b3432400d48d8c37dc2be46f6",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-17T15:13:39+00:00",
+  "created_at": "2026-09-17T15:23:29+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -43,7 +43,7 @@
     "refs/heads/pr/mgt-0287-squash-absorbed": "46629f243cc46a4b916ecd7c9222c42d691184b5",
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "2c3641e311b145284edf8d65f66db61d83c7c490",
-    "refs/heads/pr/patch-id-cache-04314": "58ba8d1745f9f0d643a96d06ce2825ea635a9967",
+    "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
@@ -110,7 +110,8 @@
           "d1d53d32f19a6fd3fda055e3c58fbbff4eb344d4",
           "71027c808525a77af2bfaef0de0214e7361237b5",
           "d373ee10dc92825856bd4f6e44f88023587a9930",
-          "58ba8d1745f9f0d643a96d06ce2825ea635a9967"
+          "58ba8d1745f9f0d643a96d06ce2825ea635a9967",
+          "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
         ],
         "id": "patch-id-cache-04314",
         "integration_branch": "main-integration",
@@ -120,11 +121,11 @@
     "version": 2
   },
   "manifest_digest": "1e16c6e5394b799083c5701af0660eea06b81bd21ea4b3984fe6cdd4abc3967b",
-  "operation_token": "f28d0692-6fd0-4609-b8de-dd89bb9d4021",
-  "parent_state": "c829ec77d2ac4536b39e85c633dc1c369f2f9816",
+  "operation_token": "decb8812-3e13-4b65-bf09-9528d2a539c6",
+  "parent_state": "695f08107eeace9eac530cd24ddbe191ccb454d3",
   "projection_status": "partial",
-  "publication_id": "2d5c95f3-7b8f-414b-8d1e-eae182f9ad01",
-  "publication_scope": "integration",
+  "publication_id": "c49de441-08aa-400e-9d36-e75f64543feb",
+  "publication_scope": "stack:patch-id-cache-04314",
   "schema_version": 2,
   "syncwheel_version": "0.43.13",
   "tombstones": [
