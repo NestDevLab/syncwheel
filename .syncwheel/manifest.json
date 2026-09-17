@@ -32,7 +32,8 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "mgt-0287-sw2-dirty-path"
+      "mgt-0287-sw2-dirty-path",
+      "historical-coordination-digest"
     ],
     "strategy": "cherry-pick"
   },
@@ -59,6 +60,23 @@
         "e7e1b933cc5f070a9b9a6f42e2755a09a8b3adeb",
         "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a",
         "2c3641e311b145284edf8d65f66db61d83c7c490"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "id": "historical-coordination-digest",
+      "branch": "pr/historical-coordination-digest-governed",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "d878a6b68898a67c618db2406f9ae7fba3f7dcb0",
+        "8128d73c0d9b0e590b7c874266dff2cb068d384d"
       ],
       "state": "published",
       "publication": {
