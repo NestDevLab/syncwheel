@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -38,19 +38,15 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "mgt-0287-sw2-dirty-path",
-      "branch": "pr/mgt-0287-sw2-dirty-path",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/mgt-0287-sw2-dirty-path",
       "commits": [
         "ecb8b3eae8900dfd5549e2178861c75e64efde99",
         "166fc6a6d766228ee8aeb3e6ff7ff651103ff10e",
@@ -61,11 +57,8 @@
         "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a",
         "2c3641e311b145284edf8d65f66db61d83c7c490"
       ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {},
+      "id": "mgt-0287-sw2-dirty-path",
+      "integration_branch": "main-integration",
       "integration_commits": [
         "aa21fb50e6d7981184efd998a1002d712ca66ed4",
         "0ce175c3e56e264e17507d0a0c3328331933396f",
@@ -75,24 +68,31 @@
         "b7f4851be0396003481718c3d930ae6c60c67b5a",
         "991c0733695a75e797ea4f582545c88eecb93e12",
         "8ea9404def6c8962664dc7050d0175234a0fd647"
-      ]
+      ],
+      "meta": {},
+      "publication": {
+        "enabled": true
+      },
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     },
     {
-      "id": "historical-coordination-digest",
-      "branch": "pr/historical-coordination-digest-governed",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/historical-coordination-digest-governed",
       "commits": [
         "d878a6b68898a67c618db2406f9ae7fba3f7dcb0",
         "8128d73c0d9b0e590b7c874266dff2cb068d384d"
       ],
-      "state": "published",
+      "id": "historical-coordination-digest",
+      "integration_branch": "main-integration",
+      "meta": {},
       "publication": {
         "enabled": true
       },
-      "meta": {}
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
