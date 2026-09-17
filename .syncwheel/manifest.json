@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -31,16 +31,42 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "mgt-0287-sw2-dirty-path"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "mgt-0287-sw2-dirty-path",
+      "branch": "pr/mgt-0287-sw2-dirty-path",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "ecb8b3eae8900dfd5549e2178861c75e64efde99",
+        "166fc6a6d766228ee8aeb3e6ff7ff651103ff10e",
+        "280dd2646929e8d8e4532be5dea6e989347d1804",
+        "b28c00149223230fb6e474d28cb38f01ad931b5d",
+        "20942dfb36dc4096a3059803161cf4e8f5b0e017",
+        "e7e1b933cc5f070a9b9a6f42e2755a09a8b3adeb",
+        "6f6d2c20e9cbb2b5c98a04881c2fb2c08e01e83a",
+        "2c3641e311b145284edf8d65f66db61d83c7c490"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
