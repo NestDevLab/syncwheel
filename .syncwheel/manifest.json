@@ -65,7 +65,17 @@
       "publication": {
         "enabled": true
       },
-      "meta": {}
+      "meta": {},
+      "integration_commits": [
+        "aa21fb50e6d7981184efd998a1002d712ca66ed4",
+        "0ce175c3e56e264e17507d0a0c3328331933396f",
+        "57e2de42c7ae4d8203d5f341201c83f73aefc8c2",
+        "f5759065c5dfc41eedaaac2490fba504b67dc0f0",
+        "6e30babfa9a204bd65bdf46cf700eab050d754d7",
+        "b7f4851be0396003481718c3d930ae6c60c67b5a",
+        "991c0733695a75e797ea4f582545c88eecb93e12",
+        "8ea9404def6c8962664dc7050d0175234a0fd647"
+      ]
     },
     {
       "id": "historical-coordination-digest",
