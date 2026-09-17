@@ -1,10 +1,8 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/historical-coordination-digest-04313": "b6d8d2fed2527936aa40ab13246873955b57bd9f"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "502f9e071f15857a0f2cff99ce937f7b046fad5c",
-    "refs/heads/pr/historical-coordination-digest-04313": "17bc4010e2f54c988cb96d2a4f7e52483cd24872",
+    "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
@@ -18,7 +16,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-17T13:04:49+00:00",
+  "created_at": "2026-09-17T13:24:36+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -86,9 +84,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "historical-coordination-digest-04313"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -96,31 +92,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/historical-coordination-digest-04313",
-        "commits": [
-          "416e5bddf302563091dce85848ae3f16b266b7b5",
-          "b6d8d2fed2527936aa40ab13246873955b57bd9f"
-        ],
-        "id": "historical-coordination-digest-04313",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "9e20d345-16c8-46e5-b609-8f21c372ff84",
-  "parent_state": "e8c68ba55791eb8d228919418ce3a59e5685272d",
+  "operation_token": "1c6348a8-0a86-4405-b9cf-e4ff6907bc84",
+  "parent_state": "3922b29a23230a118135d3bf30a5a5dd3056fcff",
   "projection_status": "partial",
-  "publication_id": "3dbedc29-e9d0-4688-8279-a61aee499b30",
-  "publication_scope": "stack:historical-coordination-digest-04313",
+  "publication_id": "fe220f75-6321-4a77-b1ac-1d034f666b35",
+  "publication_scope": "close:historical-coordination-digest-04313",
   "schema_version": 2,
   "syncwheel_version": "0.43.13",
   "tombstones": [
@@ -411,6 +391,14 @@
       "ref": "refs/heads/pr/historical-coordination-digest-governed",
       "remote_tip": null,
       "stack": "historical-coordination-digest"
+    },
+    {
+      "branch": "pr/historical-coordination-digest-04313",
+      "closed_at": "2026-09-17T13:24:32+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/historical-coordination-digest-04313",
+      "remote_tip": null,
+      "stack": "historical-coordination-digest-04313"
     }
   ]
 }
