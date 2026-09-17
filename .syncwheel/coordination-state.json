@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "36992a33467d2038df7828f012976deec0557c0b"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "fea966ab03e00ce60e7788907062f9f7395a4b00",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -12,14 +10,14 @@
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "3508004b3efcf5e0a3b3d2b5b98a48510b9abcd0",
-    "refs/heads/pr/patch-id-cache-04314": "1de2d687a9cd9c6b3432400d48d8c37dc2be46f6",
+    "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-17T15:27:41+00:00",
+  "created_at": "2026-09-17T15:35:19+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -88,9 +86,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "patch-id-cache-04314"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -98,34 +94,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/patch-id-cache-04314",
-        "commits": [
-          "d1d53d32f19a6fd3fda055e3c58fbbff4eb344d4",
-          "71027c808525a77af2bfaef0de0214e7361237b5",
-          "d373ee10dc92825856bd4f6e44f88023587a9930",
-          "58ba8d1745f9f0d643a96d06ce2825ea635a9967",
-          "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
-        ],
-        "id": "patch-id-cache-04314",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "686b2963ac2ec5a9a7719b7f136d5a7f8999061a9ae0b2148d2eff06881353ac",
-  "operation_token": "cc7b0e7a-43c9-4e7d-a05f-2c308bf65cfe",
-  "parent_state": "d21fae4350622313cc19bac4771814165248bb3e",
+  "operation_token": "b56b410d-7f69-4d40-a347-8f9e53e4d69e",
+  "parent_state": "53580358f88015cb7d5d52766076ef47a03a7294",
   "projection_status": "partial",
-  "publication_id": "bc850651-614a-4292-8605-29241ad605ab",
-  "publication_scope": "integration",
+  "publication_id": "6dd5eb0c-13d5-4409-bf68-9bcb327dc514",
+  "publication_scope": "close:patch-id-cache-04314",
   "schema_version": 2,
   "syncwheel_version": "0.43.13",
   "tombstones": [
@@ -424,6 +401,14 @@
       "ref": "refs/heads/pr/historical-coordination-digest-04313",
       "remote_tip": null,
       "stack": "historical-coordination-digest-04313"
+    },
+    {
+      "branch": "pr/patch-id-cache-04314",
+      "closed_at": "2026-09-17T15:35:15+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/patch-id-cache-04314",
+      "remote_tip": null,
+      "stack": "patch-id-cache-04314"
     }
   ]
 }
