@@ -1039,6 +1039,128 @@ with module.coordination_publication_lock(Path(repo_path)):
             'control_digest': control_digest,
         }
 
+    def _healed_historical_orphan(self, name):
+        fixture = self.prepare_orphaned_digest_state(name)
+        module = fixture['module']
+        repo = fixture['repo']
+        # Model a historical publishing state whose digest was orphaned by a
+        # later control-manifest change. The earlier repair state alone has
+        # no changed_refs and would never exercise the publishing-state walk.
+        orphaned = dict(fixture['orphaned_state'])
+        orphaned['parent_state'] = fixture['orphaned_tip']
+        orphaned['changed_refs'] = {fixture['ref']: fixture['observed']}
+        orphaned.pop('repair_evidence', None)
+        publisher_tip = module.create_coordination_state_commit(
+            repo, orphaned, fixture['orphaned_tip']
+        )
+        self.git(
+            repo, 'push', '-q', 'origin',
+            f'{publisher_tip}:refs/heads/syncwheel/state/default',
+        )
+        fixture['publisher_tip'] = publisher_tip
+        plan, _ = module.coordination_repair_plan(
+            repo, fixture['manifest'], fixture['ref'],
+            module.COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
+        )
+        module.apply_coordination_repair_plan(repo, fixture['manifest'], plan)
+        _, current = self.remote_state(fixture['origin'])
+        self.assertEqual(
+            module.verify_coordination_state_manifest_digest(
+                repo, current, 'origin'
+            )['form'],
+            module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+        )
+        current_tip, _ = self.remote_state(fixture['origin'])
+        observation = {
+            'state_tip': current_tip,
+            'integration_ref': fixture['ref'],
+            'config': {'id': current['coordination_id'], 'remote': 'origin'},
+        }
+        return fixture, observation
+
+    def test_valid_older_publisher_survives_irrelevant_orphaned_state(self):
+        fixture, observation = self._healed_historical_orphan(
+            'historical-valid-witness'
+        )
+        before_refs = self.git(fixture['repo'], 'ls-remote', 'origin').stdout
+        witness = fixture['module'].integration_reconciliation_published_witness(
+            fixture['repo'], fixture['manifest'], fixture['recorded'],
+            observation,
+        )
+        self.assertIsNotNone(witness)
+        self.assertEqual(witness['changed_refs'][fixture['ref']], fixture['recorded'])
+        self.assertEqual(self.git(fixture['repo'], 'ls-remote', 'origin').stdout, before_refs)
+
+    def test_orphaned_publisher_cannot_be_the_only_witness(self):
+        fixture, observation = self._healed_historical_orphan(
+            'historical-orphan-only'
+        )
+        witness = fixture['module'].integration_reconciliation_published_witness(
+            fixture['repo'], fixture['manifest'], fixture['observed'],
+            observation,
+        )
+        self.assertIsNone(witness)
+        with self.assertRaisesRegex(
+            fixture['module'].SyncwheelError,
+            f'unclassified history {fixture["observed"]}',
+        ):
+            fixture['module'].integration_reconciliation_history(
+                fixture['repo'], fixture['manifest'], fixture['observed'], [],
+                observation=observation,
+            )
+
+    def test_current_orphaned_digest_still_blocks_publisher_scan(self):
+        fixture = self.prepare_orphaned_digest_state('current-orphan-publisher')
+        observation = {
+            'state_tip': fixture['orphaned_tip'],
+            'integration_ref': fixture['ref'],
+            'config': {'id': 'default', 'remote': 'origin'},
+        }
+        with self.assertRaisesRegex(
+            fixture['module'].SyncwheelError,
+            'manifest_digest does not match the control manifest',
+        ):
+            fixture['module'].integration_reconciliation_published_witness(
+                fixture['repo'], fixture['manifest'], fixture['recorded'], observation,
+            )
+
+    def test_historical_publisher_with_unreadable_tip_still_blocks_scan(self):
+        fixture, observation = self._healed_historical_orphan(
+            'historical-unreadable-tip'
+        )
+        module = fixture['module']
+        original = module.coordination_state_control_manifest
+
+        def unreadable(repo_root, state, remote):
+            if state.get('changed_refs', {}).get(fixture['ref']) == fixture['observed']:
+                raise module.SyncwheelError('coordination state integration tip object is unavailable')
+            return original(repo_root, state, remote)
+
+        with mock.patch.object(module, 'coordination_state_control_manifest', side_effect=unreadable):
+            with self.assertRaisesRegex(module.SyncwheelError, 'tip object is unavailable'):
+                module.integration_reconciliation_published_witness(
+                    fixture['repo'], fixture['manifest'], fixture['recorded'], observation,
+                )
+
+    def test_broken_historical_state_chain_still_blocks_scan(self):
+        fixture, observation = self._healed_historical_orphan(
+            'historical-broken-chain'
+        )
+        module = fixture['module']
+        original = module.coordination_state_from_commit
+
+        def broken(repo_root, tip, coordination_id):
+            state = original(repo_root, tip, coordination_id)
+            if tip == fixture['publisher_tip']:
+                state = {**state, 'parent_state': None}
+            return state
+
+        with mock.patch.object(module, 'coordination_state_from_commit', side_effect=broken):
+            with self.assertRaisesRegex(module.SyncwheelError, 'historical state chain is invalid'):
+                module.integration_reconciliation_published_witness(
+                    fixture['repo'], fixture['manifest'], fixture['recorded'], observation,
+                )
+
     def prepare_additive_compose(self, name='additive-compose', plan=True):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)

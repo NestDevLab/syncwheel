@@ -5961,15 +5961,28 @@ def integration_reconciliation_publishing_states(repo_root, observation):
     current = observation['state_tip']
     ref = observation['integration_ref']
     config = observation['config']
+    current_head = current
     while current:
         state = coordination_state_from_commit(repo_root, current, config['id'])
         parents = git(repo_root, 'show', '-s', '--format=%P', current).stdout.split()
         parent = state.get('parent_state')
         if parents != ([parent] if parent else []):
             raise SyncwheelError('integration reconciliation historical state chain is invalid')
-        if (state.get('changed_refs') or {}).get(ref):
+        if current == current_head:
+            # The observed head is the present authority, even when it did
+            # not publish the integration ref in this operation.
             verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
-            yield state
+        if (state.get('changed_refs') or {}).get(ref):
+            classification = coordination_state_manifest_digest_classification(
+                repo_root, state, config['remote']
+            )
+            if classification['form'] == COORDINATION_STATE_DIGEST_FORM_ORPHANED:
+                print(
+                    f'WARNING: ignoring orphaned historical coordination publisher {current}',
+                    file=sys.stderr,
+                )
+            else:
+                yield state
         current = parent
 
 
