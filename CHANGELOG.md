@@ -5,6 +5,9 @@
 - Ignore orphaned historical coordination publishers as reconciliation evidence
   while keeping the current state, broken chains, and unreadable integration
   tips fail-closed. Report each skipped state ID.
+- Reconcile published integration history after squash delivery when both the
+  published and local final product trees exactly match the delivery base;
+  retain the current state and ref leases and reject unowned ignore rules.
 
 ## 0.43.12 - 2026-09-16
 

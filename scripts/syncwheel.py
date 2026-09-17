@@ -6080,11 +6080,61 @@ def integration_reconciliation_provenance(manifest, store, shared):
     return before, after_store, apply_derived_provenance_overrides(shared, after_store)
 
 
+def published_integration_has_no_unique_product(repo_root, manifest, tip, observation, delivery_tip):
+    """Prove a published integration's final product bytes are already delivered.
+
+    A squash merge can leave historical commits unreachable from main even when
+    none of their product content remains unique.  This proof covers the final
+    trees only; the current coordination state and ref leases are checked by
+    the reconciliation caller before and after materialization.
+    """
+    if not observation or observation.get('status') != 'current' or not delivery_tip:
+        return False
+    published_tip = observation.get('published_tip')
+    if not published_tip or not branch_contains(repo_root, tip, published_tip):
+        return False
+    control_paths = {'.syncwheel/manifest.json', '.gitignore'}
+    for candidate in (published_tip, tip):
+        if set(integration_tree_changed_paths(repo_root, candidate, delivery_tip)) - control_paths:
+            return False
+    source_ignore = tree_path_entry(repo_root, delivery_tip, '.gitignore')
+    root = syncwheel_worktree_root(manifest)
+    for candidate in (published_tip, tip):
+        candidate_ignore = tree_path_entry(repo_root, candidate, '.gitignore')
+        if candidate_ignore == source_ignore:
+            continue
+        if not source_ignore or not candidate_ignore or (
+            source_ignore['mode'] != '100644' or candidate_ignore['mode'] != '100644'
+        ):
+            return False
+        try:
+            source_text = tree_path_bytes(repo_root, source_ignore).decode('utf-8')
+            candidate_text = tree_path_bytes(repo_root, candidate_ignore).decode('utf-8')
+        except UnicodeDecodeError:
+            return False
+        candidate_split = split_syncwheel_managed_gitignore(candidate_text, root)
+        if not candidate_split or candidate_split['managed'] is None:
+            return False
+        source_split = split_syncwheel_managed_gitignore(source_text, root)
+        if source_split:
+            if source_split['unmanaged'] != candidate_split['unmanaged']:
+                return False
+        elif candidate_text.replace('.syncwheel/manifests/*.local-ledger/\n', '', 1) != source_text:
+            # main still carries the immediately preceding managed-block form.
+            # Do not discard any other line, including user-owned ignore rules.
+            return False
+    return True
+
+
 def integration_reconciliation_history(
     repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
-    detached_replay=False,
+    detached_replay=False, delivery_tip=None,
 ):
     """Refuse unexplained history before constructing a successor transaction."""
+    if not detached_replay and published_integration_has_no_unique_product(
+        repo_root, manifest, tip, observation, delivery_tip,
+    ):
+        return
     base = manifest['integration']['base']
     declared = {
         commit_full_sha(repo_root, commit)
@@ -6362,7 +6412,8 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
             repo_root, manifest, ref_tree(repo_root, replay_tip),
             gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
         )
-        integration_reconciliation_history(repo_root, manifest, local_tip, provenance, manifest_path, observed)
+        integration_reconciliation_history(repo_root, manifest, local_tip, provenance, manifest_path,
+                                           observed, delivery_tip=inputs['refs'][0]['tip'])
         integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
                                            detached_replay=True)
         final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)

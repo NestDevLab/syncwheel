@@ -6672,6 +6672,71 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'repeat merge stacks'))
         self.assertEqual(module.ref_tip(repo, manifest['integration']['branch']), final)
 
+    def test_squashed_published_history_requires_exact_final_product_and_ignore_bytes(self):
+        origin = self.create_remote('squashed-history-proof')
+        repo = self.clone(origin, 'squashed-history-proof')
+        module = self.load_module()
+        base = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        patterns = module.syncwheel_gitignore_patterns('.syncwheel/wt')
+        local_ledger = '.syncwheel/manifests/*.local-ledger/'
+        self.assertIn(local_ledger, patterns)
+
+        def ignore_text(selected):
+            return ('# syncwheel managed metadata\n'
+                    + '\n'.join(selected)
+                    + '\n# end syncwheel managed metadata\n')
+
+        self.git(repo, 'switch', '-q', '-c', 'integration/shared', base)
+        (repo / 'README.md').write_text('delivered product\n')
+        (repo / '.gitignore').write_text(ignore_text(patterns))
+        self.git(repo, 'add', 'README.md', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: historical integration product')
+        published_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'README.md').write_text('delivered product\n')
+        (repo / '.gitignore').write_text(ignore_text(
+            [pattern for pattern in patterns if pattern != local_ledger]
+        ))
+        self.git(repo, 'add', 'README.md', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: squash delivered product')
+        delivery_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        observation = {'status': 'current', 'published_tip': published_tip}
+        manifest = {
+            'syncwheel_worktree_root': '.syncwheel/wt',
+            'integration': {'base': delivery_tip},
+            'stacks': [],
+        }
+
+        self.assertTrue(module.published_integration_has_no_unique_product(
+            repo, manifest, published_tip, observation, delivery_tip,
+        ))
+        module.integration_reconciliation_history(
+            repo, manifest, published_tip, {}, observation=observation,
+            delivery_tip=delivery_tip,
+        )
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        (repo / 'unmapped.txt').write_text('unique product\n')
+        self.git(repo, 'add', 'unmapped.txt')
+        self.git(repo, 'commit', '-q', '-m', 'test: unique product')
+        self.assertFalse(module.published_integration_has_no_unique_product(
+            repo, manifest, self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+            observation, delivery_tip,
+        ))
+        with self.assertRaisesRegex(module.SyncwheelError, 'unexplained product paths'):
+            module.integration_reconciliation_history(
+                repo, manifest, self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+                {}, observation=None, delivery_tip=delivery_tip,
+            )
+        self.git(repo, 'reset', '-q', '--hard', published_tip)
+        (repo / '.gitignore').write_text('user-owned-ignore\n' + ignore_text(patterns))
+        self.git(repo, 'add', '.gitignore')
+        self.git(repo, 'commit', '-q', '-m', 'test: user ignore rule')
+        self.assertFalse(module.published_integration_has_no_unique_product(
+            repo, manifest, self.git(repo, 'rev-parse', 'HEAD').stdout.strip(),
+            observation, delivery_tip,
+        ))
+
     def test_ancestry_reconciliation_rejects_a_replay_proof_for_different_product_bytes(self):
         repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-invalid-proof')
         self.assertTrue(module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'proof'))
