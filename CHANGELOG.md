@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.43.14 - 2026-09-17
+
+- Cache stable patch IDs by immutable commit and Git diff semantics in the
+  shared Git directory; batch uncached commits through one streaming log and
+  patch-id pipeline. Verify cached rows, recompute when the cache is damaged
+  or unwritable, and invalidate on replacement refs or shallow history changes.
+- Preserve a witnessed, squash-delivered integration prefix when a later
+  unmerged stack adds new product changes; continue rejecting unowned changes
+  after that prefix.
+
 ## 0.43.13 - 2026-09-17
 
 - Ignore orphaned historical coordination publishers as reconciliation evidence
