@@ -1,10 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/pr/historical-coordination-digest-governed": "d878a6b68898a67c618db2406f9ae7fba3f7dcb0"
+    "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d"
   },
   "claims": {
     "refs/heads/main-integration": "5c39280577b36af4a24b828d880920b023a0146e",
-    "refs/heads/pr/historical-coordination-digest-governed": "b6a7ffe1b25c3e398dfcd0f1bd61e97c83b6e26e",
+    "refs/heads/pr/historical-coordination-digest-governed": "e47db17c7300ec2958bee7bcb07db6d1c324ca5d",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
@@ -17,7 +17,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-17T08:02:40+00:00",
+  "created_at": "2026-09-17T08:19:19+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -31,7 +31,7 @@
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
-    "refs/heads/pr/historical-coordination-digest-governed": "d878a6b68898a67c618db2406f9ae7fba3f7dcb0",
+    "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
@@ -125,7 +125,8 @@
         },
         "branch": "pr/historical-coordination-digest-governed",
         "commits": [
-          "d878a6b68898a67c618db2406f9ae7fba3f7dcb0"
+          "d878a6b68898a67c618db2406f9ae7fba3f7dcb0",
+          "8128d73c0d9b0e590b7c874266dff2cb068d384d"
         ],
         "id": "historical-coordination-digest",
         "integration_branch": "main-integration",
@@ -135,11 +136,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "94b8893c-f489-4d77-94f7-34d839ca75a4",
-  "parent_state": "ec77cd0aa92a742ac3a48e04e6147b5ebd9ae0b3",
+  "operation_token": "a4e82dbd-0c5c-446b-935c-73bfae07e49e",
+  "parent_state": "c1981ac02773e3ee77a04d14e4b9bead88cae4d7",
   "projection_status": "partial",
-  "publication_id": "f9b79d1c-918e-4c33-b573-52c03d4939db",
-  "publication_scope": "compose-stack:historical-coordination-digest",
+  "publication_id": "043b7db5-13a8-4a8f-af65-e9e8bac42698",
+  "publication_scope": "partial",
   "schema_version": 2,
   "syncwheel_version": "0.43.11",
   "tombstones": [
