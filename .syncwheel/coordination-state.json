@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
+    "refs/heads/main-integration": "36992a33467d2038df7828f012976deec0557c0b"
   },
   "claims": {
-    "refs/heads/main-integration": "2e5bac01b1017e485c92d4b588cbc81b9ca350e4",
+    "refs/heads/main-integration": "fea966ab03e00ce60e7788907062f9f7395a4b00",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
@@ -19,11 +19,11 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-17T15:23:29+00:00",
+  "created_at": "2026-09-17T15:27:41+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "99a329bd83195e913374fd6b22e44548db9c1d59",
+    "refs/heads/main-integration": "36992a33467d2038df7828f012976deec0557c0b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -120,12 +120,12 @@
     ],
     "version": 2
   },
-  "manifest_digest": "1e16c6e5394b799083c5701af0660eea06b81bd21ea4b3984fe6cdd4abc3967b",
-  "operation_token": "decb8812-3e13-4b65-bf09-9528d2a539c6",
-  "parent_state": "695f08107eeace9eac530cd24ddbe191ccb454d3",
+  "manifest_digest": "686b2963ac2ec5a9a7719b7f136d5a7f8999061a9ae0b2148d2eff06881353ac",
+  "operation_token": "cc7b0e7a-43c9-4e7d-a05f-2c308bf65cfe",
+  "parent_state": "d21fae4350622313cc19bac4771814165248bb3e",
   "projection_status": "partial",
-  "publication_id": "c49de441-08aa-400e-9d36-e75f64543feb",
-  "publication_scope": "stack:patch-id-cache-04314",
+  "publication_id": "bc850651-614a-4292-8605-29241ad605ab",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.43.13",
   "tombstones": [
