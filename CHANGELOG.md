@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.13 - 2026-09-17
+
+- Ignore orphaned historical coordination publishers as reconciliation evidence
+  while keeping the current state, broken chains, and unreadable integration
+  tips fail-closed. Report each skipped state ID.
+
 ## 0.43.12 - 2026-09-16
 
 - Preserve unchanged unrelated dirty paths while revisioning exact declared
