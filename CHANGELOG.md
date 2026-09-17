@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.43.12 - 2026-09-16
+
+- Preserve unchanged unrelated dirty paths while revisioning exact declared
+  paths, including no-delta and manifest recovery, without weakening index,
+  owned-file hash, or managed-ref lease checks.
+- Scope stack metadata, publication, and absorb preflights to their owned
+  paths; keep integration rebuilds guarded and reject dirty absorb targets.
+
 ## 0.43.11 - 2026-09-16
 
 - Arm newly installed journal timers on the first interval, report whether an
