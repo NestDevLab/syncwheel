@@ -103,15 +103,69 @@ class PatchIdCacheTest(unittest.TestCase):
         syncwheel.patch_id_semantics_key.cache_clear()  # Models a new CLI invocation.
         self.assertNotEqual(before, syncwheel.patch_id_semantics_key(self.repo))
 
+    def test_replace_ref_invalidates_namespace(self):
+        target = self.commits[1]
+        before = syncwheel.commit_patch_id(self.repo, target)
+        semantics_before = syncwheel.patch_id_semantics_key(self.repo)
+        self.git('replace', target, self.commits[4])
+        syncwheel.patch_id_semantics_key.cache_clear()  # Models a new CLI invocation.
+        self.assertNotEqual(semantics_before, syncwheel.patch_id_semantics_key(self.repo))
+        expected = self.legacy(target)
+        self.assertNotEqual(before, expected)
+        self.assertEqual(expected, syncwheel.commit_patch_id(self.repo, target))
+
+    def test_deepening_shallow_clone_invalidates_namespace(self):
+        shallow = Path(self.temp.name) / 'shallow'
+        subprocess.run(['git', 'clone', '-q', '--depth=2', self.repo.as_uri(), str(shallow)],
+                       check=True)
+        boundary = subprocess.check_output(['git', 'rev-parse', 'HEAD^'],
+                                           cwd=shallow, text=True).strip()
+        self.assertIsNone(syncwheel.commit_patch_id(shallow, boundary))
+        before = syncwheel.patch_id_semantics_key(shallow)
+        subprocess.run(['git', 'fetch', '-q', '--deepen=1'], cwd=shallow, check=True)
+        syncwheel.patch_id_semantics_key.cache_clear()  # Models a new CLI invocation.
+        self.assertNotEqual(before, syncwheel.patch_id_semantics_key(shallow))
+        shown = subprocess.check_output(['git', 'show', '--format=', boundary], cwd=shallow,
+                                        text=True)
+        expected = subprocess.check_output(['git', 'patch-id', '--stable'], input=shown,
+                                           text=True).split()[0]
+        self.assertEqual(expected, syncwheel.commit_patch_id(shallow, boundary))
+
     def test_corrupt_entry_and_database_recompute(self):
         syncwheel.commit_patch_ids(self.repo, self.commits)
-        path = syncwheel.git_common_dir(self.repo) / 'syncwheel' / 'patch-ids-v1.sqlite3'
+        path = syncwheel.git_common_dir(self.repo) / 'syncwheel' / 'patch-ids-v2.sqlite3'
         with sqlite3.connect(path) as connection:
             connection.execute('UPDATE patch_ids SET patch_id=? WHERE commit_sha=?',
-                               ('corrupt', self.commits[1]))
+                             ('corrupt', self.commits[1]))
+        self.assertEqual(self.legacy(self.commits[1]), syncwheel.commit_patch_id(self.repo, self.commits[1]))
+        with sqlite3.connect(path) as connection:
+            connection.execute('UPDATE patch_ids SET patch_id=? WHERE commit_sha=?',
+                               ('f' * 40, self.commits[1]))
+        self.assertNotEqual('f' * 40, self.legacy(self.commits[1]))
         self.assertEqual(self.legacy(self.commits[1]), syncwheel.commit_patch_id(self.repo, self.commits[1]))
         path.write_bytes(b'corrupt database')
         self.assertEqual(self.legacy(self.commits[2]), syncwheel.commit_patch_id(self.repo, self.commits[2]))
+
+    def test_read_only_git_directory_uses_uncached_batch(self):
+        if os.geteuid() == 0:
+            self.skipTest('root can write through read-only directory permissions')
+        expected = {commit: self.legacy(commit) for commit in self.commits}
+        git_dir = self.repo / '.git'
+        original_mode = git_dir.stat().st_mode
+        try:
+            git_dir.chmod(0o500)
+            self.assertEqual(expected, syncwheel.commit_patch_ids(self.repo, self.commits))
+        finally:
+            git_dir.chmod(original_mode)
+        self.assertFalse((git_dir / 'syncwheel').exists())
+
+    def test_ambient_git_dir_does_not_redirect_batch(self):
+        foreign = Path(self.temp.name) / 'foreign'
+        subprocess.run(['git', 'init', '-q', str(foreign)], check=True)
+        expected = self.legacy(self.commits[1])
+        with mock.patch.dict(os.environ, {'GIT_DIR': str(foreign / '.git')}):
+            syncwheel.patch_id_semantics_key.cache_clear()
+            self.assertEqual(expected, syncwheel.commit_patch_id(self.repo, self.commits[1]))
 
     def test_concurrent_writers_share_common_git_directory(self):
         other = Path(self.temp.name) / 'other'

@@ -4,7 +4,8 @@
 
 - Cache stable patch IDs by immutable commit and Git diff semantics in the
   shared Git directory; batch uncached commits through one streaming log and
-  patch-id pipeline, and recompute damaged cache entries safely.
+  patch-id pipeline. Verify cached rows, recompute when the cache is damaged
+  or unwritable, and invalidate on replacement refs or shallow history changes.
 
 ## 0.43.13 - 2026-09-17
 

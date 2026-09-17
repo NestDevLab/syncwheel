@@ -2334,6 +2334,10 @@ def patch_id_semantics_key(repo_root):
     digest = hashlib.sha256(b'stable:git-log-p:no-walk:no-merges:v1\0')
     digest.update(config.encode('utf-8', 'surrogateescape'))
     digest.update(git(repo_root, '--version').stdout.encode())
+    # Replace refs and grafts can change a commit's effective parents or diff
+    # without changing its object ID.
+    digest.update(git(repo_root, 'for-each-ref',
+                      '--format=%(refname) %(objectname)', 'refs/replace/').stdout.encode())
     # Legacy git patch-id inherits the CLI's cwd, which can select a different
     # object format from the target repository (notably SHA-1 versus SHA-256).
     digest.update(run(['git', 'rev-parse', '--show-object-format'], cwd=Path.cwd(),
@@ -2343,7 +2347,9 @@ def patch_id_semantics_key(repo_root):
         if key.startswith('GIT_'):
             digest.update(key.encode() + b'=' + value.encode('utf-8', 'surrogateescape') + b'\0')
     common_dir = git_common_dir(repo_root)
-    attributes = [('info/attributes', common_dir / 'info' / 'attributes')]
+    attributes = [('info/attributes', common_dir / 'info' / 'attributes'),
+                  ('info/grafts', common_dir / 'info' / 'grafts'),
+                  ('shallow', common_dir / 'shallow')]
     tracked = git(repo_root, 'ls-files', '-z', '--cached', '--others',
                   '--', '.gitattributes', '**/.gitattributes').stdout
     attributes.extend((name, Path(repo_root) / name) for name in tracked.split('\0') if name)
@@ -2366,13 +2372,23 @@ def patch_id_semantics_key(repo_root):
 
 
 def patch_id_cache_connection(repo_root):
-    path = git_common_dir(repo_root) / 'syncwheel' / 'patch-ids-v1.sqlite3'
+    path = git_common_dir(repo_root) / 'syncwheel' / 'patch-ids-v2.sqlite3'
     path.parent.mkdir(parents=True, exist_ok=True)
     connection = sqlite3.connect(path, timeout=30)
     connection.execute('CREATE TABLE IF NOT EXISTS patch_ids ('
                        'semantics TEXT NOT NULL, commit_sha TEXT NOT NULL, '
-                       'patch_id TEXT, PRIMARY KEY (semantics, commit_sha))')
+                       'patch_id TEXT, row_digest TEXT NOT NULL, '
+                       'PRIMARY KEY (semantics, commit_sha))')
     return connection
+
+
+def patch_id_row_digest(semantics, commit, patch_id):
+    digest = hashlib.sha256(b'patch-id-row-v2\0')
+    for value in (semantics, commit, patch_id):
+        encoded = value.encode() if value is not None else b''
+        digest.update((len(encoded) if value is not None else -1).to_bytes(8, 'big', signed=True))
+        digest.update(encoded)
+    return digest.hexdigest()
 
 
 def batch_uncached_patch_ids(repo_root, commits):
@@ -2401,11 +2417,11 @@ def batch_uncached_patch_ids(repo_root, commits):
         log = subprocess.Popen(
             ['git', 'log', '-p', '--no-walk=unsorted', '--no-merges', '--format=medium', '--stdin'],
             cwd=repo_root, stdin=revisions, stdout=subprocess.PIPE, stderr=log_errors,
-            text=True,
+            text=True, env=managed_process_env(),
         )
         patch = subprocess.Popen(
             ['git', 'patch-id', '--stable'], stdin=log.stdout, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True,
+            stderr=subprocess.PIPE, text=True, env=managed_process_env(),
         )
         log.stdout.close()
         patch_stdout, patch_stderr = patch.communicate()
@@ -2434,21 +2450,23 @@ def commit_patch_ids(repo_root, commits):
         with contextlib.closing(patch_id_cache_connection(repo_root)) as connection, connection:
             for commit in commits:
                 row = connection.execute(
-                    'SELECT patch_id FROM patch_ids WHERE semantics=? AND commit_sha=?',
+                    'SELECT patch_id, row_digest FROM patch_ids WHERE semantics=? AND commit_sha=?',
                     (semantics, commit),
                 ).fetchone()
-                if row and (row[0] is None or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0])):
+                if (row and (row[0] is None or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0]))
+                        and row[1] == patch_id_row_digest(semantics, commit, row[0])):
                     found[commit] = row[0]
             missing = [commit for commit in commits if commit not in found]
             if missing:
                 computed = batch_uncached_patch_ids(repo_root, missing)
                 connection.executemany(
-                    'INSERT OR REPLACE INTO patch_ids VALUES (?, ?, ?)',
-                    [(semantics, commit, computed[commit]) for commit in missing],
+                    'INSERT OR REPLACE INTO patch_ids VALUES (?, ?, ?, ?)',
+                    [(semantics, commit, computed[commit],
+                      patch_id_row_digest(semantics, commit, computed[commit])) for commit in missing],
                 )
                 found.update(computed)
-    except sqlite3.DatabaseError:
-        # A damaged cache is never authoritative; recompute without relying on it.
+    except (sqlite3.DatabaseError, OSError):
+        # A damaged or unwritable cache is never authoritative; recompute without it.
         return batch_uncached_patch_ids(repo_root, commits)
     return found
 
