@@ -1,11 +1,12 @@
 {
   "changed_refs": [
-    "refs/heads/main-integration"
+    "refs/heads/main-integration",
+    "refs/heads/pr/patch-id-cache-04314"
   ],
-  "claimed_at": "2026-09-17T13:32:26+00:00",
+  "claimed_at": "2026-09-17T13:55:42+00:00",
   "coordination_id": "default",
-  "operation_token": "13f0debf-1c0f-4c3d-ba74-36abcae94fa3",
-  "publication_scope": "integration",
+  "operation_token": "a34e1f3b-5cc5-4655-bb97-200063497af2",
+  "publication_scope": "stack:patch-id-cache-04314",
   "source_ref": "refs/heads/main-integration",
-  "syncwheel_version": "0.43.13"
+  "syncwheel_version": "0.43.14"
 }
