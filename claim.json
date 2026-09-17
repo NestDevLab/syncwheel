@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/historical-coordination-digest-04313"
-  ],
-  "claimed_at": "2026-09-17T13:04:49+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-17T13:24:36+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "9e20d345-16c8-46e5-b609-8f21c372ff84",
-  "publication_scope": "stack:historical-coordination-digest-04313",
+  "operation_token": "1c6348a8-0a86-4405-b9cf-e4ff6907bc84",
+  "publication_scope": "close:historical-coordination-digest-04313",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/historical-coordination-digest-04313",
   "syncwheel_version": "0.43.13"
 }
