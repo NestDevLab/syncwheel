@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/historical-coordination-digest-04313"
+  ],
+  "claimed_at": "2026-09-17T11:06:28+00:00",
+  "coordination_id": "default",
+  "operation_token": "f05364ec-4529-413f-a408-e5f625ec6e6b",
+  "publication_scope": "stack:historical-coordination-digest-04313",
+  "source_ref": "refs/heads/pr/historical-coordination-digest-04313",
+  "syncwheel_version": "0.43.12"
+}
