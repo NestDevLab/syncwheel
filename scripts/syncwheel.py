@@ -6272,6 +6272,25 @@ def published_integration_has_no_unique_product(repo_root, manifest, tip, observ
     return True
 
 
+def historically_delivered_integration_boundary(repo_root, manifest, tip, observation, delivery_tip):
+    """Find a witnessed integration prefix whose final product is on main."""
+    if not observation or observation.get('status') != 'current' or not delivery_tip:
+        return None
+    integration_ref = observation.get('integration_ref')
+    if not integration_ref:
+        return None
+    for state in integration_reconciliation_publishing_states(repo_root, observation):
+        candidate = (state.get('changed_refs') or {}).get(integration_ref)
+        if not candidate or not branch_contains(repo_root, tip, candidate):
+            continue
+        if published_integration_has_no_unique_product(
+            repo_root, manifest, candidate,
+            {'status': 'current', 'published_tip': candidate}, delivery_tip,
+        ):
+            return candidate
+    return None
+
+
 def integration_reconciliation_history(
     repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
     detached_replay=False, delivery_tip=None,
@@ -6282,6 +6301,11 @@ def integration_reconciliation_history(
     ):
         return
     base = manifest['integration']['base']
+    history_base = base
+    if not detached_replay:
+        history_base = historically_delivered_integration_boundary(
+            repo_root, manifest, tip, observation, delivery_tip,
+        ) or base
     declared = {
         commit_full_sha(repo_root, commit)
         for stack in manifest['stacks']
@@ -6290,7 +6314,7 @@ def integration_reconciliation_history(
     patches = {commit_patch_id(repo_root, commit) for commit in declared}
     patches.discard(None)
     patches.update(patch_ids_reachable_from_ref(repo_root, base))
-    history = rev_list(repo_root, f'{base}..{tip}')
+    history = rev_list(repo_root, f'{history_base}..{tip}')
     proofs = {commit: proof for commit in history
               if commit_parent_count(repo_root, commit) > 1
               and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}
