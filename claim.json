@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/historical-coordination-digest-governed"
-  ],
-  "claimed_at": "2026-09-17T08:19:19+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-17T10:57:47+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "a4e82dbd-0c5c-446b-935c-73bfae07e49e",
-  "publication_scope": "partial",
+  "operation_token": "a1e1b1b9-d304-4f0d-8c6e-996982f25519",
+  "publication_scope": "close:historical-coordination-digest",
+  "reason": "superseded",
   "source_ref": "refs/heads/pr/historical-coordination-digest-governed",
   "syncwheel_version": "0.43.11"
 }
