@@ -143,6 +143,10 @@ class PatchIdCacheTest(unittest.TestCase):
                                ('f' * 40, self.commits[1]))
         self.assertNotEqual('f' * 40, self.legacy(self.commits[1]))
         self.assertEqual(self.legacy(self.commits[1]), syncwheel.commit_patch_id(self.repo, self.commits[1]))
+        with sqlite3.connect(path) as connection:
+            connection.execute('UPDATE patch_ids SET patch_id=? WHERE commit_sha=?',
+                               (sqlite3.Binary(b'bad patch id'), self.commits[1]))
+        self.assertEqual(self.legacy(self.commits[1]), syncwheel.commit_patch_id(self.repo, self.commits[1]))
         path.write_bytes(b'corrupt database')
         self.assertEqual(self.legacy(self.commits[2]), syncwheel.commit_patch_id(self.repo, self.commits[2]))
 

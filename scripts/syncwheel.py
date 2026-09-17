@@ -2453,7 +2453,8 @@ def commit_patch_ids(repo_root, commits):
                     'SELECT patch_id, row_digest FROM patch_ids WHERE semantics=? AND commit_sha=?',
                     (semantics, commit),
                 ).fetchone()
-                if (row and (row[0] is None or re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0]))
+                if (row and (row[0] is None or (isinstance(row[0], str)
+                                            and re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', row[0])))
                         and row[1] == patch_id_row_digest(semantics, commit, row[0])):
                     found[commit] = row[0]
             missing = [commit for commit in commits if commit not in found]
