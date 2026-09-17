@@ -31,9 +31,7 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "historical-coordination-digest"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -42,25 +40,7 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/historical-coordination-digest-governed",
-      "commits": [
-        "d878a6b68898a67c618db2406f9ae7fba3f7dcb0",
-        "8128d73c0d9b0e590b7c874266dff2cb068d384d"
-      ],
-      "id": "historical-coordination-digest",
-      "integration_branch": "main-integration",
-      "meta": {},
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
