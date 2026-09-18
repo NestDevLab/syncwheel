@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "54d2a11342d7b1aa645642a9c5936e085e8f1d14"
+    "refs/heads/pr/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61"
   },
   "claims": {
     "refs/heads/main-integration": "f255a19598f7be644f981d990864da7827d18f5b",
@@ -12,7 +12,7 @@
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "3508004b3efcf5e0a3b3d2b5b98a48510b9abcd0",
-    "refs/heads/pr/missing-snapshot-commit": "0f2aa6e57060dab022bde56e106b22f8c761249a",
+    "refs/heads/pr/missing-snapshot-commit": "f342e637e1fb5232766fa49232d5657498e0eeb3",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
@@ -21,7 +21,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-18T12:05:37+00:00",
+  "created_at": "2026-09-18T12:12:32+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -111,7 +111,7 @@
         },
         "branch": "pr/missing-snapshot-commit",
         "commits": [
-          "cebf7e2aad935b13b64081e615dd07d6214ef168"
+          "b245a58f626266f323ba2402f85b325e69ec6d61"
         ],
         "id": "missing-snapshot-commit",
         "integration_branch": "main-integration",
@@ -121,11 +121,11 @@
     "version": 2
   },
   "manifest_digest": "cc178ee83565961f5c9dbea0bfd806773ddd7ccb8a60bdb4ff539aacd660be04",
-  "operation_token": "d6363cf8-7dee-4730-bbf4-c94a1487c8af",
-  "parent_state": "d2f51bfb85ce62db2595619ae854648516207047",
+  "operation_token": "4d61d031-9428-461e-9da4-dd022d22d543",
+  "parent_state": "085eb1ef6556b4e43ff8c2931c0db47bd47a575e",
   "projection_status": "partial",
-  "publication_id": "4c68d633-d7e1-46e5-be89-c32a19d192ef",
-  "publication_scope": "integration",
+  "publication_id": "942df170-6f13-4685-bb70-c007e10b12aa",
+  "publication_scope": "stack:missing-snapshot-commit",
   "schema_version": 2,
   "syncwheel_version": "0.43.14",
   "tombstones": [
