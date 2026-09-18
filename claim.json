@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/independent-worktree-open"
+  ],
+  "claimed_at": "2026-09-18T18:16:49+00:00",
+  "coordination_id": "default",
+  "operation_token": "957c26aa-e9c6-47ec-8bcb-2e11a60d7c5e",
+  "publication_scope": "create:independent-worktree-open",
+  "source_ref": "refs/heads/syncwheel/draft/independent-worktree-open",
+  "syncwheel_version": "0.43.15"
+}
