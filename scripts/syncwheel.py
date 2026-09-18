@@ -12711,6 +12711,8 @@ def coordination_stack_ref_is_exact_rebase(
     local_commits = list(local_stack.get('commits') or [])
     if not previous_commits or not local_commits:
         return False
+    if any(not commit_exists(repo_root, commit) for commit in previous_commits):
+        return False
     if commit_full_sha(repo_root, previous_commits[-1]) != remote_tip:
         return False
     candidate_tip = ref_tip(repo_root, candidate_tip)
@@ -12771,13 +12773,17 @@ def validate_coordination_changed_ref_successors(
             remote_tip,
             candidate_tip,
         )
-        exact_rebase = remote_tip and coordination_stack_ref_is_exact_rebase(
-            repo_root,
-            manifest,
-            remote_snapshot,
-            stack_id,
-            remote_tip,
-            candidate_tip,
+        exact_rebase = (
+            remote_tip
+            and not safe_successor
+            and coordination_stack_ref_is_exact_rebase(
+                repo_root,
+                manifest,
+                remote_snapshot,
+                stack_id,
+                remote_tip,
+                candidate_tip,
+            )
         )
         if not safe_successor and not exact_rebase:
             raise SyncwheelError(
