@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -37,29 +37,29 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "missing-snapshot-commit",
-      "branch": "syncwheel/draft/missing-snapshot-commit",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "syncwheel/draft/missing-snapshot-commit",
       "commits": [
         "cebf7e2aad935b13b64081e615dd07d6214ef168"
       ],
-      "state": "draft",
+      "id": "missing-snapshot-commit",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Allow safe stack metadata repair when a historical commit object is unavailable"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Allow safe stack metadata repair when a historical commit object is unavailable"
-      }
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
