@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.43.16 - 2026-09-18
+
+- Let `worktree open` create an independent lane while unrelated expired or
+  dirty lanes await explicit recovery. Keep branch, path, capacity, and shared
+  registry conflicts blocking; report unrelated lanes as warnings without
+  reaping them.
+
 ## 0.43.15 - 2026-09-18
 
 - Allow a coordinated stack metadata correction when its managed branch is an
