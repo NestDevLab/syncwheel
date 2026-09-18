@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/independent-worktree-open"
   ],
-  "claimed_at": "2026-09-18T18:19:54+00:00",
+  "claimed_at": "2026-09-18T18:21:50+00:00",
   "coordination_id": "default",
-  "operation_token": "a182564a-a2a7-468e-a6fc-bf6958297252",
+  "operation_token": "3a281e7a-9e0c-4fd8-905e-99ecd0f614dd",
   "publication_scope": "stack:independent-worktree-open",
   "source_ref": "refs/heads/pr/independent-worktree-open",
   "syncwheel_version": "0.43.15"
