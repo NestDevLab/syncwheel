@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/missing-snapshot-commit"
+  ],
+  "claimed_at": "2026-09-18T11:59:29+00:00",
+  "coordination_id": "default",
+  "operation_token": "dc4c55f7-6d7e-4d23-9e89-3ce28a6526c4",
+  "publication_scope": "create:missing-snapshot-commit",
+  "source_ref": "refs/heads/syncwheel/draft/missing-snapshot-commit",
+  "syncwheel_version": "0.43.14"
+}
