@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/independent-worktree-open"
+    "refs/heads/pr/independent-worktree-open"
   ],
-  "claimed_at": "2026-09-18T18:16:49+00:00",
+  "claimed_at": "2026-09-18T18:17:46+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "957c26aa-e9c6-47ec-8bcb-2e11a60d7c5e",
-  "publication_scope": "create:independent-worktree-open",
+  "operation_token": "966d84f8-4019-4cba-b89e-1592a2f86d9b",
+  "publication_scope": "promote:independent-worktree-open",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/independent-worktree-open",
   "syncwheel_version": "0.43.15"
 }
