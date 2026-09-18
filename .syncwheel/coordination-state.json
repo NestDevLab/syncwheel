@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/missing-snapshot-commit": "d4f9878f30046f40b501bf55317d407298233f4e"
+    "refs/heads/syncwheel/draft/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61"
   },
   "claims": {
     "refs/heads/main-integration": "1a73348ffc900fef820cd969d40cf49530015aea",
@@ -16,11 +16,11 @@
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
-    "refs/heads/syncwheel/draft/missing-snapshot-commit": "01f8ad65fe2c0b744c481d49dd77d7dd6a35012c",
+    "refs/heads/syncwheel/draft/missing-snapshot-commit": "a88f004a7315cecef5296088ca892d55f9bbc993",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-18T11:59:29+00:00",
+  "created_at": "2026-09-18T12:02:17+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -60,7 +60,7 @@
     "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "98d87d54bb122da2ea66849f144bb684a6a4f4cf",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "d09b401e08008b8943b145ad163bc59f6a66c748",
-    "refs/heads/syncwheel/draft/missing-snapshot-commit": "d4f9878f30046f40b501bf55317d407298233f4e",
+    "refs/heads/syncwheel/draft/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48"
   },
@@ -108,7 +108,9 @@
           "role": "canonical"
         },
         "branch": "syncwheel/draft/missing-snapshot-commit",
-        "commits": [],
+        "commits": [
+          "cebf7e2aad935b13b64081e615dd07d6214ef168"
+        ],
         "id": "missing-snapshot-commit",
         "integration_branch": "main-integration",
         "state": "draft",
@@ -118,11 +120,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "dc4c55f7-6d7e-4d23-9e89-3ce28a6526c4",
-  "parent_state": "d47ededbfea0dbdeb84c2cfdca92883d36cb9e59",
+  "operation_token": "e7146d09-458d-4b65-b3f4-234ba2fd4f15",
+  "parent_state": "df404e2645466eb0d8a9e522813191999ba2481d",
   "projection_status": "partial",
-  "publication_id": "140d16c1-aa84-4ecc-8a66-32afea961cab",
-  "publication_scope": "create:missing-snapshot-commit",
+  "publication_id": "0df06290-6782-4996-a080-495f0b4e12c4",
+  "publication_scope": "stack:missing-snapshot-commit",
   "schema_version": 2,
   "syncwheel_version": "0.43.14",
   "tombstones": [
