@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -37,9 +37,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -49,7 +49,8 @@
       "commits": [
         "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
         "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
-        "71742a8cfef8b8d328132c45a48dd1a816f5b404"
+        "71742a8cfef8b8d328132c45a48dd1a816f5b404",
+        "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
       ],
       "id": "independent-worktree-open",
       "integration_branch": "main-integration",
