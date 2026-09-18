@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -37,31 +37,31 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "independent-worktree-open",
-      "branch": "pr/independent-worktree-open",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/independent-worktree-open",
       "commits": [
         "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
         "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
         "71742a8cfef8b8d328132c45a48dd1a816f5b404"
       ],
-      "state": "published",
+      "id": "independent-worktree-open",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Allow independent worktree open while unrelated expired lanes need explicit recovery"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Allow independent worktree open while unrelated expired lanes need explicit recovery"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
