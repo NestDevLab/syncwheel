@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.43.15 - 2026-09-18
+
+- Allow a coordinated stack metadata correction when its managed branch is an
+  unchanged or safe successor of the published ref, even if a historical
+  declared commit object is missing. Require complete commit evidence before
+  considering the separate exact-rebase exception; unsafe rewrites remain
+  blocked.
+
 ## 0.43.14 - 2026-09-17
 
 - Cache stable patch IDs by immutable commit and Git diff semantics in the

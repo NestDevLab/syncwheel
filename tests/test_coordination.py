@@ -3758,6 +3758,46 @@ with module.coordination_publication_lock(Path(repo_path)):
             changed,
         ))
 
+    def test_missing_historical_stack_commit_accepts_only_safe_successor(self):
+        origin = self.create_remote('missing-historical-commit')
+        repo = self.clone(origin, 'missing-historical-commit')
+        self.init_coordinated(repo)
+
+        source = self.commit_on_branch(repo, 'pr/missing-history', 'feature.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'missing-history', source,
+            '--branch', 'pr/missing-history',
+        )
+        self.run_cli(repo, 'stack', 'push', 'missing-history')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        _, state = self.remote_state(origin)
+        ref = 'refs/heads/pr/missing-history'
+        published_tip = state['managed_refs'][ref]
+        self.assertEqual(published_tip, source)
+        missing = 'f' * 40
+        self.assertFalse(module.commit_exists(repo, missing))
+        state['manifest']['stacks'][0]['commits'] = [missing]
+        local_snapshot = module.coordination_manifest_snapshot(manifest, repo)
+
+        module.validate_coordination_changed_ref_successors(
+            repo, manifest, config, state, state['manifest'], local_snapshot,
+            {ref: published_tip},
+        )
+
+        unsafe_tip = self.commit_on_branch(
+            repo, 'scratch/unsafe-successor', 'unsafe.txt'
+        )
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'not a safe successor',
+        ):
+            module.validate_coordination_changed_ref_successors(
+                repo, manifest, config, state, state['manifest'], local_snapshot,
+                {ref: unsafe_tip},
+            )
+
     def test_successor_validation_rejects_unsafe_frozen_tip_after_branch_advances(self):
         origin = self.create_remote('frozen-successor')
         repo = self.clone(origin, 'frozen-successor')
