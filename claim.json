@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/missing-snapshot-commit"
+    "refs/heads/pr/missing-snapshot-commit"
   ],
-  "claimed_at": "2026-09-18T12:02:17+00:00",
+  "claimed_at": "2026-09-18T12:02:40+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "e7146d09-458d-4b65-b3f4-234ba2fd4f15",
-  "publication_scope": "stack:missing-snapshot-commit",
+  "operation_token": "9d81fc4f-01cd-43d6-8e50-4f54458dadab",
+  "publication_scope": "promote:missing-snapshot-commit",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/missing-snapshot-commit",
   "syncwheel_version": "0.43.14"
 }
