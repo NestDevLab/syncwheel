@@ -811,11 +811,12 @@ the new tip. Either GC can finish it automatically or an explicit release can
 supersede it, re-anchor the new tip, and terminalize it as released. A release
 over any other pending reap state completes it under the intent already fsynced
 for that state.
-A release whose lane another command already terminalized — a concurrent GC reap
-or the preflight of `worktree open` — reports that terminal instead of an unknown
-lane, and any reason that is not the recorded one is appended once as a release
-note. GC chooses its candidates under the registry lock, and prunes retained
-stale lock inodes that nobody holds.
+A release whose lane another command already terminalized, such as a concurrent
+GC reap, reports that terminal instead of an unknown lane, and any reason that
+is not the recorded one is appended once as a release note. `worktree open`
+does not reap unrelated lanes; it reports them as warnings and leaves cleanup
+to explicit release or GC. GC chooses its candidates under the registry lock,
+and prunes retained stale lock inodes that nobody holds.
 
 This guarantee covers concurrent Syncwheel commands and ordinary non-forced Git
 operations. Raw changes to Syncwheel-owned refs, double-force operations that

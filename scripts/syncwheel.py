@@ -18445,13 +18445,20 @@ def command_worktree_open(args):
         raise SyncwheelError('configured worktree path escapes syncwheel_worktree_root')
     with governed_worktree_registry_lock(repo_root):
         registry, registry_path = load_governed_worktree_registry(repo_root)
-        persist = governed_worktree_registry_cas_persister(repo_root, registry)
+        recovered = copy.deepcopy(registry)
         recover_governed_worktree_registry_from_ledger(
             repo_root,
-            registry,
-            persist,
+            recovered,
+            lambda: None,
             manifest_path,
         )
+        if recovered != registry:
+            raise SyncwheelError(
+                'governed worktree registry has pending ledger recovery; '
+                'resolve shared state before opening another lane'
+            )
+        persist = governed_worktree_registry_cas_persister(repo_root, registry)
+        warnings = governed_worktree_warning_lines(repo_root, manifest)
         active = [
             item for item in registry['lanes']
             if item['state'] in {'active', 'captured_pending_cleanup'}
@@ -18499,7 +18506,7 @@ def command_worktree_open(args):
             run(['git', 'worktree', 'remove', '--force', str(path)], cwd=repo_root, check=False)
             git(repo_root, 'branch', '-D', branch, check=False)
             raise
-    output = {'lane': lane, 'registry_path': str(registry_path)}
+    output = {'lane': lane, 'registry_path': str(registry_path), 'warnings': warnings}
     if args.json:
         print(json.dumps(output, indent=2, sort_keys=True))
     else:
@@ -18509,6 +18516,8 @@ def command_worktree_open(args):
         print(f"  lease: {lane['lease_expires_at']}")
         if lane['target']:
             print(f"  target stack: {lane['target']}")
+        for warning in warnings:
+            print(f'  warning: {warning}')
     return 0
 
 
@@ -30214,7 +30223,7 @@ def converge_default_repository_hooks(args):
 
 def governed_worktree_reaping_requested(args):
     always_mutating = {
-        command_worktree_open, command_worktree_lock, command_worktree_unlock,
+        command_worktree_lock, command_worktree_unlock,
         command_sync, command_publish,
         command_stack_absorb, command_stack_add, command_stack_capture_integration,
         command_stack_close, command_stack_create,
@@ -30254,6 +30263,10 @@ def governed_worktree_preflight(args):
     )
     manifest, _ = load_manifest(repo_root, manifest_path)
     if manifest is None:
+        return
+    if args.func == command_worktree_open:
+        # Open checks its own target and registry under the lock. Recovery of
+        # unrelated lanes belongs to explicit release and gc commands.
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
     if not governed_worktree_reaping_requested(args):
