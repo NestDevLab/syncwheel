@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/revision-provider-primary-guard-auth-v2"
   ],
-  "claimed_at": "2026-09-19T20:13:34+00:00",
+  "claimed_at": "2026-09-19T20:23:35+00:00",
   "coordination_id": "default",
-  "operation_token": "6f24dd77-0386-4193-8f28-d1c718be96bc",
+  "operation_token": "dee7c151-5fbe-42a8-9f2f-f862d73e0896",
   "publication_scope": "stack:revision-provider-primary-guard-auth",
   "source_ref": "refs/heads/pr/revision-provider-primary-guard-auth-v2",
   "syncwheel_version": "0.43.18"
