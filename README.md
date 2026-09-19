@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.16`
+Current version: `0.43.17`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -449,9 +449,17 @@ manifest, including during recovery. If a later create has advanced the claim,
 the old close is terminalized as `close_superseded` and cannot close the new
 generation. A close whose tombstone already landed completes from its intent
 even when unrelated publications have advanced the state, instead of publishing
-a second tombstone. `stack close --reason absorbed` first fetches and records
-the observed delivery SHA, then compares the fully composed stack result with that delivery tip for every touched
-path. Squash-equivalent delivery is accepted; a historical patch later reverted at the tip is not.
+a second tombstone. Choose the close proof from the delivery method:
+
+```bash
+syncwheel stack close feature-a --reason merged    # normal merge or fast-forward
+syncwheel stack close feature-a --reason absorbed  # squash or rebase
+```
+
+`absorbed` first fetches and records the observed delivery SHA, then compares
+the fully composed stack result with that delivery tip for every touched path.
+Squash-equivalent delivery is accepted; a historical patch later reverted at
+the tip is not. A verified `absorbed` close does not need `--force`.
 
 When `plan` finds integration commits belonging to no stack, it now names `capture-integration` into a
 new draft as the remedy.
@@ -1228,6 +1236,7 @@ python3 scripts/syncwheel.py channel --help
 python3 scripts/syncwheel.py channel contract
 python3 scripts/syncwheel.py channel operation --help
 python3 scripts/syncwheel.py stack --help
+python3 scripts/syncwheel.py stack close --help
 python3 scripts/syncwheel.py int --help
 python3 scripts/syncwheel.py stack rebuild --help
 python3 scripts/syncwheel.py stack push --help

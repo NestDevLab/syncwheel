@@ -21929,7 +21929,9 @@ def command_stack_close(args):
         raise SyncwheelError(
             f"{args.stack}: {len(unmerged)} commit(s) are NOT yet reachable from {base_ref}: "
             f"{', '.join(short)}{extra}\n"
-            f"Pass --force to close the stack anyway."
+            f"For a squash/rebase delivery, retry with --reason absorbed so Syncwheel fetches "
+            f"and verifies the delivered content. Use --force only for a deliberate close "
+            f"without ancestry or absorption proof."
         )
 
     merged_note = '' if unmerged else f' (all commits confirmed in {base_ref})'
@@ -29420,7 +29422,10 @@ def build_parser():
         '-R',
         '--reason',
         default=None,
-        help='reason for closing: merged (default when all commits are in base), abandoned, or custom string',
+        help=(
+            'closure proof: merged when every declared commit is reachable from the base; '
+            'absorbed for squash/rebase delivery verified by final content; abandoned or a custom string otherwise'
+        ),
     )
     stack_close_p.add_argument(
         '-d', '--delete-branch',
@@ -29432,7 +29437,7 @@ def build_parser():
         '-f',
         '--force',
         action='store_true',
-        help='close even if not all commits are reachable from the base ref',
+        help='close without commit-ancestry proof; not needed for a verified --reason absorbed close',
     )
     stack_close_p.set_defaults(func=command_stack_close, delete_branch=False)
 

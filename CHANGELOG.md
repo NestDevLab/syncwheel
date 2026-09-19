@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.43.17 - 2026-09-19
+
+- Teach `stack close` help and failure output to use `--reason absorbed` for
+  squash or rebase delivery. Verified content absorption closes normally
+  without `--force`.
+- Require agents to read the exact nested `--help` before first use of a
+  mutating subcommand, and align the skill, agent guides, README, and website
+  with the installed command contract.
+
 ## 0.43.16 - 2026-09-18
 
 - Let `worktree open` create an independent lane while unrelated expired or
