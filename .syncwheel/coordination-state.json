@@ -1,12 +1,10 @@
 {
-  "changed_refs": {
-    "refs/heads/syncwheel/draft/historical-pr83": "afeab5a89923456cd2eaf9a08df5a71fe42ef0d9"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "eb040f28795008b41fb196e2f6585f59a32f5c9c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
-    "refs/heads/pr/independent-worktree-open": "0224c2a58b386ce468ae0da322a764efa3f443c1",
+    "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
@@ -28,7 +26,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T07:17:03+00:00",
+  "created_at": "2026-09-19T07:27:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -107,7 +105,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "independent-worktree-open",
         "historical-pr78",
         "historical-pr79",
         "historical-pr80",
@@ -122,23 +119,6 @@
       "strategy": "merge"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/independent-worktree-open",
-        "commits": [
-          "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
-          "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
-          "71742a8cfef8b8d328132c45a48dd1a816f5b404",
-          "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
-        ],
-        "id": "independent-worktree-open",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -208,13 +188,13 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "2433461c-e6ef-454e-926d-b76659350fee",
-  "parent_state": "2d733674ea5b90adf8c35f2d2e30b6c4fac896e9",
+  "operation_token": "4ab400b9-0c57-49fc-b8ee-b0058897d936",
+  "parent_state": "f54348293af301009fae62265e44e8ecb9005bc8",
   "projection_status": "partial",
-  "publication_id": "20be7767-ddf7-48b7-bd10-9f286ad1425b",
-  "publication_scope": "create:historical-pr83",
+  "publication_id": "6cd66f85-cbad-44b0-a03f-fb33e2063184",
+  "publication_scope": "close:independent-worktree-open",
   "schema_version": 2,
-  "syncwheel_version": "0.43.15",
+  "syncwheel_version": "0.43.16",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -542,6 +522,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/independent-worktree-open",
       "remote_tip": "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
+      "stack": "independent-worktree-open"
+    },
+    {
+      "branch": "pr/independent-worktree-open",
+      "closed_at": "2026-09-19T07:27:18+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/independent-worktree-open",
+      "remote_tip": null,
       "stack": "independent-worktree-open"
     }
   ]
