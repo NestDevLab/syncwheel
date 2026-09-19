@@ -172,7 +172,15 @@
       },
       "meta": {
         "purpose": "Classify integration-only history already delivered by PR 83"
-      }
+      },
+      "integration_only_commits": [
+        "d1d53d32f19a6fd3fda055e3c58fbbff4eb344d4",
+        "71027c808525a77af2bfaef0de0214e7361237b5",
+        "fb822d123a895757fa7702badf49d625df0842d8",
+        "d373ee10dc92825856bd4f6e44f88023587a9930",
+        "58ba8d1745f9f0d643a96d06ce2825ea635a9967",
+        "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
+      ]
     }
   ],
   "syncwheel_tracking": "git-tracked",
