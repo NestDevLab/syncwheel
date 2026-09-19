@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "eb040f28795008b41fb196e2f6585f59a32f5c9c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -17,7 +15,7 @@
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/skill-close-guidance": "47097fcfbfd87faae469b5e4a1f7c86083b95afc",
-    "refs/heads/syncwheel/draft/historical-pr78": "7e65d231c503d7b28652929f7357e4d43ecac94c",
+    "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
     "refs/heads/syncwheel/draft/historical-pr79": "f022a9636b831db3564d6b2401dfa8967254a099",
     "refs/heads/syncwheel/draft/historical-pr80": "5db2523b8c8b33e5d7da7e605d57fd89f46e7e68",
     "refs/heads/syncwheel/draft/historical-pr82": "bacf20c5b8d12f31a8516c5aa941af3667c8e796",
@@ -31,7 +29,7 @@
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T08:11:32+00:00",
+  "created_at": "2026-09-19T08:12:09+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -113,7 +111,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "historical-pr78",
         "historical-pr79",
         "historical-pr80",
         "historical-pr82",
@@ -129,19 +126,6 @@
       "strategy": "merge"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "syncwheel/draft/historical-pr78",
-        "commits": [],
-        "id": "historical-pr78",
-        "integration_branch": "main-integration",
-        "state": "draft",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -226,11 +210,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "29b1fa4a-aada-4e79-a93b-3c73519e26f3",
-  "parent_state": "ef6207c00db2157435a6164d15705461378fbcf7",
+  "operation_token": "52c57219-723b-4ba4-a5a4-faeec25b6f62",
+  "parent_state": "f0be6c54e77371cf0b0fd5ce7aeb246f67af7585",
   "projection_status": "partial",
-  "publication_id": "75cf0cb8-8d8a-42b3-b4e4-1469c15a71a9",
-  "publication_scope": "partial",
+  "publication_id": "374df84f-84cc-42e7-b8ad-2b418a4dac8b",
+  "publication_scope": "close:historical-pr78",
   "schema_version": 2,
   "syncwheel_version": "0.43.16",
   "tombstones": [
@@ -577,6 +561,14 @@
       "ref": "refs/heads/syncwheel/draft/skill-close-guidance",
       "remote_tip": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
       "stack": "skill-close-guidance"
+    },
+    {
+      "branch": "syncwheel/draft/historical-pr78",
+      "closed_at": "2026-09-19T08:12:05+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/syncwheel/draft/historical-pr78",
+      "remote_tip": "afeab5a89923456cd2eaf9a08df5a71fe42ef0d9",
+      "stack": "historical-pr78"
     }
   ]
 }
