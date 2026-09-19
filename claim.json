@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/syncwheel/draft/historical-pr82"
-  ],
-  "claimed_at": "2026-09-19T07:16:34+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-19T08:12:49+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "ac588a8a-15ab-4c1b-a64c-664b504b59fe",
-  "publication_scope": "create:historical-pr82",
+  "operation_token": "5a851829-ea10-460e-9195-3b0ba0ef1008",
+  "publication_scope": "close:historical-pr82",
+  "reason": "merged",
   "source_ref": "refs/heads/syncwheel/draft/historical-pr82",
-  "syncwheel_version": "0.43.15"
+  "syncwheel_version": "0.43.16"
 }
