@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.43.20 - 2026-09-19
+
+- Allow an explicit governed `worktree release` to preserve and remove its
+  named lane while unrelated unstaged product files remain dirty in the
+  primary checkout. Index conflicts, unrelated staged paths, and a dirty
+  control manifest remain blocked.
+
 ## 0.43.19 - 2026-09-19
 
 - Authorize revision-provider product and control commit validation through the

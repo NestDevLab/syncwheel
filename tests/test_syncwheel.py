@@ -1391,6 +1391,23 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         ledger = self.read_ledger_state()
         self.assertEqual(ledger['recent_events'][-1]['type'], 'governed_worktree_released')
 
+    def test_worktree_release_preserves_unrelated_primary_dirt(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'finished', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        primary_path = self.repo / 'alpha.txt'
+        primary_path.write_text('unrelated local work\n')
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'finished', '--reason', 'delivered elsewhere',
+            '--apply', '--json',
+        ).stdout)
+
+        self.assertTrue(released['applied'])
+        self.assertEqual(primary_path.read_text(), 'unrelated local work\n')
+        self.assertFalse(lane_path.exists())
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'], [])
+
     def test_worktree_release_accepts_a_clean_record_with_a_missing_path(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'missing-release', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
