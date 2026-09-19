@@ -37,7 +37,8 @@
       "historical-pr80",
       "historical-pr82",
       "historical-pr83",
-      "historical-pr85"
+      "historical-pr85",
+      "skill-close-guidance"
     ],
     "strategy": "cherry-pick"
   },
@@ -182,6 +183,22 @@
         "71742a8cfef8b8d328132c45a48dd1a816f5b404",
         "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
       ]
+    },
+    {
+      "id": "skill-close-guidance",
+      "branch": "syncwheel/draft/skill-close-guidance",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Teach agents and CLI to close squash-delivered stacks as absorbed"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
