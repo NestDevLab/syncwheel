@@ -30209,6 +30209,7 @@ def primary_checkout_preflight(args):
             command_stack_promote,
             command_stack_demote,
             command_stack_absorb,
+            command_worktree_release,
         }
         bounded_publication_commands = {
             command_stack_push,
