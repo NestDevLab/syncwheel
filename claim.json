@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/main-integration"
   ],
-  "claimed_at": "2026-09-19T08:25:53+00:00",
+  "claimed_at": "2026-09-19T08:29:47+00:00",
   "coordination_id": "default",
-  "operation_token": "160d1819-aa61-4bb0-83e8-a502cf03122a",
+  "operation_token": "0fa8334b-b197-44b1-aebd-020fce3addc3",
   "publication_scope": "integration",
   "source_ref": "refs/heads/main-integration",
   "syncwheel_version": "0.43.16"
