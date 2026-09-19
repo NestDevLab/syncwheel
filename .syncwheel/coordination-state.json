@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/historical-pr85": "ad63eaa96b1f15c655961dbcdfca6bf457480bce"
+  },
   "claims": {
     "refs/heads/main-integration": "eb040f28795008b41fb196e2f6585f59a32f5c9c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -19,6 +21,7 @@
     "refs/heads/syncwheel/draft/historical-pr80": "5db2523b8c8b33e5d7da7e605d57fd89f46e7e68",
     "refs/heads/syncwheel/draft/historical-pr82": "bacf20c5b8d12f31a8516c5aa941af3667c8e796",
     "refs/heads/syncwheel/draft/historical-pr83": "4a93d6c14e320fdc131f498ae56570678a568d2b",
+    "refs/heads/syncwheel/draft/historical-pr85": "ede2525e0374f4694749611a1bf587cf89313b40",
     "refs/heads/syncwheel/draft/independent-worktree-open": "5833214723e4ece154a70ffa5d83ae665e22aa29",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
@@ -26,7 +29,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T07:27:22+00:00",
+  "created_at": "2026-09-19T07:28:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -70,6 +73,7 @@
     "refs/heads/syncwheel/draft/historical-pr80": "afeab5a89923456cd2eaf9a08df5a71fe42ef0d9",
     "refs/heads/syncwheel/draft/historical-pr82": "afeab5a89923456cd2eaf9a08df5a71fe42ef0d9",
     "refs/heads/syncwheel/draft/historical-pr83": "afeab5a89923456cd2eaf9a08df5a71fe42ef0d9",
+    "refs/heads/syncwheel/draft/historical-pr85": "ad63eaa96b1f15c655961dbcdfca6bf457480bce",
     "refs/heads/syncwheel/draft/independent-worktree-open": "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
     "refs/heads/syncwheel/draft/manifest-state-sync": "365c401fdf26f8627edaef3609a50103fda22398",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "98d87d54bb122da2ea66849f144bb684a6a4f4cf",
@@ -109,7 +113,8 @@
         "historical-pr79",
         "historical-pr80",
         "historical-pr82",
-        "historical-pr83"
+        "historical-pr83",
+        "historical-pr85"
       ],
       "strategy": "cherry-pick"
     },
@@ -183,16 +188,29 @@
         "integration_branch": "main-integration",
         "state": "draft",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/historical-pr85",
+        "commits": [],
+        "id": "historical-pr85",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "4ab400b9-0c57-49fc-b8ee-b0058897d936",
-  "parent_state": "f54348293af301009fae62265e44e8ecb9005bc8",
+  "operation_token": "7345fcee-3981-4755-bb0a-a254546cb9ef",
+  "parent_state": "cb696fc6d8ee97866e611b493fffd11c82a37fb7",
   "projection_status": "partial",
-  "publication_id": "6cd66f85-cbad-44b0-a03f-fb33e2063184",
-  "publication_scope": "close:independent-worktree-open",
+  "publication_id": "a12ccee5-538a-4091-9da2-d6ea5218c65c",
+  "publication_scope": "create:historical-pr85",
   "schema_version": 2,
   "syncwheel_version": "0.43.16",
   "tombstones": [
