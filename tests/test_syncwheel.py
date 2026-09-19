@@ -21,6 +21,13 @@ FIXTURE = REPO_ROOT / 'tests' / 'fixtures' / 'simple-repo'
 
 
 class SyncwheelFixtureTest(unittest.TestCase):
+    def test_stack_close_help_teaches_absorbed_squash_delivery(self):
+        result = self.run_cli('stack', 'close', '--help')
+        help_text = ' '.join(result.stdout.split())
+
+        self.assertIn('absorbed for squash/rebase delivery', help_text)
+        self.assertIn('not needed for a verified --reason absorbed close', help_text)
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-test-'))
         self.repo = self.tmp / 'repo'

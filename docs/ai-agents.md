@@ -37,10 +37,15 @@ existed, it just was not prominent enough. Follow all four exactly.
    integration is invisible to Syncwheel: the next rebuild reconstructs the branch from the
    manifest's own commit projection and never consults that resolution, so the work is lost
    and `reconcile` keeps refusing with the same conflict.
-3. Integration composition is declared and visible — inspect it with `syncwheel int show`
+3. Before the first use of each mutating subcommand in a session, or after an
+   upgrade/error, run its exact nested `--help`; never infer flags, close reasons,
+   defaults, or force requirements from memory. Integration composition is
+   declared and visible — inspect it with `syncwheel int show`
    before testing there or blaming your own code. Add a stack with `syncwheel stack create
    <id> [<commit-or-range>...] [--draft]` then `syncwheel int rebuild --reason "<why>"`;
-   remove one with `syncwheel stack close <id> --reason "<why>"` then the same rebuild.
+   close a normally merged stack with `--reason merged`, or a squash/rebase delivery
+   with `--reason absorbed`, then validate and rebuild. `absorbed` verifies final
+   delivered content and does not require `--force`.
 4. Every mutating command carries `--reason`; it is mandatory in `ai-managed` repositories
    and already enforced on several commands individually (`int rebuild` when ai-managed,
    `hooks remove --disable`, `worktree release`, `coordination provenance reset`). Pass it

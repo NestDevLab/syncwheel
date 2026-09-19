@@ -18,6 +18,15 @@ python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 ```
 
+Before the first use of each mutating subcommand in a session, and after an
+upgrade or syntax error, run its exact nested `--help`. Treat the installed
+help as authoritative for flags and defaults; do not infer them from memory.
+
+After delivery, close by proof: use `stack close <id> --reason merged` only
+when the declared commits are ancestors of the target; use `--reason absorbed`
+for squash/rebase delivery. The latter fetches the delivery tip and verifies
+the final content, so normal squash cleanup does not need `--force`.
+
 For an active-active version 2 or 3 manifest, run `python3 scripts/syncwheel.py
 handoff` before planning a handoff or publication. The diagnostic is read-only;
 use the coordinated `publish`, `stack push`, or `int push` commands rather than

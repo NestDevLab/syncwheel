@@ -3,7 +3,7 @@ name: syncwheel
 description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, integration branches, and pinned deployment-channel branches, all from a single checkout. Use whenever you are about to create a PR branch, compose a deployment channel, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
 allowed-tools: [Bash]
 metadata:
-  version: "1.0"
+  version: "1.1"
 ---
 
 # Syncwheel
@@ -221,6 +221,21 @@ $SW self status
 
 Always run Syncwheel **against the target repo**: pass `-r <repo-path-or-alias>`
 or run from inside the target repo's worktree.
+
+### Read the installed command contract
+
+Before the first use of each mutating subcommand in a session, and again after
+an upgrade or syntax error, run its exact nested help, for example:
+
+```bash
+syncwheel stack close --help
+syncwheel int rebuild --help
+```
+
+Treat that version's help as the command contract. Do not infer flags, reasons,
+defaults, or force requirements from memory. If help omits the required path or
+disagrees with repository documentation, stop and verify the installed version
+and source documentation before mutating anything.
 
 ## Safe lifecycle (always dry-run first)
 
@@ -470,11 +485,18 @@ A channel branch may be an input to CI/CD, but it remains a pinned Git
 composition. `channel publish` proves only the exact published revision and its
 receipt. Environment rollout and health require separate deployer evidence.
 
-After the PR merges, fetch the target and prove absorption against the
-candidate's own HEAD: check ancestry and require `git cherry <delivery_ref>
-<branch>` to contain no `+` patches for squash/rebase merges. A raw tree diff is
-not proof when the target has unrelated commits. Align or rebuild integration
-from the updated base, then close and reap the stack below.
+After delivery, choose the close proof from the merge method:
+
+```bash
+syncwheel stack close <id> --reason merged    # declared commits are ancestors of the target
+syncwheel stack close <id> --reason absorbed  # squash/rebase; Syncwheel proves final delivered content
+```
+
+`absorbed` fetches the delivery tip and compares every touched path; it accepts
+equivalent squash/rebase output and rejects later reverts or incomplete delivery.
+Do not replace this proof with `--force`. Then validate, align or rebuild
+integration, and explicitly classify any retained historical integration
+commits before handoff.
 
 ## Housekeeping: when and how to clean up
 
@@ -494,20 +516,10 @@ unexplained worktree is a real signal rather than routine residue.
 Procedure (never destroy unmerged or uncommitted work):
 
 ```bash
-git fetch --all --prune
-git merge-base --is-ancestor <branch> <delivery_ref>
-git cherry <delivery_ref> <branch>           # if ancestry failed, this must contain no "+" rows
-syncwheel stack close <id> -R merged --force # close metadata before removing its worktree
-git worktree remove <worktree-path>          # non-force; retain and report dirty/conflicted/submodule-blocked trees
-git branch -d <branch>                       # use -D only after squash/rebase absorption was proved above
-git worktree prune --dry-run
-git worktree prune
-```
-
-For an active-active manifest, prefer its tombstone-aware lifecycle instead:
-
-```bash
-syncwheel stack close <id> -R merged --force
+syncwheel stack close --help
+syncwheel stack close <id> --reason merged    # normal merge/fast-forward
+# or: syncwheel stack close <id> --reason absorbed  # squash/rebase
+syncwheel validate
 syncwheel gc
 syncwheel gc --apply
 ```
