@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -43,70 +43,61 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "historical-pr78",
-      "branch": "syncwheel/draft/historical-pr78",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "syncwheel/draft/historical-pr78",
       "commits": [],
-      "state": "draft",
-      "publication": {
-        "enabled": false
-      },
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 78"
-      },
+      "id": "historical-pr78",
+      "integration_branch": "main-integration",
       "integration_only_commits": [
         "669e1a4c4f260272fa9b31043df1a58d5067ef61",
         "2e4f73052dd9394fbb13a116dda7b922f48ff671",
         "1d4fd75417df70d1947de9b3711055c99060b1a8",
         "d49df5db0271e43cb3ec37c1b35ae53121d583a7",
         "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0"
-      ]
-    },
-    {
-      "id": "historical-pr79",
-      "branch": "syncwheel/draft/historical-pr79",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "draft",
+      ],
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 78"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 79"
-      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "syncwheel/draft/historical-pr79",
+      "commits": [],
+      "id": "historical-pr79",
+      "integration_branch": "main-integration",
       "integration_only_commits": [
         "b9f9bb31292dd8b9f11d85f44e6d8a0ec53d68c1",
         "ab14140ec86e5d7c3874f4ecba3d5c8efc317189"
-      ]
-    },
-    {
-      "id": "historical-pr80",
-      "branch": "syncwheel/draft/historical-pr80",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "draft",
+      ],
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 79"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 80"
-      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "syncwheel/draft/historical-pr80",
+      "commits": [],
+      "id": "historical-pr80",
+      "integration_branch": "main-integration",
       "integration_only_commits": [
         "aa21fb50e6d7981184efd998a1002d712ca66ed4",
         "0ce175c3e56e264e17507d0a0c3328331933396f",
@@ -116,43 +107,43 @@
         "b7f4851be0396003481718c3d930ae6c60c67b5a",
         "991c0733695a75e797ea4f582545c88eecb93e12",
         "8ea9404def6c8962664dc7050d0175234a0fd647"
-      ]
-    },
-    {
-      "id": "historical-pr82",
-      "branch": "syncwheel/draft/historical-pr82",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "draft",
+      ],
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 80"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 82"
-      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "syncwheel/draft/historical-pr82",
+      "commits": [],
+      "id": "historical-pr82",
+      "integration_branch": "main-integration",
       "integration_only_commits": [
         "416e5bddf302563091dce85848ae3f16b266b7b5",
         "b6d8d2fed2527936aa40ab13246873955b57bd9f"
-      ]
-    },
-    {
-      "id": "historical-pr83",
-      "branch": "syncwheel/draft/historical-pr83",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "draft",
+      ],
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 82"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 83"
-      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "syncwheel/draft/historical-pr83",
+      "commits": [],
+      "id": "historical-pr83",
+      "integration_branch": "main-integration",
       "integration_only_commits": [
         "d1d53d32f19a6fd3fda055e3c58fbbff4eb344d4",
         "71027c808525a77af2bfaef0de0214e7361237b5",
@@ -160,47 +151,56 @@
         "d373ee10dc92825856bd4f6e44f88023587a9930",
         "58ba8d1745f9f0d643a96d06ce2825ea635a9967",
         "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
-      ]
-    },
-    {
-      "id": "historical-pr85",
-      "branch": "syncwheel/draft/historical-pr85",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "draft",
+      ],
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 83"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 85"
-      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "syncwheel/draft/historical-pr85",
+      "commits": [],
+      "id": "historical-pr85",
+      "integration_branch": "main-integration",
       "integration_only_commits": [
         "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
         "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
         "71742a8cfef8b8d328132c45a48dd1a816f5b404",
         "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
-      ]
+      ],
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 85"
+      },
+      "publication": {
+        "enabled": false
+      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
     },
     {
-      "id": "skill-close-guidance",
-      "branch": "pr/skill-close-guidance",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/skill-close-guidance",
       "commits": [
         "d73bfc22ea70ca921bf7e7e1d08c160f2437e7cc"
       ],
-      "state": "published",
+      "id": "skill-close-guidance",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Teach agents and CLI to close squash-delivered stacks as absorbed"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Teach agents and CLI to close squash-delivered stacks as absorbed"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
