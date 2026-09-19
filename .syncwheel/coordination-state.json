@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
+    "refs/heads/pr/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
   },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
@@ -19,6 +19,7 @@
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
+    "refs/heads/pr/worktree-release-dirty-primary": "d5496b8606b995642e0c4f0a939a84e570902e6b",
     "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
     "refs/heads/syncwheel/draft/historical-pr79": "0599c8b9faa842388bc8b3776c7171e859b69cfb",
     "refs/heads/syncwheel/draft/historical-pr80": "2b3d6924e6374cd66d99f81a7d1bf721b68e5955",
@@ -33,10 +34,10 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
-    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "264caf11d80eb366a10790c36b44305253f9748e"
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T22:05:07+00:00",
+  "created_at": "2026-09-19T22:05:27+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -74,6 +75,7 @@
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
+    "refs/heads/pr/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc",
     "refs/heads/syncwheel/draft/auto-hook-bootstrap": "242ce4a13cbbf91418b677da038ada0e673177ac",
@@ -134,24 +136,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/worktree-release-dirty-primary",
+        "branch": "pr/worktree-release-dirty-primary",
         "commits": [
           "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
         ],
         "id": "worktree-release-dirty-primary",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "9b74ba70-df0f-4650-830e-3bed5159b091",
-  "parent_state": "cac8a9a3fef9376f3d66459da376bf82409a9eb8",
+  "operation_token": "ee27e213-d764-4a46-ac9c-f4571f99b20e",
+  "parent_state": "c2c625e998ab474580da581d6c5f094dab9b7832",
   "projection_status": "partial",
-  "publication_id": "df5bf0e8-1661-4d2f-9ac2-fcd92b1c58fa",
-  "publication_scope": "stack:worktree-release-dirty-primary",
+  "publication_id": "875bda5b-2cc8-4b88-8428-9e9372a0919e",
+  "publication_scope": "promote:worktree-release-dirty-primary",
   "schema_version": 2,
   "syncwheel_version": "0.43.19",
   "tombstones": [
@@ -586,6 +587,14 @@
       "ref": "refs/heads/pr/revision-provider-primary-guard-auth-v2",
       "remote_tip": null,
       "stack": "revision-provider-primary-guard-auth"
+    },
+    {
+      "branch": "syncwheel/draft/worktree-release-dirty-primary",
+      "closed_at": "2026-09-19T22:05:23+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/worktree-release-dirty-primary",
+      "remote_tip": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68",
+      "stack": "worktree-release-dirty-primary"
     }
   ]
 }
