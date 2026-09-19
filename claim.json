@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/skill-close-guidance"
   ],
-  "claimed_at": "2026-09-19T07:54:11+00:00",
+  "claimed_at": "2026-09-19T08:11:32+00:00",
   "coordination_id": "default",
-  "operation_token": "8623dd71-a97d-451b-9624-7914d9c49028",
+  "operation_token": "29b1fa4a-aada-4e79-a93b-3c73519e26f3",
   "publication_scope": "partial",
   "source_ref": "refs/heads/pr/skill-close-guidance",
   "syncwheel_version": "0.43.16"
