@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.19 - 2026-09-19
+
+- Authorize revision-provider product and control commit validation through the
+  managed primary-checkout guard. The provider still validates the exact
+  prepared index and message before any managed ref moves.
+
 ## 0.43.18 - 2026-09-19
 
 - Let integration reconciliation ignore only historical coordination publishers whose integration objects are unavailable in a complete repository. Current-state and shallow-clone verification remain strict.
