@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "historical-pr85",
       "skill-close-guidance"
     ],
     "strategy": "cherry-pick"
@@ -44,28 +43,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "syncwheel/draft/historical-pr85",
-      "commits": [],
-      "id": "historical-pr85",
-      "integration_branch": "main-integration",
-      "integration_only_commits": [
-        "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
-        "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
-        "71742a8cfef8b8d328132c45a48dd1a816f5b404",
-        "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
-      ],
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 85"
-      },
-      "publication": {
-        "enabled": false
-      },
-      "state": "draft",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "base": "origin/main",
       "branch": "pr/skill-close-guidance",
