@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "historical-pr82",
       "historical-pr83",
       "historical-pr85",
       "skill-close-guidance"
@@ -46,26 +45,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "syncwheel/draft/historical-pr82",
-      "commits": [],
-      "id": "historical-pr82",
-      "integration_branch": "main-integration",
-      "integration_only_commits": [
-        "416e5bddf302563091dce85848ae3f16b266b7b5",
-        "b6d8d2fed2527936aa40ab13246873955b57bd9f"
-      ],
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 82"
-      },
-      "publication": {
-        "enabled": false
-      },
-      "state": "draft",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "base": "origin/main",
       "branch": "syncwheel/draft/historical-pr83",
