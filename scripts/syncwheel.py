@@ -976,6 +976,15 @@ def authorize_ref_move(repo_root):
     return nonce
 
 
+@contextlib.contextmanager
+def ref_move_authorization(repo_root):
+    nonce = authorize_ref_move(repo_root)
+    try:
+        yield nonce
+    finally:
+        (ref_auth_dir(repo_root) / nonce).unlink(missing_ok=True)
+
+
 def ref_move_authorized(repo_root, event):
     nonce = os.environ.get(MANAGED_REF_MOVE_AUTH_ENV)
     if not nonce or not re.fullmatch(r'[0-9a-f]{64}', nonce):
@@ -27531,15 +27540,24 @@ class SyncwheelRevisionBackend:
             else:
                 commands.append(f'verify {ref} {old}')
 
-        process = subprocess.Popen(
-            ['git', 'update-ref', '--stdin'],
-            cwd=repo_root,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        authorization = authorize_ref_move(repo_root)
+        try:
+            process = subprocess.Popen(
+                ['git', 'update-ref', '--stdin'],
+                cwd=repo_root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=managed_process_env(
+                    {MANAGED_REF_MOVE_AUTH_ENV: authorization},
+                    authorize=False,
+                ),
+            )
+        except BaseException:
+            (ref_auth_dir(repo_root) / authorization).unlink(missing_ok=True)
+            raise
         prepared = False
         try:
             process.stdin.write('start\n')
@@ -27580,6 +27598,8 @@ class SyncwheelRevisionBackend:
             if prepared or process.poll() is None:
                 self._abort_ref_transaction(process)
             raise
+        finally:
+            (ref_auth_dir(repo_root) / authorization).unlink(missing_ok=True)
 
     def _abort_ref_transaction(self, process):
         if process.poll() is None and process.stdin and not process.stdin.closed:
@@ -27674,44 +27694,46 @@ class SyncwheelRevisionBackend:
                 handle.write(message)
                 handle.flush()
                 os.fsync(handle.fileno())
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    'GIT_INDEX_FILE': str(index_path),
-                    'SYNCWHEEL_REVISION_PROVIDER_COMMIT': commit,
-                }
-            )
-            git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(index_path)})
-            for hook_name, arguments in (
-                ('pre-commit', []),
-                ('commit-msg', [str(message_path)]),
-            ):
-                hook = hooks_dir / hook_name
-                if not hook.is_file() or not os.access(hook, os.X_OK):
-                    continue
-                result = subprocess.run(
-                    [str(hook), *arguments],
-                    cwd=repo_root,
-                    text=True,
-                    capture_output=True,
-                    env=environment,
+            with ref_move_authorization(repo_root) as authorization:
+                environment = managed_process_env(
+                    {
+                        'GIT_INDEX_FILE': str(index_path),
+                        'SYNCWHEEL_REVISION_PROVIDER_COMMIT': commit,
+                        MANAGED_REF_MOVE_AUTH_ENV: authorization,
+                    },
+                    authorize=False,
                 )
-                if result.returncode != 0:
-                    detail = (result.stderr.strip() or result.stdout.strip())[:2000]
-                    suffix = f': {detail}' if detail else ''
-                    self._fail(
-                        f'{hook_name} hook rejected prepared commit '
-                        f'(exit {result.returncode}){suffix}'
+                git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(index_path)})
+                for hook_name, arguments in (
+                    ('pre-commit', []),
+                    ('commit-msg', [str(message_path)]),
+                ):
+                    hook = hooks_dir / hook_name
+                    if not hook.is_file() or not os.access(hook, os.X_OK):
+                        continue
+                    result = subprocess.run(
+                        [str(hook), *arguments],
+                        cwd=repo_root,
+                        text=True,
+                        capture_output=True,
+                        env=environment,
                     )
-            hook_tree = git(
-                repo_root,
-                'write-tree',
-                env={'GIT_INDEX_FILE': str(index_path)},
-            ).stdout.strip()
-            if hook_tree != ref_tree(repo_root, commit):
-                self._fail('commit hook modified the deterministic provider index')
-            if message_path.read_text() != message:
-                self._fail('commit-msg hook modified the deterministic provider message')
+                    if result.returncode != 0:
+                        detail = (result.stderr.strip() or result.stdout.strip())[:2000]
+                        suffix = f': {detail}' if detail else ''
+                        self._fail(
+                            f'{hook_name} hook rejected prepared commit '
+                            f'(exit {result.returncode}){suffix}'
+                        )
+                hook_tree = git(
+                    repo_root,
+                    'write-tree',
+                    env={'GIT_INDEX_FILE': str(index_path)},
+                ).stdout.strip()
+                if hook_tree != ref_tree(repo_root, commit):
+                    self._fail('commit hook modified the deterministic provider index')
+                if message_path.read_text() != message:
+                    self._fail('commit-msg hook modified the deterministic provider message')
         finally:
             index_path.unlink(missing_ok=True)
             message_path.unlink(missing_ok=True)
