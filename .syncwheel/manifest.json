@@ -36,7 +36,8 @@
       "historical-pr79",
       "historical-pr80",
       "historical-pr82",
-      "historical-pr83"
+      "historical-pr83",
+      "historical-pr85"
     ],
     "strategy": "cherry-pick"
   },
@@ -159,6 +160,22 @@
         "58ba8d1745f9f0d643a96d06ce2825ea635a9967",
         "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20"
       ]
+    },
+    {
+      "id": "historical-pr85",
+      "branch": "syncwheel/draft/historical-pr85",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 85"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
