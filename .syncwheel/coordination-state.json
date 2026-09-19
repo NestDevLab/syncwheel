@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/revision-provider-primary-guard-auth-v2": "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -17,7 +15,7 @@
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
-    "refs/heads/pr/revision-provider-primary-guard-auth-v2": "535c17ee8933888c4e1d649c2382e0618d458261",
+    "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
     "refs/heads/syncwheel/draft/historical-pr79": "0599c8b9faa842388bc8b3776c7171e859b69cfb",
@@ -35,7 +33,7 @@
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T20:23:35+00:00",
+  "created_at": "2026-09-19T20:37:42+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -120,9 +118,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "revision-provider-primary-guard-auth"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -130,32 +126,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/revision-provider-primary-guard-auth-v2",
-        "commits": [
-          "f799fab9552824263f1f08a1c4f41b47f1da48b1",
-          "374b354d49390308902fcc7687fa01277d1b1213",
-          "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71"
-        ],
-        "id": "revision-provider-primary-guard-auth",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "dee7c151-5fbe-42a8-9f2f-f862d73e0896",
-  "parent_state": "72f3a6dcae60e34e21ec52b1d8967be12f99cb3d",
+  "operation_token": "2cfa49ea-b1b7-4be2-878b-7410dd1ac063",
+  "parent_state": "a2b52b1e1b022ab327e8c2bbfb8c675aebb526fa",
   "projection_status": "partial",
-  "publication_id": "009efcc1-6b8d-4075-a2b9-84ae1d58511c",
-  "publication_scope": "stack:revision-provider-primary-guard-auth",
+  "publication_id": "7dba3f39-5b0c-4510-a271-d068aebb42d8",
+  "publication_scope": "close:revision-provider-primary-guard-auth",
   "schema_version": 2,
   "syncwheel_version": "0.43.18",
   "tombstones": [
@@ -581,6 +560,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth",
       "remote_tip": "f799fab9552824263f1f08a1c4f41b47f1da48b1",
+      "stack": "revision-provider-primary-guard-auth"
+    },
+    {
+      "branch": "pr/revision-provider-primary-guard-auth-v2",
+      "closed_at": "2026-09-19T20:37:32+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/revision-provider-primary-guard-auth-v2",
+      "remote_tip": null,
       "stack": "revision-provider-primary-guard-auth"
     }
   ]
