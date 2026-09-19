@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "206d88e0243cc99bcd4409e270c58bd20a7124bd"
+  },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -30,10 +32,11 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
-    "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092"
+    "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "7e6d5d463417b99bb2ed03adc53ef4663630af8f"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T20:37:42+00:00",
+  "created_at": "2026-09-19T21:54:34+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -90,7 +93,8 @@
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "f799fab9552824263f1f08a1c4f41b47f1da48b1",
-    "refs/heads/syncwheel/draft/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20"
+    "refs/heads/syncwheel/draft/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "206d88e0243cc99bcd4409e270c58bd20a7124bd"
   },
   "manifest": {
     "coordination": {
@@ -118,25 +122,36 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "worktree-release-dirty-primary"
+      ],
       "strategy": "cherry-pick"
     },
-    "landing": {
-      "checks": null,
-      "mode": "disabled",
-      "strategy": "merge"
-    },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/worktree-release-dirty-primary",
+        "commits": [],
+        "id": "worktree-release-dirty-primary",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "2cfa49ea-b1b7-4be2-878b-7410dd1ac063",
-  "parent_state": "a2b52b1e1b022ab327e8c2bbfb8c675aebb526fa",
+  "operation_token": "bed7d40d-945f-442a-9fe0-ce9bd55db07c",
+  "parent_state": "b8cecda1310a28b1df07c6b4251854a22cf7f065",
   "projection_status": "partial",
-  "publication_id": "7dba3f39-5b0c-4510-a271-d068aebb42d8",
-  "publication_scope": "close:revision-provider-primary-guard-auth",
+  "publication_id": "3aed46aa-7057-4ac9-af3d-5a71dd82f1f5",
+  "publication_scope": "create:worktree-release-dirty-primary",
   "schema_version": 2,
-  "syncwheel_version": "0.43.18",
+  "syncwheel_version": "0.43.19",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
