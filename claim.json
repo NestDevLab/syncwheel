@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/missing-historical-integration-tip"
-  ],
-  "claimed_at": "2026-09-19T18:25:59+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-19T19:08:30+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "d9cf1d9a-2aa9-4cf6-9c57-9544c34776fe",
-  "publication_scope": "stack:missing-historical-integration-tip",
+  "operation_token": "af26b7c8-378f-4e3b-9753-ebc875f77b40",
+  "publication_scope": "close:missing-historical-integration-tip",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/missing-historical-integration-tip",
   "syncwheel_version": "0.43.17"
 }
