@@ -103,7 +103,11 @@
       },
       "meta": {
         "purpose": "Classify integration-only history already delivered by PR 79"
-      }
+      },
+      "integration_only_commits": [
+        "b9f9bb31292dd8b9f11d85f44e6d8a0ec53d68c1",
+        "ab14140ec86e5d7c3874f4ecba3d5c8efc317189"
+      ]
     }
   ],
   "syncwheel_tracking": "git-tracked",
