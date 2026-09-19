@@ -47,7 +47,8 @@
       "base": "origin/main",
       "branch": "pr/missing-historical-integration-tip",
       "commits": [
-        "97af5655bab43898be85f15c783b8b6151603e78"
+        "97af5655bab43898be85f15c783b8b6151603e78",
+        "53b7a1680315d9500e2199e314bbbd41dd11fc6e"
       ],
       "id": "missing-historical-integration-tip",
       "integration_branch": "main-integration",
