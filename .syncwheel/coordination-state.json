@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "206d88e0243cc99bcd4409e270c58bd20a7124bd"
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
   },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
@@ -33,10 +33,10 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
-    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "7e6d5d463417b99bb2ed03adc53ef4663630af8f"
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "264caf11d80eb366a10790c36b44305253f9748e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T21:54:34+00:00",
+  "created_at": "2026-09-19T22:05:07+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -94,7 +94,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "f799fab9552824263f1f08a1c4f41b47f1da48b1",
     "refs/heads/syncwheel/draft/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
-    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "206d88e0243cc99bcd4409e270c58bd20a7124bd"
+    "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
   },
   "manifest": {
     "coordination": {
@@ -135,7 +135,9 @@
           "role": "canonical"
         },
         "branch": "syncwheel/draft/worktree-release-dirty-primary",
-        "commits": [],
+        "commits": [
+          "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
+        ],
         "id": "worktree-release-dirty-primary",
         "integration_branch": "main-integration",
         "state": "draft",
@@ -145,11 +147,11 @@
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "bed7d40d-945f-442a-9fe0-ce9bd55db07c",
-  "parent_state": "b8cecda1310a28b1df07c6b4251854a22cf7f065",
+  "operation_token": "9b74ba70-df0f-4650-830e-3bed5159b091",
+  "parent_state": "cac8a9a3fef9376f3d66459da376bf82409a9eb8",
   "projection_status": "partial",
-  "publication_id": "3aed46aa-7057-4ac9-af3d-5a71dd82f1f5",
-  "publication_scope": "create:worktree-release-dirty-primary",
+  "publication_id": "df5bf0e8-1661-4d2f-9ac2-fcd92b1c58fa",
+  "publication_scope": "stack:worktree-release-dirty-primary",
   "schema_version": 2,
   "syncwheel_version": "0.43.19",
   "tombstones": [
