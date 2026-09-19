@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/historical-pr78"
+  ],
+  "claimed_at": "2026-09-19T07:12:15+00:00",
+  "coordination_id": "default",
+  "operation_token": "c2f90eab-a686-4385-a74e-584e83442ca2",
+  "publication_scope": "create:historical-pr78",
+  "source_ref": "refs/heads/syncwheel/draft/historical-pr78",
+  "syncwheel_version": "0.43.15"
+}
