@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/missing-historical-integration-tip"
   ],
-  "claimed_at": "2026-09-19T18:23:09+00:00",
+  "claimed_at": "2026-09-19T18:25:59+00:00",
   "coordination_id": "default",
-  "operation_token": "6a85323e-3130-45e0-ba76-64c5d2e32503",
-  "publication_scope": "promote:missing-historical-integration-tip",
+  "operation_token": "d9cf1d9a-2aa9-4cf6-9c57-9544c34776fe",
+  "publication_scope": "stack:missing-historical-integration-tip",
   "source_ref": "refs/heads/pr/missing-historical-integration-tip",
   "syncwheel_version": "0.43.17"
 }
