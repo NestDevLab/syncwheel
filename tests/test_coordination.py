@@ -1142,6 +1142,80 @@ with module.coordination_publication_lock(Path(repo_path)):
                     fixture['repo'], fixture['manifest'], fixture['recorded'], observation,
                 )
 
+    def test_unavailable_historical_publisher_is_ignored_in_complete_repo(self):
+        module = self.load_module()
+        ref = 'refs/heads/integration/shared'
+        state_tips = {
+            'current': '1' * 40,
+            'missing': '2' * 40,
+            'valid': '3' * 40,
+        }
+        integration_tips = {
+            'current': 'a' * 40,
+            'missing': 'b' * 40,
+            'valid': 'c' * 40,
+        }
+        states = {
+            state_tips['current']: {
+                'parent_state': state_tips['missing'],
+                'changed_refs': {},
+                'managed_refs': {ref: integration_tips['current']},
+            },
+            state_tips['missing']: {
+                'parent_state': state_tips['valid'],
+                'changed_refs': {ref: integration_tips['missing']},
+                'managed_refs': {ref: integration_tips['missing']},
+            },
+            state_tips['valid']: {
+                'parent_state': None,
+                'changed_refs': {ref: integration_tips['valid']},
+                'managed_refs': {ref: integration_tips['valid']},
+            },
+        }
+
+        def fake_git(_repo, *args, **_kwargs):
+            if args[:3] == ('show', '-s', '--format=%P'):
+                parent = states[args[3]].get('parent_state') or ''
+                return SimpleNamespace(stdout=parent + ('\n' if parent else ''))
+            if args == ('rev-parse', '--is-shallow-repository'):
+                return SimpleNamespace(stdout='false\n')
+            raise AssertionError(f'unexpected git call: {args}')
+
+        observation = {
+            'state_tip': state_tips['current'],
+            'integration_ref': ref,
+            'config': {'id': 'default', 'remote': 'origin'},
+        }
+        with (
+            mock.patch.object(
+                module, 'coordination_state_from_commit',
+                side_effect=lambda _repo, tip, _id: states[tip],
+            ),
+            mock.patch.object(module, 'git', side_effect=fake_git),
+            mock.patch.object(
+                module, 'commit_exists',
+                side_effect=lambda _repo, tip: tip != integration_tips['missing'],
+            ),
+            mock.patch.object(module, 'verify_coordination_state_manifest_digest'),
+            mock.patch.object(
+                module, 'coordination_state_manifest_digest_classification',
+                return_value={
+                    'form': module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+                },
+            ),
+        ):
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                publishers = list(module.integration_reconciliation_publishing_states(
+                    Path('/repo'), observation,
+                ))
+
+        self.assertEqual(publishers, [states[state_tips['valid']]])
+        self.assertIn(
+            f'ignoring unavailable historical coordination publisher {state_tips["missing"]}',
+            stderr.getvalue(),
+        )
+
     def test_broken_historical_state_chain_still_blocks_scan(self):
         fixture, observation = self._healed_historical_orphan(
             'historical-broken-chain'

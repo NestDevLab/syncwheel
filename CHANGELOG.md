@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.43.18 - 2026-09-19
+
+- Let integration reconciliation ignore only historical coordination publishers whose integration objects are unavailable in a complete repository. Current-state and shallow-clone verification remain strict.
+
 ## 0.43.17 - 2026-09-19
 
 - Teach `stack close` help and failure output to use `--reason absorbed` for

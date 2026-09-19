@@ -6118,7 +6118,28 @@ def integration_reconciliation_publishing_states(repo_root, observation):
             # The observed head is the present authority, even when it did
             # not publish the integration ref in this operation.
             verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
-        if (state.get('changed_refs') or {}).get(ref):
+        published = (state.get('changed_refs') or {}).get(ref)
+        if published:
+            managed_tip = (state.get('managed_refs') or {}).get(ref)
+            if (
+                current != current_head
+                and isinstance(managed_tip, str)
+                and not commit_exists(repo_root, managed_tip)
+                and git(
+                    repo_root, 'rev-parse', '--is-shallow-repository'
+                ).stdout.strip() == 'false'
+            ):
+                # A complete repository cannot use a missing historical tip
+                # as an ancestry or byte-level witness. Older coordination
+                # states can outlive unpublished integration objects after
+                # normal Git pruning, so keep the current authority strict
+                # while ignoring only this unusable historical publisher.
+                print(
+                    f'WARNING: ignoring unavailable historical coordination publisher {current}',
+                    file=sys.stderr,
+                )
+                current = parent
+                continue
             classification = coordination_state_manifest_digest_classification(
                 repo_root, state, config['remote']
             )
