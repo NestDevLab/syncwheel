@@ -33,7 +33,8 @@
     "branch": "main-integration",
     "stacks": [
       "independent-worktree-open",
-      "historical-pr78"
+      "historical-pr78",
+      "historical-pr79"
     ],
     "strategy": "cherry-pick"
   },
@@ -87,6 +88,22 @@
         "d49df5db0271e43cb3ec37c1b35ae53121d583a7",
         "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0"
       ]
+    },
+    {
+      "id": "historical-pr79",
+      "branch": "syncwheel/draft/historical-pr79",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Classify integration-only history already delivered by PR 79"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
