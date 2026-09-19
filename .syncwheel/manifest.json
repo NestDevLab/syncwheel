@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "historical-pr79",
       "historical-pr80",
       "historical-pr82",
       "historical-pr83",
@@ -48,26 +47,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "syncwheel/draft/historical-pr79",
-      "commits": [],
-      "id": "historical-pr79",
-      "integration_branch": "main-integration",
-      "integration_only_commits": [
-        "b9f9bb31292dd8b9f11d85f44e6d8a0ec53d68c1",
-        "ab14140ec86e5d7c3874f4ecba3d5c8efc317189"
-      ],
-      "meta": {
-        "purpose": "Classify integration-only history already delivered by PR 79"
-      },
-      "publication": {
-        "enabled": false
-      },
-      "state": "draft",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "base": "origin/main",
       "branch": "syncwheel/draft/historical-pr80",
