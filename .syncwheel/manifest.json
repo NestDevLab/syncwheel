@@ -186,7 +186,7 @@
     },
     {
       "id": "skill-close-guidance",
-      "branch": "syncwheel/draft/skill-close-guidance",
+      "branch": "pr/skill-close-guidance",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -194,9 +194,9 @@
       "commits": [
         "d73bfc22ea70ca921bf7e7e1d08c160f2437e7cc"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Teach agents and CLI to close squash-delivered stacks as absorbed"
