@@ -32,7 +32,8 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "missing-historical-integration-tip"
+      "missing-managed-ref-repair",
+      "missing-managed-ref-repair-v2"
     ],
     "strategy": "cherry-pick"
   },
@@ -45,15 +46,41 @@
   "stacks": [
     {
       "base": "origin/main",
-      "branch": "pr/missing-historical-integration-tip",
+      "branch": "syncwheel/draft/missing-managed-ref-repair",
       "commits": [
-        "97af5655bab43898be85f15c783b8b6151603e78",
-        "53b7a1680315d9500e2199e314bbbd41dd11fc6e"
+        "e7d7a8f52c6a5317b84f660d09018d8a4c20eade",
+        "4c92f89442bdeb53302d1e15a57f3b95dec21262"
       ],
-      "id": "missing-historical-integration-tip",
+      "id": "missing-managed-ref-repair",
+      "integration_branch": "main-integration",
+      "integration_commits": [],
+      "meta": {
+        "purpose": "Restore a missing managed remote ref from verified coordination state without force"
+      },
+      "publication": {
+        "enabled": false
+      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "pr/missing-managed-ref-repair",
+      "commits": [
+        "fafb2cec5509786c4425546df74d5b145cf7cec6",
+        "2804f0e56098dc41a55cca0183c671dcda3f7f77",
+        "1873c6f0d99ea47a835004d8f3fcc9eea1fdd1a6",
+        "041f11506b16fcf06a30dbaedb84b33d74319dbf",
+        "ff01e277869347344d0bc01d25eb8cb285032bd0",
+        "2868acd2fc70d557973b7bdbab324cd6e1e1ba88",
+        "fa1f3dae5f5aaac327a9e22536f519fba3665dd0",
+        "2da87e6c42792c9668648b3da37f608b0326989e"
+      ],
+      "id": "missing-managed-ref-repair-v2",
       "integration_branch": "main-integration",
       "meta": {
-        "purpose": "Allow integration rebuild to ignore unverifiable ancient coordination publishers while preserving current-state verification"
+        "purpose": "Restore missing managed refs and isolate stack lifecycle from unrelated lanes"
       },
       "publication": {
         "enabled": true
