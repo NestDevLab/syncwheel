@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/skill-close-guidance"
   ],
-  "claimed_at": "2026-09-19T07:38:45+00:00",
+  "claimed_at": "2026-09-19T07:49:17+00:00",
   "coordination_id": "default",
-  "operation_token": "8ff49090-eae7-449a-b97e-4552fd1c573c",
-  "publication_scope": "create:skill-close-guidance",
+  "operation_token": "58747fd8-58d9-4a3d-9b93-2c663efe0e6a",
+  "publication_scope": "partial",
   "source_ref": "refs/heads/syncwheel/draft/skill-close-guidance",
   "syncwheel_version": "0.43.16"
 }
