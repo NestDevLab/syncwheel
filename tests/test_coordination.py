@@ -3149,7 +3149,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'push', '-q', 'origin', 'main')
         self.git(repo, 'switch', '-q', previous)
 
-        self.run_cli(repo, 'stack', 'close', 'equivalent', '--force', '--reason', 'absorbed')
+        self.run_cli(repo, 'stack', 'close', 'equivalent', '--reason', 'absorbed')
 
         manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertNotIn('equivalent', [stack['id'] for stack in manifest['stacks']])
@@ -3365,7 +3365,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(publisher, 'commit', '-qm', 'feat: squash equivalent composition')
         self.git(publisher, 'push', '-q', 'origin', 'main')
 
-        self.run_cli(repo, 'stack', 'close', 'compositional', '--force', '--reason', 'absorbed')
+        self.run_cli(repo, 'stack', 'close', 'compositional', '--reason', 'absorbed')
 
         manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertNotIn('compositional', [stack['id'] for stack in manifest['stacks']])
