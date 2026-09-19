@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth"
+  ],
+  "claimed_at": "2026-09-19T19:51:37+00:00",
+  "coordination_id": "default",
+  "operation_token": "42c9da70-1894-4099-95e5-5b44819ea018",
+  "publication_scope": "create:revision-provider-primary-guard-auth",
+  "source_ref": "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth",
+  "syncwheel_version": "0.43.18"
+}
