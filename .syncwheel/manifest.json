@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "missing-historical-integration-tip"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,26 @@
     "strategy": "merge"
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "base": "origin/main",
+      "branch": "syncwheel/draft/missing-historical-integration-tip",
+      "commits": [
+        "97af5655bab43898be85f15c783b8b6151603e78"
+      ],
+      "id": "missing-historical-integration-tip",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Allow integration rebuild to ignore unverifiable ancient coordination publishers while preserving current-state verification"
+      },
+      "publication": {
+        "enabled": false
+      },
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
