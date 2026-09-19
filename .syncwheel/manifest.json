@@ -81,7 +81,8 @@
         "06a1d413037f6715881b2a9e887d2f5f66e38e4c",
         "56b8e75192773b5d8f94e1bdd7b83c4c1640c36d",
         "953e6f2f3de0df8491d057f8690ffbb0529d8b62",
-        "543ff946b9908a6b8d678efd88631075e27f5440"
+        "543ff946b9908a6b8d678efd88631075e27f5440",
+        "7733738406a41ac5db22fc089b04079616e63c08"
       ],
       "id": "missing-managed-ref-repair-v2",
       "integration_branch": "main-integration",
