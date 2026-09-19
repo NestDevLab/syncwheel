@@ -175,7 +175,13 @@
       },
       "meta": {
         "purpose": "Classify integration-only history already delivered by PR 85"
-      }
+      },
+      "integration_only_commits": [
+        "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
+        "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
+        "71742a8cfef8b8d328132c45a48dd1a816f5b404",
+        "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
+      ]
     }
   ],
   "syncwheel_tracking": "git-tracked",
