@@ -1037,7 +1037,50 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'syncwheel-lane-lane-4').exists())
 
-    def test_expired_clean_lane_is_reaped_with_a_recovery_ref_before_next_open(self):
+    def test_worktree_open_warns_and_preserves_unrelated_pending_dirty_lane(self):
+        dirty = json.loads(self.run_cli('worktree', 'open', 'dirty-owner', '--json').stdout)['lane']
+        dirty_path = Path(dirty['path'])
+        (dirty_path / 'draft.txt').write_text('leave this draft alone\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['state'] = 'captured_pending_cleanup'
+        registry['lanes'][0]['pending_reason'] = 'dirty'
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original = dict(registry['lanes'][0])
+        original_tip = module.ref_tip(self.repo, dirty['branch'])
+
+        opened = json.loads(self.run_cli('worktree', 'open', 'independent', '--json').stdout)
+        self.assertEqual(opened['lane']['id'], 'independent')
+        self.assertTrue(any('dirty-owner: dirty' in line for line in opened['warnings']))
+        text_result = self.run_cli('worktree', 'open', 'another-independent')
+        self.assertIn('warning: governed worktree dirty-owner: dirty', text_result.stdout)
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 3)
+        self.assertEqual(registry['lanes'][0], original)
+        self.assertEqual(module.ref_tip(self.repo, dirty['branch']), original_tip)
+        self.assertEqual((dirty_path / 'draft.txt').read_text(), 'leave this draft alone\n')
+
+    def test_worktree_open_still_blocks_a_conflicting_lane_and_counts_dirty_lane(self):
+        dirty = json.loads(self.run_cli('worktree', 'open', 'reserved', '--json').stdout)['lane']
+        (Path(dirty['path']) / 'draft.txt').write_text('keep\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+
+        conflict = self.run_cli('worktree', 'open', 'reserved', '--json', expected=2)
+        self.assertIn('lane id was already used: reserved', conflict.stderr)
+        for number in range(3):
+            self.run_cli('worktree', 'open', f'other-{number}', '--json')
+        full = self.run_cli('worktree', 'open', 'fifth', '--json', expected=2)
+        self.assertIn('capacity reached (4)', full.stderr)
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 4)
+        self.assertEqual((Path(dirty['path']) / 'draft.txt').read_text(), 'keep\n')
+
+    def test_expired_clean_lane_is_preserved_until_explicit_recovery(self):
         opened = json.loads(self.run_cli(
             'worktree', 'open', 'expired', '--into', 'feature-a', '--json'
         ).stdout)
@@ -1054,20 +1097,77 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             expired_status['remedy'],
         )
 
-        self.run_cli('worktree', 'open', 'next', '--json')
+        next_lane = json.loads(self.run_cli('worktree', 'open', 'next', '--json').stdout)
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
-        self.assertFalse(any(item['id'] == 'expired' for item in registry['lanes']))
-        self.assertFalse(Path(opened['lane']['path']).exists())
-        branch = subprocess.run(
-            ['git', 'show-ref', '--verify', '--quiet', 'refs/heads/syncwheel/lane/expired'],
-            cwd=self.repo,
-            text=True,
-            capture_output=True,
-        )
-        self.assertNotEqual(branch.returncode, 0)
+        self.assertEqual(len(registry['lanes']), 2)
+        self.assertEqual(registry['lanes'][0]['id'], 'expired')
+        self.assertTrue(Path(opened['lane']['path']).exists())
+        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), opened['lane']['base'])
+        self.assertTrue(any('expired: expired' in line for line in next_lane['warnings']))
+        self.run_cli('worktree', 'open', 'third', '--json')
+        self.run_cli('worktree', 'open', 'fourth', '--json')
+        full = self.run_cli('worktree', 'open', 'fifth', '--json', expected=2)
+        self.assertIn('capacity reached (4)', full.stderr)
+        self.assertTrue(Path(opened['lane']['path']).exists())
 
-    def test_expired_committed_lane_is_reaped_only_after_anchoring_its_tip(self):
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
+        self.assertFalse(Path(opened['lane']['path']).exists())
+        self.run_cli('worktree', 'open', 'fifth', '--json')
+
+    def test_late_untracked_draft_during_open_is_never_reaped(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'late-draft', '--json').stdout)['lane']
+        lane_path = Path(opened['path'])
+        draft = lane_path / 'late.txt'
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original = dict(registry['lanes'][0])
+        original_tip = module.ref_tip(self.repo, opened['branch'])
+        real_warnings = module.governed_worktree_warning_lines
+
+        def add_late_draft(repo_root, manifest):
+            draft.write_text('arrived during open\n')
+            return real_warnings(repo_root, manifest)
+
+        args = SimpleNamespace(
+            func=module.command_worktree_open, repo=str(self.repo), manifest=None,
+            personal=None, lane='independent', into=None, full=False, json=True,
+        )
+        with mock.patch.object(module, 'governed_worktree_warning_lines', side_effect=add_late_draft), \
+             mock.patch.object(module, 'reconcile_governed_worktrees', side_effect=AssertionError('implicit reap')):
+            module.governed_worktree_preflight(args)
+            with contextlib.redirect_stdout(io.StringIO()) as output:
+                module.command_worktree_open(args)
+        self.assertEqual(json.loads(output.getvalue())['lane']['id'], 'independent')
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0], original)
+        self.assertEqual(module.ref_tip(self.repo, opened['branch']), original_tip)
+        self.assertEqual(draft.read_text(), 'arrived during open\n')
+
+    def test_worktree_open_blocks_pending_registry_recovery_without_changing_it(self):
+        module = self.load_syncwheel_module()
+        opened = json.loads(self.run_cli('worktree', 'open', 'existing', '--json').stdout)['lane']
+        registry, registry_path = module.load_governed_worktree_registry(self.repo)
+        before = registry_path.read_bytes()
+
+        def pending_recovery(_repo, recovered, _persist, _manifest):
+            recovered['lanes'][0]['state'] = 'reaped'
+
+        args = SimpleNamespace(
+            repo=str(self.repo), manifest=None, personal=None, lane='independent',
+            into=None, full=False, json=True,
+        )
+        with mock.patch.object(module, 'recover_governed_worktree_registry_from_ledger',
+                               side_effect=pending_recovery):
+            with self.assertRaisesRegex(module.SyncwheelError, 'pending ledger recovery'):
+                module.command_worktree_open(args)
+        self.assertEqual(registry_path.read_bytes(), before)
+        self.assertEqual(module.ref_tip(self.repo, opened['branch']), opened['base'])
+        self.assertFalse((Path(opened['path']).parent / 'syncwheel-lane-independent').exists())
+
+    def test_expired_committed_lane_is_reaped_only_by_explicit_gc_after_anchoring_its_tip(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'expired-commit', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
         (lane_path / 'saved.txt').write_text('recover this commit\n')
@@ -1082,6 +1182,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         module.save_governed_worktree_registry(self.repo, registry)
 
         self.run_cli('worktree', 'open', 'after-expiry', '--json')
+        self.assertTrue(lane_path.exists())
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertFalse(any(item['id'] == 'expired-commit' for item in registry['lanes']))
@@ -1141,6 +1243,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
     def test_reaping_gate_uses_apply_and_explicit_worktree_creation(self):
         module = self.load_syncwheel_module()
+        self.assertFalse(module.governed_worktree_reaping_requested(
+            SimpleNamespace(func=module.command_worktree_open)
+        ))
         for command in (
             module.command_reconcile,
             module.command_resume,
@@ -1165,7 +1270,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     SimpleNamespace(func=command, auto_worktree=True, worktree=None)
                 ))
 
-    def test_expired_lane_can_be_reaped_through_repo_flag_outside_a_repository(self):
+    def test_expired_lane_can_be_reaped_through_explicit_gc_outside_a_repository(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
@@ -1173,7 +1278,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         module.save_governed_worktree_registry(self.repo, registry)
 
         self.run_cli('worktree', 'open', 'next-outside', '--json', '-r', str(self.repo), cwd=self.tmp)
-
+        self.assertTrue(Path(opened['lane']['path']).exists())
+        self.run_cli('gc', '--apply', '--no-fetch', '--json', '-r', str(self.repo), cwd=self.tmp)
         self.assertFalse(Path(opened['lane']['path']).exists())
 
     def test_branch_advanced_pending_lane_blocks_a_mutating_rebuild(self):
@@ -1231,6 +1337,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         reported = status['governed_worktrees']['lanes'][0]
         self.assertEqual(reported['code'], 'expired')
         self.run_cli('worktree', 'open', 'after-missing-expired', '--json')
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertTrue(any(item['id'] == 'missing-expired' for item in registry['lanes']))
+        self.run_cli('gc', '--apply', '--no-fetch', '--json')
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertFalse(any(item['id'] == 'missing-expired' for item in registry['lanes']))
@@ -1951,14 +2060,14 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 persisted, _ = module.load_governed_worktree_registry(self.repo)
                 self.assertFalse(any(item['id'] == lane_id for item in persisted['lanes']))
 
-    def test_release_racing_worktree_open_never_reports_an_unknown_lane(self):
+    def test_release_racing_same_id_open_preserves_conflict_until_release(self):
         module = self.load_syncwheel_module()
         reason = 'operator release'
 
         for index in range(6):
             with self.subTest(iteration=index):
                 lane_id = f'race-open-{index}'
-                self.run_cli('worktree', 'open', lane_id, '--json')
+                original = json.loads(self.run_cli('worktree', 'open', lane_id, '--json').stdout)['lane']
                 registry, _ = module.load_governed_worktree_registry(self.repo)
                 lane = next(item for item in registry['lanes'] if item['id'] == lane_id)
                 lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
@@ -1971,7 +2080,15 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
                 self.assertNotIn('unknown governed worktree lane', release.stderr)
                 self.assertEqual(release.returncode, 0, release.stderr)
-                self.assertEqual(reopen.returncode, 0, reopen.stderr)
+                if reopen.returncode == 0:
+                    replacement = json.loads(reopen.stdout)['lane']
+                else:
+                    self.assertEqual(reopen.returncode, 2, reopen.stderr)
+                    self.assertIn('lane id was already used', reopen.stderr)
+                    replacement = json.loads(self.run_cli(
+                        'worktree', 'open', lane_id, '--json',
+                    ).stdout)['lane']
+                self.assertNotEqual(replacement['generation_token'], original['generation_token'])
                 self.assertTrue(self.lane_release_reason_recorded(module, lane_id, reason))
                 self.run_cli(
                     'worktree', 'release', lane_id,
