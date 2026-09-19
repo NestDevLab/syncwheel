@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "independent-worktree-open",
       "historical-pr78",
       "historical-pr79",
       "historical-pr80",
@@ -48,27 +47,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/independent-worktree-open",
-      "commits": [
-        "f6b3713eec9e4ade9a88d7a6e60069bbfc844326",
-        "a23a8d8aa56e425e7f7285fb35cc5072b58df0fe",
-        "71742a8cfef8b8d328132c45a48dd1a816f5b404",
-        "b29a8aec275d3a7345f4a616335cb6d12358b1ee"
-      ],
-      "id": "independent-worktree-open",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Allow independent worktree open while unrelated expired lanes need explicit recovery"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "id": "historical-pr78",
       "branch": "syncwheel/draft/historical-pr78",
