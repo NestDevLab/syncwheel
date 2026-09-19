@@ -188,8 +188,8 @@
       "base": "origin/main",
       "branch": "pr/skill-close-guidance",
       "commits": [
-        "d73bfc22ea70ca921bf7e7e1d08c160f2437e7cc",
-        "3846a57ab8677f8c4c47a923a30f5a928b0d2e3d"
+        "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
+        "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac"
       ],
       "id": "skill-close-guidance",
       "integration_branch": "main-integration",
