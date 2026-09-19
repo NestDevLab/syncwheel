@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "b114c83b92b9b961f106b47da48fb7cd2c18ec95"
+  },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -28,10 +30,11 @@
     "refs/heads/syncwheel/draft/missing-historical-integration-tip": "8eb98c69217f368d77d8ce6fca60d3b89c68d8e6",
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
+    "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "a9546321815d3380e289335339f41cc662da184f",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T19:08:30+00:00",
+  "created_at": "2026-09-19T19:51:37+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -86,6 +89,7 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48",
+    "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "b114c83b92b9b961f106b47da48fb7cd2c18ec95",
     "refs/heads/syncwheel/draft/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20"
   },
   "manifest": {
@@ -114,7 +118,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "revision-provider-primary-guard-auth"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -122,17 +128,31 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/revision-provider-primary-guard-auth",
+        "commits": [],
+        "id": "revision-provider-primary-guard-auth",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "af26b7c8-378f-4e3b-9753-ebc875f77b40",
-  "parent_state": "ec2efabbf78b755b65b2144dfa2ee7e45abffac9",
+  "operation_token": "42c9da70-1894-4099-95e5-5b44819ea018",
+  "parent_state": "a44b6911dc2d5b163090a1050c570744b9d35c3a",
   "projection_status": "partial",
-  "publication_id": "af523891-a7a4-41fb-bf7f-ef070132932c",
-  "publication_scope": "close:missing-historical-integration-tip",
+  "publication_id": "b33afe30-9547-419b-bba2-9bd027f08847",
+  "publication_scope": "create:revision-provider-primary-guard-auth",
   "schema_version": 2,
-  "syncwheel_version": "0.43.17",
+  "syncwheel_version": "0.43.18",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
