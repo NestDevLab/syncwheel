@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20"
+    "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac"
   },
   "claims": {
     "refs/heads/main-integration": "eb040f28795008b41fb196e2f6585f59a32f5c9c",
@@ -16,7 +16,7 @@
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
-    "refs/heads/pr/skill-close-guidance": "c67859c2a37f569d564998038c017c7c586e71e1",
+    "refs/heads/pr/skill-close-guidance": "6d58a99a78f3e534bc017f86269bf47350e86a9c",
     "refs/heads/syncwheel/draft/historical-pr78": "7e65d231c503d7b28652929f7357e4d43ecac94c",
     "refs/heads/syncwheel/draft/historical-pr79": "f022a9636b831db3564d6b2401dfa8967254a099",
     "refs/heads/syncwheel/draft/historical-pr80": "5db2523b8c8b33e5d7da7e605d57fd89f46e7e68",
@@ -31,7 +31,7 @@
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T07:49:36+00:00",
+  "created_at": "2026-09-19T07:54:11+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -65,7 +65,7 @@
     "refs/heads/pr/resume-manifest-replay-digest": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
     "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d",
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
-    "refs/heads/pr/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
+    "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc",
@@ -215,7 +215,8 @@
         },
         "branch": "pr/skill-close-guidance",
         "commits": [
-          "d73bfc22ea70ca921bf7e7e1d08c160f2437e7cc"
+          "d73bfc22ea70ca921bf7e7e1d08c160f2437e7cc",
+          "3846a57ab8677f8c4c47a923a30f5a928b0d2e3d"
         ],
         "id": "skill-close-guidance",
         "integration_branch": "main-integration",
@@ -225,11 +226,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "04530cb4-6ca1-452d-8495-adada9a2586e",
-  "parent_state": "3bbe1caf6b421d206077876bf69f57fce50ead80",
+  "operation_token": "8623dd71-a97d-451b-9624-7914d9c49028",
+  "parent_state": "18edb968487c12b93e10194a9d95e6a8ca5ac35e",
   "projection_status": "partial",
-  "publication_id": "eda646a5-b9bc-4785-890c-5a713462396e",
-  "publication_scope": "promote:skill-close-guidance",
+  "publication_id": "9a14dbec-3482-4096-b591-7912bf808c1f",
+  "publication_scope": "partial",
   "schema_version": 2,
   "syncwheel_version": "0.43.16",
   "tombstones": [
