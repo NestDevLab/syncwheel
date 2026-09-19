@@ -6124,6 +6124,7 @@ def integration_reconciliation_publishing_states(repo_root, observation):
             if (
                 current != current_head
                 and isinstance(managed_tip, str)
+                and re.fullmatch(r'[0-9a-f]{40,64}', managed_tip)
                 and not commit_exists(repo_root, managed_tip)
                 and git(
                     repo_root, 'rev-parse', '--is-shallow-repository'

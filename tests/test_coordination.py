@@ -1216,6 +1216,27 @@ with module.coordination_publication_lock(Path(repo_path)):
             stderr.getvalue(),
         )
 
+        states[state_tips['missing']]['managed_refs'][ref] = 'not-a-sha'
+        with (
+            mock.patch.object(
+                module, 'coordination_state_from_commit',
+                side_effect=lambda _repo, tip, _id: states[tip],
+            ),
+            mock.patch.object(module, 'git', side_effect=fake_git),
+            mock.patch.object(module, 'commit_exists', return_value=False),
+            mock.patch.object(module, 'verify_coordination_state_manifest_digest'),
+            mock.patch.object(
+                module, 'coordination_state_manifest_digest_classification',
+                side_effect=module.SyncwheelError('invalid historical managed tip'),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'invalid historical managed tip'
+            ):
+                list(module.integration_reconciliation_publishing_states(
+                    Path('/repo'), observation,
+                ))
+
     def test_broken_historical_state_chain_still_blocks_scan(self):
         fixture, observation = self._healed_historical_orphan(
             'historical-broken-chain'
