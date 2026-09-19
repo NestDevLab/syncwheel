@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/worktree-release-dirty-primary"
+  ],
+  "claimed_at": "2026-09-19T22:05:27+00:00",
+  "coordination_id": "default",
+  "operation_token": "ee27e213-d764-4a46-ac9c-f4571f99b20e",
+  "publication_scope": "promote:worktree-release-dirty-primary",
+  "source_ref": "refs/heads/pr/worktree-release-dirty-primary",
+  "syncwheel_version": "0.43.19"
+}
