@@ -151,7 +151,11 @@
       },
       "meta": {
         "purpose": "Classify integration-only history already delivered by PR 82"
-      }
+      },
+      "integration_only_commits": [
+        "416e5bddf302563091dce85848ae3f16b266b7b5",
+        "b6d8d2fed2527936aa40ab13246873955b57bd9f"
+      ]
     }
   ],
   "syncwheel_tracking": "git-tracked",
