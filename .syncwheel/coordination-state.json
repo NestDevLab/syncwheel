@@ -1,9 +1,9 @@
 {
   "changed_refs": {
-    "refs/heads/pr/missing-historical-integration-tip": "8a6ec195c47d279d15e5394898db4796c54e60cb"
+    "refs/heads/main-integration": "c906135d4b85a3f9ace635c7c565fbef2eb6435c"
   },
   "claims": {
-    "refs/heads/main-integration": "8a00886ff39ca280cd24dd908c635e47b7a0d924",
+    "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
@@ -33,11 +33,11 @@
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-19T18:25:59+00:00",
+  "created_at": "2026-09-19T18:27:48+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "95df89713fafaf71e4acb53eefa36d8080d6a995",
+    "refs/heads/main-integration": "c906135d4b85a3f9ace635c7c565fbef2eb6435c",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -145,12 +145,12 @@
     ],
     "version": 2
   },
-  "manifest_digest": "c6b6c751f0e190f33a1d44146e41fa44a46063d66df36e38df2be3313b1e8595",
-  "operation_token": "d9cf1d9a-2aa9-4cf6-9c57-9544c34776fe",
-  "parent_state": "1b8bf7b54e6ea0bbb4bad15352bef01271c9442e",
+  "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
+  "operation_token": "690a5efc-14bd-4e40-9a4c-fb597e63ccfa",
+  "parent_state": "c7089ead192741713219858c66e3be4cc86aad8e",
   "projection_status": "partial",
-  "publication_id": "bce4ef83-e061-40ab-a720-d82319be33d4",
-  "publication_scope": "stack:missing-historical-integration-tip",
+  "publication_id": "807c2652-ac41-49d8-aa29-e119df1cd229",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.43.17",
   "tombstones": [
