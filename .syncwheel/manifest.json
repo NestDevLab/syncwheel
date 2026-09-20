@@ -32,7 +32,8 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "historical-closed-missing-tip"
+      "historical-closed-missing-tip",
+      "historical-closed-missing-tip-v2"
     ],
     "strategy": "cherry-pick"
   },
@@ -57,6 +58,24 @@
       },
       "meta": {
         "purpose": "Ignore pruned historical integration tips consistently during closed-stack recovery"
+      }
+    },
+    {
+      "id": "historical-closed-missing-tip-v2",
+      "branch": "syncwheel/draft/historical-closed-missing-tip-v2",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "e515208d404b7d504a5bb734053c91aa66557d49"
+      ],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Preserve historical integration proofs for pruned states and managed reconciliation merges"
       }
     }
   ],
