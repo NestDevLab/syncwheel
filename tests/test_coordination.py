@@ -3478,14 +3478,27 @@ with module.coordination_publication_lock(Path(repo_path)):
         (repo / 'squash.txt').write_text('second\n')
         self.git(repo, 'commit', '-qam', 'feat: second squash change')
         second = module.ref_tip(repo, 'HEAD')
-        stack = {'commits': [first, second]}
+        stack = {
+            'commits': [first, second],
+            'target_remote': 'origin',
+            'target_branch': 'main',
+        }
+
+        def delivery_observation(tip, branch='main'):
+            return {
+                'tip': tip,
+                'remote': 'origin',
+                'remoteRef': f'refs/heads/{branch}',
+                'remoteTip': tip,
+            }
 
         self.git(repo, 'switch', '-q', 'main')
         (repo / 'squash.txt').write_text('different\n')
         self.git(repo, 'add', 'squash.txt')
         self.git(repo, 'commit', '-qm', 'feat: different delivery')
+        different_tip = module.ref_tip(repo, 'HEAD')
         self.assertFalse(module.historical_stack_has_exact_squash_delivery(
-            repo, stack, module.ref_tip(repo, 'HEAD'),
+            repo, stack, delivery_observation(different_tip), {},
         ))
 
         self.git(repo, 'reset', '-q', '--hard', base)
@@ -3498,8 +3511,126 @@ with module.coordination_publication_lock(Path(repo_path)):
         ).stdout.strip()
         self.git(repo, 'reset', '-q', '--hard', delivered)
         self.assertTrue(module.historical_stack_has_exact_squash_delivery(
-            repo, stack, delivered,
+            repo, stack, delivery_observation(delivered), {},
         ))
+        self.assertFalse(module.historical_stack_has_exact_squash_delivery(
+            repo, stack, delivery_observation(delivered, 'other'), {},
+        ))
+
+    def test_absorbed_promotion_proof_is_bound_to_generation_and_parent_tip(self):
+        origin = self.create_remote('absorbed-generation-proof')
+        repo = self.clone(origin, 'absorbed-generation-proof')
+        module = self.load_module()
+        old = self.commit_on_branch(repo, 'scratch/old-generation', 'old.txt')
+        self.git(repo, 'switch', '-q', 'main')
+        new = self.commit_on_branch(repo, 'scratch/new-generation', 'new.txt')
+
+        def stack(branch, commit):
+            return {
+                'id': 'reused',
+                'branch': branch,
+                'commits': [commit],
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+            }
+
+        def tombstone(branch, reason, tip):
+            return {
+                'stack': 'reused',
+                'branch': branch,
+                'ref': f'refs/heads/{branch}',
+                'reason': reason,
+                'remote_tip': tip,
+            }
+
+        old_draft = stack('draft/old-reused', old)
+        old_pr = stack('pr/old-reused', old)
+        new_draft = stack('draft/new-reused', new)
+        new_pr = stack('pr/new-reused', new)
+        old_promoted = tombstone(old_draft['branch'], 'promoted', old)
+        old_abandoned = tombstone(old_pr['branch'], 'abandoned', old)
+        new_promoted = tombstone(new_draft['branch'], 'promoted', new)
+        new_absorbed = tombstone(new_pr['branch'], 'absorbed', None)
+
+        def state(parent, scope, stacks, tombstones, refs):
+            return {
+                'parent_state': parent,
+                'publication_scope': scope,
+                'manifest': {'defaults': {'canonical_remote': 'origin'}, 'stacks': stacks},
+                'tombstones': tombstones,
+                'managed_refs': refs,
+            }
+
+        reused_states = {
+            's0': state(None, 'create:reused', [old_draft], [], {
+                'refs/heads/draft/old-reused': old,
+            }),
+            's1': state('s0', 'promote:reused', [old_pr], [old_promoted], {
+                'refs/heads/pr/old-reused': old,
+            }),
+            's2': state('s1', 'close:reused', [], [old_promoted, old_abandoned], {}),
+            's3': state('s2', 'create:reused', [new_draft], [old_promoted, old_abandoned], {
+                'refs/heads/draft/new-reused': new,
+            }),
+            's4': state('s3', 'promote:reused', [new_pr], [
+                old_promoted, old_abandoned, new_promoted,
+            ], {'refs/heads/pr/new-reused': new}),
+            's5': state('s4', 'close:reused', [], [
+                old_promoted, old_abandoned, new_promoted, new_absorbed,
+            ], {}),
+        }
+
+        original_git = module.git
+
+        def closed_sources(states):
+            def fake_git(repo_root, *args, **kwargs):
+                if (
+                    len(args) == 4
+                    and args[:3] == ('show', '-s', '--format=%P')
+                    and args[3] in states
+                ):
+                    parent = states[args[3]].get('parent_state')
+                    return SimpleNamespace(stdout=(parent or '') + ('\n' if parent else ''))
+                return original_git(repo_root, *args, **kwargs)
+
+            observation = {
+                'status': 'current',
+                'state_tip': next(reversed(states)),
+                'integration_ref': 'refs/heads/main-integration',
+                'config': {'id': 'default', 'remote': 'origin'},
+            }
+            with mock.patch.object(module, 'git', side_effect=fake_git), mock.patch.object(
+                module, 'coordination_state_from_commit',
+                side_effect=lambda _repo, commit, _config: states[commit],
+            ), mock.patch.object(
+                module, 'verify_coordination_state_manifest_digest',
+            ), mock.patch.object(
+                module, 'coordination_state_manifest_digest_classification',
+                return_value={'form': 'control-manifest-file'},
+            ):
+                return module.historically_closed_integration_commits(
+                    repo, new, observation, candidates=[old, new],
+                )
+
+        trusted = closed_sources(reused_states)
+        self.assertIn(new, trusted)
+        self.assertNotIn(old, trusted)
+
+        corrupt_states = {key: value for key, value in reused_states.items() if key in {'s3', 's4', 's5'}}
+        corrupt_states['s3'] = json.loads(json.dumps(corrupt_states['s3']))
+        corrupt_states['s3']['parent_state'] = None
+        corrupt_states['s4'] = json.loads(json.dumps(corrupt_states['s4']))
+        for item in corrupt_states['s4']['tombstones']:
+            if item.get('ref') == 'refs/heads/draft/new-reused':
+                item['remote_tip'] = old
+        corrupt_states['s5'] = json.loads(json.dumps(corrupt_states['s5']))
+        for item in corrupt_states['s5']['tombstones']:
+            if item.get('ref') == 'refs/heads/draft/new-reused':
+                item['remote_tip'] = old
+        trusted = closed_sources(corrupt_states)
+        self.assertIn(new, trusted)
+        self.assertNotIn(old, trusted)
 
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')

@@ -6355,11 +6355,28 @@ def historically_delivered_integration_boundary(repo_root, manifest, tip, observ
     return None
 
 
-def historical_stack_has_exact_squash_delivery(repo_root, stack, delivery_tip):
+def historical_stack_has_exact_squash_delivery(
+    repo_root, stack, delivery_observation, defaults, coordination_remote=None,
+):
     """Prove an old squash from its immutable source chain and delivery tree."""
     commits = stack.get('commits') or []
-    if not commits or not delivery_tip or any(
-        not commit_exists(repo_root, commit) for commit in commits
+    delivery_observation = delivery_observation or {}
+    delivery_tip = delivery_observation.get('tip')
+    target_remote = (
+        stack.get('target_remote')
+        or defaults.get('canonical_remote')
+        or coordination_remote
+    )
+    target_branch = stack.get('target_branch') or defaults.get('base_branch')
+    if (
+        not commits
+        or not delivery_tip
+        or delivery_observation.get('remote') != target_remote
+        or delivery_observation.get('remoteRef') != f'refs/heads/{target_branch}'
+        or delivery_observation.get('remoteTip') != delivery_tip
+        or any(
+            not commit_exists(repo_root, commit) for commit in commits
+        )
     ):
         return False
     base = commit_first_parent(repo_root, commits[0])
@@ -6384,6 +6401,7 @@ def historical_stack_has_exact_squash_delivery(repo_root, stack, delivery_tip):
 
 def historically_closed_integration_commits(
     repo_root, tip, observation, candidates=None, delivery_tip=None,
+    delivery_observation=None,
 ):
     """Return exact commits covered by a durable coordinated close proof.
 
@@ -6410,7 +6428,7 @@ def historically_closed_integration_commits(
     candidate_patch_values = {value for value in candidate_patches.values() if value}
     head = current
     closed_sources = set()
-    absorbed_stack_ids = set()
+    trusted_stack_generations = {}
     state_cache = {}
 
     def load_state(commit):
@@ -6432,12 +6450,17 @@ def historically_closed_integration_commits(
             )
         if parent and str(state.get('publication_scope') or '').startswith('close:'):
             stack_id = state['publication_scope'].split(':', 1)[1]
+            parent_state = load_state(parent)
+            parent_tombstones = {
+                coordination_tombstone_ref(item)
+                for item in parent_state.get('tombstones') or []
+            }
             tombstones = [
                 item for item in state.get('tombstones') or []
                 if item.get('stack') == stack_id
                 and item.get('reason') in {'absorbed', 'merged'}
+                and coordination_tombstone_ref(item) not in parent_tombstones
             ]
-            parent_state = load_state(parent)
             parent_stacks = [
                 item for item in (parent_state.get('manifest') or {}).get('stacks') or []
                 if item.get('id') == stack_id
@@ -6445,10 +6468,6 @@ def historically_closed_integration_commits(
             child_stacks = {
                 item.get('id')
                 for item in (state.get('manifest') or {}).get('stacks') or []
-            }
-            parent_tombstones = {
-                coordination_tombstone_ref(item)
-                for item in parent_state.get('tombstones') or []
             }
             if len(tombstones) == 1 and len(parent_stacks) == 1 and stack_id not in child_stacks:
                 stack = parent_stacks[0]
@@ -6489,12 +6508,16 @@ def historically_closed_integration_commits(
                     reason = tombstones[0].get('reason')
                     if reason == 'absorbed' or (
                         relevant and historical_stack_has_exact_squash_delivery(
-                            repo_root, stack, delivery_tip
+                            repo_root,
+                            stack,
+                            delivery_observation,
+                            (parent_state.get('manifest') or {}).get('defaults') or {},
+                            config.get('remote'),
                         )
                     ):
                         closed_sources.update(declared)
                         if reason == 'absorbed':
-                            absorbed_stack_ids.add(stack_id)
+                            trusted_stack_generations[stack_id] = canonical_json_digest(stack)
         if (
             parent
             and str(state.get('publication_scope') or '').startswith('promote:')
@@ -6517,16 +6540,21 @@ def historically_closed_integration_commits(
                 item for item in state.get('tombstones') or []
                 if item.get('stack') == stack_id
                 and item.get('reason') == 'promoted'
+                and coordination_tombstone_ref(item) not in parent_tombstones
             ]
             if (
-                stack_id in absorbed_stack_ids
+                len(child_stacks) == 1
+                and trusted_stack_generations.get(stack_id)
+                == canonical_json_digest(child_stacks[0])
                 and len(parent_stacks) == 1
-                and len(child_stacks) == 1
                 and len(promoted) == 1
             ):
                 old_stack = parent_stacks[0]
                 new_stack = child_stacks[0]
                 closed_ref = coordination_tombstone_ref(promoted[0])
+                authoritative_tip = (
+                    parent_state.get('managed_refs') or {}
+                ).get(closed_ref)
                 state_form = coordination_state_manifest_digest_classification(
                     repo_root, state, config.get('remote')
                 )['form']
@@ -6536,6 +6564,9 @@ def historically_closed_integration_commits(
                 if (
                     closed_ref == f"refs/heads/{old_stack.get('branch')}"
                     and closed_ref not in parent_tombstones
+                    and promoted[0].get('remote_tip') == authoritative_tip
+                    and authoritative_tip
+                    and commit_exists(repo_root, authoritative_tip)
                     and new_stack.get('branch') != old_stack.get('branch')
                     and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
                     and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
@@ -6543,13 +6574,43 @@ def historically_closed_integration_commits(
                     promoted_sources = [
                         *stack_integration_commits(old_stack),
                         *stack_integration_only_commits(old_stack),
-                        promoted[0].get('remote_tip'),
+                        authoritative_tip,
                     ]
                     closed_sources.update(
                         commit_full_sha(repo_root, commit)
                         for commit in promoted_sources
                         if commit and commit_exists(repo_root, commit)
                     )
+        if parent:
+            parent_state = load_state(parent)
+            scope = str(state.get('publication_scope') or '')
+            for stack_id, trusted_digest in list(trusted_stack_generations.items()):
+                if scope == f'close:{stack_id}':
+                    continue
+                child_stacks = [
+                    item for item in (state.get('manifest') or {}).get('stacks') or []
+                    if item.get('id') == stack_id
+                ]
+                parent_stacks = [
+                    item for item in (parent_state.get('manifest') or {}).get('stacks') or []
+                    if item.get('id') == stack_id
+                ]
+                if (
+                    len(child_stacks) != 1
+                    or canonical_json_digest(child_stacks[0]) != trusted_digest
+                ):
+                    trusted_stack_generations.pop(stack_id, None)
+                    continue
+                if len(parent_stacks) != 1:
+                    trusted_stack_generations.pop(stack_id, None)
+                    continue
+                parent_digest = canonical_json_digest(parent_stacks[0])
+                if parent_digest != trusted_digest and scope not in {
+                    f'stack:{stack_id}', f'promote:{stack_id}',
+                }:
+                    trusted_stack_generations.pop(stack_id, None)
+                    continue
+                trusted_stack_generations[stack_id] = parent_digest
         current = parent
     if not closed_sources:
         return set()
@@ -6614,7 +6675,7 @@ def integration_control_only_transition(repo_root, commit, parent):
 
 def integration_reconciliation_history(
     repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
-    detached_replay=False, delivery_tip=None,
+    detached_replay=False, delivery_tip=None, delivery_observation=None,
 ):
     """Refuse unexplained history before constructing a successor transaction."""
     if not detached_replay and published_integration_has_no_unique_product(
@@ -6649,6 +6710,7 @@ def integration_reconciliation_history(
         historically_closed_integration_commits(
             repo_root, tip, observation, candidates=historical_candidates,
             delivery_tip=delivery_tip,
+            delivery_observation=delivery_observation,
         ) if not detached_replay else set()
     )
     proofs = {commit: proof for commit in history
@@ -6901,8 +6963,11 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
             repo_root, manifest, ref_tree(repo_root, replay_tip),
             gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
         )
-        integration_reconciliation_history(repo_root, manifest, local_tip, provenance, manifest_path,
-                                           observed, delivery_tip=inputs['refs'][0]['tip'])
+        integration_reconciliation_history(
+            repo_root, manifest, local_tip, provenance, manifest_path, observed,
+            delivery_tip=inputs['refs'][0]['tip'],
+            delivery_observation=inputs['refs'][0],
+        )
         integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
                                            detached_replay=True)
         final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)
