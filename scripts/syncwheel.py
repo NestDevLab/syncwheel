@@ -2615,9 +2615,14 @@ def commit_changed_files(repo_root, commit, limit=None):
 
 
 def is_manifest_only_commit(repo_root, commit):
-    """Whether a commit changes only the tracked Syncwheel coordination manifest."""
+    """Whether a commit changes only tracked Syncwheel control metadata."""
     files = commit_changed_files(repo_root, commit)
-    return bool(files) and set(files) == {'.syncwheel/manifest.json'}
+    if bool(files) and set(files) == {'.syncwheel/manifest.json'}:
+        return True
+    # Initialization also writes the managed ignore block. Preserve the strict
+    # control-transition proof so unrelated ignore changes stay unowned.
+    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()[1:]
+    return len(parents) == 1 and integration_control_only_transition(repo_root, commit, parents[0])
 
 
 def integration_composition_digest(manifest):
