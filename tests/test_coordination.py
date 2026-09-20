@@ -3288,6 +3288,25 @@ with module.coordination_publication_lock(Path(repo_path)):
             source_patch,
             {module.commit_patch_id(repo, commit) for commit in closed},
         )
+        load_state = module.coordination_state_from_commit
+
+        def force_closed_state(*args, **kwargs):
+            state = json.loads(json.dumps(load_state(*args, **kwargs)))
+            if state.get('publication_scope') == 'close:historical-close':
+                for tombstone in state.get('tombstones') or []:
+                    if tombstone.get('stack') == 'historical-close':
+                        tombstone['reason'] = 'merged'
+            return state
+        with mock.patch.object(
+            module, 'coordination_state_from_commit', side_effect=force_closed_state,
+        ):
+            force_closed = module.historically_closed_integration_commits(
+                repo, integration_tip, observation
+            )
+        self.assertNotIn(
+            source_patch,
+            {module.commit_patch_id(repo, commit) for commit in force_closed},
+        )
         module.integration_reconciliation_history(
             repo,
             manifest,

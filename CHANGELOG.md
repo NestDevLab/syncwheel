@@ -12,10 +12,10 @@
   isolated from pending promotions belonging to unrelated stacks.
 - Let stack-scoped `reconcile` and `resume` preserve unrelated dirty governed
   lanes instead of attempting global cleanup before the selected repair.
-- Reuse valid coordinated `merged` and `absorbed` tombstones when reconciling
-  historical integration commits after the delivery branch has advanced on
-  the same paths; exact or patch-equivalent closed commits are accepted while
-  unrelated integration history remains blocked.
+- Reuse valid coordinated `absorbed` tombstones when reconciling historical
+  integration commits after the delivery branch has advanced on the same
+  paths; exact or patch-equivalent closed commits are accepted while unrelated
+  integration history and force-closed stacks remain blocked.
 
 ## 0.43.20 - 2026-09-19
 

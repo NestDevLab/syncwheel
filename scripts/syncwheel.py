@@ -6367,7 +6367,7 @@ def historically_closed_integration_commits(repo_root, tip, observation, candida
             tombstones = [
                 item for item in state.get('tombstones') or []
                 if item.get('stack') == stack_id
-                and item.get('reason') in {'absorbed', 'merged'}
+                and item.get('reason') == 'absorbed'
             ]
             parent_state = load_state(parent)
             parent_stacks = [
