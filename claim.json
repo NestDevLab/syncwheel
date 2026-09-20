@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/checks-none-policy"
+  ],
+  "claimed_at": "2026-09-20T19:43:22+00:00",
+  "coordination_id": "default",
+  "operation_token": "c99d350f-871b-4ea4-bbd0-705103b327ab",
+  "publication_scope": "promote:pr-checks-none",
+  "source_ref": "refs/heads/pr/checks-none-policy",
+  "syncwheel_version": "0.43.23"
+}
