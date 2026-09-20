@@ -9791,9 +9791,9 @@ def governed_worktree_warning_lines(repo_root, manifest):
 
 def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False):
     lines = governed_worktree_warning_lines(repo_root, manifest)
-    if not lines or json_mode or not sys.stderr.isatty():
+    if not lines:
         return lines
-    color = '' if os.environ.get('NO_COLOR') else YELLOW
+    color = '' if os.environ.get('NO_COLOR') or not sys.stderr.isatty() else YELLOW
     reset = '' if not color else RESET
     for line in lines:
         print(f'{color}WARNING: {line}{reset}', file=sys.stderr)
@@ -31257,6 +31257,29 @@ def governed_worktree_preflight(args):
         # unrelated lanes belongs to explicit release and gc commands.
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
+    if args.func == command_stack_create:
+        requested_branch = (
+            f'syncwheel/draft/{safe_ref_segment(args.stack)}'
+            if args.draft
+            else args.branch or f'pr/{safe_ref_segment(args.stack)}'
+        )
+        conflicts = [
+            lane for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
+            if lane.get('state') != 'reaped'
+            and (
+                lane.get('target') == args.stack
+                or lane.get('branch') == requested_branch
+            )
+        ]
+        if conflicts:
+            labels = ', '.join(
+                lane.get('id') or lane.get('branch') or lane.get('path')
+                for lane in conflicts
+            )
+            raise SyncwheelError(
+                'governed worktree conflicts with the new stack id or branch: '
+                + labels
+            )
     stack_scoped_without_global_reaping = {
         command_stack_close,
         command_stack_promote,
