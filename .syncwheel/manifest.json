@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -38,45 +38,45 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "historical-closed-missing-tip",
-      "branch": "syncwheel/draft/historical-closed-missing-tip",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "syncwheel/draft/historical-closed-missing-tip",
       "commits": [],
-      "state": "draft",
+      "id": "historical-closed-missing-tip",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Ignore pruned historical integration tips consistently during closed-stack recovery"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Ignore pruned historical integration tips consistently during closed-stack recovery"
-      }
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
     },
     {
-      "id": "historical-closed-missing-tip-v2",
-      "branch": "pr/historical-closed-missing-tip-v2",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/historical-closed-missing-tip-v2",
       "commits": [
         "e515208d404b7d504a5bb734053c91aa66557d49"
       ],
-      "state": "published",
+      "id": "historical-closed-missing-tip-v2",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Preserve historical integration proofs for pruned states and managed reconciliation merges"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Preserve historical integration proofs for pruned states and managed reconciliation merges"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
