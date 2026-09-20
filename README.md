@@ -621,6 +621,9 @@ Practical meaning:
   manifest ownership, stack branches, integration, and remote tips; reports a
   dry-run plan by default; and can rebuild, update manifest SHAs, and push when
   explicitly run with `--apply` and `--push`.
+- Stack-scoped `reconcile` and `resume` report unrelated dirty governed lanes
+  without reaping them. A live lane targeting a selected stack still blocks
+  that stack's mutation.
 - In multi-device workflows, `reconcile` converges toward a remote branch that
   already matches the manifest projection instead of rebuilding the same logical
   state into new SHAs on every device.

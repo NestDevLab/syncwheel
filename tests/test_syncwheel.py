@@ -1375,6 +1375,56 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             pending[0],
         )
 
+    def test_scoped_reconcile_and_resume_do_not_reap_unrelated_lanes(self):
+        module = self.load_syncwheel_module()
+        unrelated = {
+            'id': 'unrelated-dirty',
+            'target': 'feature-b',
+            'state': 'active',
+        }
+        related = {
+            'id': 'feature-a-dirty',
+            'target': 'feature-a',
+            'state': 'active',
+        }
+        for command in (module.command_reconcile, module.command_resume):
+            args = SimpleNamespace(
+                func=command,
+                repo=str(self.repo),
+                manifest=None,
+                personal=None,
+                stack=['feature-a'],
+                apply=True,
+                json=False,
+            )
+            with self.subTest(command=command.__name__, lane='unrelated'):
+                with mock.patch.object(
+                    module,
+                    'load_governed_worktree_registry',
+                    return_value=({'lanes': [unrelated]}, None),
+                ), mock.patch.object(
+                    module,
+                    'emit_governed_worktree_warnings',
+                ), mock.patch.object(
+                    module,
+                    'reconcile_governed_worktrees',
+                ) as reap:
+                    module.governed_worktree_preflight(args)
+                reap.assert_not_called()
+            with self.subTest(command=command.__name__, lane='related'):
+                with mock.patch.object(
+                    module,
+                    'load_governed_worktree_registry',
+                    return_value=({'lanes': [related]}, None),
+                ), mock.patch.object(
+                    module,
+                    'emit_governed_worktree_warnings',
+                ):
+                    with self.assertRaisesRegex(
+                        module.SyncwheelError, 'selected stack: feature-a-dirty'
+                    ):
+                        module.governed_worktree_preflight(args)
+
     def test_expired_lane_can_be_reaped_through_explicit_gc_outside_a_repository(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
         module = self.load_syncwheel_module()

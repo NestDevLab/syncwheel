@@ -10,6 +10,8 @@
   remain absent.
 - Keep `stack close`, `stack promote`, `stack rebuild`, and `stack push`
   isolated from pending promotions belonging to unrelated stacks.
+- Let stack-scoped `reconcile` and `resume` preserve unrelated dirty governed
+  lanes instead of attempting global cleanup before the selected repair.
 
 ## 0.43.20 - 2026-09-19
 

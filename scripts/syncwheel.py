@@ -30729,15 +30729,20 @@ def governed_worktree_preflight(args):
         command_stack_push,
         command_stack_rebuild,
     }
+    scoped_stacks = None
     if args.func in stack_scoped_without_global_reaping:
+        scoped_stacks = {args.stack}
+    elif args.func in {command_reconcile, command_resume} and getattr(args, 'stack', None):
+        scoped_stacks = set(args.stack)
+    if scoped_stacks:
         registry, _ = load_governed_worktree_registry(repo_root)
         blockers = [
             lane for lane in registry['lanes']
-            if lane.get('target') == args.stack and lane.get('state') != 'reaped'
+            if lane.get('target') in scoped_stacks and lane.get('state') != 'reaped'
         ]
         if blockers:
             raise SyncwheelError(
-                'governed worktree recovery is required before updating this stack: '
+                'governed worktree recovery is required before updating the selected stack: '
                 + ', '.join(lane['id'] for lane in blockers)
             )
         return
