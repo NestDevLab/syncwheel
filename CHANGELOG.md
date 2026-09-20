@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.43.23 - 2026-09-20
+
+- Let `stack promote` adopt an equivalent promotion already completed by
+  another coordinated clone. Adoption requires the exact published stack,
+  managed ref tip, and promotion tombstone, terminalizes a superseded local
+  intent, updates only the local branch layout and manifest, and leaves the
+  remote coordination state unchanged.
+
 ## 0.43.22 - 2026-09-20
 
 - Let stack creation and integration align, rebuild, and push operations
