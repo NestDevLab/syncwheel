@@ -47,7 +47,8 @@
       "base": "origin/main",
       "branch": "pr/promote-recovery-adoption",
       "commits": [
-        "3620b9a265359b9021d3c0811fb2d8bdf0168984"
+        "3620b9a265359b9021d3c0811fb2d8bdf0168984",
+        "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
       ],
       "id": "promote-recovery-adoption",
       "integration_branch": "main-integration",
