@@ -31,9 +31,7 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "historical-closed-missing-tip"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -42,24 +40,7 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "syncwheel/draft/historical-closed-missing-tip",
-      "commits": [],
-      "id": "historical-closed-missing-tip",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Ignore pruned historical integration tips consistently during closed-stack recovery"
-      },
-      "publication": {
-        "enabled": false
-      },
-      "state": "draft",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
