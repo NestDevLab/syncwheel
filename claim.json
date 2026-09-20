@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/missing-managed-ref-repair"
+  ],
+  "claimed_at": "2026-09-20T08:27:16+00:00",
+  "coordination_id": "default",
+  "operation_token": "f598b3b0-fbe8-4963-a54c-0c2ac42438f2",
+  "publication_scope": "create:missing-managed-ref-repair",
+  "source_ref": "refs/heads/syncwheel/draft/missing-managed-ref-repair",
+  "syncwheel_version": "0.43.20"
+}
