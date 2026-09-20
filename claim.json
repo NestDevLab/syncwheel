@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/pr-checks-none"
+  ],
+  "claimed_at": "2026-09-20T19:41:38+00:00",
+  "coordination_id": "default",
+  "operation_token": "484f4dd1-4c09-463e-b3b6-3e983b79ffdb",
+  "publication_scope": "create:pr-checks-none",
+  "source_ref": "refs/heads/syncwheel/draft/pr-checks-none",
+  "syncwheel_version": "0.43.23"
+}
