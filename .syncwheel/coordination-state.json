@@ -1,8 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "be5e64d857d978977bb6ba0e65e5a0c63d1084b4",
-    "refs/heads/pr/promote-recovery-adoption": "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "1d2775a74b4be8e05f2bb2cabc7fb15fb545a2d5",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -20,7 +17,7 @@
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
-    "refs/heads/pr/promote-recovery-adoption": "6286a0e63eba7866816b8b65fcca97c354e20ae6",
+    "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
@@ -44,7 +41,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T19:19:53+00:00",
+  "created_at": "2026-09-20T19:21:23+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -137,9 +134,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "promote-recovery-adoption"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -147,31 +142,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/promote-recovery-adoption",
-        "commits": [
-          "47576d23feeaaa056886dc9367ae80a4528e5a9a",
-          "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
-        ],
-        "id": "promote-recovery-adoption",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "2cf2b65775313dd6821a4735ca4f67a6684a23e1cc3dcc83eaefcb1b8d9c66ba",
-  "operation_token": "a676f180-19ab-4195-a1d4-37beea60dfdc",
-  "parent_state": "b935a16fc3d63c80a7efea48a219f05e95dcc440",
+  "operation_token": "3eed4a68-e6aa-4559-920a-596663f2fc69",
+  "parent_state": "07207df844d74b43efe9a9a09bf9fdfca0b7b6b8",
   "projection_status": "partial",
-  "publication_id": "b66be886-d83f-4ce0-a4ba-2afed601c0fa",
-  "publication_scope": "stack:promote-recovery-adoption",
+  "publication_id": "4a534131-2284-4e4a-a534-2e67b6190435",
+  "publication_scope": "close:promote-recovery-adoption",
   "schema_version": 2,
   "syncwheel_version": "0.43.22",
   "tombstones": [
@@ -661,6 +640,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/promote-recovery-adoption",
       "remote_tip": "47576d23feeaaa056886dc9367ae80a4528e5a9a",
+      "stack": "promote-recovery-adoption"
+    },
+    {
+      "branch": "pr/promote-recovery-adoption",
+      "closed_at": "2026-09-20T19:21:19+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/promote-recovery-adoption",
+      "remote_tip": null,
       "stack": "promote-recovery-adoption"
     }
   ]
