@@ -31,10 +31,7 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "missing-managed-ref-repair",
-      "missing-managed-ref-repair-v2"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -43,60 +40,7 @@
     "strategy": "merge"
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "syncwheel/draft/missing-managed-ref-repair",
-      "commits": [
-        "e7d7a8f52c6a5317b84f660d09018d8a4c20eade",
-        "4c92f89442bdeb53302d1e15a57f3b95dec21262"
-      ],
-      "id": "missing-managed-ref-repair",
-      "integration_branch": "main-integration",
-      "integration_commits": [],
-      "meta": {
-        "purpose": "Restore a missing managed remote ref from verified coordination state without force"
-      },
-      "publication": {
-        "enabled": false
-      },
-      "state": "draft",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/missing-managed-ref-repair",
-      "commits": [
-        "fafb2cec5509786c4425546df74d5b145cf7cec6",
-        "2804f0e56098dc41a55cca0183c671dcda3f7f77",
-        "1873c6f0d99ea47a835004d8f3fcc9eea1fdd1a6",
-        "041f11506b16fcf06a30dbaedb84b33d74319dbf",
-        "ff01e277869347344d0bc01d25eb8cb285032bd0",
-        "2868acd2fc70d557973b7bdbab324cd6e1e1ba88",
-        "fa1f3dae5f5aaac327a9e22536f519fba3665dd0",
-        "2da87e6c42792c9668648b3da37f608b0326989e",
-        "535580ae35ca6bd70cd0b3c0ecf863acd5ef2820",
-        "046593448ea03deb6a87745a308bc4428df497e9",
-        "06a1d413037f6715881b2a9e887d2f5f66e38e4c",
-        "56b8e75192773b5d8f94e1bdd7b83c4c1640c36d",
-        "953e6f2f3de0df8491d057f8690ffbb0529d8b62",
-        "543ff946b9908a6b8d678efd88631075e27f5440",
-        "7733738406a41ac5db22fc089b04079616e63c08"
-      ],
-      "id": "missing-managed-ref-repair-v2",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Restore missing managed refs and isolate stack lifecycle from unrelated lanes"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
