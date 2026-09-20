@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -37,9 +37,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -47,7 +47,7 @@
       "base": "origin/main",
       "branch": "pr/promote-recovery-adoption",
       "commits": [
-        "3620b9a265359b9021d3c0811fb2d8bdf0168984",
+        "47576d23feeaaa056886dc9367ae80a4528e5a9a",
         "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
       ],
       "id": "promote-recovery-adoption",
