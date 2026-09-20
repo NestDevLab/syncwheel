@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/promote-recovery-adoption": "47576d23feeaaa056886dc9367ae80a4528e5a9a"
+    "refs/heads/pr/promote-recovery-adoption": "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
   },
   "claims": {
     "refs/heads/main-integration": "5bd4cd2744721f4261d613e8964eee5af9b8f75e",
@@ -19,7 +19,7 @@
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
-    "refs/heads/pr/promote-recovery-adoption": "44cd64cbe21add825d4761055691c580a3910495",
+    "refs/heads/pr/promote-recovery-adoption": "d5bd73704c7ba81815d5027dfb831d12baf67be0",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
@@ -43,7 +43,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T18:47:29+00:00",
+  "created_at": "2026-09-20T19:03:29+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -75,7 +75,7 @@
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
-    "refs/heads/pr/promote-recovery-adoption": "47576d23feeaaa056886dc9367ae80a4528e5a9a",
+    "refs/heads/pr/promote-recovery-adoption": "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad",
     "refs/heads/pr/reconcile-preflight-atomicity": "765f771ca3653e38438d8ce74ea2e74c6c052dca",
     "refs/heads/pr/reconcile-replay-mode-args": "6f51bb1b92e689043a0055d806b4f9fc2ff5ce36",
     "refs/heads/pr/resume-manifest-replay-digest": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
@@ -155,7 +155,8 @@
         },
         "branch": "pr/promote-recovery-adoption",
         "commits": [
-          "3620b9a265359b9021d3c0811fb2d8bdf0168984"
+          "3620b9a265359b9021d3c0811fb2d8bdf0168984",
+          "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
         ],
         "id": "promote-recovery-adoption",
         "integration_branch": "main-integration",
@@ -165,11 +166,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "cf5c6e25-68e1-4963-8598-844fe75f920d",
-  "parent_state": "9aa0061cbedebaa3d7852c3f22487e005e10a174",
+  "operation_token": "15019864-b286-45b9-b47b-73255e08aef8",
+  "parent_state": "e20e10d5c047cb80192e60387fc2fc193a0837e7",
   "projection_status": "partial",
-  "publication_id": "4c8dccb0-fe53-4ecd-a877-9eb7d543378d",
-  "publication_scope": "promote:promote-recovery-adoption",
+  "publication_id": "77a52e93-8923-4478-84f6-0db9c3ae0fb4",
+  "publication_scope": "stack:promote-recovery-adoption",
   "schema_version": 2,
   "syncwheel_version": "0.43.22",
   "tombstones": [
