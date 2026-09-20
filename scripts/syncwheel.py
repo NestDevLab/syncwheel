@@ -105,6 +105,8 @@ COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
 COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF = 'exact-tree-equality'
 COORDINATION_REPAIR_FAST_FORWARD_BACKEND = 'fast-forward-state-cas'
 COORDINATION_REPAIR_FAST_FORWARD_PROOF = 'exact-fast-forward-ancestry'
+COORDINATION_REPAIR_MISSING_REF_BACKEND = 'missing-ref-create-cas'
+COORDINATION_REPAIR_MISSING_REF_PROOF = 'exact-missing-ref-create'
 COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND = 'state-digest-migration'
 COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF = 'exact-control-manifest-digest'
 COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS = 'legacy-digest-migration'
@@ -974,6 +976,15 @@ def authorize_ref_move(repo_root):
     path = directory / nonce
     atomic_write_private_json(path, payload)
     return nonce
+
+
+@contextlib.contextmanager
+def ref_move_authorization(repo_root):
+    nonce = authorize_ref_move(repo_root)
+    try:
+        yield nonce
+    finally:
+        (ref_auth_dir(repo_root) / nonce).unlink(missing_ok=True)
 
 
 def ref_move_authorized(repo_root, event):
@@ -3746,6 +3757,37 @@ def split_syncwheel_managed_gitignore(text, worktree_root):
     }
 
 
+def split_historical_syncwheel_managed_gitignore(text, worktree_root):
+    """Recognize the current block and the exact pre-local-ledger block."""
+    current = split_syncwheel_managed_gitignore(text, worktree_root)
+    if current is not None:
+        return current
+    if not isinstance(text, str):
+        return None
+    lines = text.splitlines(keepends=True)
+    content = [line[:-1] if line.endswith('\n') else line for line in lines]
+    starts = [
+        index for index, line in enumerate(content)
+        if line == SYNCWHEEL_GITIGNORE_MARKER
+    ]
+    ends = [
+        index for index, line in enumerate(content)
+        if line == SYNCWHEEL_GITIGNORE_END_MARKER
+    ]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return None
+    start = starts[0]
+    end = ends[0]
+    legacy_patterns = syncwheel_gitignore_patterns(worktree_root)
+    legacy_patterns.remove('.syncwheel/manifests/*.local-ledger/')
+    if content[start + 1:end] != legacy_patterns:
+        return None
+    return {
+        'unmanaged': ''.join(lines[:start] + lines[end + 1:]),
+        'managed': ''.join(lines[start:end + 1]),
+    }
+
+
 def syncwheel_local_exclude_patterns(worktree_root):
     patterns = ['.syncwheel/']
     worktree_pattern = syncwheel_ignore_pattern(worktree_root)
@@ -4629,6 +4671,22 @@ def stack_integration_commits(stack):
         *stack_integration_base_commits(stack),
         *stack_integration_only_commits(stack),
     ]))
+
+
+def stack_delivery_identity(stack):
+    """Return fields that determine which product a stack revision delivers."""
+    return {
+        'branch': stack.get('branch'),
+        'base': stack.get('base'),
+        'state': stack.get('state', 'published'),
+        'target_remote': stack.get('target_remote'),
+        'target_branch': stack.get('target_branch'),
+        'integration_branch': stack.get('integration_branch'),
+        'depends_on': list(stack.get('depends_on') or []),
+        'commits': list(stack.get('commits') or []),
+        'integration_commits': stack_integration_base_commits(stack),
+        'integration_only_commits': stack_integration_only_commits(stack),
+    }
 
 
 def external_ledger_root(manifest_path):
@@ -6313,9 +6371,486 @@ def historically_delivered_integration_boundary(repo_root, manifest, tip, observ
     return None
 
 
+def historical_stack_has_exact_squash_delivery(
+    repo_root, stack, delivery_observation, defaults, coordination_remote=None,
+):
+    """Prove an old squash from its immutable source chain and delivery tree."""
+    commits = stack.get('commits') or []
+    delivery_observation = delivery_observation or {}
+    delivery_tip = delivery_observation.get('tip')
+    target_remote = (
+        stack.get('target_remote')
+        or defaults.get('canonical_remote')
+        or coordination_remote
+    )
+    target_branch = stack.get('target_branch') or defaults.get('base_branch')
+    if (
+        not commits
+        or not delivery_tip
+        or delivery_observation.get('remote') != target_remote
+        or delivery_observation.get('remoteRef') != f'refs/heads/{target_branch}'
+        or delivery_observation.get('remoteTip') != delivery_tip
+        or any(
+            not commit_exists(repo_root, commit) for commit in commits
+        )
+    ):
+        return False
+    base = commit_first_parent(repo_root, commits[0])
+    if not base or not branch_contains(repo_root, delivery_tip, base):
+        return False
+    delivery_path = git(
+        repo_root, 'rev-list', '--first-parent', '--reverse', '--ancestry-path',
+        f'{base}..{delivery_tip}',
+    ).stdout.split()
+    if not delivery_path:
+        return False
+    delivered = delivery_path[0]
+    parents = git(repo_root, 'show', '-s', '--format=%P', delivered).stdout.split()
+    if parents != [base]:
+        return False
+    projection = deterministic_stack_projection(repo_root, base, commits)
+    return (
+        projection.get('status') == 'projected'
+        and ref_tree(repo_root, projection['tip']) == ref_tree(repo_root, delivered)
+    )
+
+
+def historical_managed_tip_has_exact_squash_delivery(
+    repo_root, managed_tip, stack, delivery_observation, defaults,
+    coordination_remote=None,
+):
+    """Prove the complete managed first-parent product was squash-delivered."""
+    delivery_tip = (delivery_observation or {}).get('tip')
+    if (
+        not managed_tip
+        or not delivery_tip
+        or not commit_exists(repo_root, managed_tip)
+        or not commit_exists(repo_root, delivery_tip)
+    ):
+        return False
+    bases = git(
+        repo_root, 'merge-base', '--all', managed_tip, delivery_tip,
+        check=False,
+    )
+    if bases.returncode != 0:
+        return False
+    bases = bases.stdout.split()
+    if len(bases) != 1:
+        return False
+    base = bases[0]
+    first_parent_chain = git(
+        repo_root, 'rev-list', '--first-parent', managed_tip,
+    ).stdout.split()
+    if base not in first_parent_chain:
+        return False
+    commits = git(
+        repo_root, 'rev-list', '--first-parent', '--reverse',
+        f'{base}..{managed_tip}',
+    ).stdout.split()
+    if not commits:
+        return False
+    managed_stack = {
+        'commits': commits,
+        'target_remote': stack.get('target_remote'),
+        'target_branch': stack.get('target_branch'),
+    }
+    return historical_stack_has_exact_squash_delivery(
+        repo_root,
+        managed_stack,
+        delivery_observation,
+        defaults,
+        coordination_remote,
+    )
+
+
+def historically_closed_integration_commits(
+    repo_root, tip, observation, candidates=None, delivery_tip=None,
+    delivery_observation=None, merge_parent_candidates=None,
+):
+    """Return exact commits covered by a durable coordinated close proof.
+
+    A squash/rebase close proves delivery when it happens, but later changes to
+    the same paths make a fresh byte comparison against the current base
+    impossible.  The append-only coordination chain still contains both the
+    closing tombstone and its parent manifest.  Accept only commits in the
+    history being reconciled whose exact SHA or stable patch ID matches what
+    the parent declared.  Unrelated commits remain unexplained.
+    """
+    if not observation or observation.get('status') != 'current':
+        return set()
+    current = observation.get('state_tip')
+    integration_ref = observation.get('integration_ref')
+    config = observation.get('config') or {}
+    if not current or not integration_ref or not config.get('id'):
+        return set()
+    candidates = [
+        commit_full_sha(repo_root, commit)
+        for commit in (candidates if candidates is not None else rev_list(repo_root, tip))
+        if commit_exists(repo_root, commit)
+    ]
+    candidate_patches = commit_patch_ids(repo_root, candidates)
+    candidate_patch_values = {value for value in candidate_patches.values() if value}
+    merge_parent_candidates = {
+        commit_full_sha(repo_root, commit)
+        for commit in (merge_parent_candidates or [])
+        if commit_exists(repo_root, commit)
+    }
+    head = current
+    closed_sources = set()
+    owned_merge_parents = set()
+    trusted_stack_generations = {}
+    state_cache = {}
+
+    def load_state(commit):
+        if commit not in state_cache:
+            state_cache[commit] = coordination_state_from_commit(
+                repo_root, commit, config['id']
+            )
+        return state_cache[commit]
+
+    while current:
+        state = load_state(current)
+        parents = git(repo_root, 'show', '-s', '--format=%P', current).stdout.split()
+        parent = state.get('parent_state')
+        if parents != ([parent] if parent else []):
+            raise SyncwheelError('integration reconciliation historical state chain is invalid')
+        if current == head:
+            verify_coordination_state_manifest_digest(
+                repo_root, state, config.get('remote')
+            )
+        if parent and str(state.get('publication_scope') or '').startswith('close:'):
+            stack_id = state['publication_scope'].split(':', 1)[1]
+            parent_state = load_state(parent)
+            parent_tombstones = {
+                coordination_tombstone_ref(item)
+                for item in parent_state.get('tombstones') or []
+            }
+            tombstones = [
+                item for item in state.get('tombstones') or []
+                if item.get('stack') == stack_id
+                and item.get('reason') in {'absorbed', 'merged'}
+                and coordination_tombstone_ref(item) not in parent_tombstones
+            ]
+            parent_stacks = [
+                item for item in (parent_state.get('manifest') or {}).get('stacks') or []
+                if item.get('id') == stack_id
+            ]
+            child_stacks = {
+                item.get('id')
+                for item in (state.get('manifest') or {}).get('stacks') or []
+            }
+            if len(tombstones) == 1 and len(parent_stacks) == 1 and stack_id not in child_stacks:
+                stack = parent_stacks[0]
+                closed_ref = coordination_tombstone_ref(tombstones[0])
+                expected_ref = f"refs/heads/{stack.get('branch')}"
+                state_form = coordination_state_manifest_digest_classification(
+                    repo_root, state, config.get('remote')
+                )['form']
+                parent_form = coordination_state_manifest_digest_classification(
+                    repo_root, parent_state, config.get('remote')
+                )['form']
+                if (
+                    closed_ref == expected_ref
+                    and closed_ref not in parent_tombstones
+                    and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                    and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                ):
+                    declared = [
+                        *stack_integration_commits(stack),
+                        *stack_integration_only_commits(stack),
+                    ]
+                    managed_tip = (
+                        parent_state.get('managed_refs') or {}
+                    ).get(expected_ref)
+                    if tombstones[0].get('reason') == 'absorbed' and managed_tip:
+                        declared.append(managed_tip)
+                    declared = [
+                        commit_full_sha(repo_root, commit)
+                        for commit in declared if commit_exists(repo_root, commit)
+                    ]
+                    declared_patches = commit_patch_ids(repo_root, declared)
+                    relevant = bool(
+                        set(declared).intersection(candidates)
+                        or candidate_patch_values.intersection(
+                            value for value in declared_patches.values() if value
+                        )
+                    )
+                    reason = tombstones[0].get('reason')
+                    if reason == 'absorbed' or (
+                        relevant and historical_stack_has_exact_squash_delivery(
+                            repo_root,
+                            stack,
+                            delivery_observation,
+                            (parent_state.get('manifest') or {}).get('defaults') or {},
+                            config.get('remote'),
+                        )
+                    ):
+                        closed_sources.update(declared)
+                        if reason == 'absorbed':
+                            trusted_stack_generations[stack_id] = {
+                                'digest': canonical_json_digest(stack),
+                                'managed_tip': managed_tip,
+                                'exact_squash_delivery': (
+                                    historical_managed_tip_has_exact_squash_delivery(
+                                        repo_root,
+                                        managed_tip,
+                                        stack,
+                                        delivery_observation,
+                                        (parent_state.get('manifest') or {}).get('defaults') or {},
+                                        config.get('remote'),
+                                    )
+                                ),
+                            }
+        if (
+            parent
+            and str(state.get('publication_scope') or '').startswith('promote:')
+        ):
+            stack_id = state['publication_scope'].split(':', 1)[1]
+            parent_state = load_state(parent)
+            parent_stacks = [
+                item for item in (parent_state.get('manifest') or {}).get('stacks') or []
+                if item.get('id') == stack_id
+            ]
+            child_stacks = [
+                item for item in (state.get('manifest') or {}).get('stacks') or []
+                if item.get('id') == stack_id
+            ]
+            parent_tombstones = {
+                coordination_tombstone_ref(item)
+                for item in parent_state.get('tombstones') or []
+            }
+            promoted = [
+                item for item in state.get('tombstones') or []
+                if item.get('stack') == stack_id
+                and item.get('reason') == 'promoted'
+                and coordination_tombstone_ref(item) not in parent_tombstones
+            ]
+            if (
+                len(child_stacks) == 1
+                and (trusted_stack_generations.get(stack_id) or {}).get('digest')
+                == canonical_json_digest(child_stacks[0])
+                and len(parent_stacks) == 1
+                and len(promoted) == 1
+            ):
+                old_stack = parent_stacks[0]
+                new_stack = child_stacks[0]
+                closed_ref = coordination_tombstone_ref(promoted[0])
+                authoritative_tip = (
+                    parent_state.get('managed_refs') or {}
+                ).get(closed_ref)
+                state_form = coordination_state_manifest_digest_classification(
+                    repo_root, state, config.get('remote')
+                )['form']
+                parent_form = coordination_state_manifest_digest_classification(
+                    repo_root, parent_state, config.get('remote')
+                )['form']
+                if (
+                    closed_ref == f"refs/heads/{old_stack.get('branch')}"
+                    and closed_ref not in parent_tombstones
+                    and promoted[0].get('remote_tip') == authoritative_tip
+                    and authoritative_tip
+                    and commit_exists(repo_root, authoritative_tip)
+                    and new_stack.get('branch') != old_stack.get('branch')
+                    and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                    and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                ):
+                    promoted_sources = [
+                        *stack_integration_commits(old_stack),
+                        *stack_integration_only_commits(old_stack),
+                        authoritative_tip,
+                    ]
+                    closed_sources.update(
+                        commit_full_sha(repo_root, commit)
+                        for commit in promoted_sources
+                        if commit and commit_exists(repo_root, commit)
+                    )
+        if parent:
+            parent_state = load_state(parent)
+            scope = str(state.get('publication_scope') or '')
+            for stack_id, trusted in list(trusted_stack_generations.items()):
+                if scope == f'close:{stack_id}':
+                    continue
+                child_stacks = [
+                    item for item in (state.get('manifest') or {}).get('stacks') or []
+                    if item.get('id') == stack_id
+                ]
+                parent_stacks = [
+                    item for item in (parent_state.get('manifest') or {}).get('stacks') or []
+                    if item.get('id') == stack_id
+                ]
+                if (
+                    len(child_stacks) != 1
+                    or canonical_json_digest(child_stacks[0]) != trusted['digest']
+                ):
+                    trusted_stack_generations.pop(stack_id, None)
+                    continue
+                if len(parent_stacks) != 1:
+                    trusted_stack_generations.pop(stack_id, None)
+                    continue
+                parent_digest = canonical_json_digest(parent_stacks[0])
+                parent_ref = f"refs/heads/{parent_stacks[0].get('branch')}"
+                child_ref = f"refs/heads/{child_stacks[0].get('branch')}"
+                parent_managed_tip = (
+                    parent_state.get('managed_refs') or {}
+                ).get(parent_ref)
+                child_managed_tip = (
+                    state.get('managed_refs') or {}
+                ).get(child_ref)
+                if parent_digest != trusted['digest']:
+                    same_delivery = (
+                        scope == f'stack:{stack_id}'
+                        and stack_delivery_identity(child_stacks[0])
+                        == stack_delivery_identity(parent_stacks[0])
+                        and child_managed_tip == parent_managed_tip
+                    )
+                    if scope == f'promote:{stack_id}':
+                        pass
+                    elif same_delivery:
+                        pass
+                    elif (
+                        scope == f'stack:{stack_id}'
+                        and child_ref == parent_ref
+                        and trusted['exact_squash_delivery']
+                        and child_managed_tip == trusted['managed_tip']
+                        and parent_managed_tip
+                        and commit_exists(repo_root, parent_managed_tip)
+                        and parent_managed_tip in git(
+                            repo_root, 'rev-list', '--first-parent', child_managed_tip,
+                        ).stdout.split()
+                    ):
+                        promotion_parent = parent_state.get('parent_state')
+                        promotion_parent_state = (
+                            load_state(promotion_parent) if promotion_parent else None
+                        )
+                        promotion_parents = git(
+                            repo_root, 'show', '-s', '--format=%P', parent,
+                        ).stdout.split()
+                        promotion_parent_stacks = [
+                            item for item in (
+                                (promotion_parent_state or {}).get('manifest') or {}
+                            ).get('stacks') or []
+                            if item.get('id') == stack_id
+                        ]
+                        promotion_parent_tombstones = {
+                            coordination_tombstone_ref(item)
+                            for item in (
+                                (promotion_parent_state or {}).get('tombstones') or []
+                            )
+                        }
+                        promotion_tombstones = [
+                            item for item in parent_state.get('tombstones') or []
+                            if item.get('stack') == stack_id
+                            and item.get('reason') == 'promoted'
+                            and coordination_tombstone_ref(item)
+                            not in promotion_parent_tombstones
+                        ]
+                        promotion_owned = bool(
+                            parent_state.get('publication_scope') == f'promote:{stack_id}'
+                            and promotion_parent
+                            and promotion_parents == [promotion_parent]
+                            and len(promotion_parent_stacks) == 1
+                            and len(promotion_tombstones) == 1
+                            and coordination_tombstone_ref(promotion_tombstones[0])
+                            == f"refs/heads/{promotion_parent_stacks[0].get('branch')}"
+                            and promotion_tombstones[0].get('remote_tip')
+                            == parent_managed_tip
+                            and (
+                                (promotion_parent_state.get('managed_refs') or {}).get(
+                                    coordination_tombstone_ref(promotion_tombstones[0])
+                                )
+                                == parent_managed_tip
+                            )
+                            and coordination_state_manifest_digest_classification(
+                                repo_root, parent_state, config.get('remote')
+                            )['form'] != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                            and coordination_state_manifest_digest_classification(
+                                repo_root, promotion_parent_state, config.get('remote')
+                            )['form'] != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                        )
+                        if (
+                            promotion_owned
+                            and parent_managed_tip in merge_parent_candidates
+                        ):
+                            owned_merge_parents.add(commit_full_sha(
+                                repo_root, parent_managed_tip,
+                            ))
+                        trusted_stack_generations.pop(stack_id, None)
+                        continue
+                    else:
+                        trusted_stack_generations.pop(stack_id, None)
+                        continue
+                trusted_stack_generations[stack_id] = {
+                    **trusted,
+                    'digest': parent_digest,
+                    'managed_tip': parent_managed_tip,
+                }
+        current = parent
+    if not closed_sources:
+        return set()
+    source_patches = {
+        value for value in commit_patch_ids(repo_root, closed_sources).values()
+        if value
+    }
+    closed = {
+        commit for commit in candidates
+        if commit in closed_sources
+        or (candidate_patches.get(commit) and candidate_patches[commit] in source_patches)
+    }
+    closed.update(owned_merge_parents.intersection(merge_parent_candidates))
+    return closed
+
+
+def integration_control_only_transition(repo_root, commit, parent):
+    """Prove that a commit changes only valid Syncwheel control projection."""
+    changed = {
+        path for path in git(
+            repo_root, 'diff', '--name-only', '--no-renames', '-z', parent, commit
+        ).stdout.split('\0')
+        if path
+    }
+    if not changed or not changed.issubset({'.syncwheel/manifest.json', '.gitignore'}):
+        return False
+    entry = tree_path_entry(repo_root, commit, '.syncwheel/manifest.json')
+    if not entry or entry['mode'] != '100644':
+        return False
+    try:
+        control = json.loads(tree_path_bytes(repo_root, entry))
+    except (ValueError, UnicodeDecodeError):
+        control = None
+    if not isinstance(control, dict):
+        return False
+    if '.gitignore' not in changed:
+        return True
+    candidate = tree_path_entry(repo_root, commit, '.gitignore')
+    parent_entry = tree_path_entry(repo_root, parent, '.gitignore')
+    if not candidate or candidate['mode'] != '100644' or (
+        parent_entry is not None and parent_entry['mode'] != '100644'
+    ):
+        return False
+    try:
+        candidate_text = tree_path_bytes(repo_root, candidate).decode('utf-8')
+        parent_text = (
+            tree_path_bytes(repo_root, parent_entry).decode('utf-8')
+            if parent_entry else ''
+        )
+        candidate_ignore = split_historical_syncwheel_managed_gitignore(
+            candidate_text, syncwheel_worktree_root(control),
+        )
+        parent_ignore = split_historical_syncwheel_managed_gitignore(
+            parent_text, syncwheel_worktree_root(control),
+        )
+    except UnicodeDecodeError:
+        return False
+    return bool(
+        candidate_ignore and parent_ignore
+        and candidate_ignore['managed'] is not None
+        and candidate_ignore['unmanaged'] == parent_ignore['unmanaged']
+    )
+
+
 def integration_reconciliation_history(
     repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
-    detached_replay=False, delivery_tip=None,
+    detached_replay=False, delivery_tip=None, delivery_observation=None,
 ):
     """Refuse unexplained history before constructing a successor transaction."""
     if not detached_replay and published_integration_has_no_unique_product(
@@ -6337,6 +6872,24 @@ def integration_reconciliation_history(
     patches.discard(None)
     patches.update(patch_ids_reachable_from_ref(repo_root, base))
     history = rev_list(repo_root, f'{history_base}..{tip}')
+    merge_parents = {
+        commit: git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
+        for commit in history
+        if commit_parent_count(repo_root, commit) > 1
+    }
+    historical_candidates = list(history)
+    historical_merge_parents = {
+        parents[1] for parents in merge_parents.values() if len(parents) == 2
+    }
+    historical_candidates.extend(historical_merge_parents)
+    closed_commits = (
+        historically_closed_integration_commits(
+            repo_root, tip, observation, candidates=historical_candidates,
+            delivery_tip=delivery_tip,
+            delivery_observation=delivery_observation,
+            merge_parent_candidates=historical_merge_parents,
+        ) if not detached_replay else set()
+    )
     proofs = {commit: proof for commit in history
               if commit_parent_count(repo_root, commit) > 1
               and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}
@@ -6347,44 +6900,27 @@ def integration_reconciliation_history(
         replay_merges.update(git(repo_root, 'rev-list', '--first-parent', '--merges',
                                  f'{replay_base}..{replay_tip}').stdout.split())
     for commit in history:
-        if commit in declared:
+        if commit in declared or commit in closed_commits:
             continue
         if commit_parent_count(repo_root, commit) != 1:
             if commit in proofs or commit in replay_merges:
                 continue
+            parents = merge_parents[commit]
+            if (
+                len(parents) == 2
+                and (
+                    (delivery_tip and branch_contains(repo_root, delivery_tip, parents[1]))
+                    or parents[1] in closed_commits
+                )
+                and integration_control_only_transition(
+                    repo_root, commit, parents[1]
+                )
+            ):
+                continue
             raise SyncwheelError(f'integration reconciliation has unclassified merge: {commit}')
         changed = set(commit_changed_files(repo_root, commit))
-        if changed and changed.issubset({'.syncwheel/manifest.json', '.gitignore'}):
-            entry = tree_path_entry(repo_root, commit, '.syncwheel/manifest.json')
-            try:
-                control = json.loads(tree_path_bytes(repo_root, entry))
-            except (ValueError, UnicodeDecodeError):
-                control = None
-            if entry and entry['mode'] == '100644' and isinstance(control, dict):
-                if '.gitignore' not in changed:
-                    continue
-                candidate = tree_path_entry(repo_root, commit, '.gitignore')
-                parent = tree_path_entry(repo_root, f'{commit}^', '.gitignore')
-                if candidate and candidate['mode'] == '100644' and (
-                    parent is None or parent['mode'] == '100644'
-                ):
-                    try:
-                        candidate_ignore = split_syncwheel_managed_gitignore(
-                            tree_path_bytes(repo_root, candidate).decode('utf-8'),
-                            syncwheel_worktree_root(control),
-                        )
-                        parent_ignore = split_syncwheel_managed_gitignore(
-                            tree_path_bytes(repo_root, parent).decode('utf-8'),
-                            syncwheel_worktree_root(control),
-                        )
-                    except UnicodeDecodeError:
-                        candidate_ignore = parent_ignore = None
-                    if (
-                        candidate_ignore and parent_ignore
-                        and candidate_ignore['managed'] is not None
-                        and candidate_ignore['unmanaged'] == parent_ignore['unmanaged']
-                    ):
-                        continue
+        if integration_control_only_transition(repo_root, commit, f'{commit}^'):
+            continue
         if is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
             continue
         patch = commit_patch_id(repo_root, commit)
@@ -6604,8 +7140,11 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
             repo_root, manifest, ref_tree(repo_root, replay_tip),
             gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
         )
-        integration_reconciliation_history(repo_root, manifest, local_tip, provenance, manifest_path,
-                                           observed, delivery_tip=inputs['refs'][0]['tip'])
+        integration_reconciliation_history(
+            repo_root, manifest, local_tip, provenance, manifest_path, observed,
+            delivery_tip=inputs['refs'][0]['tip'],
+            delivery_observation=inputs['refs'][0],
+        )
         integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
                                            detached_replay=True)
         final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)
@@ -10968,7 +11507,10 @@ def build_coordination_state(
     }
 
 
-def build_coordination_repair_state(previous_state, previous_tip, repaired_ref, repaired_tip, installation):
+def build_coordination_repair_state(
+    previous_state, previous_tip, repaired_ref, repaired_tip, installation,
+    *, operation_token=None, claim_commit=None, repair_evidence=None,
+):
     """Build an append-only repair child without re-projecting prior public state.
 
     A repair corrects transport evidence, not topology.  Deep-copying the
@@ -10996,6 +11538,13 @@ def build_coordination_repair_state(previous_state, previous_tip, repaired_ref, 
     child['managed_refs'][repaired_ref] = repaired_tip
     child['changed_refs'] = {repaired_ref: repaired_tip}
     child['publication_scope'] = f'repair:{repaired_ref}'
+    if operation_token is not None:
+        child['operation_token'] = operation_token
+    if claim_commit is not None:
+        child.setdefault('claims', {})[repaired_ref] = claim_commit
+        child['claims'] = dict(sorted(child['claims'].items()))
+    if repair_evidence is not None:
+        child['repair_evidence'] = repair_evidence
     child['projection_status'] = previous_state.get('projection_status')
     return validate_coordination_state(child, previous_state['coordination_id'])
 
@@ -11143,11 +11692,27 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     observed_refs = remote_ref_tips(
         repo_root, config['remote'], list(previous['state']['managed_refs'])
     )
-    observed = observed_refs[repaired_ref]
-    if not observed:
-        raise SyncwheelError(f'coordination repair managed ref is absent: {repaired_ref}')
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
-    ref_repair_required = expected_recorded != observed
+    observed = observed_refs[repaired_ref]
+    missing_ref_restore_required = observed is None
+    active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
+    if missing_ref_restore_required and repaired_ref not in active_refs:
+        raise SyncwheelError(
+            'coordination repair refuses to recreate an inactive or tombstoned managed ref'
+        )
+    if (
+        missing_ref_restore_required
+        and freeze_backend != COORDINATION_REPAIR_MISSING_REF_BACKEND
+    ):
+        raise SyncwheelError(
+            f'coordination repair managed ref is absent: {repaired_ref}; '
+            f'use --freeze-backend {COORDINATION_REPAIR_MISSING_REF_BACKEND}'
+        )
+    if missing_ref_restore_required and not commit_exists(repo_root, expected_recorded):
+        raise SyncwheelError(
+            'coordination repair missing-ref proof requires the recorded commit object'
+        )
+    ref_repair_required = observed is not None and expected_recorded != observed
     digest_classification = coordination_state_manifest_digest_classification(
         repo_root, previous['state'], config['remote']
     )
@@ -11159,7 +11724,9 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
         not ref_repair_required
         and digest_classification['form'] == COORDINATION_STATE_DIGEST_FORM_ORPHANED
     )
-    if ref_repair_required:
+    if missing_ref_restore_required:
+        status = 'missing-ref-restore-required'
+    elif ref_repair_required:
         status = 'repair-required'
     elif digest_migration_required:
         status = 'digest-migration-required'
@@ -11200,6 +11767,29 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
             'expectedManifestDigest': digest_classification['control_manifest_digest'],
             'proof': COORDINATION_REPAIR_DIGEST_HEAL_PROOF,
             'precondition': COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION,
+        })
+    if missing_ref_restore_required:
+        claim_ref = coordination_claim_ref(repaired_ref)
+        claim_tip = remote_ref_tips(
+            repo_root, config['remote'], [claim_ref]
+        )[claim_ref]
+        if claim_tip:
+            claim = fetch_coordination_claim(
+                repo_root, config['remote'], claim_ref, claim_tip
+            )
+            if (
+                claim.get('coordination_id') != config['id']
+                or claim.get('source_ref') != repaired_ref
+            ):
+                raise SyncwheelError(
+                    'coordination repair missing-ref claim belongs to another owner'
+                )
+        payload.update({
+            'repairClass': 'missing-managed-ref-create',
+            'proof': COORDINATION_REPAIR_MISSING_REF_PROOF,
+            'precondition': 'exact-missing-ref-and-atomic-create-state-cas',
+            'expectedClaimRef': claim_ref,
+            'expectedClaimTip': claim_tip,
         })
     if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and ref_repair_required:
         active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
@@ -11393,6 +11983,117 @@ class FastForwardStateCasCoordinationRepairBackend(
     proof = COORDINATION_REPAIR_FAST_FORWARD_PROOF
 
 
+class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
+    """Atomically recreate one absent owned ref and append its repair state."""
+
+    name = COORDINATION_REPAIR_MISSING_REF_BACKEND
+    proof = COORDINATION_REPAIR_MISSING_REF_PROOF
+
+    def _verify_observations(
+        self, repo_root, coordination, remote, state_ref, expected_state_tip,
+        guarded_refs, claim_ref=None, expected_claim_tip=None,
+    ):
+        require_exclusive_coordination_ownership(repo_root, coordination, guarded_refs)
+        refs = [state_ref, *guarded_refs]
+        if claim_ref:
+            refs.append(claim_ref)
+        observed = remote_ref_tips(repo_root, remote, refs)
+        if observed.get(state_ref) != expected_state_tip:
+            raise SyncwheelError(
+                'coordination repair STOP: state lease was lost before missing-ref CAS'
+            )
+        drifted = {
+            ref: (tip, observed.get(ref)) for ref, tip in guarded_refs.items()
+            if observed.get(ref) != tip
+        }
+        if drifted:
+            raise SyncwheelError(
+                'coordination repair STOP: guarded refs drifted before missing-ref CAS'
+            )
+        if claim_ref and observed.get(claim_ref) != expected_claim_tip:
+            raise SyncwheelError(
+                'coordination repair STOP: claim lease was lost before missing-ref CAS'
+            )
+        return observed
+
+    def preflight(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+            kwargs.get('claim_ref'),
+            kwargs.get('expected_claim_tip'),
+        )
+        if kwargs['guarded_refs'].get(kwargs['repaired_ref']) is not None:
+            raise SyncwheelError('coordination repair missing-ref target is no longer absent')
+        return {'proof': self.proof}
+
+    def apply(self, **kwargs):
+        self.preflight(**kwargs)
+        repaired_ref = kwargs['repaired_ref']
+        repaired_tip = kwargs['repaired_tip']
+        claim_ref = kwargs['claim_ref']
+        new_claim_tip = kwargs['new_claim_tip']
+        command = [
+            'git',
+            'push',
+            '--atomic',
+            f'--force-with-lease={repaired_ref}:',
+            f"--force-with-lease={claim_ref}:{kwargs['expected_claim_tip'] or ''}",
+            f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
+            kwargs['remote'],
+            f'{repaired_tip}:{repaired_ref}',
+            f'{new_claim_tip}:{claim_ref}',
+            f"{kwargs['new_state_tip']}:{kwargs['state_ref']}",
+        ]
+        result = run_authorized_push(
+            kwargs['repo_root'],
+            command,
+            kwargs['remote'],
+            [repaired_ref, claim_ref, kwargs['state_ref']],
+            check=False,
+        )
+        if result.returncode != 0:
+            observed = remote_ref_tips(
+                kwargs['repo_root'],
+                kwargs['remote'],
+                [repaired_ref, claim_ref, kwargs['state_ref']],
+            )
+            if (
+                observed.get(repaired_ref) is None
+                and observed.get(claim_ref) == kwargs['expected_claim_tip']
+                and observed.get(kwargs['state_ref']) == kwargs['expected_state_tip']
+            ):
+                raise SyncwheelError(
+                    'coordination repair missing-ref CAS was rejected without mutation'
+                )
+            if (
+                observed.get(repaired_ref) != repaired_tip
+                or observed.get(claim_ref) != new_claim_tip
+                or observed.get(kwargs['state_ref']) != kwargs['new_state_tip']
+            ):
+                raise SyncwheelError(
+                    'coordination repair outcome is unknown after missing-ref CAS rejection'
+                )
+        return {'proof': self.proof, 'atomicCreate': True}
+
+    def postflight(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+            kwargs.get('claim_ref'),
+            kwargs.get('expected_claim_tip'),
+        )
+        return {'proof': self.proof}
+
+
 class DigestMigrationStateCasCoordinationRepairBackend(
     TreeEquivalentStateCasCoordinationRepairBackend
 ):
@@ -11409,6 +12110,96 @@ class DigestHealStateCasCoordinationRepairBackend(
 
     name = COORDINATION_REPAIR_DIGEST_HEAL_BACKEND
     proof = COORDINATION_REPAIR_DIGEST_HEAL_PROOF
+
+
+def coordination_missing_ref_repair_identity(previous_state, plan):
+    identity = {
+        'coordination_id': previous_state['coordination_id'],
+        'scope': f"repair:{plan['repairedRef']}",
+        'projection_status': previous_state.get('projection_status'),
+        'manifest_digest': coordination_state_operation_manifest_digest(previous_state),
+        'changed_refs': {plan['repairedRef']: plan['expectedRecordedTip']},
+        'tombstone': None,
+        'rename': None,
+        'state_transition': None,
+        'repair_plan_digest': plan['planDigest'],
+    }
+    return identity, canonical_json_digest(identity)
+
+
+def begin_coordination_missing_ref_repair(
+    repo_root, manifest, manifest_path, previous, plan,
+):
+    identity, fingerprint = coordination_missing_ref_repair_identity(
+        previous['state'], plan
+    )
+    with coordination_publication_lock(repo_root):
+        existing = pending_coordination_publication_after_resolution(
+            repo_root, manifest, manifest_path, fingerprint
+        )
+        if existing:
+            return {**existing, 'retry': True}
+        observed = read_remote_coordination_state(
+            repo_root,
+            coordination_config(manifest),
+            fetch=True,
+            local_manifest_version=manifest['version'],
+        )
+        if observed['tip'] != plan['expectedStateTip']:
+            raise SyncwheelError(
+                'coordination repair state changed before its intent could be recorded'
+            )
+        payload = {
+            **identity,
+            'fingerprint': fingerprint,
+            'operation_token': str(uuid.uuid4()),
+            'expected_coordination_state_tip': observed['tip'],
+            'owner': coordination_publication_owner(repo_root),
+        }
+        append_ledger_event(
+            repo_root, 'coordination_publish_intent', payload, manifest_path
+        )
+        return {**payload, 'retry': False}
+
+
+def recover_landed_coordination_missing_ref_repair(
+    repo_root, manifest, manifest_path, plan,
+):
+    config = coordination_config(manifest)
+    matching = [
+        intent for intent in pending_coordination_publications(repo_root, manifest_path)
+        if intent.get('repair_plan_digest') == plan.get('planDigest')
+    ]
+    if not matching:
+        return None
+    if len(matching) != 1:
+        raise SyncwheelError(
+            'multiple coordination repair intents match the reviewed plan'
+        )
+    operation = matching[0]
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    if not coordinated_operation_landed(
+        repo_root, config, observed, operation, claims_fallback=True
+    ):
+        return None
+    complete_coordination_publication(
+        repo_root,
+        manifest_path,
+        operation,
+        {'state_tip': observed['tip'], 'status': 'recovered', 'recovered': True},
+    )
+    return {
+        'status': 'repaired',
+        'state_tip': observed['tip'],
+        'parent_state': plan['expectedStateTip'],
+        'plan_digest': plan['planDigest'],
+        'backend': COORDINATION_REPAIR_MISSING_REF_BACKEND,
+        'backend_result': {'proof': plan.get('proof'), 'recovered': True},
+        'proof': plan.get('proof'),
+        'recovered': True,
+    }
 
 
 def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, manifest_path=None):
@@ -11430,6 +12221,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             backend = TreeEquivalentStateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_FAST_FORWARD_BACKEND:
             backend = FastForwardStateCasCoordinationRepairBackend()
+        elif plan.get('freezeBackend') == COORDINATION_REPAIR_MISSING_REF_BACKEND:
+            backend = MissingRefCreateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND:
             backend = DigestMigrationStateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_HEAL_BACKEND:
@@ -11451,12 +12244,46 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         raise SyncwheelError('coordination repair backend does not match the reviewed plan')
     tree_equivalent_repair = backend.name == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
     fast_forward_repair = backend.name == COORDINATION_REPAIR_FAST_FORWARD_BACKEND
+    missing_ref_repair = backend.name == COORDINATION_REPAIR_MISSING_REF_BACKEND
     digest_migration_repair = backend.name == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
     digest_heal_repair = backend.name == COORDINATION_REPAIR_DIGEST_HEAL_BACKEND
     state_only_repair = (
         tree_equivalent_repair or fast_forward_repair or digest_migration_repair
         or digest_heal_repair
     )
+    if plan.get('status') == 'missing-ref-restore-required' and not missing_ref_repair:
+        raise SyncwheelError(
+            'coordination repair missing-ref restore requires the '
+            f'{COORDINATION_REPAIR_MISSING_REF_BACKEND} backend'
+        )
+    if missing_ref_repair:
+        required_proof = {
+            'repairClass', 'proof', 'expectedClaimRef', 'expectedClaimTip',
+        }
+        missing_proof = sorted(required_proof - set(plan))
+        if missing_proof:
+            raise SyncwheelError(
+                'coordination repair missing-ref plan is missing: '
+                + ', '.join(missing_proof)
+            )
+        if (
+            plan.get('status') != 'missing-ref-restore-required'
+            or plan.get('repairClass') != 'missing-managed-ref-create'
+            or plan.get('proof') != COORDINATION_REPAIR_MISSING_REF_PROOF
+            or plan.get('precondition')
+            != 'exact-missing-ref-and-atomic-create-state-cas'
+            or plan.get('expectedRemoteTip') is not None
+            or not isinstance(plan.get('expectedRecordedTip'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', plan['expectedRecordedTip'])
+            or plan.get('guardedRefs', {}).get(plan.get('repairedRef')) is not None
+            or plan.get('expectedClaimRef')
+            != coordination_claim_ref(plan.get('repairedRef'))
+            or (
+                plan.get('expectedClaimTip') is not None
+                and not re.fullmatch(r'[0-9a-f]{40}', plan['expectedClaimTip'])
+            )
+        ):
+            raise SyncwheelError('coordination repair missing-ref proof is invalid')
     if plan.get('status') == 'digest-migration-required' and not digest_migration_repair:
         raise SyncwheelError(
             'coordination repair digest migration requires the '
@@ -11570,6 +12397,16 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             raise SyncwheelError('coordination repair fast-forward proof is invalid')
     if plan.get('localManifestDigest') != coordination_manifest_digest(manifest, repo_root):
         raise SyncwheelError('coordination repair STOP: local manifest changed after review')
+    resolved_manifest_path = (
+        Path(manifest_path)
+        if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
+    )
+    if missing_ref_repair:
+        recovered = recover_landed_coordination_missing_ref_repair(
+            repo_root, manifest, resolved_manifest_path, plan
+        )
+        if recovered is not None:
+            return recovered
     current_plan, previous = coordination_repair_plan(
         repo_root, manifest, plan['repairedRef'], plan['freezeBackend']
     )
@@ -11581,6 +12418,11 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         comparison_keys.extend([
             'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
             'expectedManifestDigest', 'proof',
+        ])
+    if missing_ref_repair:
+        comparison_keys.extend([
+            'status', 'repairClass', 'proof', 'expectedClaimRef',
+            'expectedClaimTip',
         ])
     if digest_heal_repair:
         comparison_keys.extend([
@@ -11609,9 +12451,45 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         state_ref=plan['stateRef'],
         expected_state_tip=plan['expectedStateTip'],
         guarded_refs=plan['guardedRefs'],
+        repaired_ref=plan['repairedRef'],
+        repaired_tip=plan['expectedRecordedTip'],
+        claim_ref=plan.get('expectedClaimRef'),
+        expected_claim_tip=plan.get('expectedClaimTip'),
     )
     installation = installation_id(create=True)
-    if tree_equivalent_repair:
+    operation = None
+    if missing_ref_repair:
+        operation = begin_coordination_missing_ref_repair(
+            repo_root, manifest, resolved_manifest_path, previous, plan
+        )
+        claim_commit = create_coordination_claim_commit(
+            repo_root,
+            plan['repairedRef'],
+            config['id'],
+            operation['operation_token'],
+            plan['expectedClaimTip'],
+            publication_scope=operation['scope'],
+            changed_refs=operation['changed_refs'],
+        )
+        child = build_coordination_repair_state(
+            previous['state'],
+            previous['tip'],
+            plan['repairedRef'],
+            plan['expectedRecordedTip'],
+            installation,
+            operation_token=operation['operation_token'],
+            claim_commit=claim_commit,
+            repair_evidence={
+                'schemaVersion': 1,
+                'planDigest': supplied_digest,
+                'proof': plan['proof'],
+                'ref': plan['repairedRef'],
+                'recordedTip': plan['expectedRecordedTip'],
+                'claimRef': plan['expectedClaimRef'],
+                'claimCommit': claim_commit,
+            },
+        )
+    elif tree_equivalent_repair:
         child = build_tree_equivalent_coordination_repair_state(
             previous['state'], previous['tip'], plan, installation
         )
@@ -11640,14 +12518,22 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         expected_state_tip=plan['expectedStateTip'],
         new_state_tip=child_tip,
         guarded_refs=plan['guardedRefs'],
+        repaired_ref=plan['repairedRef'],
+        repaired_tip=plan['expectedRecordedTip'],
+        claim_ref=plan.get('expectedClaimRef'),
+        expected_claim_tip=plan.get('expectedClaimTip'),
+        new_claim_tip=(child.get('claims') or {}).get(plan['repairedRef']),
     )
+    expected_post_refs = dict(plan['guardedRefs'])
+    if missing_ref_repair:
+        expected_post_refs[plan['repairedRef']] = plan['expectedRecordedTip']
     observed = backend.observe(
-        repo_root, config['remote'], [plan['stateRef'], *plan['guardedRefs']]
+        repo_root, config['remote'], [plan['stateRef'], *expected_post_refs]
     )
     if observed.get(plan['stateRef']) != child_tip:
         raise SyncwheelError('coordination repair outcome is unknown: state CAS was not observed')
     drifted = {
-        ref: (tip, observed.get(ref)) for ref, tip in plan['guardedRefs'].items()
+        ref: (tip, observed.get(ref)) for ref, tip in expected_post_refs.items()
         if observed.get(ref) != tip
     }
     if drifted:
@@ -11658,14 +12544,21 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         remote=config['remote'],
         state_ref=plan['stateRef'],
         expected_state_tip=child_tip,
-        guarded_refs=plan['guardedRefs'],
+        guarded_refs=expected_post_refs,
+        repaired_ref=plan['repairedRef'],
+        repaired_tip=plan['expectedRecordedTip'],
+        claim_ref=plan.get('expectedClaimRef'),
+        expected_claim_tip=(child.get('claims') or {}).get(plan['repairedRef']),
     )
     verified = coordination_state_from_commit(repo_root, child_tip, config['id'])
     git_parent = git(repo_root, 'rev-parse', f'{child_tip}^').stdout.strip()
     if (
         git_parent != previous['tip']
         or verified['parent_state'] != previous['tip']
-        or verified['managed_refs'][plan['repairedRef']] != plan['expectedRemoteTip']
+        or verified['managed_refs'][plan['repairedRef']] != (
+            plan['expectedRecordedTip'] if missing_ref_repair
+            else plan['expectedRemoteTip']
+        )
     ):
         raise SyncwheelError('coordination repair post-verification failed: invalid child state')
     if state_only_repair:
@@ -11710,6 +12603,26 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             raise SyncwheelError(
                 'coordination repair post-verification failed: invalid digest-heal evidence'
             )
+    if missing_ref_repair:
+        evidence = verified.get('repair_evidence')
+        claim_tip = (verified.get('claims') or {}).get(plan['repairedRef'])
+        if (
+            verified.get('operation_token') != operation['operation_token']
+            or claim_tip != (child.get('claims') or {}).get(plan['repairedRef'])
+            or not isinstance(evidence, dict)
+            or evidence.get('planDigest') != supplied_digest
+            or evidence.get('proof') != plan.get('proof')
+            or evidence.get('claimCommit') != claim_tip
+        ):
+            raise SyncwheelError(
+                'coordination repair post-verification failed: invalid missing-ref evidence'
+            )
+        complete_coordination_publication(
+            repo_root,
+            resolved_manifest_path,
+            operation,
+            {'state_tip': child_tip, 'status': 'published'},
+        )
     repaired = {
         'status': 'repaired',
         'state_tip': child_tip,
@@ -21796,7 +22709,11 @@ def command_stack_close(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+        repo_root,
+        manifest,
+        manifest_path,
+        skip_stacks={args.stack},
+        only_stacks={args.stack},
     )
     original_manifest = copy.deepcopy(manifest)
     pending_close = pending_stack_close_operation(repo_root, manifest_path, args.stack)
@@ -22840,7 +23757,8 @@ def recover_pending_stack_promote(
 
 
 def complete_pending_promote_intents(
-    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=(),
+    only_stacks=None,
 ):
     """Finish promotions that landed before their manifest was saved.
 
@@ -22861,17 +23779,28 @@ def complete_pending_promote_intents(
     )
     with guard:
         resolve_pending_promote_intents(
-            repo_root, manifest, manifest_path, apply=apply, skip_stacks=skip_stacks
+            repo_root,
+            manifest,
+            manifest_path,
+            apply=apply,
+            skip_stacks=skip_stacks,
+            only_stacks=only_stacks,
         )
 
 
 def resolve_pending_promote_intents(
-    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=(),
+    only_stacks=None,
 ):
+    selected = None if only_stacks is None else set(only_stacks)
     pending = [
         intent for intent in pending_coordination_publications(repo_root, manifest_path)
         if str(intent.get('scope') or '').startswith('promote:')
         and str(intent.get('scope'))[len('promote:'):] not in set(skip_stacks)
+        and (
+            selected is None
+            or str(intent.get('scope'))[len('promote:'):] in selected
+        )
     ]
     if not pending:
         return
@@ -22903,7 +23832,11 @@ def command_stack_promote(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+        repo_root,
+        manifest,
+        manifest_path,
+        skip_stacks={args.stack},
+        only_stacks={args.stack},
     )
     stack = require_stack(manifest, args.stack)
     pending_promotion = pending_coordination_publication_for_scope(
@@ -23636,7 +24569,11 @@ def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, apply=not args.dry_run
+        repo_root,
+        manifest,
+        manifest_path,
+        apply=not args.dry_run,
+        only_stacks={args.stack},
     )
     stack = require_stack(manifest, args.stack)
     mode, worktree = select_replay_mode(
@@ -23662,7 +24599,11 @@ def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, apply=not args.dry_run
+        repo_root,
+        manifest,
+        manifest_path,
+        apply=not args.dry_run,
+        only_stacks={args.stack},
     )
     if coordination_is_active(manifest):
         recovery_state = getattr(args, '_control_manifest_recovery_state', None)
@@ -27531,15 +28472,24 @@ class SyncwheelRevisionBackend:
             else:
                 commands.append(f'verify {ref} {old}')
 
-        process = subprocess.Popen(
-            ['git', 'update-ref', '--stdin'],
-            cwd=repo_root,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
+        authorization = authorize_ref_move(repo_root)
+        try:
+            process = subprocess.Popen(
+                ['git', 'update-ref', '--stdin'],
+                cwd=repo_root,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env=managed_process_env(
+                    {MANAGED_REF_MOVE_AUTH_ENV: authorization},
+                    authorize=False,
+                ),
+            )
+        except BaseException:
+            (ref_auth_dir(repo_root) / authorization).unlink(missing_ok=True)
+            raise
         prepared = False
         try:
             process.stdin.write('start\n')
@@ -27580,6 +28530,8 @@ class SyncwheelRevisionBackend:
             if prepared or process.poll() is None:
                 self._abort_ref_transaction(process)
             raise
+        finally:
+            (ref_auth_dir(repo_root) / authorization).unlink(missing_ok=True)
 
     def _abort_ref_transaction(self, process):
         if process.poll() is None and process.stdin and not process.stdin.closed:
@@ -27674,44 +28626,46 @@ class SyncwheelRevisionBackend:
                 handle.write(message)
                 handle.flush()
                 os.fsync(handle.fileno())
-            environment = os.environ.copy()
-            environment.update(
-                {
-                    'GIT_INDEX_FILE': str(index_path),
-                    'SYNCWHEEL_REVISION_PROVIDER_COMMIT': commit,
-                }
-            )
-            git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(index_path)})
-            for hook_name, arguments in (
-                ('pre-commit', []),
-                ('commit-msg', [str(message_path)]),
-            ):
-                hook = hooks_dir / hook_name
-                if not hook.is_file() or not os.access(hook, os.X_OK):
-                    continue
-                result = subprocess.run(
-                    [str(hook), *arguments],
-                    cwd=repo_root,
-                    text=True,
-                    capture_output=True,
-                    env=environment,
+            with ref_move_authorization(repo_root) as authorization:
+                environment = managed_process_env(
+                    {
+                        'GIT_INDEX_FILE': str(index_path),
+                        'SYNCWHEEL_REVISION_PROVIDER_COMMIT': commit,
+                        MANAGED_REF_MOVE_AUTH_ENV: authorization,
+                    },
+                    authorize=False,
                 )
-                if result.returncode != 0:
-                    detail = (result.stderr.strip() or result.stdout.strip())[:2000]
-                    suffix = f': {detail}' if detail else ''
-                    self._fail(
-                        f'{hook_name} hook rejected prepared commit '
-                        f'(exit {result.returncode}){suffix}'
+                git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(index_path)})
+                for hook_name, arguments in (
+                    ('pre-commit', []),
+                    ('commit-msg', [str(message_path)]),
+                ):
+                    hook = hooks_dir / hook_name
+                    if not hook.is_file() or not os.access(hook, os.X_OK):
+                        continue
+                    result = subprocess.run(
+                        [str(hook), *arguments],
+                        cwd=repo_root,
+                        text=True,
+                        capture_output=True,
+                        env=environment,
                     )
-            hook_tree = git(
-                repo_root,
-                'write-tree',
-                env={'GIT_INDEX_FILE': str(index_path)},
-            ).stdout.strip()
-            if hook_tree != ref_tree(repo_root, commit):
-                self._fail('commit hook modified the deterministic provider index')
-            if message_path.read_text() != message:
-                self._fail('commit-msg hook modified the deterministic provider message')
+                    if result.returncode != 0:
+                        detail = (result.stderr.strip() or result.stdout.strip())[:2000]
+                        suffix = f': {detail}' if detail else ''
+                        self._fail(
+                            f'{hook_name} hook rejected prepared commit '
+                            f'(exit {result.returncode}){suffix}'
+                        )
+                hook_tree = git(
+                    repo_root,
+                    'write-tree',
+                    env={'GIT_INDEX_FILE': str(index_path)},
+                ).stdout.strip()
+                if hook_tree != ref_tree(repo_root, commit):
+                    self._fail('commit hook modified the deterministic provider index')
+                if message_path.read_text() != message:
+                    self._fail('commit-msg hook modified the deterministic provider message')
         finally:
             index_path.unlink(missing_ok=True)
             message_path.unlink(missing_ok=True)
@@ -28928,6 +29882,7 @@ def build_parser():
             'github-lock',
             COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
             COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+            COORDINATION_REPAIR_MISSING_REF_BACKEND,
             COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
             COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
         ],
@@ -28936,11 +29891,11 @@ def build_parser():
             'reviewed repair backend: github-lock remains unsupported; '
             'tree-equivalent-state-cas requires exact tree equality; '
             'fast-forward-state-cas requires exact bounded ancestry; '
+            'missing-ref-create-cas atomically recreates one absent owned ref; '
             'state-digest-migration republishes a pre-0.42.2 state under the '
             'control-manifest digest; state-digest-heal recomputes an '
             'unrecognized (neither raw nor legacy) manifest_digest from the '
-            'manifest already committed at the aligned integration tip; all '
-            'four change only append-only coordination state'
+            'manifest already committed at the aligned integration tip'
         ),
     )
     coordination_repair_p.add_argument(
@@ -30187,9 +31142,11 @@ def primary_checkout_preflight(args):
             command_stack_promote,
             command_stack_demote,
             command_stack_absorb,
+            command_worktree_release,
         }
         bounded_publication_commands = {
             command_stack_push,
+            command_stack_rebuild,
             command_int_push,
             command_coordination_compose,
             command_stack_merge_pr,
@@ -30264,8 +31221,6 @@ def governed_worktree_reaping_requested(args):
         command_stack_land,
     }
     dry_run_gated = {
-        command_stack_push,
-        command_stack_rebuild,
         command_int_align_remote,
         command_int_push,
         command_int_rebuild,
@@ -30296,6 +31251,31 @@ def governed_worktree_preflight(args):
         # unrelated lanes belongs to explicit release and gc commands.
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
+    stack_scoped_without_global_reaping = {
+        command_stack_close,
+        command_stack_promote,
+        command_stack_push,
+        command_stack_rebuild,
+    }
+    scoped_stacks = None
+    scoped_stack_label = 'the selected stack'
+    if args.func in stack_scoped_without_global_reaping:
+        scoped_stacks = {args.stack}
+        scoped_stack_label = 'this stack'
+    elif args.func in {command_reconcile, command_resume} and getattr(args, 'stack', None):
+        scoped_stacks = set(args.stack)
+    if scoped_stacks:
+        registry, _ = load_governed_worktree_registry(repo_root)
+        blockers = [
+            lane for lane in registry['lanes']
+            if lane.get('target') in scoped_stacks and lane.get('state') != 'reaped'
+        ]
+        if blockers:
+            raise SyncwheelError(
+                f'governed worktree recovery is required before updating {scoped_stack_label}: '
+                + ', '.join(lane['id'] for lane in blockers)
+            )
+        return
     if not governed_worktree_reaping_requested(args):
         return
     cleanup = reconcile_governed_worktrees(repo_root, manifest, manifest_path)

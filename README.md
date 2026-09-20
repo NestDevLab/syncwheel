@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.18`
+Current version: `0.43.21`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -224,6 +224,15 @@ Apply repeats the ancestry and drift checks, then appends only state evidence
 under the same exact state-ref lease. It never updates the managed branch and
 refuses non-descendants, intervals above 1024 commits, plan drift, ownership
 uncertainty, or concurrent ref changes.
+
+When coordination state still owns a ref that was deleted remotely, use
+`--freeze-backend missing-ref-create-cas`. The reviewed plan requires the ref
+to remain actively declared and absent and the recorded commit object to exist
+locally. Apply records a durable intent, then atomically creates that exact ref,
+publishes a successor ownership claim, and appends a child state under exact
+leases. A retry can complete an interrupted successful publication from its
+operation token. Inactive or tombstoned refs are rejected; if any guarded ref
+or claim appears or changes, nothing is overwritten.
 
 A coordination state records the digest of `.syncwheel/manifest.json` on its
 integration tip. States published before 0.42.2 recorded the digest of the
@@ -612,6 +621,9 @@ Practical meaning:
   manifest ownership, stack branches, integration, and remote tips; reports a
   dry-run plan by default; and can rebuild, update manifest SHAs, and push when
   explicitly run with `--apply` and `--push`.
+- Stack-scoped `reconcile` and `resume` report unrelated dirty governed lanes
+  without reaping them. A live lane targeting a selected stack still blocks
+  that stack's mutation.
 - In multi-device workflows, `reconcile` converges toward a remote branch that
   already matches the manifest projection instead of rebuilding the same logical
   state into new SHAs on every device.

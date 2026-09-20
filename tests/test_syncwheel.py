@@ -1253,6 +1253,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertFalse(module.governed_worktree_reaping_requested(
             SimpleNamespace(func=module.command_worktree_open)
         ))
+        for command in (module.command_stack_push, module.command_stack_rebuild):
+            with self.subTest(command=command.__name__):
+                self.assertFalse(module.governed_worktree_reaping_requested(
+                    SimpleNamespace(func=command, dry_run=False)
+                ))
         for command in (
             module.command_reconcile,
             module.command_resume,
@@ -1277,6 +1282,151 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     SimpleNamespace(func=command, auto_worktree=True, worktree=None)
                 ))
 
+    def test_stack_lifecycle_recovers_promotions_only_for_requested_stack(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        cases = (
+            (module.command_stack_close, False, {
+                'skip_stacks': {'feature-a'},
+                'only_stacks': {'feature-a'},
+            }),
+            (module.command_stack_promote, False, {
+                'skip_stacks': {'feature-a'},
+                'only_stacks': {'feature-a'},
+            }),
+            (module.command_stack_rebuild, False, {
+                'apply': True,
+                'only_stacks': {'feature-a'},
+            }),
+            (module.command_stack_push, False, {
+                'apply': True,
+                'only_stacks': {'feature-a'},
+            }),
+        )
+        for command, dry_run, expected_kwargs in cases:
+            args = SimpleNamespace(
+                repo=str(self.repo),
+                manifest=None,
+                personal=None,
+                stack='feature-a',
+                dry_run=dry_run,
+            )
+            with self.subTest(command=command.__name__):
+                with mock.patch.object(
+                    module,
+                    'require_manifest',
+                    return_value=(manifest, manifest_path),
+                ), mock.patch.object(
+                    module,
+                    'complete_pending_promote_intents',
+                    side_effect=RuntimeError('stop after recovery gate'),
+                ) as recover:
+                    with self.assertRaisesRegex(RuntimeError, 'recovery gate'):
+                        command(args)
+                recover.assert_called_once_with(
+                    self.repo,
+                    manifest,
+                    manifest_path,
+                    **expected_kwargs,
+                )
+
+    def test_pending_promotion_resolution_skips_unrelated_stack(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        feature_a = next(
+            stack for stack in manifest['stacks'] if stack['id'] == 'feature-a'
+        )
+        feature_b = {**feature_a, 'id': 'feature-b', 'branch': 'pr/feature-b'}
+        manifest['stacks'].append(feature_b)
+        pending = [
+            {'scope': 'promote:feature-a'},
+            {'scope': 'promote:feature-b'},
+        ]
+        with mock.patch.object(
+            module,
+            'pending_coordination_publications',
+            return_value=pending,
+        ), mock.patch.object(
+            module,
+            'read_remote_coordination_state',
+            return_value={'tip': 'a' * 40, 'state': {}},
+        ), mock.patch.object(
+            module,
+            'coordinated_operation_landed',
+            return_value=True,
+        ), mock.patch.object(
+            module,
+            'recover_pending_stack_promote',
+        ) as recover:
+            module.resolve_pending_promote_intents(
+                self.repo,
+                manifest,
+                manifest_path,
+                only_stacks={'feature-a'},
+            )
+
+        recover.assert_called_once_with(
+            self.repo,
+            manifest,
+            manifest_path,
+            feature_a,
+            pending[0],
+        )
+
+    def test_scoped_reconcile_and_resume_do_not_reap_unrelated_lanes(self):
+        module = self.load_syncwheel_module()
+        unrelated = {
+            'id': 'unrelated-dirty',
+            'target': 'feature-b',
+            'state': 'active',
+        }
+        related = {
+            'id': 'feature-a-dirty',
+            'target': 'feature-a',
+            'state': 'active',
+        }
+        for command in (module.command_reconcile, module.command_resume):
+            args = SimpleNamespace(
+                func=command,
+                repo=str(self.repo),
+                manifest=None,
+                personal=None,
+                stack=['feature-a'],
+                apply=True,
+                json=False,
+            )
+            with self.subTest(command=command.__name__, lane='unrelated'):
+                with mock.patch.object(
+                    module,
+                    'load_governed_worktree_registry',
+                    return_value=({'lanes': [unrelated]}, None),
+                ), mock.patch.object(
+                    module,
+                    'emit_governed_worktree_warnings',
+                ), mock.patch.object(
+                    module,
+                    'reconcile_governed_worktrees',
+                ) as reap:
+                    module.governed_worktree_preflight(args)
+                reap.assert_not_called()
+            with self.subTest(command=command.__name__, lane='related'):
+                with mock.patch.object(
+                    module,
+                    'load_governed_worktree_registry',
+                    return_value=({'lanes': [related]}, None),
+                ), mock.patch.object(
+                    module,
+                    'emit_governed_worktree_warnings',
+                ):
+                    with self.assertRaisesRegex(
+                        module.SyncwheelError,
+                        'governed worktree recovery is required before updating '
+                        'the selected stack: feature-a-dirty',
+                    ):
+                        module.governed_worktree_preflight(args)
+
     def test_expired_lane_can_be_reaped_through_explicit_gc_outside_a_repository(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
         module = self.load_syncwheel_module()
@@ -1290,7 +1440,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertFalse(Path(opened['lane']['path']).exists())
 
     def test_branch_advanced_pending_lane_blocks_a_mutating_rebuild(self):
-        opened = json.loads(self.run_cli('worktree', 'open', 'advanced', '--json').stdout)
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'advanced', '--into', 'feature-a', '--json'
+        ).stdout)
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['state'] = 'captured_pending_cleanup'
@@ -1299,7 +1451,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         result = self.run_cli('stack', 'rebuild', 'feature-a', expected=2)
 
-        self.assertIn('governed worktree recovery is required', result.stderr)
+        self.assertIn('recovery is required before updating this stack', result.stderr)
         self.assertTrue(Path(opened['lane']['path']).is_dir())
 
     def test_linked_worktree_uses_the_primary_configured_root(self):
@@ -1390,6 +1542,41 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertFalse(lane_path.exists())
         ledger = self.read_ledger_state()
         self.assertEqual(ledger['recent_events'][-1]['type'], 'governed_worktree_released')
+
+    def test_worktree_release_preserves_unrelated_primary_dirt(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'finished', '--json').stdout)
+        lane_path = Path(opened['lane']['path'])
+        primary_path = self.repo / 'alpha.txt'
+        primary_path.write_text('unrelated local work\n')
+
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'finished', '--reason', 'delivered elsewhere',
+            '--apply', '--json',
+        ).stdout)
+
+        self.assertTrue(released['applied'])
+        self.assertEqual(primary_path.read_text(), 'unrelated local work\n')
+        self.assertFalse(lane_path.exists())
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'], [])
+
+    def test_stack_rebuild_preserves_unrelated_primary_dirt(self):
+        self.prepare_replay_stack()
+        opened = json.loads(self.run_cli('worktree', 'open', 'unrelated', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        unrelated = next(lane for lane in registry['lanes'] if lane['id'] == 'unrelated')
+        unrelated['state'] = 'captured_pending_cleanup'
+        unrelated['pending_reason'] = 'branch_advanced'
+        module.save_governed_worktree_registry(self.repo, registry)
+        primary_path = self.repo / 'alpha.txt'
+        primary_path.write_text('unrelated local work\n')
+
+        self.run_cli('stack', 'rebuild', 'replay')
+
+        self.assertEqual(primary_path.read_text(), 'unrelated local work\n')
+        self.assertEqual(self.git('status', '--short', '--', 'alpha.txt'), 'M alpha.txt')
+        self.assertTrue(Path(opened['lane']['path']).is_dir())
 
     def test_worktree_release_accepts_a_clean_record_with_a_missing_path(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'missing-release', '--json').stdout)

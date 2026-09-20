@@ -2718,6 +2718,35 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             ['feature.txt', '.syncwheel/manifest.json'],
         )
 
+    def test_revision_provider_authorizes_the_managed_primary_commit_guard(self):
+        stable_cli = self.fixture.root / 'syncwheel'
+        stable_cli.write_text(
+            '#!/bin/sh\n'
+            f'exec {shlex.quote(sys.executable)} {shlex.quote(str(CLI))} "$@"\n'
+        )
+        stable_cli.chmod(0o755)
+        path = f'{self.fixture.root}{os.pathsep}{os.environ.get("PATH", "")}'
+        with mock.patch.dict(os.environ, {'PATH': path}):
+            hook_status = SYNCWHEEL.install_managed_push_hook(
+                self.fixture.repo,
+                apply=True,
+            )
+            self.assertTrue(hook_status['ready'])
+            request = self.fixture.request(
+                'preflight', operation_id='managed-primary-guard-op'
+            )
+            self.fixture.protocol_request(self.fixture.check_request(request))
+            (self.fixture.repo / 'feature.txt').write_text('feature\n')
+            self.fixture.protocol_request(request)
+
+            response, _ = self.fixture.protocol_request(
+                {**request, 'action': 'finalize'}
+            )
+
+        self.assertEqual(response['status'], 'verified')
+        self.assertEqual(response['productCommitSha'], self.fixture.git('rev-parse', 'HEAD^'))
+        self.assertEqual(response['controlCommitSha'], self.fixture.git('rev-parse', 'HEAD'))
+
     def test_commit_message_hook_cannot_change_the_deterministic_message(self):
         hook = self.fixture.repo / '.git' / 'hooks' / 'commit-msg'
         hook.write_text('#!/bin/sh\nprintf "\\nmutated\\n" >> "$1"\n')
