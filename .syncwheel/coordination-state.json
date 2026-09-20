@@ -1,9 +1,10 @@
 {
   "changed_refs": {
+    "refs/heads/main-integration": "be5e64d857d978977bb6ba0e65e5a0c63d1084b4",
     "refs/heads/pr/promote-recovery-adoption": "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
   },
   "claims": {
-    "refs/heads/main-integration": "5bd4cd2744721f4261d613e8964eee5af9b8f75e",
+    "refs/heads/main-integration": "1d2775a74b4be8e05f2bb2cabc7fb15fb545a2d5",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
@@ -19,7 +20,7 @@
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
-    "refs/heads/pr/promote-recovery-adoption": "d5bd73704c7ba81815d5027dfb831d12baf67be0",
+    "refs/heads/pr/promote-recovery-adoption": "6286a0e63eba7866816b8b65fcca97c354e20ae6",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
@@ -43,11 +44,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T19:03:29+00:00",
+  "created_at": "2026-09-20T19:19:53+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "5bf0e31471adef175e48b20c623af43a9f21a97c",
+    "refs/heads/main-integration": "be5e64d857d978977bb6ba0e65e5a0c63d1084b4",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -155,7 +156,7 @@
         },
         "branch": "pr/promote-recovery-adoption",
         "commits": [
-          "3620b9a265359b9021d3c0811fb2d8bdf0168984",
+          "47576d23feeaaa056886dc9367ae80a4528e5a9a",
           "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad"
         ],
         "id": "promote-recovery-adoption",
@@ -165,11 +166,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "15019864-b286-45b9-b47b-73255e08aef8",
-  "parent_state": "e20e10d5c047cb80192e60387fc2fc193a0837e7",
+  "manifest_digest": "2cf2b65775313dd6821a4735ca4f67a6684a23e1cc3dcc83eaefcb1b8d9c66ba",
+  "operation_token": "a676f180-19ab-4195-a1d4-37beea60dfdc",
+  "parent_state": "b935a16fc3d63c80a7efea48a219f05e95dcc440",
   "projection_status": "partial",
-  "publication_id": "77a52e93-8923-4478-84f6-0db9c3ae0fb4",
+  "publication_id": "b66be886-d83f-4ce0-a4ba-2afed601c0fa",
   "publication_scope": "stack:promote-recovery-adoption",
   "schema_version": 2,
   "syncwheel_version": "0.43.22",
