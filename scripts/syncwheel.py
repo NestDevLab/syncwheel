@@ -30730,7 +30730,7 @@ def governed_worktree_preflight(args):
         command_stack_rebuild,
     }
     scoped_stacks = None
-    scoped_stack_label = 'selected stack'
+    scoped_stack_label = 'the selected stack'
     if args.func in stack_scoped_without_global_reaping:
         scoped_stacks = {args.stack}
         scoped_stack_label = 'this stack'

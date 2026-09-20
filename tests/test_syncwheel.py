@@ -1421,7 +1421,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     'emit_governed_worktree_warnings',
                 ):
                     with self.assertRaisesRegex(
-                        module.SyncwheelError, 'selected stack: feature-a-dirty'
+                        module.SyncwheelError,
+                        'governed worktree recovery is required before updating '
+                        'the selected stack: feature-a-dirty',
                     ):
                         module.governed_worktree_preflight(args)
 
