@@ -6508,6 +6508,31 @@ def historically_closed_integration_commits(
             )
         return state_cache[commit]
 
+    def historical_state_form(state_tip, state):
+        try:
+            return coordination_state_manifest_digest_classification(
+                repo_root, state, config.get('remote')
+            )['form']
+        except SyncwheelError as exc:
+            unavailable = (
+                str(exc) == (
+                    'coordination state integration tip object is unavailable '
+                    'for manifest verification'
+                )
+                and state_tip != head
+                and git(
+                    repo_root, 'rev-parse', '--is-shallow-repository'
+                ).stdout.strip() == 'false'
+            )
+            if not unavailable:
+                raise
+            print(
+                'WARNING: ignoring unavailable historical closed-stack proof '
+                f'{state_tip}',
+                file=sys.stderr,
+            )
+            return None
+
     while current:
         state = load_state(current)
         parents = git(repo_root, 'show', '-s', '--format=%P', current).stdout.split()
@@ -6543,15 +6568,13 @@ def historically_closed_integration_commits(
                 stack = parent_stacks[0]
                 closed_ref = coordination_tombstone_ref(tombstones[0])
                 expected_ref = f"refs/heads/{stack.get('branch')}"
-                state_form = coordination_state_manifest_digest_classification(
-                    repo_root, state, config.get('remote')
-                )['form']
-                parent_form = coordination_state_manifest_digest_classification(
-                    repo_root, parent_state, config.get('remote')
-                )['form']
+                state_form = historical_state_form(current, state)
+                parent_form = historical_state_form(parent, parent_state)
                 if (
                     closed_ref == expected_ref
                     and closed_ref not in parent_tombstones
+                    and state_form is not None
+                    and parent_form is not None
                     and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
                     and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
                 ):
@@ -6559,10 +6582,27 @@ def historically_closed_integration_commits(
                         *stack_integration_commits(stack),
                         *stack_integration_only_commits(stack),
                     ]
+                    reason = tombstones[0].get('reason')
                     managed_tip = (
                         parent_state.get('managed_refs') or {}
                     ).get(expected_ref)
-                    if tombstones[0].get('reason') == 'absorbed' and managed_tip:
+                    if reason == 'absorbed' and managed_tip:
+                        explicit = {
+                            commit_full_sha(repo_root, commit)
+                            for commit in declared
+                            if commit_exists(repo_root, commit)
+                        }
+                        managed_parents = (
+                            git(
+                                repo_root, 'show', '-s', '--format=%P', managed_tip
+                            ).stdout.split()
+                            if commit_exists(repo_root, managed_tip)
+                            else []
+                        )
+                        if len(managed_parents) == 2 and explicit.intersection(
+                            managed_parents
+                        ):
+                            declared.extend(managed_parents)
                         declared.append(managed_tip)
                     declared = [
                         commit_full_sha(repo_root, commit)
@@ -6575,7 +6615,6 @@ def historically_closed_integration_commits(
                             value for value in declared_patches.values() if value
                         )
                     )
-                    reason = tombstones[0].get('reason')
                     if reason == 'absorbed' or (
                         relevant and historical_stack_has_exact_squash_delivery(
                             repo_root,
@@ -6638,12 +6677,8 @@ def historically_closed_integration_commits(
                 authoritative_tip = (
                     parent_state.get('managed_refs') or {}
                 ).get(closed_ref)
-                state_form = coordination_state_manifest_digest_classification(
-                    repo_root, state, config.get('remote')
-                )['form']
-                parent_form = coordination_state_manifest_digest_classification(
-                    repo_root, parent_state, config.get('remote')
-                )['form']
+                state_form = historical_state_form(current, state)
+                parent_form = historical_state_form(parent, parent_state)
                 if (
                     closed_ref == f"refs/heads/{old_stack.get('branch')}"
                     and closed_ref not in parent_tombstones
@@ -6651,6 +6686,8 @@ def historically_closed_integration_commits(
                     and authoritative_tip
                     and commit_exists(repo_root, authoritative_tip)
                     and new_stack.get('branch') != old_stack.get('branch')
+                    and state_form is not None
+                    and parent_form is not None
                     and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
                     and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
                 ):
@@ -6760,12 +6797,11 @@ def historically_closed_integration_commits(
                                 )
                                 == parent_managed_tip
                             )
-                            and coordination_state_manifest_digest_classification(
-                                repo_root, parent_state, config.get('remote')
-                            )['form'] != COORDINATION_STATE_DIGEST_FORM_ORPHANED
-                            and coordination_state_manifest_digest_classification(
-                                repo_root, promotion_parent_state, config.get('remote')
-                            )['form'] != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                            and historical_state_form(parent, parent_state)
+                            not in {None, COORDINATION_STATE_DIGEST_FORM_ORPHANED}
+                            and historical_state_form(
+                                promotion_parent, promotion_parent_state
+                            ) not in {None, COORDINATION_STATE_DIGEST_FORM_ORPHANED}
                         )
                         if (
                             promotion_owned

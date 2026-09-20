@@ -3332,6 +3332,197 @@ with module.coordination_publication_lock(Path(repo_path)):
                 delivery_tip=module.ref_tip(repo, 'origin/main'),
             )
 
+    def test_closed_stack_history_ignores_unavailable_non_head_control_tip(self):
+        origin = self.create_remote('closed-history-pruned-tip')
+        repo = self.clone(origin, 'closed-history-pruned-tip')
+        module = self.load_module()
+        candidate = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        stack = {
+            'id': 'historical',
+            'branch': 'pr/historical',
+            'commits': [candidate],
+        }
+        tombstone = {
+            'stack': 'historical',
+            'branch': 'pr/historical',
+            'ref': 'refs/heads/pr/historical',
+            'reason': 'absorbed',
+            'remote_tip': candidate,
+        }
+        states = {
+            's0': {
+                'parent_state': None,
+                'publication_scope': 'create:historical',
+                'manifest': {'stacks': [stack]},
+                'managed_refs': {'refs/heads/pr/historical': candidate},
+                'tombstones': [],
+            },
+            's1': {
+                'parent_state': 's0',
+                'publication_scope': 'close:historical',
+                'manifest': {'stacks': []},
+                'managed_refs': {},
+                'tombstones': [tombstone],
+            },
+            's2': {
+                'parent_state': 's1',
+                'publication_scope': 'stack:later',
+                'manifest': {'stacks': []},
+                'managed_refs': {},
+                'tombstones': [tombstone],
+            },
+        }
+        observation = {
+            'status': 'current',
+            'state_tip': 's2',
+            'integration_ref': 'refs/heads/main-integration',
+            'config': {'id': 'default', 'remote': 'origin'},
+        }
+        original_git = module.git
+
+        def fake_git(repo_root, *args, **kwargs):
+            if (
+                len(args) == 4
+                and args[:3] == ('show', '-s', '--format=%P')
+                and args[3] in states
+            ):
+                parent = states[args[3]].get('parent_state')
+                return SimpleNamespace(stdout=(parent or '') + ('\n' if parent else ''))
+            return original_git(repo_root, *args, **kwargs)
+
+        def classify(_repo, state, _remote):
+            if state is states['s1']:
+                raise module.SyncwheelError(
+                    'coordination state integration tip object is unavailable '
+                    'for manifest verification'
+                )
+            return {'form': 'control-manifest-file'}
+
+        stderr = io.StringIO()
+        with mock.patch.object(module, 'git', side_effect=fake_git), mock.patch.object(
+            module,
+            'coordination_state_from_commit',
+            side_effect=lambda _repo, commit, _config: states[commit],
+        ), mock.patch.object(
+            module, 'verify_coordination_state_manifest_digest'
+        ), mock.patch.object(
+            module,
+            'coordination_state_manifest_digest_classification',
+            side_effect=classify,
+        ), contextlib.redirect_stderr(stderr):
+            closed = module.historically_closed_integration_commits(
+                repo,
+                candidate,
+                observation,
+                candidates=[candidate],
+            )
+
+        self.assertEqual(closed, set())
+        self.assertIn(
+            'ignoring unavailable historical closed-stack proof s1',
+            stderr.getvalue(),
+        )
+
+    def test_absorbed_close_trusts_patch_equivalent_parent_of_managed_merge_tip(self):
+        origin = self.create_remote('closed-history-managed-merge')
+        repo = self.clone(origin, 'closed-history-managed-merge')
+        base = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', '-c', 'pr/declared', base)
+        (repo / 'owned.txt').write_text('owned\n')
+        self.git(repo, 'add', 'owned.txt')
+        self.git(repo, 'commit', '-qm', 'feat: declared form')
+        declared = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', '-c', 'pr/alternate', base)
+        (repo / 'owned.txt').write_text('owned\n')
+        self.git(repo, 'add', 'owned.txt')
+        self.git(repo, 'commit', '-qm', 'feat: alternate form')
+        alternate = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'pr/declared')
+        self.git(
+            repo,
+            'merge', '--no-ff', 'pr/alternate', '-m',
+            'Merge equivalent published histories',
+        )
+        managed_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+
+        module = self.load_module()
+        stack = {
+            'id': 'historical',
+            'branch': 'pr/historical',
+            'commits': [declared],
+        }
+        tombstone = {
+            'stack': 'historical',
+            'branch': 'pr/historical',
+            'ref': 'refs/heads/pr/historical',
+            'reason': 'absorbed',
+            'remote_tip': None,
+        }
+        states = {
+            's0': {
+                'parent_state': None,
+                'publication_scope': 'stack:historical',
+                'manifest': {'stacks': [stack]},
+                'managed_refs': {'refs/heads/pr/historical': managed_tip},
+                'tombstones': [],
+            },
+            's1': {
+                'parent_state': 's0',
+                'publication_scope': 'close:historical',
+                'manifest': {'stacks': []},
+                'managed_refs': {},
+                'tombstones': [tombstone],
+            },
+            's2': {
+                'parent_state': 's1',
+                'publication_scope': 'stack:later',
+                'manifest': {'stacks': []},
+                'managed_refs': {},
+                'tombstones': [tombstone],
+            },
+        }
+        observation = {
+            'status': 'current',
+            'state_tip': 's2',
+            'integration_ref': 'refs/heads/main-integration',
+            'config': {'id': 'default', 'remote': 'origin'},
+        }
+        original_git = module.git
+
+        def fake_git(repo_root, *args, **kwargs):
+            if (
+                len(args) == 4
+                and args[:3] == ('show', '-s', '--format=%P')
+                and args[3] in states
+            ):
+                parent = states[args[3]].get('parent_state')
+                return SimpleNamespace(stdout=(parent or '') + ('\n' if parent else ''))
+            return original_git(repo_root, *args, **kwargs)
+
+        with mock.patch.object(module, 'git', side_effect=fake_git), mock.patch.object(
+            module,
+            'coordination_state_from_commit',
+            side_effect=lambda _repo, commit, _config: states[commit],
+        ), mock.patch.object(
+            module, 'verify_coordination_state_manifest_digest'
+        ), mock.patch.object(
+            module,
+            'coordination_state_manifest_digest_classification',
+            return_value={'form': 'control-manifest-file'},
+        ):
+            closed = module.historically_closed_integration_commits(
+                repo,
+                managed_tip,
+                observation,
+                candidates=[alternate],
+            )
+
+        self.assertEqual(
+            module.commit_patch_id(repo, declared),
+            module.commit_patch_id(repo, alternate),
+        )
+        self.assertIn(alternate, closed)
+
     def test_integration_reconciliation_accepts_exact_legacy_gitignore_block_migration(self):
         origin = self.create_remote('legacy-gitignore-history')
         repo = self.clone(origin, 'legacy-gitignore-history')
