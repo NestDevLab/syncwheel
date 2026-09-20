@@ -143,6 +143,13 @@ class GithubPrMergeTest(unittest.TestCase):
         with self.assertRaisesRegex(SYNCWHEEL.SyncwheelError, 'at least one'):
             SYNCWHEEL.normalize_github_pr_merge_policy(invalid)
 
+    def test_policy_normalization_accepts_explicit_no_checks(self):
+        policy = self.policy()
+        policy['checks'] = 'none'
+        self.assertEqual(
+            SYNCWHEEL.normalize_github_pr_merge_policy(policy)['checks'], 'none'
+        )
+
     def test_policy_dry_run_preserves_existing_profile_and_does_not_write(self):
         before = (self.repo / '.syncwheel' / 'profile.local.json').read_bytes()
         output = io.StringIO()
@@ -256,6 +263,25 @@ class GithubPrMergeTest(unittest.TestCase):
             )
         self.assertEqual(plan['status'], 'blocked')
         self.assertTrue(any(item['code'] == 'check_failed_or_pending' for item in plan['blockers']))
+
+    def test_explicit_no_checks_allows_a_pr_without_ci_and_warns(self):
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        policy = self.policy()
+        policy['checks'] = 'none'
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = policy
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        observed = self.observation(decision='APPROVED', checks=[])
+        observed['pr']['mergeStateStatus'] = 'CLEAN'
+        with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+             mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=observed):
+            plan = SYNCWHEEL.build_github_pr_merge_plan(
+                self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+            )
+        self.assertEqual(plan['status'], 'ready')
+        self.assertFalse(any(item['code'] == 'checks_missing' for item in plan['blockers']))
+        self.assertTrue(any(item['code'] == 'checks_not_required' for item in plan['warnings']))
 
     def test_required_check_context_must_be_present(self):
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}

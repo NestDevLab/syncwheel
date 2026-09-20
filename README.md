@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.23`
+Current version: `0.43.24`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -676,7 +676,9 @@ Practical meaning:
 For repositories that explicitly use `ai-managed` source delivery, the
 optional digest-bound GitHub PR merge path is documented in
 [`docs/github-pr-merge.md`](docs/github-pr-merge.md). Its private policy stays
-clone-local and its admin bypass is limited to required reviews.
+clone-local and its admin bypass is limited to required reviews. CI is required
+by default; repositories without CI can explicitly select clone-local
+`checks: "none"`, which remains visible as a merge-plan warning.
 
 ## Install Methods
 
