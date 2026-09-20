@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/checks-none-policy"
-  ],
-  "claimed_at": "2026-09-20T19:48:23+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-20T20:01:01+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "d26e68dc-4275-4198-b9c2-e0faed0c94f1",
-  "publication_scope": "stack:pr-checks-none",
+  "operation_token": "44805fcb-3a04-4160-a007-96dbecaabe73",
+  "publication_scope": "close:pr-checks-none",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/checks-none-policy",
   "syncwheel_version": "0.43.23"
 }
