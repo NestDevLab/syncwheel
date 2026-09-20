@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/missing-managed-ref-repair": "2da87e6c42792c9668648b3da37f608b0326989e"
+    "refs/heads/pr/missing-managed-ref-repair": "535580ae35ca6bd70cd0b3c0ecf863acd5ef2820"
   },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
@@ -14,7 +14,7 @@
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "3508004b3efcf5e0a3b3d2b5b98a48510b9abcd0",
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
-    "refs/heads/pr/missing-managed-ref-repair": "6b84eebe98b5bb3a36190198a72cf92ccb76be73",
+    "refs/heads/pr/missing-managed-ref-repair": "6ef8e0f1c73622370485538b602faa92159460f1",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
@@ -40,7 +40,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T15:45:51+00:00",
+  "created_at": "2026-09-20T15:47:56+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -66,7 +66,7 @@
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "2c3641e311b145284edf8d65f66db61d83c7c490",
     "refs/heads/pr/missing-historical-integration-tip": "8a6ec195c47d279d15e5394898db4796c54e60cb",
-    "refs/heads/pr/missing-managed-ref-repair": "2da87e6c42792c9668648b3da37f608b0326989e",
+    "refs/heads/pr/missing-managed-ref-repair": "535580ae35ca6bd70cd0b3c0ecf863acd5ef2820",
     "refs/heads/pr/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
@@ -173,7 +173,8 @@
           "ff01e277869347344d0bc01d25eb8cb285032bd0",
           "2868acd2fc70d557973b7bdbab324cd6e1e1ba88",
           "fa1f3dae5f5aaac327a9e22536f519fba3665dd0",
-          "2da87e6c42792c9668648b3da37f608b0326989e"
+          "2da87e6c42792c9668648b3da37f608b0326989e",
+          "535580ae35ca6bd70cd0b3c0ecf863acd5ef2820"
         ],
         "id": "missing-managed-ref-repair-v2",
         "integration_branch": "main-integration",
@@ -183,10 +184,10 @@
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "cdde5e6a-f7b5-4928-9bf3-c899047d89f5",
-  "parent_state": "49ae470dc793939c3eb0d4a062480df35031abba",
+  "operation_token": "b8ea442b-67a6-4574-ad69-7d511ef68575",
+  "parent_state": "3b870cf0097de1246ea9658e4037373a1e9b12e8",
   "projection_status": "partial",
-  "publication_id": "ce3b405e-4a72-48ab-a8b0-aa5b944e241d",
+  "publication_id": "5a187c62-274f-4f5c-8aaa-b869a85e4329",
   "publication_scope": "stack:missing-managed-ref-repair-v2",
   "schema_version": 2,
   "syncwheel_version": "0.43.21",
