@@ -1,11 +1,12 @@
 {
   "changed_refs": [
-    "refs/heads/main-integration"
+    "refs/heads/main-integration",
+    "refs/heads/pr/promote-recovery-adoption"
   ],
-  "claimed_at": "2026-09-20T18:02:59+00:00",
+  "claimed_at": "2026-09-20T19:19:53+00:00",
   "coordination_id": "default",
-  "operation_token": "588879f4-83cb-4bfd-84ab-13b499227bb6",
-  "publication_scope": "integration",
+  "operation_token": "a676f180-19ab-4195-a1d4-37beea60dfdc",
+  "publication_scope": "stack:promote-recovery-adoption",
   "source_ref": "refs/heads/main-integration",
   "syncwheel_version": "0.43.22"
 }
