@@ -23683,6 +23683,116 @@ def realign_promoted_local_branches(
     git(repo_root, 'update-ref', '-d', f'refs/heads/{from_branch}', draft_tip)
 
 
+def equivalent_remote_stack_promotion(
+    repo_root, manifest, stack, from_branch, to_branch,
+):
+    """Return proof when another publisher already completed this promotion."""
+    if (
+        not coordination_is_active(manifest)
+        or from_branch == to_branch
+        or stack.get('state', 'published') != 'draft'
+    ):
+        return None
+    config = coordination_config(manifest)
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    state = observed.get('state') or {}
+    if not state or not coordination_state_matches_remote(repo_root, config, state):
+        return None
+    remote_stack = stack_snapshot_map(state.get('manifest') or {}).get(stack['id'])
+    proposed = copy.deepcopy(manifest)
+    proposed_stack = require_stack(proposed, stack['id'])
+    proposed_stack['branch'] = to_branch
+    proposed_stack['state'] = 'published'
+    proposed_stack['publication'] = {'enabled': True}
+    proposed_stack = stack_snapshot_map(
+        coordination_manifest_snapshot(proposed, repo_root)
+    ).get(stack['id'])
+    if remote_stack != proposed_stack:
+        return None
+    from_ref = f'refs/heads/{from_branch}'
+    to_ref = f'refs/heads/{to_branch}'
+    promoted_tip = (state.get('managed_refs') or {}).get(to_ref)
+    local_tip = ref_tip(repo_root, from_branch) or ref_tip(repo_root, to_branch)
+    if not promoted_tip or local_tip != promoted_tip:
+        return None
+    matching_tombstone = next((
+        item for item in state.get('tombstones') or []
+        if item.get('stack') == stack['id']
+        and coordination_tombstone_ref(item) == from_ref
+        and item.get('reason') == 'promoted'
+        and item.get('remote_tip') == promoted_tip
+    ), None)
+    if not matching_tombstone:
+        return None
+    return {
+        'config': config,
+        'observed': observed,
+        'state_tip': observed['tip'],
+        'promoted_tip': promoted_tip,
+    }
+
+
+def adopt_equivalent_remote_stack_promotion(
+    repo_root, manifest, manifest_path, stack, from_branch, to_branch,
+):
+    proof = equivalent_remote_stack_promotion(
+        repo_root, manifest, stack, from_branch, to_branch
+    )
+    if not proof:
+        return False
+    pending = pending_coordination_publication_for_scope(
+        repo_root, manifest_path, f"promote:{stack['id']}"
+    )
+    if pending and coordinated_operation_landed(
+        repo_root,
+        proof['config'],
+        proof['observed'],
+        pending,
+        claims_fallback=True,
+    ):
+        return False
+    resolve_pending_coordination_publications(repo_root, manifest, manifest_path)
+    proof = equivalent_remote_stack_promotion(
+        repo_root, manifest, stack, from_branch, to_branch
+    )
+    if not proof:
+        raise SyncwheelError(
+            f'{stack["id"]}: published promotion changed during local adoption'
+        )
+    require_manifest_transaction_current(manifest_path)
+    realign_promoted_local_branches(
+        repo_root,
+        proof['config'],
+        stack['id'],
+        from_branch,
+        to_branch,
+        proof['promoted_tip'],
+        manifest_path=manifest_path,
+    )
+    stack['branch'] = to_branch
+    stack['state'] = 'published'
+    stack['publication'] = {'enabled': True}
+    save_manifest(manifest_path, manifest)
+    append_ledger_event(
+        repo_root,
+        'stack_promoted',
+        {
+            'stack': stack['id'],
+            'from_branch': from_branch,
+            'branch': to_branch,
+            'coordination_state': proof['state_tip'],
+            'adopted': True,
+        },
+        manifest_path,
+    )
+    print(f"{stack['id']}: adopted equivalent published promotion")
+    print(f'  branch: {from_branch} -> {to_branch}')
+    print(f"  coordination state: {proof['state_tip']}")
+    return True
+
+
 def recover_pending_stack_promote(
     repo_root, manifest, manifest_path, stack, pending
 ):
@@ -23839,6 +23949,12 @@ def command_stack_promote(args):
         only_stacks={args.stack},
     )
     stack = require_stack(manifest, args.stack)
+    from_branch = stack['branch']
+    to_branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
+    if stack.get('state', 'published') == 'draft' and adopt_equivalent_remote_stack_promotion(
+        repo_root, manifest, manifest_path, stack, from_branch, to_branch
+    ):
+        return 0
     pending_promotion = pending_coordination_publication_for_scope(
         repo_root, manifest_path, f'promote:{args.stack}'
     )
@@ -23859,10 +23975,8 @@ def command_stack_promote(args):
             raise failure from exc
     if stack.get('state', 'published') != 'draft':
         raise SyncwheelError(f"{args.stack}: promote requires state draft (found {stack.get('state', 'published')})")
-    from_branch = stack['branch']
     if not branch_exists(repo_root, from_branch):
         raise SyncwheelError(f"{args.stack}: cannot promote draft without a materialized branch: {from_branch}")
-    to_branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
     if to_branch != from_branch:
         referencing_channels = channel_ids_referencing_stack(manifest, args.stack)
         if referencing_channels:

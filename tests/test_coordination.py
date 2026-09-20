@@ -8276,6 +8276,113 @@ with module.coordination_publication_lock(Path(repo_path)):
         fixture = self.prepare_landed_promotion('round9-sync-first', 'synced')
         self.assert_landed_promotion_completes(fixture, 'stack', 'sync', 'synced')
 
+    def test_promote_adopts_an_equivalent_promotion_from_another_clone(self):
+        origin = self.create_remote('round9-foreign-promotion')
+        publisher = self.clone(origin, 'round9-foreign-promotion-publisher')
+        self.init_coordinated(publisher)
+        self.run_cli(publisher, 'int', 'push')
+        source = self.commit_on_branch(
+            publisher, 'scratch/foreign-promotion', 'foreign-promotion.txt'
+        )
+        self.run_cli(
+            publisher, 'stack', 'create', 'foreign-promotion', source, '--draft'
+        )
+        follower = self.mirror_coordinated_clone(
+            origin,
+            publisher,
+            'round9-foreign-promotion-follower',
+            ['integration/shared', 'syncwheel/draft/foreign-promotion'],
+        )
+        self.run_cli(
+            publisher,
+            'stack',
+            'promote',
+            'foreign-promotion',
+            '--branch',
+            'pr/foreign-promotion',
+        )
+        promoted_state, _state = self.remote_state(origin)
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(follower)
+        stack = next(
+            item for item in manifest['stacks']
+            if item['id'] == 'foreign-promotion'
+        )
+        draft_branch = stack['branch']
+        draft_tip = module.ref_tip(follower, draft_branch)
+        proposed = json.loads(json.dumps(manifest))
+        proposed_stack = next(
+            item for item in proposed['stacks']
+            if item['id'] == 'foreign-promotion'
+        )
+        proposed_stack['branch'] = 'pr/foreign-promotion'
+        proposed_stack['state'] = 'published'
+        proposed_stack['publication'] = {'enabled': True}
+        tombstone = {
+            'stack': 'foreign-promotion',
+            'branch': draft_branch,
+            'ref': f'refs/heads/{draft_branch}',
+            'reason': 'promoted',
+            'remote_tip': draft_tip,
+        }
+        rename = {
+            'stack': 'foreign-promotion',
+            'from_branch': draft_branch,
+            'to_branch': 'pr/foreign-promotion',
+            'from_ref_tip': draft_tip,
+        }
+        identity, fingerprint = module.coordination_publication_identity(
+            follower,
+            proposed,
+            {'refs/heads/pr/foreign-promotion': draft_tip},
+            'promote:foreign-promotion',
+            'partial',
+            tombstone=tombstone,
+            rename=rename,
+        )
+        stale_token = str(uuid.uuid4())
+        module.append_ledger_event(
+            follower,
+            'coordination_publish_intent',
+            {
+                **identity,
+                'fingerprint': fingerprint,
+                'operation_token': stale_token,
+                'expected_coordination_state_tip': promoted_state,
+            },
+            manifest_path,
+        )
+
+        adopted = self.run_cli(
+            follower,
+            'stack',
+            'promote',
+            'foreign-promotion',
+            '--branch',
+            'pr/foreign-promotion',
+        )
+
+        self.assertIn('adopted equivalent published promotion', adopted.stdout)
+        self.assertEqual(self.remote_state(origin)[0], promoted_state)
+        self.assertFalse(module.pending_coordination_publications(follower, manifest_path))
+        abandoned = next(
+            event['payload'] for event in module.load_ledger_events(follower)
+            if event['type'] == 'coordination_publish_abandoned'
+            and event['payload'].get('operation_token') == stale_token
+        )
+        self.assertEqual(abandoned['reason'], 'not_landed')
+        self.assertTrue(module.branch_exists(follower, 'pr/foreign-promotion'))
+        self.assertFalse(
+            module.branch_exists(follower, 'syncwheel/draft/foreign-promotion')
+        )
+        saved = json.loads((follower / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(
+            item for item in saved['stacks']
+            if item['id'] == 'foreign-promotion'
+        )
+        self.assertEqual(promoted['branch'], 'pr/foreign-promotion')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+
     def test_add_completes_a_landed_promotion_first(self):
         fixture = self.prepare_landed_promotion('round9-add-first', 'added')
         extra = self.commit_on_branch(fixture['repo'], 'scratch/added-extra', 'extra.txt')
