@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.43.22 - 2026-09-20
+
+- Let stack creation and integration align, rebuild, and push operations
+  proceed while unrelated governed lanes are dirty or expired. Their
+  diagnostics remain visible as warnings, and recovery stays an explicit
+  `worktree release` or `gc` action.
+
 ## 0.43.21 - 2026-09-20
 
 - Add the plan-first `missing-ref-create-cas` coordination repair backend. It

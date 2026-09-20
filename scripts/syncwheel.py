@@ -31206,6 +31206,19 @@ def converge_default_repository_hooks(args):
 
 
 def governed_worktree_reaping_requested(args):
+    # Integration operations update the dedicated integration ref or its
+    # publication state, while stack creation claims a new stack id and branch.
+    # Governed lanes use independent syncwheel/lane/* refs, so an expired or
+    # dirty unrelated lane cannot conflict with these operations. Keep
+    # surfacing diagnostics as warnings and leave recovery to explicit
+    # release/gc.
+    if args.func in {
+        command_int_align_remote,
+        command_int_push,
+        command_int_rebuild,
+        command_stack_create,
+    }:
+        return False
     always_mutating = {
         command_worktree_lock, command_worktree_unlock,
         command_sync, command_publish,
@@ -31220,17 +31233,10 @@ def governed_worktree_reaping_requested(args):
         command_stack_classify_integration,
         command_stack_land,
     }
-    dry_run_gated = {
-        command_int_align_remote,
-        command_int_push,
-        command_int_rebuild,
-    }
     if args.func in always_mutating:
         return True
     if args.func in apply_gated:
         return bool(getattr(args, 'apply', False))
-    if args.func in dry_run_gated:
-        return not bool(getattr(args, 'dry_run', False))
     if args.func in {command_stack_git, command_int_git}:
         return bool(getattr(args, 'auto_worktree', False) or getattr(args, 'worktree', None))
     return False

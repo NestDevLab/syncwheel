@@ -1427,6 +1427,33 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     ):
                         module.governed_worktree_preflight(args)
 
+    def test_integration_mutations_do_not_reap_unrelated_dirty_lanes(self):
+        module = self.load_syncwheel_module()
+        for command in (
+            module.command_int_align_remote,
+            module.command_int_push,
+            module.command_int_rebuild,
+            module.command_stack_create,
+        ):
+            args = SimpleNamespace(
+                func=command,
+                repo=str(self.repo),
+                manifest=None,
+                personal=None,
+                dry_run=False,
+                json=False,
+            )
+            with self.subTest(command=command.__name__), mock.patch.object(
+                module,
+                'emit_governed_worktree_warnings',
+            ) as warnings, mock.patch.object(
+                module,
+                'reconcile_governed_worktrees',
+            ) as reap:
+                module.governed_worktree_preflight(args)
+            warnings.assert_called_once()
+            reap.assert_not_called()
+
     def test_expired_lane_can_be_reaped_through_explicit_gc_outside_a_repository(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
         module = self.load_syncwheel_module()
