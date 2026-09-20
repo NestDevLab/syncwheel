@@ -155,3 +155,15 @@ AI:
 - blockers needing human decision
 - channels planned/applied/published/closed, receipt digests, and any separate
   deployment evidence (or the explicit absence of it)
+
+## Publish draft updates before promotion
+
+After adding commits and rebuilding integration, run `syncwheel publish` before
+`syncwheel stack promote <stack>`. Active-active promotion proves a branch/state
+transition against published coordination metadata; unpublished draft changes
+must be published first.
+
+Install the candidate CLI (`python3 -m pip install .`) so guard hooks can resolve
+a stable executable. Run `python3 scripts/cli-dogfood.py` for a disposable local-remote delivery and
+second-clone resume check. Every subprocess is timed and bounded; its evidence
+directory is printed at startup.

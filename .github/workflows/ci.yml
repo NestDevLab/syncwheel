@@ -59,6 +59,19 @@ jobs:
           python scripts/syncwheel.py self --help
           python scripts/syncwheel.py self install-hooks --help
 
+      - name: Install candidate CLI for guard hooks
+        run: python -m pip install .
+
+      - name: Real CLI delivery and second-clone resume
+        run: python scripts/cli-dogfood.py --syncwheel-command '["syncwheel"]' --evidence-dir "${{ runner.temp }}/cli-dogfood"
+
+      - name: Upload CLI timings and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-dogfood
+          path: ${{ runner.temp }}/cli-dogfood/commands.jsonl
+
       - name: Version bump guard
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then

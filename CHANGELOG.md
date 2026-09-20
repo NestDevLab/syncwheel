@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.43.26 - 2026-09-20
+
+- Recognize initialization commits containing the manifest and the strictly validated managed ignore block during cross-clone resume.
+- Exercise real CLI publication and second-clone recovery in CI, recording command durations and enforcing timeouts.
+
 ## 0.43.25 - 2026-09-20
 
 - Ignore unavailable integration objects from non-current coordination states
