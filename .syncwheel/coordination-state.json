@@ -1,8 +1,11 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/dogfood-resume-fix": "e833a8da1c1a2fab8c7ac7cb520873a2557daad9"
+  },
   "claims": {
     "refs/heads/main-integration": "a60258dff26baf6f28442cc31ee84ae18e22d8cb",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
+    "refs/heads/pr/dogfood-resume-fix": "aea504c79672c7609d347db75496fc9253b75158",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
@@ -46,7 +49,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T21:46:41+00:00",
+  "created_at": "2026-09-20T23:28:06+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -57,6 +60,7 @@
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
+    "refs/heads/pr/dogfood-resume-fix": "e833a8da1c1a2fab8c7ac7cb520873a2557daad9",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
@@ -144,7 +148,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "dogfood-resume-fix"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -152,17 +158,32 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/dogfood-resume-fix",
+        "commits": [
+          "0fadfb046c533bfbed012e237c941e33198905e2"
+        ],
+        "id": "dogfood-resume-fix",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "59379e70446252b341e6a68fcd0f8760fb7e3606d5554a0f368c06236203c7b6",
-  "operation_token": "eb53403a-5d6e-4c28-938b-9295a4312194",
-  "parent_state": "a2c93384c48c60e712a88385f3608d5dca059c31",
+  "operation_token": "b4ce0859-f4a2-4ec6-8cc6-0f0427944a5e",
+  "parent_state": "af23464bbd9d650ccd5f40b276ab3a7eb979d269",
   "projection_status": "partial",
-  "publication_id": "38cc027a-1bcd-4db9-8d76-8a14166b7ae2",
-  "publication_scope": "close:historical-closed-missing-tip",
+  "publication_id": "0a690770-fc6f-4d50-83cc-3a6f48444719",
+  "publication_scope": "stack:dogfood-resume-fix",
   "schema_version": 2,
-  "syncwheel_version": "0.43.24",
+  "syncwheel_version": "0.43.25",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
