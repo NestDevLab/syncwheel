@@ -58,8 +58,10 @@ failing command names. For a managed ref that disagrees with the coordination st
 named repair classes are all `syncwheel coordination repair` (plan-first, then `--apply
 --plan-file <plan>`): default for a wrong recorded tip on an otherwise-correct ref (ref
 repair), `--freeze-backend tree-equivalent-state-cas` for same-tree/different-shape,
-`--freeze-backend fast-forward-state-cas` for an exact reviewed fast-forward, and
-`--freeze-backend state-digest-migration` for a pre-0.42.2 legacy-digest state.
+`--freeze-backend fast-forward-state-cas` for an exact reviewed fast-forward,
+`--freeze-backend missing-ref-create-cas` to atomically recreate an absent owned
+ref at its recorded tip, and `--freeze-backend state-digest-migration` for a
+pre-0.42.2 legacy-digest state.
 
 ## Recommended prompt flow
 

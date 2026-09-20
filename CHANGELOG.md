@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.43.21 - 2026-09-20
+
+- Add the plan-first `missing-ref-create-cas` coordination repair backend. It
+  recreates one absent, actively managed ref at its recorded tip and publishes
+  its ownership claim plus append-only repair state in one atomic, create-only
+  transaction. A durable operation intent makes an interrupted publish
+  recoverable without repeating the ref update; inactive and tombstoned refs
+  remain absent.
+- Keep `stack close`, `stack promote`, `stack rebuild`, and `stack push`
+  isolated from pending promotions belonging to unrelated stacks.
+- Let stack-scoped `reconcile` and `resume` preserve unrelated dirty governed
+  lanes instead of attempting global cleanup before the selected repair.
+- Reuse valid coordinated `absorbed` tombstones when reconciling historical
+  integration commits after the delivery branch has advanced on the same
+  paths; exact or patch-equivalent closed commits are accepted while unrelated
+  integration history and force-closed stacks remain blocked.
+- Recognize the exact pre-local-ledger managed `.gitignore` block while
+  validating historical control-only integration commits, so upgrading that
+  block remains classifiable without accepting arbitrary managed patterns.
+- Reconcile legacy delivery and stack merges only when their result differs
+  from a delivery-backed or durably closed parent by valid control metadata.
+  For older squash closes recorded as `merged`, require an exact reconstructed
+  stack tree on the delivery first-parent chain, and carry a later verified
+  `absorbed` close through its delivery-identical stack revisions, coordinated
+  draft promotion, authoritative managed-tip history, and original delivery
+  target. Content rewrites of the same stack generation cannot inherit that
+  delivery proof.
+
 ## 0.43.20 - 2026-09-19
 
 - Allow an explicit governed `worktree release` to preserve and remove its

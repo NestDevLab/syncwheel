@@ -2228,14 +2228,23 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertEqual(result.returncode, 2)
         self.assertIn('unrelated staged paths: seed', result.stderr)
 
-    def test_checkout_rebuild_still_refuses_unrelated_primary_dirt(self):
+    def test_stack_rebuild_allows_unrelated_unstaged_primary_dirt(self):
+        remote = self.temp_root / 'remote.git'
+        subprocess.run(['git', 'init', '--bare', '-q', str(remote)], check=True)
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin', str(remote)],
+            cwd=self.repo, check=True,
+        )
+        subprocess.run(
+            ['git', 'push', '-q', 'origin', 'HEAD:refs/heads/main'],
+            cwd=self.repo, check=True,
+        )
         self._install_and_branch('main-integration')
         (self.repo / 'seed').write_text('unrelated work\n')
         result = self.run_syncwheel(
             'stack', 'rebuild', 'feature', '--repo', str(self.repo),
         )
-        self.assertEqual(result.returncode, 2)
-        self.assertIn('primary checkout is dirty', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.repo / 'seed').read_text(), 'unrelated work\n')
 
     def test_remove_apply_requires_disable_and_reason(self):

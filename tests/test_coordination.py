@@ -3251,6 +3251,522 @@ with module.coordination_publication_lock(Path(repo_path)):
         _, state = self.remote_state(origin)
         self.assertNotIn('equivalent', [stack['id'] for stack in state['manifest']['stacks']])
 
+    def test_integration_reconciliation_uses_coordinated_absorbed_close_after_delivery_advances(self):
+        origin = self.create_remote('absorbed-close-history')
+        repo = self.clone(origin, 'absorbed-close-history')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/historical-close', 'delivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'historical-close', source, '--draft')
+        self.run_cli(repo, 'int', 'push')
+        self.run_cli(repo, 'stack', 'promote', 'historical-close')
+
+        publisher = self.clone(origin, 'absorbed-close-history-publisher')
+        self.git(publisher, 'cherry-pick', source)
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        self.run_cli(repo, 'stack', 'close', 'historical-close', '--reason', 'absorbed')
+
+        (publisher / 'delivered.txt').write_text('later delivery content\n')
+        self.git(publisher, 'commit', '-qam', 'feat: advance delivered content')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        self.git(
+            repo, 'fetch', '-q', 'origin',
+            '+refs/heads/main:refs/remotes/origin/main',
+        )
+
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        self.git(repo, 'switch', '-q', manifest['integration']['branch'])
+        self.git(repo, 'merge', '-q', '--no-ff', source, '-m', 'test: merge closed stack')
+        integration_tip = module.ref_tip(repo, manifest['integration']['branch'])
+        observation = module.observe_published_integration_tip(repo, manifest)
+        closed = module.historically_closed_integration_commits(
+            repo, integration_tip, observation
+        )
+        self.assertTrue(closed)
+        source_patch = module.commit_patch_id(repo, source)
+        self.assertIn(
+            source_patch,
+            {module.commit_patch_id(repo, commit) for commit in closed},
+        )
+        load_state = module.coordination_state_from_commit
+
+        def force_closed_state(*args, **kwargs):
+            state = json.loads(json.dumps(load_state(*args, **kwargs)))
+            if state.get('publication_scope') == 'close:historical-close':
+                for tombstone in state.get('tombstones') or []:
+                    if tombstone.get('stack') == 'historical-close':
+                        tombstone['reason'] = 'merged'
+            return state
+        with mock.patch.object(
+            module, 'coordination_state_from_commit', side_effect=force_closed_state,
+        ):
+            force_closed = module.historically_closed_integration_commits(
+                repo, integration_tip, observation
+            )
+        self.assertNotIn(
+            source_patch,
+            {module.commit_patch_id(repo, commit) for commit in force_closed},
+        )
+        module.integration_reconciliation_history(
+            repo,
+            manifest,
+            integration_tip,
+            {},
+            manifest_path=manifest_path,
+            observation=observation,
+            delivery_tip=module.ref_tip(repo, 'origin/main'),
+        )
+
+        (repo / 'unowned.txt').write_text('must remain blocked\n')
+        self.git(repo, 'add', 'unowned.txt')
+        self.git(repo, 'commit', '-qm', 'test: unrelated unowned integration change')
+        with self.assertRaisesRegex(module.SyncwheelError, 'unexplained product paths: unowned.txt'):
+            module.integration_reconciliation_history(
+                repo,
+                manifest,
+                module.ref_tip(repo, manifest['integration']['branch']),
+                {},
+                manifest_path=manifest_path,
+                observation=observation,
+                delivery_tip=module.ref_tip(repo, 'origin/main'),
+            )
+
+    def test_integration_reconciliation_accepts_exact_legacy_gitignore_block_migration(self):
+        origin = self.create_remote('legacy-gitignore-history')
+        repo = self.clone(origin, 'legacy-gitignore-history')
+        module = self.load_module()
+        worktree_root = '.syncwheel/wt'
+        current_patterns = module.syncwheel_gitignore_patterns(worktree_root)
+        legacy_patterns = list(current_patterns)
+        legacy_patterns.remove('.syncwheel/manifests/*.local-ledger/')
+
+        def managed_block(patterns):
+            return (
+                '# syncwheel managed metadata\n'
+                + '\n'.join(patterns)
+                + '\n# end syncwheel managed metadata\n'
+            )
+
+        (repo / '.syncwheel').mkdir(exist_ok=True)
+        (repo / '.gitignore').write_text('user-owned\n' + managed_block(legacy_patterns))
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps({
+            'syncwheel_worktree_root': worktree_root,
+            'stage': 'legacy',
+        }))
+        self.git(repo, 'add', '.gitignore', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'chore: legacy managed metadata')
+        base = module.ref_tip(repo, 'HEAD')
+
+        (repo / '.gitignore').write_text('user-owned\n' + managed_block(current_patterns))
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps({
+            'syncwheel_worktree_root': worktree_root,
+            'stage': 'current',
+        }))
+        self.git(repo, 'commit', '-qam', 'chore: update tracked metadata')
+        tip = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'syncwheel_worktree_root': worktree_root,
+            'integration': {'base': base},
+            'stacks': [],
+        }
+        module.integration_reconciliation_history(repo, manifest, tip, {})
+
+        self.git(repo, 'reset', '-q', '--hard', base)
+        malformed_patterns = [*legacy_patterns, '.syncwheel/unexpected/']
+        (repo / '.gitignore').write_text('user-owned\n' + managed_block(malformed_patterns))
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps({
+            'syncwheel_worktree_root': worktree_root,
+            'stage': 'malformed',
+        }))
+        self.git(repo, 'commit', '-qam', 'chore: malformed managed metadata')
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'integration reconciliation has unclassified history',
+        ):
+            module.integration_reconciliation_history(
+                repo, manifest, module.ref_tip(repo, 'HEAD'), {},
+            )
+
+    def test_legacy_gitignore_block_preserves_colliding_worktree_pattern(self):
+        module = self.load_module()
+        worktree_root = '.syncwheel/manifests/*.local-ledger'
+        patterns = module.syncwheel_gitignore_patterns(worktree_root)
+        self.assertEqual(
+            patterns.count('.syncwheel/manifests/*.local-ledger/'), 2,
+        )
+        legacy_patterns = list(patterns)
+        legacy_patterns.remove('.syncwheel/manifests/*.local-ledger/')
+        text = (
+            '# syncwheel managed metadata\n'
+            + '\n'.join(legacy_patterns)
+            + '\n# end syncwheel managed metadata\n'
+        )
+        parsed = module.split_historical_syncwheel_managed_gitignore(
+            text, worktree_root,
+        )
+        self.assertIsNotNone(parsed)
+        self.assertIsNotNone(parsed['managed'])
+        omitted = (
+            '# syncwheel managed metadata\n'
+            + '\n'.join(
+                pattern for pattern in patterns
+                if pattern != '.syncwheel/manifests/*.local-ledger/'
+            )
+            + '\n# end syncwheel managed metadata\n'
+        )
+        self.assertIsNone(module.split_historical_syncwheel_managed_gitignore(
+            omitted, worktree_root,
+        ))
+
+    def test_integration_reconciliation_accepts_delivery_merge_with_control_only_result(self):
+        origin = self.create_remote('historical-control-merge')
+        repo = self.clone(origin, 'historical-control-merge')
+        module = self.load_module()
+        worktree_root = '.syncwheel/wt'
+        (repo / '.syncwheel').mkdir(exist_ok=True)
+        control = {'syncwheel_worktree_root': worktree_root, 'stage': 'base'}
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(control))
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'chore: add control manifest')
+        base = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'branch', 'integration/shared', base)
+
+        (repo / 'delivered.txt').write_text('delivery\n')
+        self.git(repo, 'add', 'delivered.txt')
+        self.git(repo, 'commit', '-qm', 'feat: advance delivery')
+        delivery_tip = module.ref_tip(repo, 'HEAD')
+
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        control['stage'] = 'integration'
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(control))
+        self.git(repo, 'commit', '-qam', 'chore: update control manifest')
+        self.git(repo, 'merge', '-q', '--no-ff', delivery_tip, '-m', 'merge delivery')
+        merge_tip = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'syncwheel_worktree_root': worktree_root,
+            'integration': {'base': delivery_tip},
+            'stacks': [],
+        }
+        module.integration_reconciliation_history(
+            repo, manifest, merge_tip, {}, delivery_tip=delivery_tip,
+        )
+
+        unsafe_tree = self.git(repo, 'rev-parse', f'{merge_tip}^1^{{tree}}').stdout.strip()
+        unsafe_merge = self.git(
+            repo, 'commit-tree', unsafe_tree,
+            '-p', f'{merge_tip}^1', '-p', delivery_tip,
+            '-m', 'merge delivery with product rollback',
+        ).stdout.strip()
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'integration reconciliation has unclassified merge',
+        ):
+            module.integration_reconciliation_history(
+                repo, manifest, unsafe_merge, {}, delivery_tip=delivery_tip,
+            )
+
+    def test_historical_merged_close_requires_exact_squash_tree(self):
+        origin = self.create_remote('historical-squash-proof')
+        repo = self.clone(origin, 'historical-squash-proof')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', '-c', 'pr/historical-squash')
+        (repo / 'squash.txt').write_text('first\n')
+        self.git(repo, 'add', 'squash.txt')
+        self.git(repo, 'commit', '-qm', 'feat: first squash change')
+        first = module.ref_tip(repo, 'HEAD')
+        (repo / 'squash.txt').write_text('second\n')
+        self.git(repo, 'commit', '-qam', 'feat: second squash change')
+        second = module.ref_tip(repo, 'HEAD')
+        stack = {
+            'commits': [first, second],
+            'target_remote': 'origin',
+            'target_branch': 'main',
+        }
+
+        def delivery_observation(tip, branch='main'):
+            return {
+                'tip': tip,
+                'remote': 'origin',
+                'remoteRef': f'refs/heads/{branch}',
+                'remoteTip': tip,
+            }
+
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'squash.txt').write_text('different\n')
+        self.git(repo, 'add', 'squash.txt')
+        self.git(repo, 'commit', '-qm', 'feat: different delivery')
+        different_tip = module.ref_tip(repo, 'HEAD')
+        self.assertFalse(module.historical_stack_has_exact_squash_delivery(
+            repo, stack, delivery_observation(different_tip), {},
+        ))
+
+        self.git(repo, 'reset', '-q', '--hard', base)
+        projection = module.deterministic_stack_projection(
+            repo, base, stack['commits'],
+        )
+        delivered = self.git(
+            repo, 'commit-tree', module.ref_tree(repo, projection['tip']),
+            '-p', base, '-m', 'feat: exact squash delivery',
+        ).stdout.strip()
+        self.git(repo, 'reset', '-q', '--hard', delivered)
+        self.assertTrue(module.historical_stack_has_exact_squash_delivery(
+            repo, stack, delivery_observation(delivered), {},
+        ))
+        self.assertFalse(module.historical_stack_has_exact_squash_delivery(
+            repo, stack, delivery_observation(delivered, 'other'), {},
+        ))
+
+    def test_absorbed_promotion_proof_is_bound_to_generation_and_parent_tip(self):
+        origin = self.create_remote('absorbed-generation-proof')
+        repo = self.clone(origin, 'absorbed-generation-proof')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'main')
+        old = self.commit_on_branch(repo, 'scratch/old-generation', 'old.txt')
+        self.git(repo, 'switch', '-q', 'main')
+        new = self.commit_on_branch(repo, 'scratch/new-generation', 'new.txt')
+        self.git(repo, 'switch', '-q', 'scratch/new-generation')
+        (repo / 'undeclared-middle.txt').write_text('undeclared\n')
+        self.git(repo, 'add', 'undeclared-middle.txt')
+        self.git(repo, 'commit', '-qm', 'test: undeclared middle change')
+        undeclared_middle = module.ref_tip(repo, 'HEAD')
+        (repo / 'rewritten-chain.txt').write_text('rewritten\n')
+        self.git(repo, 'add', 'rewritten-chain.txt')
+        self.git(repo, 'commit', '-qm', 'feat: rewritten chain change')
+        rewritten_chain = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', 'main')
+        rewritten = self.commit_on_branch(
+            repo, 'scratch/rewritten-generation', 'rewritten.txt',
+        )
+
+        def stack(branch, commit):
+            return {
+                'id': 'reused',
+                'branch': branch,
+                'commits': [commit],
+                'target_remote': 'origin',
+                'target_branch': 'main',
+                'integration_branch': 'main-integration',
+            }
+
+        def tombstone(branch, reason, tip):
+            return {
+                'stack': 'reused',
+                'branch': branch,
+                'ref': f'refs/heads/{branch}',
+                'reason': reason,
+                'remote_tip': tip,
+            }
+
+        old_draft = stack('draft/old-reused', old)
+        old_pr = stack('pr/old-reused', old)
+        new_draft = stack('draft/new-reused', new)
+        new_pr = stack('pr/new-reused', new)
+        old_promoted = tombstone(old_draft['branch'], 'promoted', old)
+        old_abandoned = tombstone(old_pr['branch'], 'abandoned', old)
+        new_promoted = tombstone(new_draft['branch'], 'promoted', new)
+        new_absorbed = tombstone(new_pr['branch'], 'absorbed', None)
+
+        def state(parent, scope, stacks, tombstones, refs):
+            return {
+                'parent_state': parent,
+                'publication_scope': scope,
+                'manifest': {'defaults': {'canonical_remote': 'origin'}, 'stacks': stacks},
+                'tombstones': tombstones,
+                'managed_refs': refs,
+            }
+
+        reused_states = {
+            's0': state(None, 'create:reused', [old_draft], [], {
+                'refs/heads/draft/old-reused': old,
+            }),
+            's1': state('s0', 'promote:reused', [old_pr], [old_promoted], {
+                'refs/heads/pr/old-reused': old,
+            }),
+            's2': state('s1', 'close:reused', [], [old_promoted, old_abandoned], {}),
+            's3': state('s2', 'create:reused', [new_draft], [old_promoted, old_abandoned], {
+                'refs/heads/draft/new-reused': new,
+            }),
+            's4': state('s3', 'promote:reused', [new_pr], [
+                old_promoted, old_abandoned, new_promoted,
+            ], {'refs/heads/pr/new-reused': new}),
+            's5': state('s4', 'close:reused', [], [
+                old_promoted, old_abandoned, new_promoted, new_absorbed,
+            ], {}),
+        }
+
+        original_git = module.git
+
+        def closed_sources(
+            states, candidates=None, tip=None, delivery_observation=None,
+            merge_parent_candidates=None,
+        ):
+            def fake_git(repo_root, *args, **kwargs):
+                if (
+                    len(args) == 4
+                    and args[:3] == ('show', '-s', '--format=%P')
+                    and args[3] in states
+                ):
+                    parent = states[args[3]].get('parent_state')
+                    return SimpleNamespace(stdout=(parent or '') + ('\n' if parent else ''))
+                return original_git(repo_root, *args, **kwargs)
+
+            observation = {
+                'status': 'current',
+                'state_tip': next(reversed(states)),
+                'integration_ref': 'refs/heads/main-integration',
+                'config': {'id': 'default', 'remote': 'origin'},
+            }
+            with mock.patch.object(module, 'git', side_effect=fake_git), mock.patch.object(
+                module, 'coordination_state_from_commit',
+                side_effect=lambda _repo, commit, _config: states[commit],
+            ), mock.patch.object(
+                module, 'verify_coordination_state_manifest_digest',
+            ), mock.patch.object(
+                module, 'coordination_state_manifest_digest_classification',
+                return_value={'form': 'control-manifest-file'},
+            ):
+                return module.historically_closed_integration_commits(
+                    repo,
+                    tip or new,
+                    observation,
+                    candidates=candidates or [old, new],
+                    delivery_tip=(delivery_observation or {}).get('tip'),
+                    delivery_observation=delivery_observation,
+                    merge_parent_candidates=merge_parent_candidates,
+                )
+
+        trusted = closed_sources(reused_states)
+        self.assertIn(new, trusted)
+        self.assertNotIn(old, trusted)
+
+        rewritten_pr = stack('pr/new-reused', rewritten)
+        rewritten_states = json.loads(json.dumps(reused_states))
+        rewritten_states['s5'] = state('s4', 'stack:reused', [rewritten_pr], [
+            old_promoted, old_abandoned, new_promoted,
+        ], {'refs/heads/pr/new-reused': rewritten})
+        rewritten_states['s6'] = state('s5', 'close:reused', [], [
+            old_promoted, old_abandoned, new_promoted, new_absorbed,
+        ], {})
+        trusted = closed_sources(
+            rewritten_states,
+            candidates=[old, new, rewritten],
+            tip=rewritten,
+        )
+        self.assertIn(rewritten, trusted)
+        self.assertNotIn(new, trusted)
+        self.assertNotIn(old, trusted)
+
+        lineage_pr = stack('pr/new-reused', rewritten_chain)
+        lineage_states = json.loads(json.dumps(reused_states))
+        lineage_states['s5'] = state('s4', 'stack:reused', [lineage_pr], [
+            old_promoted, old_abandoned, new_promoted,
+        ], {'refs/heads/pr/new-reused': rewritten_chain})
+        lineage_states['s6'] = state('s5', 'close:reused', [], [
+            old_promoted, old_abandoned, new_promoted, new_absorbed,
+        ], {})
+        exact_delivery = self.git(
+            repo,
+            'commit-tree', module.ref_tree(repo, rewritten_chain),
+            '-p', base, '-m', 'feat: squash complete managed chain',
+        ).stdout.strip()
+        delivery_observation = {
+            'tip': exact_delivery,
+            'remote': 'origin',
+            'remoteRef': 'refs/heads/main',
+            'remoteTip': exact_delivery,
+        }
+        self.assertTrue(
+            module.historical_managed_tip_has_exact_squash_delivery(
+                repo,
+                rewritten_chain,
+                lineage_pr,
+                delivery_observation,
+                {'canonical_remote': 'origin'},
+                'origin',
+            ),
+        )
+        trusted = closed_sources(
+            lineage_states,
+            candidates=[new, undeclared_middle, rewritten_chain],
+            tip=rewritten_chain,
+            delivery_observation=delivery_observation,
+            merge_parent_candidates=[new, undeclared_middle],
+        )
+        self.assertIn(new, trusted)
+        self.assertIn(rewritten_chain, trusted)
+        self.assertNotIn(undeclared_middle, trusted)
+
+        corrupt_states = {key: value for key, value in reused_states.items() if key in {'s3', 's4', 's5'}}
+        corrupt_states['s3'] = json.loads(json.dumps(corrupt_states['s3']))
+        corrupt_states['s3']['parent_state'] = None
+        corrupt_states['s4'] = json.loads(json.dumps(corrupt_states['s4']))
+        for item in corrupt_states['s4']['tombstones']:
+            if item.get('ref') == 'refs/heads/draft/new-reused':
+                item['remote_tip'] = old
+        corrupt_states['s5'] = json.loads(json.dumps(corrupt_states['s5']))
+        for item in corrupt_states['s5']['tombstones']:
+            if item.get('ref') == 'refs/heads/draft/new-reused':
+                item['remote_tip'] = old
+        trusted = closed_sources(corrupt_states)
+        self.assertIn(new, trusted)
+        self.assertNotIn(old, trusted)
+
+    def test_historical_managed_tip_squash_rejects_an_undeclared_commit(self):
+        origin = self.create_remote('absorbed-managed-tip-squash')
+        repo = self.clone(origin, 'absorbed-managed-tip-squash')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'main')
+        self.git(repo, 'switch', '-q', '-c', 'pr/absorbed-managed-ref')
+        (repo / 'undeclared.txt').write_text('undeclared\n')
+        self.git(repo, 'add', 'undeclared.txt')
+        self.git(repo, 'commit', '-qm', 'test: undeclared managed change')
+        undeclared = module.ref_tip(repo, 'HEAD')
+        (repo / 'declared.txt').write_text('declared\n')
+        self.git(repo, 'add', 'declared.txt')
+        self.git(repo, 'commit', '-qm', 'feat: declared managed change')
+        declared = module.ref_tip(repo, 'HEAD')
+        managed_tip = module.ref_tip(repo, 'HEAD')
+        stack = {
+            'commits': [declared],
+            'target_remote': 'origin',
+            'target_branch': 'main',
+        }
+
+        def observation(tip):
+            return {
+                'tip': tip,
+                'remote': 'origin',
+                'remoteRef': 'refs/heads/main',
+                'remoteTip': tip,
+            }
+
+        declared_projection = module.deterministic_stack_projection(
+            repo, base, [declared],
+        )
+        delivery_without_undeclared = self.git(
+            repo,
+            'commit-tree', module.ref_tree(repo, declared_projection['tip']),
+            '-p', base, '-m', 'feat: deliver only declared change',
+        ).stdout.strip()
+
+        self.assertFalse(
+            module.historical_managed_tip_has_exact_squash_delivery(
+                repo, managed_tip, stack, observation(delivery_without_undeclared), {},
+            ),
+        )
+        exact_delivery = self.git(
+            repo,
+            'commit-tree', module.ref_tree(repo, managed_tip),
+            '-p', base, '-m', 'feat: deliver complete managed product',
+        ).stdout.strip()
+        self.assertTrue(
+            module.historical_managed_tip_has_exact_squash_delivery(
+                repo, managed_tip, stack, observation(exact_delivery), {},
+            ),
+        )
+        self.assertNotEqual(undeclared, declared)
+
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')
         repo = self.clone(origin, 'absorbed-close')
@@ -4502,6 +5018,186 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue(
             any(item.get('stack') == 'after-repair' for item in closed_state['tombstones'])
         )
+
+    def test_missing_managed_ref_repair_atomically_restores_recorded_tip(self):
+        origin = self.create_remote('missing-managed-ref-repair')
+        repo = self.clone(origin, 'missing-managed-ref-repair')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        parent_tip, parent = self.remote_state(origin)
+        ref = 'refs/heads/integration/shared'
+        recorded_tip = parent['managed_refs'][ref]
+        self.git(repo, 'push', '--no-verify', 'origin', f':{ref}')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        with self.assertRaisesRegex(module.SyncwheelError, 'missing-ref-create-cas'):
+            module.coordination_repair_plan(repo, manifest, ref)
+
+        plan, _ = module.coordination_repair_plan(
+            repo,
+            manifest,
+            ref,
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+        )
+        self.assertEqual(plan['status'], 'missing-ref-restore-required')
+        self.assertEqual(plan['repairClass'], 'missing-managed-ref-create')
+        self.assertEqual(plan['proof'], module.COORDINATION_REPAIR_MISSING_REF_PROOF)
+        self.assertEqual(plan['expectedStateTip'], parent_tip)
+        self.assertEqual(plan['expectedRecordedTip'], recorded_tip)
+        self.assertIsNone(plan['expectedRemoteTip'])
+        self.assertIsNone(plan['guardedRefs'][ref])
+        self.assertEqual(
+            plan['expectedClaimRef'], module.coordination_claim_ref(ref)
+        )
+
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(repo_root, command, remote, refs, check=True):
+            pushes.append({'command': command, 'remote': remote, 'refs': refs})
+            return original_push(repo_root, command, remote, refs, check=check)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_repair_plan(repo, manifest, plan)
+
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(result['backend'], module.COORDINATION_REPAIR_MISSING_REF_BACKEND)
+        self.assertEqual(result['proof'], module.COORDINATION_REPAIR_MISSING_REF_PROOF)
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(
+            pushes[0]['refs'],
+            [ref, plan['expectedClaimRef'], plan['stateRef']],
+        )
+        self.assertIn('--atomic', pushes[0]['command'])
+        self.assertIn(f'--force-with-lease={ref}:', pushes[0]['command'])
+        self.assertIn(
+            f"--force-with-lease={plan['expectedClaimRef']}:"
+            f"{plan['expectedClaimTip'] or ''}",
+            pushes[0]['command'],
+        )
+        self.assertIn(f'{recorded_tip}:{ref}', pushes[0]['command'])
+
+        child_tip, child = self.remote_state(origin)
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], parent_tip)
+        self.assertEqual(child['managed_refs'][ref], recorded_tip)
+        self.assertEqual(child['changed_refs'], {ref: recorded_tip})
+        self.assertEqual(
+            child['repair_evidence']['planDigest'], plan['planDigest']
+        )
+        self.assertEqual(
+            child['claims'][ref], child['repair_evidence']['claimCommit']
+        )
+        claim = module.fetch_coordination_claim(
+            repo, 'origin', plan['expectedClaimRef'], child['claims'][ref]
+        )
+        self.assertEqual(claim['operation_token'], child['operation_token'])
+        self.assertEqual(claim['publication_scope'], f'repair:{ref}')
+        self.assertEqual(claim['changed_refs'], [ref])
+        for key in ('manifest', 'manifest_digest', 'tombstones'):
+            self.assertEqual(child[key], parent[key])
+        self.assertEqual(
+            module.remote_ref_tips(repo, 'origin', [ref])[ref],
+            recorded_tip,
+        )
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_repair_plan(repo, manifest, plan)
+
+    def test_missing_managed_ref_repair_recovers_after_push_sigkill(self):
+        origin = self.create_remote('missing-managed-ref-repair-recovery')
+        repo = self.clone(origin, 'missing-managed-ref-repair-recovery')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        ref = 'refs/heads/integration/shared'
+        self.git(repo, 'push', '--no-verify', 'origin', f':{ref}')
+        plan, _ = module.coordination_repair_plan(
+            repo,
+            manifest,
+            ref,
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+        )
+        plan_path = repo / '.test-missing-ref-repair-plan.json'
+        plan_path.write_text(json.dumps(plan))
+
+        self.run_cli_sigkill_after(
+            repo,
+            'authorized_push',
+            'coordination',
+            'repair',
+            '--freeze-backend',
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+            '--apply',
+            '--plan-file',
+            str(plan_path),
+        )
+        landed_tip, landed = self.remote_state(origin)
+        pending = module.pending_coordination_publications(repo, manifest_path)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['operation_token'], landed['operation_token'])
+
+        recovered = json.loads(self.run_cli(
+            repo,
+            'coordination',
+            'repair',
+            '--freeze-backend',
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+            '--apply',
+            '--plan-file',
+            str(plan_path),
+        ).stdout)
+
+        self.assertTrue(recovered['recovered'])
+        self.assertEqual(recovered['state_tip'], landed_tip)
+        self.assertEqual(self.remote_state(origin)[0], landed_tip)
+        self.assertFalse(module.pending_coordination_publications(repo, manifest_path))
+
+    def test_missing_managed_ref_repair_refuses_inactive_tombstone(self):
+        origin = self.create_remote('missing-managed-ref-repair-tombstone')
+        repo = self.clone(origin, 'missing-managed-ref-repair-tombstone')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        tip = self.commit_on_branch(repo, 'pr/retired-repair', 'retired-repair.txt')
+        self.run_cli(
+            repo,
+            'stack',
+            'create',
+            'retired-repair',
+            tip,
+            '--branch',
+            'pr/retired-repair',
+        )
+        self.run_cli(repo, 'stack', 'push', 'retired-repair')
+        self.run_cli(repo, 'stack', 'close', 'retired-repair', '--force')
+        self.git(
+            repo,
+            'push',
+            '--no-verify',
+            'origin',
+            ':refs/heads/pr/retired-repair',
+        )
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        ref = 'refs/heads/pr/retired-repair'
+        _state_tip, state = self.remote_state(origin)
+        self.assertIn(ref, state['managed_refs'])
+        self.assertNotIn(
+            ref, module.coordination_snapshot_managed_ref_names(state['manifest'])
+        )
+        self.assertIsNone(module.remote_ref_tips(repo, 'origin', [ref])[ref])
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'inactive or tombstoned'
+        ):
+            module.coordination_repair_plan(
+                repo,
+                manifest,
+                ref,
+                module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+            )
 
     def test_tree_equivalent_repair_pushes_only_append_only_state(self):
         fixture = self.prepare_tree_equivalent_repair()

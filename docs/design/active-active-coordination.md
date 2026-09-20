@@ -248,6 +248,15 @@ pre-CAS drift, lease loss, and ambiguous push outcomes all stop fail-closed.
 Repository object IDs are currently restricted to 40-hex SHA-1; SHA-256 state
 or managed-ref tips are rejected rather than truncated or inferred.
 
+The `missing-ref-create-cas` backend covers an actively managed branch that is
+absent remotely while its recorded commit still exists. Planning binds the
+missing ref, its current claim tip, the state tip, and the complete guarded-ref
+snapshot. Apply records a durable operation intent, creates a successor claim,
+and atomically publishes the missing ref, claim, and append-only state child
+under exact leases. A retry after an interrupted successful push verifies the
+operation token and claim before completing the local receipt. Historical,
+inactive, and tombstoned refs are rejected rather than recreated.
+
 The `fast-forward-state-cas` backend covers a second mechanically provable
 subset: an actively owned managed ref whose observed tip is an exact descendant
 of the recorded tip. Planning binds the digest to both endpoint tips and trees,

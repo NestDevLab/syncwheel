@@ -169,6 +169,23 @@ For each stack that needs repair:
 3. validate again
 4. only then push or update the PR
 
+When coordination state owns an actively declared branch that is absent from
+the remote, use the reviewed missing-ref repair instead of a raw push:
+
+```bash
+syncwheel coordination repair \
+  --ref refs/heads/<managed-branch> \
+  --freeze-backend missing-ref-create-cas > repair-plan.json
+syncwheel coordination repair \
+  --freeze-backend missing-ref-create-cas \
+  --apply --plan-file repair-plan.json
+```
+
+Inspect the plan before apply. It binds the state, target, ownership claim, and
+every guarded ref. Apply publishes the target, a successor claim, and the new
+state atomically. Retrying the same plan after an interrupted successful push
+completes its durable receipt. Syncwheel refuses inactive or tombstoned refs.
+
 Dry-run:
 ```bash
 python3 scripts/syncwheel.py stack rebuild <stack> --dry-run
