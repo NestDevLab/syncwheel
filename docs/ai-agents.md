@@ -279,9 +279,12 @@ reviewing the exact local diff. Then use `stack merge-pr <stack>` to produce a
 digest-bound JSON plan. See [`github-pr-merge.md`](github-pr-merge.md) for the
 full contract.
 
-The policy is fail-closed: it requires an allowlisted actor with repository
-admin permission, an allowlisted PR/commit/source repository, an exact stack
-head, green CI, no unresolved review work, and recognized GitHub rules. The
+The policy is fail-closed by default: it requires an allowlisted actor with
+repository admin permission, an allowlisted PR/commit/source repository, an
+exact stack head, green CI, no unresolved review work, and recognized GitHub
+rules. Repositories without CI may explicitly set clone-local `checks: "none"`;
+the plan reports that opt-out as a warning and still honors required GitHub
+checks. The
 admin bypass is limited to required reviews and always includes
 `--match-head-commit`; no branch deletion is performed.
 

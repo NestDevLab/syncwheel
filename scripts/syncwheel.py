@@ -209,7 +209,7 @@ GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
 GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
 GITHUB_PR_MERGE_BYPASSES = {'private_free_rules', 'required_reviews'}
-GITHUB_PR_MERGE_CHECKS = {'all'}
+GITHUB_PR_MERGE_CHECKS = {'all', 'none'}
 GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
 GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
 GOVERNED_WORKTREE_REGISTRY_VERSION = 1
@@ -8369,7 +8369,8 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
         raise SyncwheelError(f'{path}.allowed_bypasses accepts only: {accepted}')
     checks = value.get('checks')
     if checks not in GITHUB_PR_MERGE_CHECKS:
-        raise SyncwheelError(f'{path}.checks accepts only all')
+        accepted = ', '.join(sorted(GITHUB_PR_MERGE_CHECKS))
+        raise SyncwheelError(f'{path}.checks accepts only: {accepted}')
     merge_actors = string_list('merge_actors', required=True)
     filters = {
         field: string_list(field)
@@ -8890,18 +8891,35 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         if pr.get('mergeStateStatus') in {'BEHIND', 'DIRTY', 'UNKNOWN', 'UNSTABLE'}:
             github_blocker(blockers, 'base_obsolete_or_dirty', f"mergeStateStatus={pr.get('mergeStateStatus')}")
         checks = pr.get('checks') or []
-        if not checks:
-            github_blocker(blockers, 'checks_missing', 'at least one successful check is required')
+        if policy['checks'] == 'all':
+            if not checks:
+                github_blocker(blockers, 'checks_missing', 'at least one successful check is required')
+            else:
+                for check in checks:
+                    if github_ci_check_result(check) is None:
+                        github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
         else:
-            for check in checks:
-                if github_ci_check_result(check) is None:
-                    github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
+            warnings.append({
+                'code': 'checks_not_required',
+                'detail': 'the clone-local merge policy does not require CI checks',
+            })
         required_names = github_required_check_names(rules)
         if required_names:
-            observed_names = {item.get('name') for item in checks if isinstance(item, dict)}
+            observed_by_name = {
+                item.get('name'): item
+                for item in checks
+                if isinstance(item, dict) and isinstance(item.get('name'), str)
+            }
             for name in required_names:
-                if name not in observed_names:
+                required_check = observed_by_name.get(name)
+                if required_check is None:
                     github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
+                elif github_ci_check_result(required_check) is None:
+                    github_blocker(
+                        blockers,
+                        'required_check_failed_or_pending',
+                        f'required check did not conclude SUCCESS/SKIPPED: {required_check}',
+                    )
         if decision == 'REVIEW_REQUIRED':
             path = 'admin-review-bypass'
         else:
