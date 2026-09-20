@@ -4531,6 +4531,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(plan['expectedRecordedTip'], recorded_tip)
         self.assertIsNone(plan['expectedRemoteTip'])
         self.assertIsNone(plan['guardedRefs'][ref])
+        self.assertEqual(
+            plan['expectedClaimRef'], module.coordination_claim_ref(ref)
+        )
 
         pushes = []
         original_push = module.run_authorized_push
@@ -4546,9 +4549,17 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(result['backend'], module.COORDINATION_REPAIR_MISSING_REF_BACKEND)
         self.assertEqual(result['proof'], module.COORDINATION_REPAIR_MISSING_REF_PROOF)
         self.assertEqual(len(pushes), 1)
-        self.assertEqual(pushes[0]['refs'], [ref, plan['stateRef']])
+        self.assertEqual(
+            pushes[0]['refs'],
+            [ref, plan['expectedClaimRef'], plan['stateRef']],
+        )
         self.assertIn('--atomic', pushes[0]['command'])
         self.assertIn(f'--force-with-lease={ref}:', pushes[0]['command'])
+        self.assertIn(
+            f"--force-with-lease={plan['expectedClaimRef']}:"
+            f"{plan['expectedClaimTip'] or ''}",
+            pushes[0]['command'],
+        )
         self.assertIn(f'{recorded_tip}:{ref}', pushes[0]['command'])
 
         child_tip, child = self.remote_state(origin)
@@ -4556,6 +4567,18 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(child['parent_state'], parent_tip)
         self.assertEqual(child['managed_refs'][ref], recorded_tip)
         self.assertEqual(child['changed_refs'], {ref: recorded_tip})
+        self.assertEqual(
+            child['repair_evidence']['planDigest'], plan['planDigest']
+        )
+        self.assertEqual(
+            child['claims'][ref], child['repair_evidence']['claimCommit']
+        )
+        claim = module.fetch_coordination_claim(
+            repo, 'origin', plan['expectedClaimRef'], child['claims'][ref]
+        )
+        self.assertEqual(claim['operation_token'], child['operation_token'])
+        self.assertEqual(claim['publication_scope'], f'repair:{ref}')
+        self.assertEqual(claim['changed_refs'], [ref])
         for key in ('manifest', 'manifest_digest', 'tombstones'):
             self.assertEqual(child[key], parent[key])
         self.assertEqual(
@@ -4565,6 +4588,100 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
             module.apply_coordination_repair_plan(repo, manifest, plan)
+
+    def test_missing_managed_ref_repair_recovers_after_push_sigkill(self):
+        origin = self.create_remote('missing-managed-ref-repair-recovery')
+        repo = self.clone(origin, 'missing-managed-ref-repair-recovery')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        ref = 'refs/heads/integration/shared'
+        self.git(repo, 'push', '--no-verify', 'origin', f':{ref}')
+        plan, _ = module.coordination_repair_plan(
+            repo,
+            manifest,
+            ref,
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+        )
+        plan_path = repo / '.test-missing-ref-repair-plan.json'
+        plan_path.write_text(json.dumps(plan))
+
+        self.run_cli_sigkill_after(
+            repo,
+            'authorized_push',
+            'coordination',
+            'repair',
+            '--freeze-backend',
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+            '--apply',
+            '--plan-file',
+            str(plan_path),
+        )
+        landed_tip, landed = self.remote_state(origin)
+        pending = module.pending_coordination_publications(repo, manifest_path)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]['operation_token'], landed['operation_token'])
+
+        recovered = json.loads(self.run_cli(
+            repo,
+            'coordination',
+            'repair',
+            '--freeze-backend',
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+            '--apply',
+            '--plan-file',
+            str(plan_path),
+        ).stdout)
+
+        self.assertTrue(recovered['recovered'])
+        self.assertEqual(recovered['state_tip'], landed_tip)
+        self.assertEqual(self.remote_state(origin)[0], landed_tip)
+        self.assertFalse(module.pending_coordination_publications(repo, manifest_path))
+
+    def test_missing_managed_ref_repair_refuses_inactive_tombstone(self):
+        origin = self.create_remote('missing-managed-ref-repair-tombstone')
+        repo = self.clone(origin, 'missing-managed-ref-repair-tombstone')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        tip = self.commit_on_branch(repo, 'pr/retired-repair', 'retired-repair.txt')
+        self.run_cli(
+            repo,
+            'stack',
+            'create',
+            'retired-repair',
+            tip,
+            '--branch',
+            'pr/retired-repair',
+        )
+        self.run_cli(repo, 'stack', 'push', 'retired-repair')
+        self.run_cli(repo, 'stack', 'close', 'retired-repair', '--force')
+        self.git(
+            repo,
+            'push',
+            '--no-verify',
+            'origin',
+            ':refs/heads/pr/retired-repair',
+        )
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        ref = 'refs/heads/pr/retired-repair'
+        _state_tip, state = self.remote_state(origin)
+        self.assertIn(ref, state['managed_refs'])
+        self.assertNotIn(
+            ref, module.coordination_snapshot_managed_ref_names(state['manifest'])
+        )
+        self.assertIsNone(module.remote_ref_tips(repo, 'origin', [ref])[ref])
+
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'inactive or tombstoned'
+        ):
+            module.coordination_repair_plan(
+                repo,
+                manifest,
+                ref,
+                module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+            )
 
     def test_tree_equivalent_repair_pushes_only_append_only_state(self):
         fixture = self.prepare_tree_equivalent_repair()

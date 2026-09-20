@@ -10979,7 +10979,10 @@ def build_coordination_state(
     }
 
 
-def build_coordination_repair_state(previous_state, previous_tip, repaired_ref, repaired_tip, installation):
+def build_coordination_repair_state(
+    previous_state, previous_tip, repaired_ref, repaired_tip, installation,
+    *, operation_token=None, claim_commit=None, repair_evidence=None,
+):
     """Build an append-only repair child without re-projecting prior public state.
 
     A repair corrects transport evidence, not topology.  Deep-copying the
@@ -11007,6 +11010,13 @@ def build_coordination_repair_state(previous_state, previous_tip, repaired_ref, 
     child['managed_refs'][repaired_ref] = repaired_tip
     child['changed_refs'] = {repaired_ref: repaired_tip}
     child['publication_scope'] = f'repair:{repaired_ref}'
+    if operation_token is not None:
+        child['operation_token'] = operation_token
+    if claim_commit is not None:
+        child.setdefault('claims', {})[repaired_ref] = claim_commit
+        child['claims'] = dict(sorted(child['claims'].items()))
+    if repair_evidence is not None:
+        child['repair_evidence'] = repair_evidence
     child['projection_status'] = previous_state.get('projection_status')
     return validate_coordination_state(child, previous_state['coordination_id'])
 
@@ -11157,6 +11167,11 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
     observed = observed_refs[repaired_ref]
     missing_ref_restore_required = observed is None
+    active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
+    if missing_ref_restore_required and repaired_ref not in active_refs:
+        raise SyncwheelError(
+            'coordination repair refuses to recreate an inactive or tombstoned managed ref'
+        )
     if (
         missing_ref_restore_required
         and freeze_backend != COORDINATION_REPAIR_MISSING_REF_BACKEND
@@ -11226,10 +11241,27 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
             'precondition': COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION,
         })
     if missing_ref_restore_required:
+        claim_ref = coordination_claim_ref(repaired_ref)
+        claim_tip = remote_ref_tips(
+            repo_root, config['remote'], [claim_ref]
+        )[claim_ref]
+        if claim_tip:
+            claim = fetch_coordination_claim(
+                repo_root, config['remote'], claim_ref, claim_tip
+            )
+            if (
+                claim.get('coordination_id') != config['id']
+                or claim.get('source_ref') != repaired_ref
+            ):
+                raise SyncwheelError(
+                    'coordination repair missing-ref claim belongs to another owner'
+                )
         payload.update({
             'repairClass': 'missing-managed-ref-create',
             'proof': COORDINATION_REPAIR_MISSING_REF_PROOF,
             'precondition': 'exact-missing-ref-and-atomic-create-state-cas',
+            'expectedClaimRef': claim_ref,
+            'expectedClaimTip': claim_tip,
         })
     if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and ref_repair_required:
         active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
@@ -11430,10 +11462,14 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
     proof = COORDINATION_REPAIR_MISSING_REF_PROOF
 
     def _verify_observations(
-        self, repo_root, coordination, remote, state_ref, expected_state_tip, guarded_refs
+        self, repo_root, coordination, remote, state_ref, expected_state_tip,
+        guarded_refs, claim_ref=None, expected_claim_tip=None,
     ):
         require_exclusive_coordination_ownership(repo_root, coordination, guarded_refs)
-        observed = remote_ref_tips(repo_root, remote, [state_ref, *guarded_refs])
+        refs = [state_ref, *guarded_refs]
+        if claim_ref:
+            refs.append(claim_ref)
+        observed = remote_ref_tips(repo_root, remote, refs)
         if observed.get(state_ref) != expected_state_tip:
             raise SyncwheelError(
                 'coordination repair STOP: state lease was lost before missing-ref CAS'
@@ -11446,6 +11482,10 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
             raise SyncwheelError(
                 'coordination repair STOP: guarded refs drifted before missing-ref CAS'
             )
+        if claim_ref and observed.get(claim_ref) != expected_claim_tip:
+            raise SyncwheelError(
+                'coordination repair STOP: claim lease was lost before missing-ref CAS'
+            )
         return observed
 
     def preflight(self, **kwargs):
@@ -11456,6 +11496,8 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
             kwargs['state_ref'],
             kwargs['expected_state_tip'],
             kwargs['guarded_refs'],
+            kwargs.get('claim_ref'),
+            kwargs.get('expected_claim_tip'),
         )
         if kwargs['guarded_refs'].get(kwargs['repaired_ref']) is not None:
             raise SyncwheelError('coordination repair missing-ref target is no longer absent')
@@ -11465,31 +11507,36 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
         self.preflight(**kwargs)
         repaired_ref = kwargs['repaired_ref']
         repaired_tip = kwargs['repaired_tip']
+        claim_ref = kwargs['claim_ref']
+        new_claim_tip = kwargs['new_claim_tip']
         command = [
             'git',
             'push',
             '--atomic',
             f'--force-with-lease={repaired_ref}:',
+            f"--force-with-lease={claim_ref}:{kwargs['expected_claim_tip'] or ''}",
             f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
             kwargs['remote'],
             f'{repaired_tip}:{repaired_ref}',
+            f'{new_claim_tip}:{claim_ref}',
             f"{kwargs['new_state_tip']}:{kwargs['state_ref']}",
         ]
         result = run_authorized_push(
             kwargs['repo_root'],
             command,
             kwargs['remote'],
-            [repaired_ref, kwargs['state_ref']],
+            [repaired_ref, claim_ref, kwargs['state_ref']],
             check=False,
         )
         if result.returncode != 0:
             observed = remote_ref_tips(
                 kwargs['repo_root'],
                 kwargs['remote'],
-                [repaired_ref, kwargs['state_ref']],
+                [repaired_ref, claim_ref, kwargs['state_ref']],
             )
             if (
                 observed.get(repaired_ref) is None
+                and observed.get(claim_ref) == kwargs['expected_claim_tip']
                 and observed.get(kwargs['state_ref']) == kwargs['expected_state_tip']
             ):
                 raise SyncwheelError(
@@ -11497,6 +11544,7 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
                 )
             if (
                 observed.get(repaired_ref) != repaired_tip
+                or observed.get(claim_ref) != new_claim_tip
                 or observed.get(kwargs['state_ref']) != kwargs['new_state_tip']
             ):
                 raise SyncwheelError(
@@ -11512,6 +11560,8 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
             kwargs['state_ref'],
             kwargs['expected_state_tip'],
             kwargs['guarded_refs'],
+            kwargs.get('claim_ref'),
+            kwargs.get('expected_claim_tip'),
         )
         return {'proof': self.proof}
 
@@ -11532,6 +11582,96 @@ class DigestHealStateCasCoordinationRepairBackend(
 
     name = COORDINATION_REPAIR_DIGEST_HEAL_BACKEND
     proof = COORDINATION_REPAIR_DIGEST_HEAL_PROOF
+
+
+def coordination_missing_ref_repair_identity(previous_state, plan):
+    identity = {
+        'coordination_id': previous_state['coordination_id'],
+        'scope': f"repair:{plan['repairedRef']}",
+        'projection_status': previous_state.get('projection_status'),
+        'manifest_digest': coordination_state_operation_manifest_digest(previous_state),
+        'changed_refs': {plan['repairedRef']: plan['expectedRecordedTip']},
+        'tombstone': None,
+        'rename': None,
+        'state_transition': None,
+        'repair_plan_digest': plan['planDigest'],
+    }
+    return identity, canonical_json_digest(identity)
+
+
+def begin_coordination_missing_ref_repair(
+    repo_root, manifest, manifest_path, previous, plan,
+):
+    identity, fingerprint = coordination_missing_ref_repair_identity(
+        previous['state'], plan
+    )
+    with coordination_publication_lock(repo_root):
+        existing = pending_coordination_publication_after_resolution(
+            repo_root, manifest, manifest_path, fingerprint
+        )
+        if existing:
+            return {**existing, 'retry': True}
+        observed = read_remote_coordination_state(
+            repo_root,
+            coordination_config(manifest),
+            fetch=True,
+            local_manifest_version=manifest['version'],
+        )
+        if observed['tip'] != plan['expectedStateTip']:
+            raise SyncwheelError(
+                'coordination repair state changed before its intent could be recorded'
+            )
+        payload = {
+            **identity,
+            'fingerprint': fingerprint,
+            'operation_token': str(uuid.uuid4()),
+            'expected_coordination_state_tip': observed['tip'],
+            'owner': coordination_publication_owner(repo_root),
+        }
+        append_ledger_event(
+            repo_root, 'coordination_publish_intent', payload, manifest_path
+        )
+        return {**payload, 'retry': False}
+
+
+def recover_landed_coordination_missing_ref_repair(
+    repo_root, manifest, manifest_path, plan,
+):
+    config = coordination_config(manifest)
+    matching = [
+        intent for intent in pending_coordination_publications(repo_root, manifest_path)
+        if intent.get('repair_plan_digest') == plan.get('planDigest')
+    ]
+    if not matching:
+        return None
+    if len(matching) != 1:
+        raise SyncwheelError(
+            'multiple coordination repair intents match the reviewed plan'
+        )
+    operation = matching[0]
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    if not coordinated_operation_landed(
+        repo_root, config, observed, operation, claims_fallback=True
+    ):
+        return None
+    complete_coordination_publication(
+        repo_root,
+        manifest_path,
+        operation,
+        {'state_tip': observed['tip'], 'status': 'recovered', 'recovered': True},
+    )
+    return {
+        'status': 'repaired',
+        'state_tip': observed['tip'],
+        'parent_state': plan['expectedStateTip'],
+        'plan_digest': plan['planDigest'],
+        'backend': COORDINATION_REPAIR_MISSING_REF_BACKEND,
+        'backend_result': {'proof': plan.get('proof'), 'recovered': True},
+        'proof': plan.get('proof'),
+        'recovered': True,
+    }
 
 
 def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, manifest_path=None):
@@ -11589,7 +11729,9 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             f'{COORDINATION_REPAIR_MISSING_REF_BACKEND} backend'
         )
     if missing_ref_repair:
-        required_proof = {'repairClass', 'proof'}
+        required_proof = {
+            'repairClass', 'proof', 'expectedClaimRef', 'expectedClaimTip',
+        }
         missing_proof = sorted(required_proof - set(plan))
         if missing_proof:
             raise SyncwheelError(
@@ -11606,6 +11748,12 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             or not isinstance(plan.get('expectedRecordedTip'), str)
             or not re.fullmatch(r'[0-9a-f]{40}', plan['expectedRecordedTip'])
             or plan.get('guardedRefs', {}).get(plan.get('repairedRef')) is not None
+            or plan.get('expectedClaimRef')
+            != coordination_claim_ref(plan.get('repairedRef'))
+            or (
+                plan.get('expectedClaimTip') is not None
+                and not re.fullmatch(r'[0-9a-f]{40}', plan['expectedClaimTip'])
+            )
         ):
             raise SyncwheelError('coordination repair missing-ref proof is invalid')
     if plan.get('status') == 'digest-migration-required' and not digest_migration_repair:
@@ -11721,6 +11869,16 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             raise SyncwheelError('coordination repair fast-forward proof is invalid')
     if plan.get('localManifestDigest') != coordination_manifest_digest(manifest, repo_root):
         raise SyncwheelError('coordination repair STOP: local manifest changed after review')
+    resolved_manifest_path = (
+        Path(manifest_path)
+        if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
+    )
+    if missing_ref_repair:
+        recovered = recover_landed_coordination_missing_ref_repair(
+            repo_root, manifest, resolved_manifest_path, plan
+        )
+        if recovered is not None:
+            return recovered
     current_plan, previous = coordination_repair_plan(
         repo_root, manifest, plan['repairedRef'], plan['freezeBackend']
     )
@@ -11734,7 +11892,10 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             'expectedManifestDigest', 'proof',
         ])
     if missing_ref_repair:
-        comparison_keys.extend(['status', 'repairClass', 'proof'])
+        comparison_keys.extend([
+            'status', 'repairClass', 'proof', 'expectedClaimRef',
+            'expectedClaimTip',
+        ])
     if digest_heal_repair:
         comparison_keys.extend([
             'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
@@ -11764,15 +11925,41 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         guarded_refs=plan['guardedRefs'],
         repaired_ref=plan['repairedRef'],
         repaired_tip=plan['expectedRecordedTip'],
+        claim_ref=plan.get('expectedClaimRef'),
+        expected_claim_tip=plan.get('expectedClaimTip'),
     )
     installation = installation_id(create=True)
+    operation = None
     if missing_ref_repair:
+        operation = begin_coordination_missing_ref_repair(
+            repo_root, manifest, resolved_manifest_path, previous, plan
+        )
+        claim_commit = create_coordination_claim_commit(
+            repo_root,
+            plan['repairedRef'],
+            config['id'],
+            operation['operation_token'],
+            plan['expectedClaimTip'],
+            publication_scope=operation['scope'],
+            changed_refs=operation['changed_refs'],
+        )
         child = build_coordination_repair_state(
             previous['state'],
             previous['tip'],
             plan['repairedRef'],
             plan['expectedRecordedTip'],
             installation,
+            operation_token=operation['operation_token'],
+            claim_commit=claim_commit,
+            repair_evidence={
+                'schemaVersion': 1,
+                'planDigest': supplied_digest,
+                'proof': plan['proof'],
+                'ref': plan['repairedRef'],
+                'recordedTip': plan['expectedRecordedTip'],
+                'claimRef': plan['expectedClaimRef'],
+                'claimCommit': claim_commit,
+            },
         )
     elif tree_equivalent_repair:
         child = build_tree_equivalent_coordination_repair_state(
@@ -11805,6 +11992,9 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         guarded_refs=plan['guardedRefs'],
         repaired_ref=plan['repairedRef'],
         repaired_tip=plan['expectedRecordedTip'],
+        claim_ref=plan.get('expectedClaimRef'),
+        expected_claim_tip=plan.get('expectedClaimTip'),
+        new_claim_tip=(child.get('claims') or {}).get(plan['repairedRef']),
     )
     expected_post_refs = dict(plan['guardedRefs'])
     if missing_ref_repair:
@@ -11829,6 +12019,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         guarded_refs=expected_post_refs,
         repaired_ref=plan['repairedRef'],
         repaired_tip=plan['expectedRecordedTip'],
+        claim_ref=plan.get('expectedClaimRef'),
+        expected_claim_tip=(child.get('claims') or {}).get(plan['repairedRef']),
     )
     verified = coordination_state_from_commit(repo_root, child_tip, config['id'])
     git_parent = git(repo_root, 'rev-parse', f'{child_tip}^').stdout.strip()
@@ -11883,6 +12075,26 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             raise SyncwheelError(
                 'coordination repair post-verification failed: invalid digest-heal evidence'
             )
+    if missing_ref_repair:
+        evidence = verified.get('repair_evidence')
+        claim_tip = (verified.get('claims') or {}).get(plan['repairedRef'])
+        if (
+            verified.get('operation_token') != operation['operation_token']
+            or claim_tip != (child.get('claims') or {}).get(plan['repairedRef'])
+            or not isinstance(evidence, dict)
+            or evidence.get('planDigest') != supplied_digest
+            or evidence.get('proof') != plan.get('proof')
+            or evidence.get('claimCommit') != claim_tip
+        ):
+            raise SyncwheelError(
+                'coordination repair post-verification failed: invalid missing-ref evidence'
+            )
+        complete_coordination_publication(
+            repo_root,
+            resolved_manifest_path,
+            operation,
+            {'state_tip': child_tip, 'status': 'published'},
+        )
     repaired = {
         'status': 'repaired',
         'state_tip': child_tip,
@@ -21969,7 +22181,11 @@ def command_stack_close(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+        repo_root,
+        manifest,
+        manifest_path,
+        skip_stacks={args.stack},
+        only_stacks={args.stack},
     )
     original_manifest = copy.deepcopy(manifest)
     pending_close = pending_stack_close_operation(repo_root, manifest_path, args.stack)
@@ -23013,7 +23229,8 @@ def recover_pending_stack_promote(
 
 
 def complete_pending_promote_intents(
-    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=(),
+    only_stacks=None,
 ):
     """Finish promotions that landed before their manifest was saved.
 
@@ -23034,17 +23251,28 @@ def complete_pending_promote_intents(
     )
     with guard:
         resolve_pending_promote_intents(
-            repo_root, manifest, manifest_path, apply=apply, skip_stacks=skip_stacks
+            repo_root,
+            manifest,
+            manifest_path,
+            apply=apply,
+            skip_stacks=skip_stacks,
+            only_stacks=only_stacks,
         )
 
 
 def resolve_pending_promote_intents(
-    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=()
+    repo_root, manifest, manifest_path, *, apply=True, skip_stacks=(),
+    only_stacks=None,
 ):
+    selected = None if only_stacks is None else set(only_stacks)
     pending = [
         intent for intent in pending_coordination_publications(repo_root, manifest_path)
         if str(intent.get('scope') or '').startswith('promote:')
         and str(intent.get('scope'))[len('promote:'):] not in set(skip_stacks)
+        and (
+            selected is None
+            or str(intent.get('scope'))[len('promote:'):] in selected
+        )
     ]
     if not pending:
         return
@@ -23076,7 +23304,11 @@ def command_stack_promote(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, skip_stacks={args.stack}
+        repo_root,
+        manifest,
+        manifest_path,
+        skip_stacks={args.stack},
+        only_stacks={args.stack},
     )
     stack = require_stack(manifest, args.stack)
     pending_promotion = pending_coordination_publication_for_scope(
@@ -23809,7 +24041,11 @@ def command_stack_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, apply=not args.dry_run
+        repo_root,
+        manifest,
+        manifest_path,
+        apply=not args.dry_run,
+        only_stacks={args.stack},
     )
     stack = require_stack(manifest, args.stack)
     mode, worktree = select_replay_mode(
@@ -23835,7 +24071,11 @@ def command_stack_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     complete_pending_promote_intents(
-        repo_root, manifest, manifest_path, apply=not args.dry_run
+        repo_root,
+        manifest,
+        manifest_path,
+        apply=not args.dry_run,
+        only_stacks={args.stack},
     )
     if coordination_is_active(manifest):
         recovery_state = getattr(args, '_control_manifest_recovery_state', None)

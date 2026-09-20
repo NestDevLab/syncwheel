@@ -227,9 +227,12 @@ uncertainty, or concurrent ref changes.
 
 When coordination state still owns a ref that was deleted remotely, use
 `--freeze-backend missing-ref-create-cas`. The reviewed plan requires the ref
-to remain absent and the recorded commit object to exist locally. Apply then
-atomically creates that exact ref and appends a child state under create-only
-and state-tip leases. If either ref appears or changes, nothing is overwritten.
+to remain actively declared and absent and the recorded commit object to exist
+locally. Apply records a durable intent, then atomically creates that exact ref,
+publishes a successor ownership claim, and appends a child state under exact
+leases. A retry can complete an interrupted successful publication from its
+operation token. Inactive or tombstoned refs are rejected; if any guarded ref
+or claim appears or changes, nothing is overwritten.
 
 A coordination state records the digest of `.syncwheel/manifest.json` on its
 integration tip. States published before 0.42.2 recorded the digest of the

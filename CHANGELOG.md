@@ -3,8 +3,13 @@
 ## 0.43.21 - 2026-09-20
 
 - Add the plan-first `missing-ref-create-cas` coordination repair backend. It
-  recreates one absent owned ref at its recorded tip and appends the repair
-  state in one atomic, create-only transaction.
+  recreates one absent, actively managed ref at its recorded tip and publishes
+  its ownership claim plus append-only repair state in one atomic, create-only
+  transaction. A durable operation intent makes an interrupted publish
+  recoverable without repeating the ref update; inactive and tombstoned refs
+  remain absent.
+- Keep `stack close`, `stack promote`, `stack rebuild`, and `stack push`
+  isolated from pending promotions belonging to unrelated stacks.
 
 ## 0.43.20 - 2026-09-19
 

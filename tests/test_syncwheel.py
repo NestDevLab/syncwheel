@@ -1282,6 +1282,99 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     SimpleNamespace(func=command, auto_worktree=True, worktree=None)
                 ))
 
+    def test_stack_lifecycle_recovers_promotions_only_for_requested_stack(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        cases = (
+            (module.command_stack_close, False, {
+                'skip_stacks': {'feature-a'},
+                'only_stacks': {'feature-a'},
+            }),
+            (module.command_stack_promote, False, {
+                'skip_stacks': {'feature-a'},
+                'only_stacks': {'feature-a'},
+            }),
+            (module.command_stack_rebuild, False, {
+                'apply': True,
+                'only_stacks': {'feature-a'},
+            }),
+            (module.command_stack_push, False, {
+                'apply': True,
+                'only_stacks': {'feature-a'},
+            }),
+        )
+        for command, dry_run, expected_kwargs in cases:
+            args = SimpleNamespace(
+                repo=str(self.repo),
+                manifest=None,
+                personal=None,
+                stack='feature-a',
+                dry_run=dry_run,
+            )
+            with self.subTest(command=command.__name__):
+                with mock.patch.object(
+                    module,
+                    'require_manifest',
+                    return_value=(manifest, manifest_path),
+                ), mock.patch.object(
+                    module,
+                    'complete_pending_promote_intents',
+                    side_effect=RuntimeError('stop after recovery gate'),
+                ) as recover:
+                    with self.assertRaisesRegex(RuntimeError, 'recovery gate'):
+                        command(args)
+                recover.assert_called_once_with(
+                    self.repo,
+                    manifest,
+                    manifest_path,
+                    **expected_kwargs,
+                )
+
+    def test_pending_promotion_resolution_skips_unrelated_stack(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        feature_a = next(
+            stack for stack in manifest['stacks'] if stack['id'] == 'feature-a'
+        )
+        feature_b = {**feature_a, 'id': 'feature-b', 'branch': 'pr/feature-b'}
+        manifest['stacks'].append(feature_b)
+        pending = [
+            {'scope': 'promote:feature-a'},
+            {'scope': 'promote:feature-b'},
+        ]
+        with mock.patch.object(
+            module,
+            'pending_coordination_publications',
+            return_value=pending,
+        ), mock.patch.object(
+            module,
+            'read_remote_coordination_state',
+            return_value={'tip': 'a' * 40, 'state': {}},
+        ), mock.patch.object(
+            module,
+            'coordinated_operation_landed',
+            return_value=True,
+        ), mock.patch.object(
+            module,
+            'recover_pending_stack_promote',
+        ) as recover:
+            module.resolve_pending_promote_intents(
+                self.repo,
+                manifest,
+                manifest_path,
+                only_stacks={'feature-a'},
+            )
+
+        recover.assert_called_once_with(
+            self.repo,
+            manifest,
+            manifest_path,
+            feature_a,
+            pending[0],
+        )
+
     def test_expired_lane_can_be_reaped_through_explicit_gc_outside_a_repository(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
         module = self.load_syncwheel_module()
