@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/missing-managed-ref-repair"
   ],
-  "claimed_at": "2026-09-20T16:48:31+00:00",
+  "claimed_at": "2026-09-20T16:59:26+00:00",
   "coordination_id": "default",
-  "operation_token": "008774dd-851f-4b19-91be-98be0c65cb9d",
+  "operation_token": "7ce7fe7e-ba4c-4501-8079-85b7d1ccf308",
   "publication_scope": "stack:missing-managed-ref-repair-v2",
   "source_ref": "refs/heads/pr/missing-managed-ref-repair",
   "syncwheel_version": "0.43.21"
