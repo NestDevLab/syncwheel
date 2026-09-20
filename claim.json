@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/independent-integration-lanes"
   ],
-  "claimed_at": "2026-09-20T17:34:44+00:00",
+  "claimed_at": "2026-09-20T17:36:37+00:00",
   "coordination_id": "default",
-  "operation_token": "3307858e-67b0-4b61-873d-ad7551c659ec",
+  "operation_token": "3d410839-6f55-4464-bb03-513e5188adf1",
   "publication_scope": "stack:independent-integration-lanes",
   "source_ref": "refs/heads/pr/independent-integration-lanes",
   "syncwheel_version": "0.43.21"
