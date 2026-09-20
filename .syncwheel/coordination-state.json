@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "2804f0e56098dc41a55cca0183c671dcda3f7f77"
+    "refs/heads/pr/missing-managed-ref-repair": "2804f0e56098dc41a55cca0183c671dcda3f7f77"
   },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
@@ -14,6 +14,7 @@
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "3508004b3efcf5e0a3b3d2b5b98a48510b9abcd0",
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
+    "refs/heads/pr/missing-managed-ref-repair": "c08c58997a4553279fb0d93f4ff19478eadf0edc",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
@@ -31,7 +32,7 @@
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/missing-historical-integration-tip": "8eb98c69217f368d77d8ce6fca60d3b89c68d8e6",
     "refs/heads/syncwheel/draft/missing-managed-ref-repair": "160f4bc4f09d67577f4a1ae10740ef7860456180",
-    "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "7d58b86d17f52a42e7ec80acfc75c6854566646a",
+    "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "b380fe48a47cc32e90d009d5ca86a18f1b9b3e25",
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
@@ -39,7 +40,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T08:52:55+00:00",
+  "created_at": "2026-09-20T08:53:13+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -65,6 +66,7 @@
     "refs/heads/pr/mgt-0287-sw1": "76d4f78ff23e66225b515b447779615f90384fd7",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "2c3641e311b145284edf8d65f66db61d83c7c490",
     "refs/heads/pr/missing-historical-integration-tip": "8a6ec195c47d279d15e5394898db4796c54e60cb",
+    "refs/heads/pr/missing-managed-ref-repair": "2804f0e56098dc41a55cca0183c671dcda3f7f77",
     "refs/heads/pr/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
@@ -162,25 +164,24 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/missing-managed-ref-repair-v2",
+        "branch": "pr/missing-managed-ref-repair",
         "commits": [
           "e7d7a8f52c6a5317b84f660d09018d8a4c20eade",
           "6445a1fbec5264a705fa5266c0c196ff078f0ce2"
         ],
         "id": "missing-managed-ref-repair-v2",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "9ab71338-7a7b-4d49-ba1b-27e992f00204",
-  "parent_state": "01aba1d24e2a34c7b60bef08cf197fc86470973a",
+  "operation_token": "8dd1b78c-eb98-41f5-8acc-a440f9d7da8a",
+  "parent_state": "a671f6db2e09c017cd1f2a69ea760e324fd9c8a0",
   "projection_status": "partial",
-  "publication_id": "004c9283-91bc-4ad1-be2a-3941820ea942",
-  "publication_scope": "create:missing-managed-ref-repair-v2",
+  "publication_id": "4b79a5b6-285a-4e21-81c4-1ca514f1701c",
+  "publication_scope": "promote:missing-managed-ref-repair-v2",
   "schema_version": 2,
   "syncwheel_version": "0.43.20",
   "tombstones": [
@@ -631,6 +632,14 @@
       "ref": "refs/heads/pr/worktree-release-dirty-primary",
       "remote_tip": null,
       "stack": "worktree-release-dirty-primary"
+    },
+    {
+      "branch": "syncwheel/draft/missing-managed-ref-repair-v2",
+      "closed_at": "2026-09-20T08:53:08+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2",
+      "remote_tip": "2804f0e56098dc41a55cca0183c671dcda3f7f77",
+      "stack": "missing-managed-ref-repair-v2"
     }
   ]
 }
