@@ -62,7 +62,7 @@
     },
     {
       "id": "historical-closed-missing-tip-v2",
-      "branch": "syncwheel/draft/historical-closed-missing-tip-v2",
+      "branch": "pr/historical-closed-missing-tip-v2",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -70,9 +70,9 @@
       "commits": [
         "e515208d404b7d504a5bb734053c91aa66557d49"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Preserve historical integration proofs for pruned states and managed reconciliation merges"
