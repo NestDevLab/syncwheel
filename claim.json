@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/pr-checks-none"
+    "refs/heads/pr/checks-none-policy"
   ],
-  "claimed_at": "2026-09-20T19:43:07+00:00",
+  "claimed_at": "2026-09-20T19:43:22+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "cf8b36ad-fc6f-4cf3-b798-24f5a859f90e",
-  "publication_scope": "stack:pr-checks-none",
+  "operation_token": "c99d350f-871b-4ea4-bbd0-705103b327ab",
+  "publication_scope": "promote:pr-checks-none",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/pr-checks-none",
   "syncwheel_version": "0.43.23"
 }
