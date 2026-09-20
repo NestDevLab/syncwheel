@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/missing-managed-ref-repair": "7733738406a41ac5db22fc089b04079616e63c08"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -14,7 +12,7 @@
     "refs/heads/pr/mgt-0287-sw1": "e8403b9535bea8ccb6d4765a3ba7d6d6c78052bf",
     "refs/heads/pr/mgt-0287-sw2-dirty-path": "3508004b3efcf5e0a3b3d2b5b98a48510b9abcd0",
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
-    "refs/heads/pr/missing-managed-ref-repair": "91bcaa1ba489126d51da4dae383ed13bec087f22",
+    "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
@@ -40,7 +38,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T17:06:33+00:00",
+  "created_at": "2026-09-20T17:21:25+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -131,8 +129,7 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "missing-managed-ref-repair",
-        "missing-managed-ref-repair-v2"
+        "missing-managed-ref-repair"
       ],
       "strategy": "cherry-pick"
     },
@@ -157,44 +154,16 @@
         "integration_branch": "main-integration",
         "state": "draft",
         "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/missing-managed-ref-repair",
-        "commits": [
-          "fafb2cec5509786c4425546df74d5b145cf7cec6",
-          "2804f0e56098dc41a55cca0183c671dcda3f7f77",
-          "1873c6f0d99ea47a835004d8f3fcc9eea1fdd1a6",
-          "041f11506b16fcf06a30dbaedb84b33d74319dbf",
-          "ff01e277869347344d0bc01d25eb8cb285032bd0",
-          "2868acd2fc70d557973b7bdbab324cd6e1e1ba88",
-          "fa1f3dae5f5aaac327a9e22536f519fba3665dd0",
-          "2da87e6c42792c9668648b3da37f608b0326989e",
-          "535580ae35ca6bd70cd0b3c0ecf863acd5ef2820",
-          "046593448ea03deb6a87745a308bc4428df497e9",
-          "06a1d413037f6715881b2a9e887d2f5f66e38e4c",
-          "56b8e75192773b5d8f94e1bdd7b83c4c1640c36d",
-          "953e6f2f3de0df8491d057f8690ffbb0529d8b62",
-          "543ff946b9908a6b8d678efd88631075e27f5440",
-          "7733738406a41ac5db22fc089b04079616e63c08"
-        ],
-        "id": "missing-managed-ref-repair-v2",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "2a3987ed-a844-4fc7-a1a7-66fe0bc35922",
-  "parent_state": "1d997b9c8eca748a57275a83691ee79009543a07",
+  "operation_token": "10e7c113-a3a6-468b-b026-b635c5fdcf1a",
+  "parent_state": "7a4929e0f7c8bb9b38aef55724add5d298af1091",
   "projection_status": "partial",
-  "publication_id": "0b9ba2ad-7efb-43d1-8535-0c2e0ccb3df6",
-  "publication_scope": "stack:missing-managed-ref-repair-v2",
+  "publication_id": "13ef980e-c3b2-4355-a429-033498b10312",
+  "publication_scope": "close:missing-managed-ref-repair-v2",
   "schema_version": 2,
   "syncwheel_version": "0.43.21",
   "tombstones": [
@@ -652,6 +621,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2",
       "remote_tip": "2804f0e56098dc41a55cca0183c671dcda3f7f77",
+      "stack": "missing-managed-ref-repair-v2"
+    },
+    {
+      "branch": "pr/missing-managed-ref-repair",
+      "closed_at": "2026-09-20T17:21:22+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/missing-managed-ref-repair",
+      "remote_tip": null,
       "stack": "missing-managed-ref-repair-v2"
     }
   ]
