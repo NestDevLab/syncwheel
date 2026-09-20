@@ -16,6 +16,9 @@
   integration commits after the delivery branch has advanced on the same
   paths; exact or patch-equivalent closed commits are accepted while unrelated
   integration history and force-closed stacks remain blocked.
+- Recognize the exact pre-local-ledger managed `.gitignore` block while
+  validating historical control-only integration commits, so upgrading that
+  block remains classifiable without accepting arbitrary managed patterns.
 
 ## 0.43.20 - 2026-09-19
 

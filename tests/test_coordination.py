@@ -3331,6 +3331,64 @@ with module.coordination_publication_lock(Path(repo_path)):
                 delivery_tip=module.ref_tip(repo, 'origin/main'),
             )
 
+    def test_integration_reconciliation_accepts_exact_legacy_gitignore_block_migration(self):
+        origin = self.create_remote('legacy-gitignore-history')
+        repo = self.clone(origin, 'legacy-gitignore-history')
+        module = self.load_module()
+        worktree_root = '.syncwheel/wt'
+        current_patterns = module.syncwheel_gitignore_patterns(worktree_root)
+        legacy_patterns = [
+            pattern for pattern in current_patterns
+            if pattern != '.syncwheel/manifests/*.local-ledger/'
+        ]
+
+        def managed_block(patterns):
+            return (
+                '# syncwheel managed metadata\n'
+                + '\n'.join(patterns)
+                + '\n# end syncwheel managed metadata\n'
+            )
+
+        (repo / '.syncwheel').mkdir(exist_ok=True)
+        (repo / '.gitignore').write_text('user-owned\n' + managed_block(legacy_patterns))
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps({
+            'syncwheel_worktree_root': worktree_root,
+            'stage': 'legacy',
+        }))
+        self.git(repo, 'add', '.gitignore', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'chore: legacy managed metadata')
+        base = module.ref_tip(repo, 'HEAD')
+
+        (repo / '.gitignore').write_text('user-owned\n' + managed_block(current_patterns))
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps({
+            'syncwheel_worktree_root': worktree_root,
+            'stage': 'current',
+        }))
+        self.git(repo, 'commit', '-qam', 'chore: update tracked metadata')
+        tip = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'syncwheel_worktree_root': worktree_root,
+            'integration': {'base': base},
+            'stacks': [],
+        }
+        module.integration_reconciliation_history(repo, manifest, tip, {})
+
+        self.git(repo, 'reset', '-q', '--hard', base)
+        malformed_patterns = [*legacy_patterns, '.syncwheel/unexpected/']
+        (repo / '.gitignore').write_text('user-owned\n' + managed_block(malformed_patterns))
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps({
+            'syncwheel_worktree_root': worktree_root,
+            'stage': 'malformed',
+        }))
+        self.git(repo, 'commit', '-qam', 'chore: malformed managed metadata')
+        with self.assertRaisesRegex(
+            module.SyncwheelError,
+            'integration reconciliation has unclassified history',
+        ):
+            module.integration_reconciliation_history(
+                repo, manifest, module.ref_tip(repo, 'HEAD'), {},
+            )
+
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')
         repo = self.clone(origin, 'absorbed-close')

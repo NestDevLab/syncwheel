@@ -3757,6 +3757,39 @@ def split_syncwheel_managed_gitignore(text, worktree_root):
     }
 
 
+def split_historical_syncwheel_managed_gitignore(text, worktree_root):
+    """Recognize the current block and the exact pre-local-ledger block."""
+    current = split_syncwheel_managed_gitignore(text, worktree_root)
+    if current is not None:
+        return current
+    if not isinstance(text, str):
+        return None
+    lines = text.splitlines(keepends=True)
+    content = [line[:-1] if line.endswith('\n') else line for line in lines]
+    starts = [
+        index for index, line in enumerate(content)
+        if line == SYNCWHEEL_GITIGNORE_MARKER
+    ]
+    ends = [
+        index for index, line in enumerate(content)
+        if line == SYNCWHEEL_GITIGNORE_END_MARKER
+    ]
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        return None
+    start = starts[0]
+    end = ends[0]
+    legacy_patterns = [
+        pattern for pattern in syncwheel_gitignore_patterns(worktree_root)
+        if pattern != '.syncwheel/manifests/*.local-ledger/'
+    ]
+    if content[start + 1:end] != legacy_patterns:
+        return None
+    return {
+        'unmanaged': ''.join(lines[:start] + lines[end + 1:]),
+        'managed': ''.join(lines[start:end + 1]),
+    }
+
+
 def syncwheel_local_exclude_patterns(worktree_root):
     patterns = ['.syncwheel/']
     worktree_pattern = syncwheel_ignore_pattern(worktree_root)
@@ -6487,11 +6520,11 @@ def integration_reconciliation_history(
                     parent is None or parent['mode'] == '100644'
                 ):
                     try:
-                        candidate_ignore = split_syncwheel_managed_gitignore(
+                        candidate_ignore = split_historical_syncwheel_managed_gitignore(
                             tree_path_bytes(repo_root, candidate).decode('utf-8'),
                             syncwheel_worktree_root(control),
                         )
-                        parent_ignore = split_syncwheel_managed_gitignore(
+                        parent_ignore = split_historical_syncwheel_managed_gitignore(
                             tree_path_bytes(repo_root, parent).decode('utf-8'),
                             syncwheel_worktree_root(control),
                         )
