@@ -1,9 +1,12 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/independent-integration-lanes": "78de2afddcde0ac780cd13bd43a4cf6d95772760"
+  },
   "claims": {
     "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
+    "refs/heads/pr/independent-integration-lanes": "dd98056784deec449e4dc22a326c5eddbdd95180",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
@@ -38,7 +41,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T17:22:57+00:00",
+  "created_at": "2026-09-20T17:34:44+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -54,6 +57,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/historical-coordination-digest-04313": "b6d8d2fed2527936aa40ab13246873955b57bd9f",
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
+    "refs/heads/pr/independent-integration-lanes": "78de2afddcde0ac780cd13bd43a4cf6d95772760",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
@@ -128,7 +132,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "independent-integration-lanes"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -136,15 +142,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/independent-integration-lanes",
+        "commits": [
+          "6d9170bea170966e343af0e62b65e5f6c0b945d2"
+        ],
+        "id": "independent-integration-lanes",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "f3b6acd4-f24f-47a4-8208-9280f6a9698f",
-  "parent_state": "b880a1cb2f89ce80edaa4e8f37a25e6ec083589b",
+  "operation_token": "3307858e-67b0-4b61-873d-ad7551c659ec",
+  "parent_state": "a0200efe98937bd75a644eacab836b48977d4766",
   "projection_status": "partial",
-  "publication_id": "59cf0edf-a992-4518-9add-ec865823469f",
-  "publication_scope": "close:missing-managed-ref-repair",
+  "publication_id": "9b88304e-ba53-4c14-9120-5e346eeffae2",
+  "publication_scope": "stack:independent-integration-lanes",
   "schema_version": 2,
   "syncwheel_version": "0.43.21",
   "tombstones": [
