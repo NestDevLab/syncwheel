@@ -105,6 +105,8 @@ COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
 COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF = 'exact-tree-equality'
 COORDINATION_REPAIR_FAST_FORWARD_BACKEND = 'fast-forward-state-cas'
 COORDINATION_REPAIR_FAST_FORWARD_PROOF = 'exact-fast-forward-ancestry'
+COORDINATION_REPAIR_MISSING_REF_BACKEND = 'missing-ref-create-cas'
+COORDINATION_REPAIR_MISSING_REF_PROOF = 'exact-missing-ref-create'
 COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND = 'state-digest-migration'
 COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF = 'exact-control-manifest-digest'
 COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS = 'legacy-digest-migration'
@@ -11152,11 +11154,22 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     observed_refs = remote_ref_tips(
         repo_root, config['remote'], list(previous['state']['managed_refs'])
     )
-    observed = observed_refs[repaired_ref]
-    if not observed:
-        raise SyncwheelError(f'coordination repair managed ref is absent: {repaired_ref}')
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
-    ref_repair_required = expected_recorded != observed
+    observed = observed_refs[repaired_ref]
+    missing_ref_restore_required = observed is None
+    if (
+        missing_ref_restore_required
+        and freeze_backend != COORDINATION_REPAIR_MISSING_REF_BACKEND
+    ):
+        raise SyncwheelError(
+            f'coordination repair managed ref is absent: {repaired_ref}; '
+            f'use --freeze-backend {COORDINATION_REPAIR_MISSING_REF_BACKEND}'
+        )
+    if missing_ref_restore_required and not commit_exists(repo_root, expected_recorded):
+        raise SyncwheelError(
+            'coordination repair missing-ref proof requires the recorded commit object'
+        )
+    ref_repair_required = observed is not None and expected_recorded != observed
     digest_classification = coordination_state_manifest_digest_classification(
         repo_root, previous['state'], config['remote']
     )
@@ -11168,7 +11181,9 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
         not ref_repair_required
         and digest_classification['form'] == COORDINATION_STATE_DIGEST_FORM_ORPHANED
     )
-    if ref_repair_required:
+    if missing_ref_restore_required:
+        status = 'missing-ref-restore-required'
+    elif ref_repair_required:
         status = 'repair-required'
     elif digest_migration_required:
         status = 'digest-migration-required'
@@ -11209,6 +11224,12 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
             'expectedManifestDigest': digest_classification['control_manifest_digest'],
             'proof': COORDINATION_REPAIR_DIGEST_HEAL_PROOF,
             'precondition': COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION,
+        })
+    if missing_ref_restore_required:
+        payload.update({
+            'repairClass': 'missing-managed-ref-create',
+            'proof': COORDINATION_REPAIR_MISSING_REF_PROOF,
+            'precondition': 'exact-missing-ref-and-atomic-create-state-cas',
         })
     if freeze_backend == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND and ref_repair_required:
         active_refs = coordination_snapshot_managed_ref_names(previous['state']['manifest'])
@@ -11402,6 +11423,99 @@ class FastForwardStateCasCoordinationRepairBackend(
     proof = COORDINATION_REPAIR_FAST_FORWARD_PROOF
 
 
+class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
+    """Atomically recreate one absent owned ref and append its repair state."""
+
+    name = COORDINATION_REPAIR_MISSING_REF_BACKEND
+    proof = COORDINATION_REPAIR_MISSING_REF_PROOF
+
+    def _verify_observations(
+        self, repo_root, coordination, remote, state_ref, expected_state_tip, guarded_refs
+    ):
+        require_exclusive_coordination_ownership(repo_root, coordination, guarded_refs)
+        observed = remote_ref_tips(repo_root, remote, [state_ref, *guarded_refs])
+        if observed.get(state_ref) != expected_state_tip:
+            raise SyncwheelError(
+                'coordination repair STOP: state lease was lost before missing-ref CAS'
+            )
+        drifted = {
+            ref: (tip, observed.get(ref)) for ref, tip in guarded_refs.items()
+            if observed.get(ref) != tip
+        }
+        if drifted:
+            raise SyncwheelError(
+                'coordination repair STOP: guarded refs drifted before missing-ref CAS'
+            )
+        return observed
+
+    def preflight(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+        )
+        if kwargs['guarded_refs'].get(kwargs['repaired_ref']) is not None:
+            raise SyncwheelError('coordination repair missing-ref target is no longer absent')
+        return {'proof': self.proof}
+
+    def apply(self, **kwargs):
+        self.preflight(**kwargs)
+        repaired_ref = kwargs['repaired_ref']
+        repaired_tip = kwargs['repaired_tip']
+        command = [
+            'git',
+            'push',
+            '--atomic',
+            f'--force-with-lease={repaired_ref}:',
+            f"--force-with-lease={kwargs['state_ref']}:{kwargs['expected_state_tip']}",
+            kwargs['remote'],
+            f'{repaired_tip}:{repaired_ref}',
+            f"{kwargs['new_state_tip']}:{kwargs['state_ref']}",
+        ]
+        result = run_authorized_push(
+            kwargs['repo_root'],
+            command,
+            kwargs['remote'],
+            [repaired_ref, kwargs['state_ref']],
+            check=False,
+        )
+        if result.returncode != 0:
+            observed = remote_ref_tips(
+                kwargs['repo_root'],
+                kwargs['remote'],
+                [repaired_ref, kwargs['state_ref']],
+            )
+            if (
+                observed.get(repaired_ref) is None
+                and observed.get(kwargs['state_ref']) == kwargs['expected_state_tip']
+            ):
+                raise SyncwheelError(
+                    'coordination repair missing-ref CAS was rejected without mutation'
+                )
+            if (
+                observed.get(repaired_ref) != repaired_tip
+                or observed.get(kwargs['state_ref']) != kwargs['new_state_tip']
+            ):
+                raise SyncwheelError(
+                    'coordination repair outcome is unknown after missing-ref CAS rejection'
+                )
+        return {'proof': self.proof, 'atomicCreate': True}
+
+    def postflight(self, **kwargs):
+        self._verify_observations(
+            kwargs['repo_root'],
+            kwargs['coordination'],
+            kwargs['remote'],
+            kwargs['state_ref'],
+            kwargs['expected_state_tip'],
+            kwargs['guarded_refs'],
+        )
+        return {'proof': self.proof}
+
+
 class DigestMigrationStateCasCoordinationRepairBackend(
     TreeEquivalentStateCasCoordinationRepairBackend
 ):
@@ -11439,6 +11553,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             backend = TreeEquivalentStateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_FAST_FORWARD_BACKEND:
             backend = FastForwardStateCasCoordinationRepairBackend()
+        elif plan.get('freezeBackend') == COORDINATION_REPAIR_MISSING_REF_BACKEND:
+            backend = MissingRefCreateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND:
             backend = DigestMigrationStateCasCoordinationRepairBackend()
         elif plan.get('freezeBackend') == COORDINATION_REPAIR_DIGEST_HEAL_BACKEND:
@@ -11460,12 +11576,38 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         raise SyncwheelError('coordination repair backend does not match the reviewed plan')
     tree_equivalent_repair = backend.name == COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND
     fast_forward_repair = backend.name == COORDINATION_REPAIR_FAST_FORWARD_BACKEND
+    missing_ref_repair = backend.name == COORDINATION_REPAIR_MISSING_REF_BACKEND
     digest_migration_repair = backend.name == COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND
     digest_heal_repair = backend.name == COORDINATION_REPAIR_DIGEST_HEAL_BACKEND
     state_only_repair = (
         tree_equivalent_repair or fast_forward_repair or digest_migration_repair
         or digest_heal_repair
     )
+    if plan.get('status') == 'missing-ref-restore-required' and not missing_ref_repair:
+        raise SyncwheelError(
+            'coordination repair missing-ref restore requires the '
+            f'{COORDINATION_REPAIR_MISSING_REF_BACKEND} backend'
+        )
+    if missing_ref_repair:
+        required_proof = {'repairClass', 'proof'}
+        missing_proof = sorted(required_proof - set(plan))
+        if missing_proof:
+            raise SyncwheelError(
+                'coordination repair missing-ref plan is missing: '
+                + ', '.join(missing_proof)
+            )
+        if (
+            plan.get('status') != 'missing-ref-restore-required'
+            or plan.get('repairClass') != 'missing-managed-ref-create'
+            or plan.get('proof') != COORDINATION_REPAIR_MISSING_REF_PROOF
+            or plan.get('precondition')
+            != 'exact-missing-ref-and-atomic-create-state-cas'
+            or plan.get('expectedRemoteTip') is not None
+            or not isinstance(plan.get('expectedRecordedTip'), str)
+            or not re.fullmatch(r'[0-9a-f]{40}', plan['expectedRecordedTip'])
+            or plan.get('guardedRefs', {}).get(plan.get('repairedRef')) is not None
+        ):
+            raise SyncwheelError('coordination repair missing-ref proof is invalid')
     if plan.get('status') == 'digest-migration-required' and not digest_migration_repair:
         raise SyncwheelError(
             'coordination repair digest migration requires the '
@@ -11591,6 +11733,8 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
             'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
             'expectedManifestDigest', 'proof',
         ])
+    if missing_ref_repair:
+        comparison_keys.extend(['status', 'repairClass', 'proof'])
     if digest_heal_repair:
         comparison_keys.extend([
             'status', 'repairClass', 'stateDigestForm', 'recordedManifestDigest',
@@ -11618,9 +11762,19 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         state_ref=plan['stateRef'],
         expected_state_tip=plan['expectedStateTip'],
         guarded_refs=plan['guardedRefs'],
+        repaired_ref=plan['repairedRef'],
+        repaired_tip=plan['expectedRecordedTip'],
     )
     installation = installation_id(create=True)
-    if tree_equivalent_repair:
+    if missing_ref_repair:
+        child = build_coordination_repair_state(
+            previous['state'],
+            previous['tip'],
+            plan['repairedRef'],
+            plan['expectedRecordedTip'],
+            installation,
+        )
+    elif tree_equivalent_repair:
         child = build_tree_equivalent_coordination_repair_state(
             previous['state'], previous['tip'], plan, installation
         )
@@ -11649,14 +11803,19 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         expected_state_tip=plan['expectedStateTip'],
         new_state_tip=child_tip,
         guarded_refs=plan['guardedRefs'],
+        repaired_ref=plan['repairedRef'],
+        repaired_tip=plan['expectedRecordedTip'],
     )
+    expected_post_refs = dict(plan['guardedRefs'])
+    if missing_ref_repair:
+        expected_post_refs[plan['repairedRef']] = plan['expectedRecordedTip']
     observed = backend.observe(
-        repo_root, config['remote'], [plan['stateRef'], *plan['guardedRefs']]
+        repo_root, config['remote'], [plan['stateRef'], *expected_post_refs]
     )
     if observed.get(plan['stateRef']) != child_tip:
         raise SyncwheelError('coordination repair outcome is unknown: state CAS was not observed')
     drifted = {
-        ref: (tip, observed.get(ref)) for ref, tip in plan['guardedRefs'].items()
+        ref: (tip, observed.get(ref)) for ref, tip in expected_post_refs.items()
         if observed.get(ref) != tip
     }
     if drifted:
@@ -11667,14 +11826,19 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
         remote=config['remote'],
         state_ref=plan['stateRef'],
         expected_state_tip=child_tip,
-        guarded_refs=plan['guardedRefs'],
+        guarded_refs=expected_post_refs,
+        repaired_ref=plan['repairedRef'],
+        repaired_tip=plan['expectedRecordedTip'],
     )
     verified = coordination_state_from_commit(repo_root, child_tip, config['id'])
     git_parent = git(repo_root, 'rev-parse', f'{child_tip}^').stdout.strip()
     if (
         git_parent != previous['tip']
         or verified['parent_state'] != previous['tip']
-        or verified['managed_refs'][plan['repairedRef']] != plan['expectedRemoteTip']
+        or verified['managed_refs'][plan['repairedRef']] != (
+            plan['expectedRecordedTip'] if missing_ref_repair
+            else plan['expectedRemoteTip']
+        )
     ):
         raise SyncwheelError('coordination repair post-verification failed: invalid child state')
     if state_only_repair:
@@ -28950,6 +29114,7 @@ def build_parser():
             'github-lock',
             COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
             COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+            COORDINATION_REPAIR_MISSING_REF_BACKEND,
             COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
             COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
         ],
@@ -28958,11 +29123,11 @@ def build_parser():
             'reviewed repair backend: github-lock remains unsupported; '
             'tree-equivalent-state-cas requires exact tree equality; '
             'fast-forward-state-cas requires exact bounded ancestry; '
+            'missing-ref-create-cas atomically recreates one absent owned ref; '
             'state-digest-migration republishes a pre-0.42.2 state under the '
             'control-manifest digest; state-digest-heal recomputes an '
             'unrecognized (neither raw nor legacy) manifest_digest from the '
-            'manifest already committed at the aligned integration tip; all '
-            'four change only append-only coordination state'
+            'manifest already committed at the aligned integration tip'
         ),
     )
     coordination_repair_p.add_argument(

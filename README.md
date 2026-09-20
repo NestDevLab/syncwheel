@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.20`
+Current version: `0.43.21`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -224,6 +224,12 @@ Apply repeats the ancestry and drift checks, then appends only state evidence
 under the same exact state-ref lease. It never updates the managed branch and
 refuses non-descendants, intervals above 1024 commits, plan drift, ownership
 uncertainty, or concurrent ref changes.
+
+When coordination state still owns a ref that was deleted remotely, use
+`--freeze-backend missing-ref-create-cas`. The reviewed plan requires the ref
+to remain absent and the recorded commit object to exist locally. Apply then
+atomically creates that exact ref and appends a child state under create-only
+and state-tip leases. If either ref appears or changes, nothing is overwritten.
 
 A coordination state records the digest of `.syncwheel/manifest.json` on its
 integration tip. States published before 0.42.2 recorded the digest of the

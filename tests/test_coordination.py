@@ -4503,6 +4503,69 @@ with module.coordination_publication_lock(Path(repo_path)):
             any(item.get('stack') == 'after-repair' for item in closed_state['tombstones'])
         )
 
+    def test_missing_managed_ref_repair_atomically_restores_recorded_tip(self):
+        origin = self.create_remote('missing-managed-ref-repair')
+        repo = self.clone(origin, 'missing-managed-ref-repair')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        parent_tip, parent = self.remote_state(origin)
+        ref = 'refs/heads/integration/shared'
+        recorded_tip = parent['managed_refs'][ref]
+        self.git(repo, 'push', '--no-verify', 'origin', f':{ref}')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        with self.assertRaisesRegex(module.SyncwheelError, 'missing-ref-create-cas'):
+            module.coordination_repair_plan(repo, manifest, ref)
+
+        plan, _ = module.coordination_repair_plan(
+            repo,
+            manifest,
+            ref,
+            module.COORDINATION_REPAIR_MISSING_REF_BACKEND,
+        )
+        self.assertEqual(plan['status'], 'missing-ref-restore-required')
+        self.assertEqual(plan['repairClass'], 'missing-managed-ref-create')
+        self.assertEqual(plan['proof'], module.COORDINATION_REPAIR_MISSING_REF_PROOF)
+        self.assertEqual(plan['expectedStateTip'], parent_tip)
+        self.assertEqual(plan['expectedRecordedTip'], recorded_tip)
+        self.assertIsNone(plan['expectedRemoteTip'])
+        self.assertIsNone(plan['guardedRefs'][ref])
+
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(repo_root, command, remote, refs, check=True):
+            pushes.append({'command': command, 'remote': remote, 'refs': refs})
+            return original_push(repo_root, command, remote, refs, check=check)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_repair_plan(repo, manifest, plan)
+
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(result['backend'], module.COORDINATION_REPAIR_MISSING_REF_BACKEND)
+        self.assertEqual(result['proof'], module.COORDINATION_REPAIR_MISSING_REF_PROOF)
+        self.assertEqual(len(pushes), 1)
+        self.assertEqual(pushes[0]['refs'], [ref, plan['stateRef']])
+        self.assertIn('--atomic', pushes[0]['command'])
+        self.assertIn(f'--force-with-lease={ref}:', pushes[0]['command'])
+        self.assertIn(f'{recorded_tip}:{ref}', pushes[0]['command'])
+
+        child_tip, child = self.remote_state(origin)
+        self.assertEqual(child_tip, result['state_tip'])
+        self.assertEqual(child['parent_state'], parent_tip)
+        self.assertEqual(child['managed_refs'][ref], recorded_tip)
+        self.assertEqual(child['changed_refs'], {ref: recorded_tip})
+        for key in ('manifest', 'manifest_digest', 'tombstones'):
+            self.assertEqual(child[key], parent[key])
+        self.assertEqual(
+            module.remote_ref_tips(repo, 'origin', [ref])[ref],
+            recorded_tip,
+        )
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted'):
+            module.apply_coordination_repair_plan(repo, manifest, plan)
+
     def test_tree_equivalent_repair_pushes_only_append_only_state(self):
         fixture = self.prepare_tree_equivalent_repair()
         module = fixture['module']

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.21 - 2026-09-20
+
+- Add the plan-first `missing-ref-create-cas` coordination repair backend. It
+  recreates one absent owned ref at its recorded tip and appends the repair
+  state in one atomic, create-only transaction.
+
 ## 0.43.20 - 2026-09-19
 
 - Allow an explicit governed `worktree release` to preserve and remove its
