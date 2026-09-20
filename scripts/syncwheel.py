@@ -6324,6 +6324,108 @@ def historically_delivered_integration_boundary(repo_root, manifest, tip, observ
     return None
 
 
+def historically_closed_integration_commits(repo_root, tip, observation, candidates=None):
+    """Return exact commits covered by a durable coordinated close proof.
+
+    A squash/rebase close proves delivery when it happens, but later changes to
+    the same paths make a fresh byte comparison against the current base
+    impossible.  The append-only coordination chain still contains both the
+    closing tombstone and its parent manifest.  Accept only commits in the
+    history being reconciled whose exact SHA or stable patch ID matches what
+    the parent declared.  Unrelated commits remain unexplained.
+    """
+    if not observation or observation.get('status') != 'current':
+        return set()
+    current = observation.get('state_tip')
+    integration_ref = observation.get('integration_ref')
+    config = observation.get('config') or {}
+    if not current or not integration_ref or not config.get('id'):
+        return set()
+    head = current
+    closed_sources = set()
+    state_cache = {}
+
+    def load_state(commit):
+        if commit not in state_cache:
+            state_cache[commit] = coordination_state_from_commit(
+                repo_root, commit, config['id']
+            )
+        return state_cache[commit]
+
+    while current:
+        state = load_state(current)
+        parents = git(repo_root, 'show', '-s', '--format=%P', current).stdout.split()
+        parent = state.get('parent_state')
+        if parents != ([parent] if parent else []):
+            raise SyncwheelError('integration reconciliation historical state chain is invalid')
+        if current == head:
+            verify_coordination_state_manifest_digest(
+                repo_root, state, config.get('remote')
+            )
+        if parent and str(state.get('publication_scope') or '').startswith('close:'):
+            stack_id = state['publication_scope'].split(':', 1)[1]
+            tombstones = [
+                item for item in state.get('tombstones') or []
+                if item.get('stack') == stack_id
+                and item.get('reason') in {'absorbed', 'merged'}
+            ]
+            parent_state = load_state(parent)
+            parent_stacks = [
+                item for item in (parent_state.get('manifest') or {}).get('stacks') or []
+                if item.get('id') == stack_id
+            ]
+            child_stacks = {
+                item.get('id')
+                for item in (state.get('manifest') or {}).get('stacks') or []
+            }
+            parent_tombstones = {
+                coordination_tombstone_ref(item)
+                for item in parent_state.get('tombstones') or []
+            }
+            if len(tombstones) == 1 and len(parent_stacks) == 1 and stack_id not in child_stacks:
+                stack = parent_stacks[0]
+                closed_ref = coordination_tombstone_ref(tombstones[0])
+                expected_ref = f"refs/heads/{stack.get('branch')}"
+                state_form = coordination_state_manifest_digest_classification(
+                    repo_root, state, config.get('remote')
+                )['form']
+                parent_form = coordination_state_manifest_digest_classification(
+                    repo_root, parent_state, config.get('remote')
+                )['form']
+                if (
+                    closed_ref == expected_ref
+                    and closed_ref not in parent_tombstones
+                    and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                    and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                ):
+                    declared = [
+                        *stack_integration_commits(stack),
+                        *stack_integration_only_commits(stack),
+                    ]
+                    for commit in declared:
+                        if not commit_exists(repo_root, commit):
+                            continue
+                        closed_sources.add(commit_full_sha(repo_root, commit))
+        current = parent
+    if not closed_sources:
+        return set()
+    candidates = [
+        commit_full_sha(repo_root, commit)
+        for commit in (candidates if candidates is not None else rev_list(repo_root, tip))
+        if commit_exists(repo_root, commit)
+    ]
+    source_patches = {
+        value for value in commit_patch_ids(repo_root, closed_sources).values()
+        if value
+    }
+    candidate_patches = commit_patch_ids(repo_root, candidates)
+    return {
+        commit for commit in candidates
+        if commit in closed_sources
+        or (candidate_patches.get(commit) and candidate_patches[commit] in source_patches)
+    }
+
+
 def integration_reconciliation_history(
     repo_root, manifest, tip, provenance, manifest_path=None, observation=None,
     detached_replay=False, delivery_tip=None,
@@ -6348,6 +6450,11 @@ def integration_reconciliation_history(
     patches.discard(None)
     patches.update(patch_ids_reachable_from_ref(repo_root, base))
     history = rev_list(repo_root, f'{history_base}..{tip}')
+    closed_commits = (
+        historically_closed_integration_commits(
+            repo_root, tip, observation, candidates=history,
+        ) if not detached_replay else set()
+    )
     proofs = {commit: proof for commit in history
               if commit_parent_count(repo_root, commit) > 1
               and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}
@@ -6358,7 +6465,7 @@ def integration_reconciliation_history(
         replay_merges.update(git(repo_root, 'rev-list', '--first-parent', '--merges',
                                  f'{replay_base}..{replay_tip}').stdout.split())
     for commit in history:
-        if commit in declared:
+        if commit in declared or commit in closed_commits:
             continue
         if commit_parent_count(repo_root, commit) != 1:
             if commit in proofs or commit in replay_merges:

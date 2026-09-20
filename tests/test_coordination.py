@@ -3251,6 +3251,67 @@ with module.coordination_publication_lock(Path(repo_path)):
         _, state = self.remote_state(origin)
         self.assertNotIn('equivalent', [stack['id'] for stack in state['manifest']['stacks']])
 
+    def test_integration_reconciliation_uses_coordinated_absorbed_close_after_delivery_advances(self):
+        origin = self.create_remote('absorbed-close-history')
+        repo = self.clone(origin, 'absorbed-close-history')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/historical-close', 'delivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'historical-close', source, '--draft')
+        self.run_cli(repo, 'int', 'push')
+
+        publisher = self.clone(origin, 'absorbed-close-history-publisher')
+        self.git(publisher, 'cherry-pick', source)
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        self.run_cli(repo, 'stack', 'close', 'historical-close', '--reason', 'absorbed')
+
+        (publisher / 'delivered.txt').write_text('later delivery content\n')
+        self.git(publisher, 'commit', '-qam', 'feat: advance delivered content')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        self.git(
+            repo, 'fetch', '-q', 'origin',
+            '+refs/heads/main:refs/remotes/origin/main',
+        )
+
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        self.git(repo, 'switch', '-q', manifest['integration']['branch'])
+        self.git(repo, 'cherry-pick', source)
+        integration_tip = module.ref_tip(repo, manifest['integration']['branch'])
+        observation = module.observe_published_integration_tip(repo, manifest)
+        closed = module.historically_closed_integration_commits(
+            repo, integration_tip, observation
+        )
+        self.assertTrue(closed)
+        source_patch = module.commit_patch_id(repo, source)
+        self.assertIn(
+            source_patch,
+            {module.commit_patch_id(repo, commit) for commit in closed},
+        )
+        module.integration_reconciliation_history(
+            repo,
+            manifest,
+            integration_tip,
+            {},
+            manifest_path=manifest_path,
+            observation=observation,
+            delivery_tip=module.ref_tip(repo, 'origin/main'),
+        )
+
+        (repo / 'unowned.txt').write_text('must remain blocked\n')
+        self.git(repo, 'add', 'unowned.txt')
+        self.git(repo, 'commit', '-qm', 'test: unrelated unowned integration change')
+        with self.assertRaisesRegex(module.SyncwheelError, 'unexplained product paths: unowned.txt'):
+            module.integration_reconciliation_history(
+                repo,
+                manifest,
+                module.ref_tip(repo, manifest['integration']['branch']),
+                {},
+                manifest_path=manifest_path,
+                observation=observation,
+                delivery_tip=module.ref_tip(repo, 'origin/main'),
+            )
+
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')
         repo = self.clone(origin, 'absorbed-close')
