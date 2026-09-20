@@ -47,7 +47,8 @@
       "base": "origin/main",
       "branch": "pr/checks-none-policy",
       "commits": [
-        "baf68d9e0a7a1c861372225d2d699ed827b0377a"
+        "baf68d9e0a7a1c861372225d2d699ed827b0377a",
+        "e517a63522249fad2612b667a564b52a0891cb56"
       ],
       "id": "pr-checks-none",
       "integration_branch": "main-integration",
