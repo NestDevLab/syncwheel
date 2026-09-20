@@ -3259,6 +3259,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         source = self.commit_on_branch(repo, 'scratch/historical-close', 'delivered.txt')
         self.run_cli(repo, 'stack', 'create', 'historical-close', source, '--draft')
         self.run_cli(repo, 'int', 'push')
+        self.run_cli(repo, 'stack', 'promote', 'historical-close')
 
         publisher = self.clone(origin, 'absorbed-close-history-publisher')
         self.git(publisher, 'cherry-pick', source)
@@ -3276,7 +3277,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         module = self.load_module()
         manifest, manifest_path = module.load_manifest(repo)
         self.git(repo, 'switch', '-q', manifest['integration']['branch'])
-        self.git(repo, 'cherry-pick', source)
+        self.git(repo, 'merge', '-q', '--no-ff', source, '-m', 'test: merge closed stack')
         integration_tip = module.ref_tip(repo, manifest['integration']['branch'])
         observation = module.observe_published_integration_tip(repo, manifest)
         closed = module.historically_closed_integration_commits(
@@ -3337,10 +3338,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         module = self.load_module()
         worktree_root = '.syncwheel/wt'
         current_patterns = module.syncwheel_gitignore_patterns(worktree_root)
-        legacy_patterns = [
-            pattern for pattern in current_patterns
-            if pattern != '.syncwheel/manifests/*.local-ledger/'
-        ]
+        legacy_patterns = list(current_patterns)
+        legacy_patterns.remove('.syncwheel/manifests/*.local-ledger/')
 
         def managed_block(patterns):
             return (
@@ -3388,6 +3387,119 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.integration_reconciliation_history(
                 repo, manifest, module.ref_tip(repo, 'HEAD'), {},
             )
+
+    def test_legacy_gitignore_block_preserves_colliding_worktree_pattern(self):
+        module = self.load_module()
+        worktree_root = '.syncwheel/manifests/*.local-ledger'
+        patterns = module.syncwheel_gitignore_patterns(worktree_root)
+        self.assertEqual(
+            patterns.count('.syncwheel/manifests/*.local-ledger/'), 2,
+        )
+        legacy_patterns = list(patterns)
+        legacy_patterns.remove('.syncwheel/manifests/*.local-ledger/')
+        text = (
+            '# syncwheel managed metadata\n'
+            + '\n'.join(legacy_patterns)
+            + '\n# end syncwheel managed metadata\n'
+        )
+        parsed = module.split_historical_syncwheel_managed_gitignore(
+            text, worktree_root,
+        )
+        self.assertIsNotNone(parsed)
+        self.assertIsNotNone(parsed['managed'])
+        omitted = (
+            '# syncwheel managed metadata\n'
+            + '\n'.join(
+                pattern for pattern in patterns
+                if pattern != '.syncwheel/manifests/*.local-ledger/'
+            )
+            + '\n# end syncwheel managed metadata\n'
+        )
+        self.assertIsNone(module.split_historical_syncwheel_managed_gitignore(
+            omitted, worktree_root,
+        ))
+
+    def test_integration_reconciliation_accepts_delivery_merge_with_control_only_result(self):
+        origin = self.create_remote('historical-control-merge')
+        repo = self.clone(origin, 'historical-control-merge')
+        module = self.load_module()
+        worktree_root = '.syncwheel/wt'
+        (repo / '.syncwheel').mkdir(exist_ok=True)
+        control = {'syncwheel_worktree_root': worktree_root, 'stage': 'base'}
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(control))
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'chore: add control manifest')
+        base = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'branch', 'integration/shared', base)
+
+        (repo / 'delivered.txt').write_text('delivery\n')
+        self.git(repo, 'add', 'delivered.txt')
+        self.git(repo, 'commit', '-qm', 'feat: advance delivery')
+        delivery_tip = module.ref_tip(repo, 'HEAD')
+
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        control['stage'] = 'integration'
+        (repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(control))
+        self.git(repo, 'commit', '-qam', 'chore: update control manifest')
+        self.git(repo, 'merge', '-q', '--no-ff', delivery_tip, '-m', 'merge delivery')
+        merge_tip = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'syncwheel_worktree_root': worktree_root,
+            'integration': {'base': delivery_tip},
+            'stacks': [],
+        }
+        module.integration_reconciliation_history(
+            repo, manifest, merge_tip, {}, delivery_tip=delivery_tip,
+        )
+
+        unsafe_tree = self.git(repo, 'rev-parse', f'{merge_tip}^1^{{tree}}').stdout.strip()
+        unsafe_merge = self.git(
+            repo, 'commit-tree', unsafe_tree,
+            '-p', f'{merge_tip}^1', '-p', delivery_tip,
+            '-m', 'merge delivery with product rollback',
+        ).stdout.strip()
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'integration reconciliation has unclassified merge',
+        ):
+            module.integration_reconciliation_history(
+                repo, manifest, unsafe_merge, {}, delivery_tip=delivery_tip,
+            )
+
+    def test_historical_merged_close_requires_exact_squash_tree(self):
+        origin = self.create_remote('historical-squash-proof')
+        repo = self.clone(origin, 'historical-squash-proof')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', '-c', 'pr/historical-squash')
+        (repo / 'squash.txt').write_text('first\n')
+        self.git(repo, 'add', 'squash.txt')
+        self.git(repo, 'commit', '-qm', 'feat: first squash change')
+        first = module.ref_tip(repo, 'HEAD')
+        (repo / 'squash.txt').write_text('second\n')
+        self.git(repo, 'commit', '-qam', 'feat: second squash change')
+        second = module.ref_tip(repo, 'HEAD')
+        stack = {'commits': [first, second]}
+
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'squash.txt').write_text('different\n')
+        self.git(repo, 'add', 'squash.txt')
+        self.git(repo, 'commit', '-qm', 'feat: different delivery')
+        self.assertFalse(module.historical_stack_has_exact_squash_delivery(
+            repo, stack, module.ref_tip(repo, 'HEAD'),
+        ))
+
+        self.git(repo, 'reset', '-q', '--hard', base)
+        projection = module.deterministic_stack_projection(
+            repo, base, stack['commits'],
+        )
+        delivered = self.git(
+            repo, 'commit-tree', module.ref_tree(repo, projection['tip']),
+            '-p', base, '-m', 'feat: exact squash delivery',
+        ).stdout.strip()
+        self.git(repo, 'reset', '-q', '--hard', delivered)
+        self.assertTrue(module.historical_stack_has_exact_squash_delivery(
+            repo, stack, delivered,
+        ))
 
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')

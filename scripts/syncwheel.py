@@ -3778,10 +3778,8 @@ def split_historical_syncwheel_managed_gitignore(text, worktree_root):
         return None
     start = starts[0]
     end = ends[0]
-    legacy_patterns = [
-        pattern for pattern in syncwheel_gitignore_patterns(worktree_root)
-        if pattern != '.syncwheel/manifests/*.local-ledger/'
-    ]
+    legacy_patterns = syncwheel_gitignore_patterns(worktree_root)
+    legacy_patterns.remove('.syncwheel/manifests/*.local-ledger/')
     if content[start + 1:end] != legacy_patterns:
         return None
     return {
@@ -6357,7 +6355,36 @@ def historically_delivered_integration_boundary(repo_root, manifest, tip, observ
     return None
 
 
-def historically_closed_integration_commits(repo_root, tip, observation, candidates=None):
+def historical_stack_has_exact_squash_delivery(repo_root, stack, delivery_tip):
+    """Prove an old squash from its immutable source chain and delivery tree."""
+    commits = stack.get('commits') or []
+    if not commits or not delivery_tip or any(
+        not commit_exists(repo_root, commit) for commit in commits
+    ):
+        return False
+    base = commit_first_parent(repo_root, commits[0])
+    if not base or not branch_contains(repo_root, delivery_tip, base):
+        return False
+    delivery_path = git(
+        repo_root, 'rev-list', '--first-parent', '--reverse', '--ancestry-path',
+        f'{base}..{delivery_tip}',
+    ).stdout.split()
+    if not delivery_path:
+        return False
+    delivered = delivery_path[0]
+    parents = git(repo_root, 'show', '-s', '--format=%P', delivered).stdout.split()
+    if parents != [base]:
+        return False
+    projection = deterministic_stack_projection(repo_root, base, commits)
+    return (
+        projection.get('status') == 'projected'
+        and ref_tree(repo_root, projection['tip']) == ref_tree(repo_root, delivered)
+    )
+
+
+def historically_closed_integration_commits(
+    repo_root, tip, observation, candidates=None, delivery_tip=None,
+):
     """Return exact commits covered by a durable coordinated close proof.
 
     A squash/rebase close proves delivery when it happens, but later changes to
@@ -6374,8 +6401,16 @@ def historically_closed_integration_commits(repo_root, tip, observation, candida
     config = observation.get('config') or {}
     if not current or not integration_ref or not config.get('id'):
         return set()
+    candidates = [
+        commit_full_sha(repo_root, commit)
+        for commit in (candidates if candidates is not None else rev_list(repo_root, tip))
+        if commit_exists(repo_root, commit)
+    ]
+    candidate_patches = commit_patch_ids(repo_root, candidates)
+    candidate_patch_values = {value for value in candidate_patches.values() if value}
     head = current
     closed_sources = set()
+    absorbed_stack_ids = set()
     state_cache = {}
 
     def load_state(commit):
@@ -6400,7 +6435,7 @@ def historically_closed_integration_commits(repo_root, tip, observation, candida
             tombstones = [
                 item for item in state.get('tombstones') or []
                 if item.get('stack') == stack_id
-                and item.get('reason') == 'absorbed'
+                and item.get('reason') in {'absorbed', 'merged'}
             ]
             parent_state = load_state(parent)
             parent_stacks = [
@@ -6435,28 +6470,146 @@ def historically_closed_integration_commits(repo_root, tip, observation, candida
                         *stack_integration_commits(stack),
                         *stack_integration_only_commits(stack),
                     ]
-                    for commit in declared:
-                        if not commit_exists(repo_root, commit):
-                            continue
-                        closed_sources.add(commit_full_sha(repo_root, commit))
+                    managed_tip = (
+                        parent_state.get('managed_refs') or {}
+                    ).get(expected_ref)
+                    if tombstones[0].get('reason') == 'absorbed' and managed_tip:
+                        declared.append(managed_tip)
+                    declared = [
+                        commit_full_sha(repo_root, commit)
+                        for commit in declared if commit_exists(repo_root, commit)
+                    ]
+                    declared_patches = commit_patch_ids(repo_root, declared)
+                    relevant = bool(
+                        set(declared).intersection(candidates)
+                        or candidate_patch_values.intersection(
+                            value for value in declared_patches.values() if value
+                        )
+                    )
+                    reason = tombstones[0].get('reason')
+                    if reason == 'absorbed' or (
+                        relevant and historical_stack_has_exact_squash_delivery(
+                            repo_root, stack, delivery_tip
+                        )
+                    ):
+                        closed_sources.update(declared)
+                        if reason == 'absorbed':
+                            absorbed_stack_ids.add(stack_id)
+        if (
+            parent
+            and str(state.get('publication_scope') or '').startswith('promote:')
+        ):
+            stack_id = state['publication_scope'].split(':', 1)[1]
+            parent_state = load_state(parent)
+            parent_stacks = [
+                item for item in (parent_state.get('manifest') or {}).get('stacks') or []
+                if item.get('id') == stack_id
+            ]
+            child_stacks = [
+                item for item in (state.get('manifest') or {}).get('stacks') or []
+                if item.get('id') == stack_id
+            ]
+            parent_tombstones = {
+                coordination_tombstone_ref(item)
+                for item in parent_state.get('tombstones') or []
+            }
+            promoted = [
+                item for item in state.get('tombstones') or []
+                if item.get('stack') == stack_id
+                and item.get('reason') == 'promoted'
+            ]
+            if (
+                stack_id in absorbed_stack_ids
+                and len(parent_stacks) == 1
+                and len(child_stacks) == 1
+                and len(promoted) == 1
+            ):
+                old_stack = parent_stacks[0]
+                new_stack = child_stacks[0]
+                closed_ref = coordination_tombstone_ref(promoted[0])
+                state_form = coordination_state_manifest_digest_classification(
+                    repo_root, state, config.get('remote')
+                )['form']
+                parent_form = coordination_state_manifest_digest_classification(
+                    repo_root, parent_state, config.get('remote')
+                )['form']
+                if (
+                    closed_ref == f"refs/heads/{old_stack.get('branch')}"
+                    and closed_ref not in parent_tombstones
+                    and new_stack.get('branch') != old_stack.get('branch')
+                    and state_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                    and parent_form != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                ):
+                    promoted_sources = [
+                        *stack_integration_commits(old_stack),
+                        *stack_integration_only_commits(old_stack),
+                        promoted[0].get('remote_tip'),
+                    ]
+                    closed_sources.update(
+                        commit_full_sha(repo_root, commit)
+                        for commit in promoted_sources
+                        if commit and commit_exists(repo_root, commit)
+                    )
         current = parent
     if not closed_sources:
         return set()
-    candidates = [
-        commit_full_sha(repo_root, commit)
-        for commit in (candidates if candidates is not None else rev_list(repo_root, tip))
-        if commit_exists(repo_root, commit)
-    ]
     source_patches = {
         value for value in commit_patch_ids(repo_root, closed_sources).values()
         if value
     }
-    candidate_patches = commit_patch_ids(repo_root, candidates)
     return {
         commit for commit in candidates
         if commit in closed_sources
         or (candidate_patches.get(commit) and candidate_patches[commit] in source_patches)
     }
+
+
+def integration_control_only_transition(repo_root, commit, parent):
+    """Prove that a commit changes only valid Syncwheel control projection."""
+    changed = {
+        path for path in git(
+            repo_root, 'diff', '--name-only', '--no-renames', '-z', parent, commit
+        ).stdout.split('\0')
+        if path
+    }
+    if not changed or not changed.issubset({'.syncwheel/manifest.json', '.gitignore'}):
+        return False
+    entry = tree_path_entry(repo_root, commit, '.syncwheel/manifest.json')
+    if not entry or entry['mode'] != '100644':
+        return False
+    try:
+        control = json.loads(tree_path_bytes(repo_root, entry))
+    except (ValueError, UnicodeDecodeError):
+        control = None
+    if not isinstance(control, dict):
+        return False
+    if '.gitignore' not in changed:
+        return True
+    candidate = tree_path_entry(repo_root, commit, '.gitignore')
+    parent_entry = tree_path_entry(repo_root, parent, '.gitignore')
+    if not candidate or candidate['mode'] != '100644' or (
+        parent_entry is not None and parent_entry['mode'] != '100644'
+    ):
+        return False
+    try:
+        candidate_text = tree_path_bytes(repo_root, candidate).decode('utf-8')
+        parent_text = (
+            tree_path_bytes(repo_root, parent_entry).decode('utf-8')
+            if parent_entry else ''
+        )
+        candidate_ignore = split_historical_syncwheel_managed_gitignore(
+            candidate_text, syncwheel_worktree_root(control),
+        )
+        parent_ignore = split_historical_syncwheel_managed_gitignore(
+            parent_text, syncwheel_worktree_root(control),
+        )
+    except UnicodeDecodeError:
+        return False
+    return bool(
+        candidate_ignore and parent_ignore
+        and candidate_ignore['managed'] is not None
+        and candidate_ignore['unmanaged'] == parent_ignore['unmanaged']
+    )
 
 
 def integration_reconciliation_history(
@@ -6483,9 +6636,19 @@ def integration_reconciliation_history(
     patches.discard(None)
     patches.update(patch_ids_reachable_from_ref(repo_root, base))
     history = rev_list(repo_root, f'{history_base}..{tip}')
+    merge_parents = {
+        commit: git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
+        for commit in history
+        if commit_parent_count(repo_root, commit) > 1
+    }
+    historical_candidates = list(history)
+    historical_candidates.extend(
+        parents[1] for parents in merge_parents.values() if len(parents) == 2
+    )
     closed_commits = (
         historically_closed_integration_commits(
-            repo_root, tip, observation, candidates=history,
+            repo_root, tip, observation, candidates=historical_candidates,
+            delivery_tip=delivery_tip,
         ) if not detached_replay else set()
     )
     proofs = {commit: proof for commit in history
@@ -6503,39 +6666,22 @@ def integration_reconciliation_history(
         if commit_parent_count(repo_root, commit) != 1:
             if commit in proofs or commit in replay_merges:
                 continue
+            parents = merge_parents[commit]
+            if (
+                len(parents) == 2
+                and (
+                    (delivery_tip and branch_contains(repo_root, delivery_tip, parents[1]))
+                    or parents[1] in closed_commits
+                )
+                and integration_control_only_transition(
+                    repo_root, commit, parents[1]
+                )
+            ):
+                continue
             raise SyncwheelError(f'integration reconciliation has unclassified merge: {commit}')
         changed = set(commit_changed_files(repo_root, commit))
-        if changed and changed.issubset({'.syncwheel/manifest.json', '.gitignore'}):
-            entry = tree_path_entry(repo_root, commit, '.syncwheel/manifest.json')
-            try:
-                control = json.loads(tree_path_bytes(repo_root, entry))
-            except (ValueError, UnicodeDecodeError):
-                control = None
-            if entry and entry['mode'] == '100644' and isinstance(control, dict):
-                if '.gitignore' not in changed:
-                    continue
-                candidate = tree_path_entry(repo_root, commit, '.gitignore')
-                parent = tree_path_entry(repo_root, f'{commit}^', '.gitignore')
-                if candidate and candidate['mode'] == '100644' and (
-                    parent is None or parent['mode'] == '100644'
-                ):
-                    try:
-                        candidate_ignore = split_historical_syncwheel_managed_gitignore(
-                            tree_path_bytes(repo_root, candidate).decode('utf-8'),
-                            syncwheel_worktree_root(control),
-                        )
-                        parent_ignore = split_historical_syncwheel_managed_gitignore(
-                            tree_path_bytes(repo_root, parent).decode('utf-8'),
-                            syncwheel_worktree_root(control),
-                        )
-                    except UnicodeDecodeError:
-                        candidate_ignore = parent_ignore = None
-                    if (
-                        candidate_ignore and parent_ignore
-                        and candidate_ignore['managed'] is not None
-                        and candidate_ignore['unmanaged'] == parent_ignore['unmanaged']
-                    ):
-                        continue
+        if integration_control_only_transition(repo_root, commit, f'{commit}^'):
+            continue
         if is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
             continue
         patch = commit_patch_id(repo_root, commit)
