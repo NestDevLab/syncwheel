@@ -23,8 +23,10 @@
   from a delivery-backed or durably closed parent by valid control metadata.
   For older squash closes recorded as `merged`, require an exact reconstructed
   stack tree on the delivery first-parent chain, and carry a later verified
-  `absorbed` close through its exact stack generation, coordinated draft
-  promotion, authoritative managed tip, and original delivery target.
+  `absorbed` close through its delivery-identical stack revisions, coordinated
+  draft promotion, authoritative managed-tip history, and original delivery
+  target. Content rewrites of the same stack generation cannot inherit that
+  delivery proof.
 
 ## 0.43.20 - 2026-09-19
 

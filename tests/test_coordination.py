@@ -3524,6 +3524,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         old = self.commit_on_branch(repo, 'scratch/old-generation', 'old.txt')
         self.git(repo, 'switch', '-q', 'main')
         new = self.commit_on_branch(repo, 'scratch/new-generation', 'new.txt')
+        self.git(repo, 'switch', '-q', 'main')
+        rewritten = self.commit_on_branch(
+            repo, 'scratch/rewritten-generation', 'rewritten.txt',
+        )
 
         def stack(branch, commit):
             return {
@@ -3583,7 +3587,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         original_git = module.git
 
-        def closed_sources(states):
+        def closed_sources(states, candidates=None, tip=None):
             def fake_git(repo_root, *args, **kwargs):
                 if (
                     len(args) == 4
@@ -3610,11 +3614,31 @@ with module.coordination_publication_lock(Path(repo_path)):
                 return_value={'form': 'control-manifest-file'},
             ):
                 return module.historically_closed_integration_commits(
-                    repo, new, observation, candidates=[old, new],
+                    repo,
+                    tip or new,
+                    observation,
+                    candidates=candidates or [old, new],
                 )
 
         trusted = closed_sources(reused_states)
         self.assertIn(new, trusted)
+        self.assertNotIn(old, trusted)
+
+        rewritten_pr = stack('pr/new-reused', rewritten)
+        rewritten_states = json.loads(json.dumps(reused_states))
+        rewritten_states['s5'] = state('s4', 'stack:reused', [rewritten_pr], [
+            old_promoted, old_abandoned, new_promoted,
+        ], {'refs/heads/pr/new-reused': rewritten})
+        rewritten_states['s6'] = state('s5', 'close:reused', [], [
+            old_promoted, old_abandoned, new_promoted, new_absorbed,
+        ], {})
+        trusted = closed_sources(
+            rewritten_states,
+            candidates=[old, new, rewritten],
+            tip=rewritten,
+        )
+        self.assertIn(rewritten, trusted)
+        self.assertNotIn(new, trusted)
         self.assertNotIn(old, trusted)
 
         corrupt_states = {key: value for key, value in reused_states.items() if key in {'s3', 's4', 's5'}}
@@ -3631,6 +3655,34 @@ with module.coordination_publication_lock(Path(repo_path)):
         trusted = closed_sources(corrupt_states)
         self.assertIn(new, trusted)
         self.assertNotIn(old, trusted)
+
+    def test_absorbed_managed_ref_commits_use_a_unique_first_parent_base(self):
+        origin = self.create_remote('absorbed-managed-ref-chain')
+        repo = self.clone(origin, 'absorbed-managed-ref-chain')
+        module = self.load_module()
+        delivery_tip = module.ref_tip(repo, 'main')
+        self.git(repo, 'switch', '-q', '-c', 'pr/absorbed-managed-ref')
+        (repo / 'first.txt').write_text('first\n')
+        self.git(repo, 'add', 'first.txt')
+        self.git(repo, 'commit', '-qm', 'feat: first absorbed change')
+        first = module.ref_tip(repo, 'HEAD')
+        (repo / 'second.txt').write_text('second\n')
+        self.git(repo, 'add', 'second.txt')
+        self.git(repo, 'commit', '-qm', 'feat: second absorbed change')
+        managed_tip = module.ref_tip(repo, 'HEAD')
+
+        self.assertEqual(
+            module.absorbed_managed_ref_commits(repo, managed_tip, delivery_tip),
+            [first, managed_tip],
+        )
+        orphan_tree = module.ref_tree(repo, managed_tip)
+        orphan = self.git(
+            repo, 'commit-tree', orphan_tree, '-m', 'test: unrelated root',
+        ).stdout.strip()
+        self.assertEqual(
+            module.absorbed_managed_ref_commits(repo, orphan, delivery_tip),
+            [],
+        )
 
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')
