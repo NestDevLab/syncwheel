@@ -3521,9 +3521,19 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote('absorbed-generation-proof')
         repo = self.clone(origin, 'absorbed-generation-proof')
         module = self.load_module()
+        base = module.ref_tip(repo, 'main')
         old = self.commit_on_branch(repo, 'scratch/old-generation', 'old.txt')
         self.git(repo, 'switch', '-q', 'main')
         new = self.commit_on_branch(repo, 'scratch/new-generation', 'new.txt')
+        self.git(repo, 'switch', '-q', 'scratch/new-generation')
+        (repo / 'undeclared-middle.txt').write_text('undeclared\n')
+        self.git(repo, 'add', 'undeclared-middle.txt')
+        self.git(repo, 'commit', '-qm', 'test: undeclared middle change')
+        undeclared_middle = module.ref_tip(repo, 'HEAD')
+        (repo / 'rewritten-chain.txt').write_text('rewritten\n')
+        self.git(repo, 'add', 'rewritten-chain.txt')
+        self.git(repo, 'commit', '-qm', 'feat: rewritten chain change')
+        rewritten_chain = module.ref_tip(repo, 'HEAD')
         self.git(repo, 'switch', '-q', 'main')
         rewritten = self.commit_on_branch(
             repo, 'scratch/rewritten-generation', 'rewritten.txt',
@@ -3587,7 +3597,9 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         original_git = module.git
 
-        def closed_sources(states, candidates=None, tip=None):
+        def closed_sources(
+            states, candidates=None, tip=None, delivery_observation=None,
+        ):
             def fake_git(repo_root, *args, **kwargs):
                 if (
                     len(args) == 4
@@ -3618,6 +3630,8 @@ with module.coordination_publication_lock(Path(repo_path)):
                     tip or new,
                     observation,
                     candidates=candidates or [old, new],
+                    delivery_tip=(delivery_observation or {}).get('tip'),
+                    delivery_observation=delivery_observation,
                 )
 
         trusted = closed_sources(reused_states)
@@ -3641,6 +3655,45 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertNotIn(new, trusted)
         self.assertNotIn(old, trusted)
 
+        lineage_pr = stack('pr/new-reused', rewritten_chain)
+        lineage_states = json.loads(json.dumps(reused_states))
+        lineage_states['s5'] = state('s4', 'stack:reused', [lineage_pr], [
+            old_promoted, old_abandoned, new_promoted,
+        ], {'refs/heads/pr/new-reused': rewritten_chain})
+        lineage_states['s6'] = state('s5', 'close:reused', [], [
+            old_promoted, old_abandoned, new_promoted, new_absorbed,
+        ], {})
+        exact_delivery = self.git(
+            repo,
+            'commit-tree', module.ref_tree(repo, rewritten_chain),
+            '-p', base, '-m', 'feat: squash complete managed chain',
+        ).stdout.strip()
+        delivery_observation = {
+            'tip': exact_delivery,
+            'remote': 'origin',
+            'remoteRef': 'refs/heads/main',
+            'remoteTip': exact_delivery,
+        }
+        self.assertTrue(
+            module.historical_managed_tip_has_exact_squash_delivery(
+                repo,
+                rewritten_chain,
+                lineage_pr,
+                delivery_observation,
+                {'canonical_remote': 'origin'},
+                'origin',
+            ),
+        )
+        trusted = closed_sources(
+            lineage_states,
+            candidates=[new, undeclared_middle, rewritten_chain],
+            tip=rewritten_chain,
+            delivery_observation=delivery_observation,
+        )
+        self.assertIn(new, trusted)
+        self.assertIn(rewritten_chain, trusted)
+        self.assertNotIn(undeclared_middle, trusted)
+
         corrupt_states = {key: value for key, value in reused_states.items() if key in {'s3', 's4', 's5'}}
         corrupt_states['s3'] = json.loads(json.dumps(corrupt_states['s3']))
         corrupt_states['s3']['parent_state'] = None
@@ -3656,33 +3709,60 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertIn(new, trusted)
         self.assertNotIn(old, trusted)
 
-    def test_absorbed_managed_ref_commits_use_a_unique_first_parent_base(self):
-        origin = self.create_remote('absorbed-managed-ref-chain')
-        repo = self.clone(origin, 'absorbed-managed-ref-chain')
+    def test_historical_managed_tip_squash_rejects_an_undeclared_commit(self):
+        origin = self.create_remote('absorbed-managed-tip-squash')
+        repo = self.clone(origin, 'absorbed-managed-tip-squash')
         module = self.load_module()
-        delivery_tip = module.ref_tip(repo, 'main')
+        base = module.ref_tip(repo, 'main')
         self.git(repo, 'switch', '-q', '-c', 'pr/absorbed-managed-ref')
-        (repo / 'first.txt').write_text('first\n')
-        self.git(repo, 'add', 'first.txt')
-        self.git(repo, 'commit', '-qm', 'feat: first absorbed change')
-        first = module.ref_tip(repo, 'HEAD')
-        (repo / 'second.txt').write_text('second\n')
-        self.git(repo, 'add', 'second.txt')
-        self.git(repo, 'commit', '-qm', 'feat: second absorbed change')
+        (repo / 'undeclared.txt').write_text('undeclared\n')
+        self.git(repo, 'add', 'undeclared.txt')
+        self.git(repo, 'commit', '-qm', 'test: undeclared managed change')
+        undeclared = module.ref_tip(repo, 'HEAD')
+        (repo / 'declared.txt').write_text('declared\n')
+        self.git(repo, 'add', 'declared.txt')
+        self.git(repo, 'commit', '-qm', 'feat: declared managed change')
+        declared = module.ref_tip(repo, 'HEAD')
         managed_tip = module.ref_tip(repo, 'HEAD')
+        stack = {
+            'commits': [declared],
+            'target_remote': 'origin',
+            'target_branch': 'main',
+        }
 
-        self.assertEqual(
-            module.absorbed_managed_ref_commits(repo, managed_tip, delivery_tip),
-            [first, managed_tip],
+        def observation(tip):
+            return {
+                'tip': tip,
+                'remote': 'origin',
+                'remoteRef': 'refs/heads/main',
+                'remoteTip': tip,
+            }
+
+        declared_projection = module.deterministic_stack_projection(
+            repo, base, [declared],
         )
-        orphan_tree = module.ref_tree(repo, managed_tip)
-        orphan = self.git(
-            repo, 'commit-tree', orphan_tree, '-m', 'test: unrelated root',
+        delivery_without_undeclared = self.git(
+            repo,
+            'commit-tree', module.ref_tree(repo, declared_projection['tip']),
+            '-p', base, '-m', 'feat: deliver only declared change',
         ).stdout.strip()
-        self.assertEqual(
-            module.absorbed_managed_ref_commits(repo, orphan, delivery_tip),
-            [],
+
+        self.assertFalse(
+            module.historical_managed_tip_has_exact_squash_delivery(
+                repo, managed_tip, stack, observation(delivery_without_undeclared), {},
+            ),
         )
+        exact_delivery = self.git(
+            repo,
+            'commit-tree', module.ref_tree(repo, managed_tip),
+            '-p', base, '-m', 'feat: deliver complete managed product',
+        ).stdout.strip()
+        self.assertTrue(
+            module.historical_managed_tip_has_exact_squash_delivery(
+                repo, managed_tip, stack, observation(exact_delivery), {},
+            ),
+        )
+        self.assertNotEqual(undeclared, declared)
 
     def test_absorbed_close_requires_delivery_base_content_even_with_force(self):
         origin = self.create_remote('absorbed-close')

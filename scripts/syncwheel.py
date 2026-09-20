@@ -6415,34 +6415,52 @@ def historical_stack_has_exact_squash_delivery(
     )
 
 
-def absorbed_managed_ref_commits(repo_root, managed_tip, delivery_tip):
-    """Return managed first-parent commits after the unique delivery merge base."""
+def historical_managed_tip_has_exact_squash_delivery(
+    repo_root, managed_tip, stack, delivery_observation, defaults,
+    coordination_remote=None,
+):
+    """Prove the complete managed first-parent product was squash-delivered."""
+    delivery_tip = (delivery_observation or {}).get('tip')
     if (
         not managed_tip
         or not delivery_tip
         or not commit_exists(repo_root, managed_tip)
         or not commit_exists(repo_root, delivery_tip)
     ):
-        return []
+        return False
     bases = git(
         repo_root, 'merge-base', '--all', managed_tip, delivery_tip,
         check=False,
     )
     if bases.returncode != 0:
-        return []
+        return False
     bases = bases.stdout.split()
     if len(bases) != 1:
-        return []
+        return False
     base = bases[0]
     first_parent_chain = git(
         repo_root, 'rev-list', '--first-parent', managed_tip,
     ).stdout.split()
     if base not in first_parent_chain:
-        return []
-    return git(
+        return False
+    commits = git(
         repo_root, 'rev-list', '--first-parent', '--reverse',
         f'{base}..{managed_tip}',
     ).stdout.split()
+    if not commits:
+        return False
+    managed_stack = {
+        'commits': commits,
+        'target_remote': stack.get('target_remote'),
+        'target_branch': stack.get('target_branch'),
+    }
+    return historical_stack_has_exact_squash_delivery(
+        repo_root,
+        managed_stack,
+        delivery_observation,
+        defaults,
+        coordination_remote,
+    )
 
 
 def historically_closed_integration_commits(
@@ -6540,9 +6558,6 @@ def historically_closed_integration_commits(
                     ).get(expected_ref)
                     if tombstones[0].get('reason') == 'absorbed' and managed_tip:
                         declared.append(managed_tip)
-                        declared.extend(absorbed_managed_ref_commits(
-                            repo_root, managed_tip, delivery_tip,
-                        ))
                     declared = [
                         commit_full_sha(repo_root, commit)
                         for commit in declared if commit_exists(repo_root, commit)
@@ -6566,7 +6581,20 @@ def historically_closed_integration_commits(
                     ):
                         closed_sources.update(declared)
                         if reason == 'absorbed':
-                            trusted_stack_generations[stack_id] = canonical_json_digest(stack)
+                            trusted_stack_generations[stack_id] = {
+                                'digest': canonical_json_digest(stack),
+                                'managed_tip': managed_tip,
+                                'exact_squash_delivery': (
+                                    historical_managed_tip_has_exact_squash_delivery(
+                                        repo_root,
+                                        managed_tip,
+                                        stack,
+                                        delivery_observation,
+                                        (parent_state.get('manifest') or {}).get('defaults') or {},
+                                        config.get('remote'),
+                                    )
+                                ),
+                            }
         if (
             parent
             and str(state.get('publication_scope') or '').startswith('promote:')
@@ -6593,7 +6621,7 @@ def historically_closed_integration_commits(
             ]
             if (
                 len(child_stacks) == 1
-                and trusted_stack_generations.get(stack_id)
+                and (trusted_stack_generations.get(stack_id) or {}).get('digest')
                 == canonical_json_digest(child_stacks[0])
                 and len(parent_stacks) == 1
                 and len(promoted) == 1
@@ -6633,7 +6661,7 @@ def historically_closed_integration_commits(
         if parent:
             parent_state = load_state(parent)
             scope = str(state.get('publication_scope') or '')
-            for stack_id, trusted_digest in list(trusted_stack_generations.items()):
+            for stack_id, trusted in list(trusted_stack_generations.items()):
                 if scope == f'close:{stack_id}':
                     continue
                 child_stacks = [
@@ -6646,7 +6674,7 @@ def historically_closed_integration_commits(
                 ]
                 if (
                     len(child_stacks) != 1
-                    or canonical_json_digest(child_stacks[0]) != trusted_digest
+                    or canonical_json_digest(child_stacks[0]) != trusted['digest']
                 ):
                     trusted_stack_generations.pop(stack_id, None)
                     continue
@@ -6654,16 +6682,47 @@ def historically_closed_integration_commits(
                     trusted_stack_generations.pop(stack_id, None)
                     continue
                 parent_digest = canonical_json_digest(parent_stacks[0])
-                if parent_digest != trusted_digest:
+                parent_ref = f"refs/heads/{parent_stacks[0].get('branch')}"
+                child_ref = f"refs/heads/{child_stacks[0].get('branch')}"
+                parent_managed_tip = (
+                    parent_state.get('managed_refs') or {}
+                ).get(parent_ref)
+                child_managed_tip = (
+                    state.get('managed_refs') or {}
+                ).get(child_ref)
+                if parent_digest != trusted['digest']:
                     same_delivery = (
                         scope == f'stack:{stack_id}'
                         and stack_delivery_identity(child_stacks[0])
                         == stack_delivery_identity(parent_stacks[0])
+                        and child_managed_tip == parent_managed_tip
                     )
-                    if scope != f'promote:{stack_id}' and not same_delivery:
+                    if scope == f'promote:{stack_id}':
+                        pass
+                    elif same_delivery:
+                        pass
+                    elif (
+                        scope == f'stack:{stack_id}'
+                        and child_ref == parent_ref
+                        and trusted['exact_squash_delivery']
+                        and child_managed_tip == trusted['managed_tip']
+                        and parent_managed_tip
+                        and commit_exists(repo_root, parent_managed_tip)
+                        and parent_managed_tip in git(
+                            repo_root, 'rev-list', '--first-parent', child_managed_tip,
+                        ).stdout.split()
+                    ):
+                        closed_sources.add(commit_full_sha(repo_root, parent_managed_tip))
                         trusted_stack_generations.pop(stack_id, None)
                         continue
-                trusted_stack_generations[stack_id] = parent_digest
+                    else:
+                        trusted_stack_generations.pop(stack_id, None)
+                        continue
+                trusted_stack_generations[stack_id] = {
+                    **trusted,
+                    'digest': parent_digest,
+                    'managed_tip': parent_managed_tip,
+                }
         current = parent
     if not closed_sources:
         return set()
