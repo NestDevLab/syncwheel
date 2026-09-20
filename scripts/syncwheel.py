@@ -8905,10 +8905,21 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             })
         required_names = github_required_check_names(rules)
         if required_names:
-            observed_names = {item.get('name') for item in checks if isinstance(item, dict)}
+            observed_by_name = {
+                item.get('name'): item
+                for item in checks
+                if isinstance(item, dict) and isinstance(item.get('name'), str)
+            }
             for name in required_names:
-                if name not in observed_names:
+                required_check = observed_by_name.get(name)
+                if required_check is None:
                     github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
+                elif github_ci_check_result(required_check) is None:
+                    github_blocker(
+                        blockers,
+                        'required_check_failed_or_pending',
+                        f'required check did not conclude SUCCESS/SKIPPED: {required_check}',
+                    )
         if decision == 'REVIEW_REQUIRED':
             path = 'admin-review-bypass'
         else:
