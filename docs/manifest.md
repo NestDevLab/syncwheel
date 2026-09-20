@@ -353,6 +353,12 @@ tombstoned recovery ref; Syncwheel does not delete it. If a reconcile-created
 `.syncwheel/wt/<draft-branch>` directory exists, promotion prints its retained
 path rather than moving it silently.
 
+If another coordinated clone already completed the same promotion, rerun
+`stack promote` with the same destination branch. Syncwheel adopts the
+published branch locally without another remote publication only when the
+published stack shape, managed ref tip, and promotion tombstone exactly match
+the local draft.
+
 New manifests require every declared stack to participate in integration. Migrate
 an existing legacy manifest only after closing stacks that are already absorbed
 or abandoned:

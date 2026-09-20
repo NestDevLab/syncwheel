@@ -8276,6 +8276,244 @@ with module.coordination_publication_lock(Path(repo_path)):
         fixture = self.prepare_landed_promotion('round9-sync-first', 'synced')
         self.assert_landed_promotion_completes(fixture, 'stack', 'sync', 'synced')
 
+    def test_promote_adopts_an_equivalent_promotion_from_another_clone(self):
+        origin = self.create_remote('round9-foreign-promotion')
+        publisher = self.clone(origin, 'round9-foreign-promotion-publisher')
+        self.init_coordinated(publisher)
+        self.run_cli(publisher, 'int', 'push')
+        source = self.commit_on_branch(
+            publisher, 'scratch/foreign-promotion', 'foreign-promotion.txt'
+        )
+        self.run_cli(
+            publisher, 'stack', 'create', 'foreign-promotion', source, '--draft'
+        )
+        follower = self.mirror_coordinated_clone(
+            origin,
+            publisher,
+            'round9-foreign-promotion-follower',
+            ['integration/shared', 'syncwheel/draft/foreign-promotion'],
+        )
+        self.run_cli(
+            publisher,
+            'stack',
+            'promote',
+            'foreign-promotion',
+            '--branch',
+            'pr/foreign-promotion',
+        )
+        promoted_state, _state = self.remote_state(origin)
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(follower)
+        stack = next(
+            item for item in manifest['stacks']
+            if item['id'] == 'foreign-promotion'
+        )
+        draft_branch = stack['branch']
+        draft_tip = module.ref_tip(follower, draft_branch)
+        proposed = json.loads(json.dumps(manifest))
+        proposed_stack = next(
+            item for item in proposed['stacks']
+            if item['id'] == 'foreign-promotion'
+        )
+        proposed_stack['branch'] = 'pr/foreign-promotion'
+        proposed_stack['state'] = 'published'
+        proposed_stack['publication'] = {'enabled': True}
+        tombstone = {
+            'stack': 'foreign-promotion',
+            'branch': draft_branch,
+            'ref': f'refs/heads/{draft_branch}',
+            'reason': 'promoted',
+            'remote_tip': draft_tip,
+        }
+        rename = {
+            'stack': 'foreign-promotion',
+            'from_branch': draft_branch,
+            'to_branch': 'pr/foreign-promotion',
+            'from_ref_tip': draft_tip,
+        }
+        identity, fingerprint = module.coordination_publication_identity(
+            follower,
+            proposed,
+            {'refs/heads/pr/foreign-promotion': draft_tip},
+            'promote:foreign-promotion',
+            'partial',
+            tombstone=tombstone,
+            rename=rename,
+        )
+        stale_token = str(uuid.uuid4())
+        module.append_ledger_event(
+            follower,
+            'coordination_publish_intent',
+            {
+                **identity,
+                'fingerprint': fingerprint,
+                'operation_token': stale_token,
+                'expected_coordination_state_tip': promoted_state,
+            },
+            manifest_path,
+        )
+
+        adopted = self.run_cli(
+            follower,
+            'stack',
+            'promote',
+            'foreign-promotion',
+            '--branch',
+            'pr/foreign-promotion',
+        )
+
+        self.assertIn('adopted equivalent published promotion', adopted.stdout)
+        self.assertEqual(self.remote_state(origin)[0], promoted_state)
+        self.assertFalse(module.pending_coordination_publications(follower, manifest_path))
+        abandoned = next(
+            event['payload'] for event in module.load_ledger_events(follower)
+            if event['type'] == 'coordination_publish_abandoned'
+            and event['payload'].get('operation_token') == stale_token
+        )
+        self.assertEqual(abandoned['reason'], 'not_landed')
+        self.assertTrue(module.branch_exists(follower, 'pr/foreign-promotion'))
+        self.assertFalse(
+            module.branch_exists(follower, 'syncwheel/draft/foreign-promotion')
+        )
+        saved = json.loads((follower / '.syncwheel' / 'manifest.json').read_text())
+        promoted = next(
+            item for item in saved['stacks']
+            if item['id'] == 'foreign-promotion'
+        )
+        self.assertEqual(promoted['branch'], 'pr/foreign-promotion')
+        self.assertEqual(promoted.get('state', 'published'), 'published')
+
+    def prepare_foreign_promotion_for_adoption(self, name):
+        origin = self.create_remote(name)
+        publisher = self.clone(origin, f'{name}-publisher')
+        self.init_coordinated(publisher)
+        self.run_cli(publisher, 'int', 'push')
+        stack_id = f'{name}-stack'
+        source = self.commit_on_branch(
+            publisher, f'scratch/{stack_id}', f'{stack_id}.txt'
+        )
+        self.run_cli(publisher, 'stack', 'create', stack_id, source, '--draft')
+        draft_branch = f'syncwheel/draft/{stack_id}'
+        follower = self.mirror_coordinated_clone(
+            origin,
+            publisher,
+            f'{name}-follower',
+            ['integration/shared', draft_branch],
+        )
+        target_branch = f'pr/{stack_id}'
+        self.run_cli(
+            publisher, 'stack', 'promote', stack_id, '--branch', target_branch
+        )
+        return {
+            'origin': origin,
+            'follower': follower,
+            'stack': stack_id,
+            'draft': draft_branch,
+            'target': target_branch,
+            'tip': self.git(follower, 'rev-parse', draft_branch).stdout.strip(),
+        }
+
+    def test_foreign_promotion_adoption_rejects_a_different_local_target_tip(self):
+        for relation in ('advanced', 'divergent'):
+            with self.subTest(relation=relation):
+                fixture = self.prepare_foreign_promotion_for_adoption(
+                    f'round9-foreign-target-{relation}'
+                )
+                repo = fixture['follower']
+                if relation == 'advanced':
+                    self.git(repo, 'branch', fixture['target'], fixture['tip'])
+                else:
+                    self.git(repo, 'branch', fixture['target'], 'origin/main')
+                previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+                self.git(repo, 'switch', '-q', fixture['target'])
+                (repo / f'{relation}.txt').write_text(f'{relation}\n')
+                self.git(repo, 'add', f'{relation}.txt')
+                self.git(repo, 'commit', '-q', '-m', f'test: {relation} target')
+                self.git(repo, 'switch', '-q', previous)
+                target_before = self.git(
+                    repo, 'rev-parse', fixture['target']
+                ).stdout.strip()
+                manifest_path = repo / '.syncwheel' / 'manifest.json'
+                manifest_before = manifest_path.read_bytes()
+                state_before = self.remote_state(fixture['origin'])[0]
+
+                rejected = self.run_cli(
+                    repo,
+                    'stack',
+                    'promote',
+                    fixture['stack'],
+                    '--branch',
+                    fixture['target'],
+                    expected=2,
+                )
+
+                self.assertIn('existing local branch', rejected.stderr)
+                self.assertEqual(
+                    self.git(repo, 'rev-parse', fixture['target']).stdout.strip(),
+                    target_before,
+                )
+                self.assertEqual(manifest_path.read_bytes(), manifest_before)
+                self.assertEqual(self.remote_state(fixture['origin'])[0], state_before)
+
+    def test_foreign_promotion_adoption_preserves_local_semantic_guards(self):
+        for guard in ('channel', 'branch-owner'):
+            with self.subTest(guard=guard):
+                fixture = self.prepare_foreign_promotion_for_adoption(
+                    f'round9-foreign-guard-{guard}'
+                )
+                repo = fixture['follower']
+                module = self.load_module()
+                manifest, manifest_path = module.load_manifest(repo)
+                stack = next(
+                    item for item in manifest['stacks']
+                    if item['id'] == fixture['stack']
+                )
+                if guard == 'channel':
+                    manifest['version'] = 3
+                    manifest.setdefault('channels', []).append({
+                        'id': 'pinned',
+                        'branch': 'channel/pinned',
+                        'lifecycle': 'shared',
+                        'base': manifest['defaults']['base_ref'],
+                        'baseRevision': module.commit_full_sha(
+                            repo, manifest['defaults']['base_ref']
+                        ),
+                        'remote': manifest['defaults']['publication_remote'],
+                        'composition': [
+                            module.pin_stack_for_channel(
+                                repo, manifest, fixture['stack']
+                            )
+                        ],
+                    })
+                    expected = 'pinned by active channel(s): pinned'
+                else:
+                    other = json.loads(json.dumps(stack))
+                    other['id'] = 'existing-owner'
+                    other['branch'] = fixture['target']
+                    other['state'] = 'published'
+                    other['publication'] = {'enabled': True}
+                    manifest['stacks'].append(other)
+                    expected = 'stack branch already exists in manifest'
+                module.save_manifest(manifest_path, manifest)
+                manifest_before = manifest_path.read_bytes()
+                refs_before = self.git(repo, 'show-ref').stdout
+                state_before = self.remote_state(fixture['origin'])[0]
+
+                rejected = self.run_cli(
+                    repo,
+                    'stack',
+                    'promote',
+                    fixture['stack'],
+                    '--branch',
+                    fixture['target'],
+                    expected=2,
+                )
+
+                self.assertIn(expected, rejected.stderr)
+                self.assertEqual(manifest_path.read_bytes(), manifest_before)
+                self.assertEqual(self.git(repo, 'show-ref').stdout, refs_before)
+                self.assertEqual(self.remote_state(fixture['origin'])[0], state_before)
+
     def test_add_completes_a_landed_promotion_first(self):
         fixture = self.prepare_landed_promotion('round9-add-first', 'added')
         extra = self.commit_on_branch(fixture['repo'], 'scratch/added-extra', 'extra.txt')

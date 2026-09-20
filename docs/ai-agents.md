@@ -142,7 +142,10 @@ only its manifest save; `stack promote`, `stack push`, `int push`,
 `reconcile --apply` complete it from the published state and rebuild the
 promoted branch instead of requiring a particular local branch layout, anchoring
 a diverged draft branch under `refs/syncwheel/recovery/drafts/` before dropping
-it. Never leave a publish intent that no command can terminalize, and never let
+it. When a different clone completed the same promotion without leaving a local
+intent, `stack promote` may adopt it only from exact published stack, ref, and
+tombstone evidence; adoption must not publish a new remote state. Never leave a
+publish intent that no command can terminalize, and never let
 a foreign pending intent be the reason an unrelated publication cannot run.
 
 For draft close, the order is intent, remote tombstone claim plus state CAS,

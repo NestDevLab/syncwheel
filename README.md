@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.22`
+Current version: `0.43.23`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -187,7 +187,10 @@ rebuild`, `stack sync` and `stack add` included, completes it from the published
 state and rebuilds the promoted branch, so an intervening `sync` cannot strand
 it, and a draft branch that came back with commits of its own is anchored under
 `refs/syncwheel/recovery/drafts/` before it is dropped. A clone that lost a
-publication race, was refused by the remote, or died before its push keeps
+promotion race can also rerun `stack promote`: when the published stack,
+managed ref, and promotion tombstone exactly match its draft, Syncwheel adopts
+that published branch locally without republishing coordination state. A clone
+whose publication was refused by the remote, or died before its push, keeps
 publishing after a plain retry. A coordination remote that is unreachable, or
 that refuses the atomic push without changing anything, fails closed and names
 the retry command for `stack push`, `int push`, `stack promote`, `stack create
