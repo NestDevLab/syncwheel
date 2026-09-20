@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/independent-integration-lanes"
-  ],
-  "claimed_at": "2026-09-20T17:42:39+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-20T17:58:55+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "92da3201-1b74-455c-aec9-5735373c94b6",
-  "publication_scope": "stack:independent-integration-lanes",
+  "operation_token": "8402e740-70af-4e89-8bfc-54a0ecc77fbc",
+  "publication_scope": "close:independent-integration-lanes",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/independent-integration-lanes",
   "syncwheel_version": "0.43.21"
 }
