@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/promote-recovery-adoption"
   ],
-  "claimed_at": "2026-09-20T18:32:44+00:00",
+  "claimed_at": "2026-09-20T18:47:11+00:00",
   "coordination_id": "default",
-  "operation_token": "52c37fd4-c41c-4fdd-a4d2-ba0cd74216fc",
-  "publication_scope": "create:promote-recovery-adoption",
+  "operation_token": "e2cb21c2-eeb8-42d8-bcd4-1dc53ef55b4f",
+  "publication_scope": "stack:promote-recovery-adoption",
   "source_ref": "refs/heads/syncwheel/draft/promote-recovery-adoption",
   "syncwheel_version": "0.43.22"
 }
