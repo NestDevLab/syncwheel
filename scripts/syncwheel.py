@@ -6465,7 +6465,7 @@ def historical_managed_tip_has_exact_squash_delivery(
 
 def historically_closed_integration_commits(
     repo_root, tip, observation, candidates=None, delivery_tip=None,
-    delivery_observation=None,
+    delivery_observation=None, merge_parent_candidates=None,
 ):
     """Return exact commits covered by a durable coordinated close proof.
 
@@ -6490,8 +6490,14 @@ def historically_closed_integration_commits(
     ]
     candidate_patches = commit_patch_ids(repo_root, candidates)
     candidate_patch_values = {value for value in candidate_patches.values() if value}
+    merge_parent_candidates = {
+        commit_full_sha(repo_root, commit)
+        for commit in (merge_parent_candidates or [])
+        if commit_exists(repo_root, commit)
+    }
     head = current
     closed_sources = set()
+    owned_merge_parents = set()
     trusted_stack_generations = {}
     state_cache = {}
 
@@ -6712,7 +6718,62 @@ def historically_closed_integration_commits(
                             repo_root, 'rev-list', '--first-parent', child_managed_tip,
                         ).stdout.split()
                     ):
-                        closed_sources.add(commit_full_sha(repo_root, parent_managed_tip))
+                        promotion_parent = parent_state.get('parent_state')
+                        promotion_parent_state = (
+                            load_state(promotion_parent) if promotion_parent else None
+                        )
+                        promotion_parents = git(
+                            repo_root, 'show', '-s', '--format=%P', parent,
+                        ).stdout.split()
+                        promotion_parent_stacks = [
+                            item for item in (
+                                (promotion_parent_state or {}).get('manifest') or {}
+                            ).get('stacks') or []
+                            if item.get('id') == stack_id
+                        ]
+                        promotion_parent_tombstones = {
+                            coordination_tombstone_ref(item)
+                            for item in (
+                                (promotion_parent_state or {}).get('tombstones') or []
+                            )
+                        }
+                        promotion_tombstones = [
+                            item for item in parent_state.get('tombstones') or []
+                            if item.get('stack') == stack_id
+                            and item.get('reason') == 'promoted'
+                            and coordination_tombstone_ref(item)
+                            not in promotion_parent_tombstones
+                        ]
+                        promotion_owned = bool(
+                            parent_state.get('publication_scope') == f'promote:{stack_id}'
+                            and promotion_parent
+                            and promotion_parents == [promotion_parent]
+                            and len(promotion_parent_stacks) == 1
+                            and len(promotion_tombstones) == 1
+                            and coordination_tombstone_ref(promotion_tombstones[0])
+                            == f"refs/heads/{promotion_parent_stacks[0].get('branch')}"
+                            and promotion_tombstones[0].get('remote_tip')
+                            == parent_managed_tip
+                            and (
+                                (promotion_parent_state.get('managed_refs') or {}).get(
+                                    coordination_tombstone_ref(promotion_tombstones[0])
+                                )
+                                == parent_managed_tip
+                            )
+                            and coordination_state_manifest_digest_classification(
+                                repo_root, parent_state, config.get('remote')
+                            )['form'] != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                            and coordination_state_manifest_digest_classification(
+                                repo_root, promotion_parent_state, config.get('remote')
+                            )['form'] != COORDINATION_STATE_DIGEST_FORM_ORPHANED
+                        )
+                        if (
+                            promotion_owned
+                            and parent_managed_tip in merge_parent_candidates
+                        ):
+                            owned_merge_parents.add(commit_full_sha(
+                                repo_root, parent_managed_tip,
+                            ))
                         trusted_stack_generations.pop(stack_id, None)
                         continue
                     else:
@@ -6730,11 +6791,13 @@ def historically_closed_integration_commits(
         value for value in commit_patch_ids(repo_root, closed_sources).values()
         if value
     }
-    return {
+    closed = {
         commit for commit in candidates
         if commit in closed_sources
         or (candidate_patches.get(commit) and candidate_patches[commit] in source_patches)
     }
+    closed.update(owned_merge_parents.intersection(merge_parent_candidates))
+    return closed
 
 
 def integration_control_only_transition(repo_root, commit, parent):
@@ -6815,14 +6878,16 @@ def integration_reconciliation_history(
         if commit_parent_count(repo_root, commit) > 1
     }
     historical_candidates = list(history)
-    historical_candidates.extend(
+    historical_merge_parents = {
         parents[1] for parents in merge_parents.values() if len(parents) == 2
-    )
+    }
+    historical_candidates.extend(historical_merge_parents)
     closed_commits = (
         historically_closed_integration_commits(
             repo_root, tip, observation, candidates=historical_candidates,
             delivery_tip=delivery_tip,
             delivery_observation=delivery_observation,
+            merge_parent_candidates=historical_merge_parents,
         ) if not detached_replay else set()
     )
     proofs = {commit: proof for commit in history

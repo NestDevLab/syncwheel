@@ -3599,6 +3599,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         def closed_sources(
             states, candidates=None, tip=None, delivery_observation=None,
+            merge_parent_candidates=None,
         ):
             def fake_git(repo_root, *args, **kwargs):
                 if (
@@ -3632,6 +3633,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                     candidates=candidates or [old, new],
                     delivery_tip=(delivery_observation or {}).get('tip'),
                     delivery_observation=delivery_observation,
+                    merge_parent_candidates=merge_parent_candidates,
                 )
 
         trusted = closed_sources(reused_states)
@@ -3689,6 +3691,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             candidates=[new, undeclared_middle, rewritten_chain],
             tip=rewritten_chain,
             delivery_observation=delivery_observation,
+            merge_parent_candidates=[new, undeclared_middle],
         )
         self.assertIn(new, trusted)
         self.assertIn(rewritten_chain, trusted)
