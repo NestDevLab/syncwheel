@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/missing-managed-ref-repair"
+  ],
+  "claimed_at": "2026-09-20T08:53:12+00:00",
+  "coordination_id": "default",
+  "operation_token": "8dd1b78c-eb98-41f5-8acc-a440f9d7da8a",
+  "publication_scope": "promote:missing-managed-ref-repair-v2",
+  "source_ref": "refs/heads/pr/missing-managed-ref-repair",
+  "syncwheel_version": "0.43.20"
+}
