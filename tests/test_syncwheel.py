@@ -1427,6 +1427,82 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     ):
                         module.governed_worktree_preflight(args)
 
+    def test_integration_mutations_do_not_reap_unrelated_dirty_lanes(self):
+        module = self.load_syncwheel_module()
+        for command in (
+            module.command_int_align_remote,
+            module.command_int_push,
+            module.command_int_rebuild,
+            module.command_stack_create,
+        ):
+            args = SimpleNamespace(
+                func=command,
+                repo=str(self.repo),
+                manifest=None,
+                personal=None,
+                dry_run=False,
+                json=False,
+                draft=False,
+                branch=None,
+                stack='independent-created',
+            )
+            with self.subTest(command=command.__name__), mock.patch.object(
+                module,
+                'emit_governed_worktree_warnings',
+            ) as warnings, mock.patch.object(
+                module,
+                'reconcile_governed_worktrees',
+            ) as reap:
+                module.governed_worktree_preflight(args)
+            warnings.assert_called_once()
+            reap.assert_not_called()
+
+    def test_stack_create_warns_and_preserves_unrelated_dirty_lane_non_interactively(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'unrelated-create-draft', '--json'
+        ).stdout)['lane']
+        draft = Path(opened['path']) / 'draft.txt'
+        draft.write_text('preserve this work\n')
+
+        created = self.run_cli(
+            'stack', 'create', 'independent-created',
+            '--branch', 'pr/independent-created',
+        )
+
+        self.assertIn(
+            'WARNING: governed worktree unrelated-create-draft: dirty',
+            created.stderr,
+        )
+        self.assertEqual(draft.read_text(), 'preserve this work\n')
+        self.assertIn(
+            'independent-created',
+            {stack['id'] for stack in self.read_manifest()['stacks']},
+        )
+
+    def test_stack_create_blocks_a_governed_lane_with_the_requested_branch(self):
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'claimed-create-branch', '--json'
+        ).stdout)['lane']
+        draft = Path(opened['path']) / 'draft.txt'
+        draft.write_text('preserve this work\n')
+
+        result = self.run_cli(
+            'stack', 'create', 'conflicting-created',
+            '--branch', opened['branch'],
+            expected=2,
+        )
+
+        self.assertIn(
+            'governed worktree conflicts with the new stack id or branch: '
+            'claimed-create-branch',
+            result.stderr,
+        )
+        self.assertEqual(draft.read_text(), 'preserve this work\n')
+        self.assertNotIn(
+            'conflicting-created',
+            {stack['id'] for stack in self.read_manifest()['stacks']},
+        )
+
     def test_expired_lane_can_be_reaped_through_explicit_gc_outside_a_repository(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'outside-repo', '--json').stdout)
         module = self.load_syncwheel_module()
