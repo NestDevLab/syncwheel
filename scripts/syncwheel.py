@@ -30730,8 +30730,10 @@ def governed_worktree_preflight(args):
         command_stack_rebuild,
     }
     scoped_stacks = None
+    scoped_stack_label = 'selected stack'
     if args.func in stack_scoped_without_global_reaping:
         scoped_stacks = {args.stack}
+        scoped_stack_label = 'this stack'
     elif args.func in {command_reconcile, command_resume} and getattr(args, 'stack', None):
         scoped_stacks = set(args.stack)
     if scoped_stacks:
@@ -30742,7 +30744,7 @@ def governed_worktree_preflight(args):
         ]
         if blockers:
             raise SyncwheelError(
-                'governed worktree recovery is required before updating the selected stack: '
+                f'governed worktree recovery is required before updating {scoped_stack_label}: '
                 + ', '.join(lane['id'] for lane in blockers)
             )
         return
