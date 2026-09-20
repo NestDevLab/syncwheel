@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "922c9904b07c4408e2dd1cc0de63a0ee05d81bca"
+  },
   "claims": {
-    "refs/heads/main-integration": "1d2775a74b4be8e05f2bb2cabc7fb15fb545a2d5",
+    "refs/heads/main-integration": "c2feb7491b8fd875e3466c21e7c8f61515b3f00f",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
@@ -41,11 +43,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T19:21:23+00:00",
+  "created_at": "2026-09-20T19:22:17+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "be5e64d857d978977bb6ba0e65e5a0c63d1084b4",
+    "refs/heads/main-integration": "922c9904b07c4408e2dd1cc0de63a0ee05d81bca",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -145,12 +147,12 @@
     "stacks": [],
     "version": 2
   },
-  "manifest_digest": "2cf2b65775313dd6821a4735ca4f67a6684a23e1cc3dcc83eaefcb1b8d9c66ba",
-  "operation_token": "3eed4a68-e6aa-4559-920a-596663f2fc69",
-  "parent_state": "07207df844d74b43efe9a9a09bf9fdfca0b7b6b8",
+  "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
+  "operation_token": "6964ac15-0b2c-4b8a-97c9-9224dfcf1296",
+  "parent_state": "f3db16a418796f367b64e695d94bfd491feed4b8",
   "projection_status": "partial",
-  "publication_id": "4a534131-2284-4e4a-a534-2e67b6190435",
-  "publication_scope": "close:promote-recovery-adoption",
+  "publication_id": "11c9de4f-4f02-4182-ada3-7a648c13012d",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.43.22",
   "tombstones": [
