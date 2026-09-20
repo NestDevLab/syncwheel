@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.24 - 2026-09-20
+
+- Add an explicit clone-local `checks: "none"` GitHub PR merge policy for
+  repositories without CI. The default remains `all`; opting out produces a
+  visible plan warning and never bypasses checks required by GitHub rules.
+
 ## 0.43.23 - 2026-09-20
 
 - Let `stack promote` adopt an equivalent promotion already completed by

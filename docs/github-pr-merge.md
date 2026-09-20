@@ -20,7 +20,8 @@ syncwheel repo pr-merge-policy set github \
   --merge-actor LOGIN \
   --pr-author LOGIN \
   --commit-author LOGIN \
-  --head-repository OWNER/REPO
+  --head-repository OWNER/REPO \
+  --checks all
 ```
 
 Review the JSON preview, then repeat with `--apply`. Inspect or remove the
@@ -35,6 +36,12 @@ At least one provenance filter (`--pr-author`, `--commit-author`, or
 `--head-repository`) is mandatory. Configured filters are combined with AND;
 empty lists, unknown keys, tokens, commands, and secrets are rejected.
 
+`--checks all` is the fail-closed default: at least one check must exist and
+every observed check must finish successfully or be skipped. A repository
+without CI may explicitly use `--checks none`; the merge plan then records a
+`checks_not_required` warning. This opt-out is clone-local and does not bypass
+required checks reported by GitHub branch protection or rulesets.
+
 `private_free_rules` is a narrow fallback for private repositories on GitHub
 Free. It applies only when GitHub returns its explicit plan-limit response for
 the branch-protection or rules APIs and the repository is confirmed private.
@@ -47,7 +54,8 @@ public repositories, and unrecognized errors remain blocked.
 
 The stack must be `published`, its remote branch must exactly match the
 declared commit projection, and all local, integration, identity, repository,
-review, rules, and CI checks must pass:
+review and rules checks must pass. CI must also pass unless the clone-local
+policy explicitly declares `checks: "none"`:
 
 ```bash
 syncwheel stack merge-pr STACK --json
