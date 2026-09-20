@@ -1,12 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/main-integration",
-    "refs/heads/pr/promote-recovery-adoption"
-  ],
-  "claimed_at": "2026-09-20T19:19:53+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-20T19:21:23+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "a676f180-19ab-4195-a1d4-37beea60dfdc",
-  "publication_scope": "stack:promote-recovery-adoption",
+  "operation_token": "3eed4a68-e6aa-4559-920a-596663f2fc69",
+  "publication_scope": "close:promote-recovery-adoption",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/promote-recovery-adoption",
   "syncwheel_version": "0.43.22"
 }
