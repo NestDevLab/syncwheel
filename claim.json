@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2"
+    "refs/heads/pr/historical-closed-missing-tip-v2"
   ],
-  "claimed_at": "2026-09-20T21:32:00+00:00",
+  "claimed_at": "2026-09-20T21:32:18+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "55c4cdf4-43cb-44c5-96cc-349decbe1498",
-  "publication_scope": "create:historical-closed-missing-tip-v2",
+  "operation_token": "ca0debda-3490-477e-bd60-506d307c1957",
+  "publication_scope": "promote:historical-closed-missing-tip-v2",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2",
   "syncwheel_version": "0.43.24"
 }
