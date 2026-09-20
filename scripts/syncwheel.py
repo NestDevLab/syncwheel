@@ -30378,6 +30378,7 @@ def primary_checkout_preflight(args):
         }
         bounded_publication_commands = {
             command_stack_push,
+            command_stack_rebuild,
             command_int_push,
             command_coordination_compose,
             command_stack_merge_pr,
@@ -30452,8 +30453,6 @@ def governed_worktree_reaping_requested(args):
         command_stack_land,
     }
     dry_run_gated = {
-        command_stack_push,
-        command_stack_rebuild,
         command_int_align_remote,
         command_int_push,
         command_int_rebuild,
@@ -30484,6 +30483,18 @@ def governed_worktree_preflight(args):
         # unrelated lanes belongs to explicit release and gc commands.
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
+    if args.func in {command_stack_push, command_stack_rebuild}:
+        registry, _ = load_governed_worktree_registry(repo_root)
+        blockers = [
+            lane for lane in registry['lanes']
+            if lane.get('target') == args.stack and lane.get('state') != 'reaped'
+        ]
+        if blockers:
+            raise SyncwheelError(
+                'governed worktree recovery is required before updating this stack: '
+                + ', '.join(lane['id'] for lane in blockers)
+            )
+        return
     if not governed_worktree_reaping_requested(args):
         return
     cleanup = reconcile_governed_worktrees(repo_root, manifest, manifest_path)

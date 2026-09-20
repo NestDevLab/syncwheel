@@ -1253,6 +1253,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertFalse(module.governed_worktree_reaping_requested(
             SimpleNamespace(func=module.command_worktree_open)
         ))
+        for command in (module.command_stack_push, module.command_stack_rebuild):
+            with self.subTest(command=command.__name__):
+                self.assertFalse(module.governed_worktree_reaping_requested(
+                    SimpleNamespace(func=command, dry_run=False)
+                ))
         for command in (
             module.command_reconcile,
             module.command_resume,
@@ -1290,7 +1295,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertFalse(Path(opened['lane']['path']).exists())
 
     def test_branch_advanced_pending_lane_blocks_a_mutating_rebuild(self):
-        opened = json.loads(self.run_cli('worktree', 'open', 'advanced', '--json').stdout)
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'advanced', '--into', 'feature-a', '--json'
+        ).stdout)
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['state'] = 'captured_pending_cleanup'
@@ -1299,7 +1306,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         result = self.run_cli('stack', 'rebuild', 'feature-a', expected=2)
 
-        self.assertIn('governed worktree recovery is required', result.stderr)
+        self.assertIn('recovery is required before updating this stack', result.stderr)
         self.assertTrue(Path(opened['lane']['path']).is_dir())
 
     def test_linked_worktree_uses_the_primary_configured_root(self):
@@ -1407,6 +1414,24 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertFalse(lane_path.exists())
         registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'], [])
+
+    def test_stack_rebuild_preserves_unrelated_primary_dirt(self):
+        self.prepare_replay_stack()
+        opened = json.loads(self.run_cli('worktree', 'open', 'unrelated', '--json').stdout)
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        unrelated = next(lane for lane in registry['lanes'] if lane['id'] == 'unrelated')
+        unrelated['state'] = 'captured_pending_cleanup'
+        unrelated['pending_reason'] = 'branch_advanced'
+        module.save_governed_worktree_registry(self.repo, registry)
+        primary_path = self.repo / 'alpha.txt'
+        primary_path.write_text('unrelated local work\n')
+
+        self.run_cli('stack', 'rebuild', 'replay')
+
+        self.assertEqual(primary_path.read_text(), 'unrelated local work\n')
+        self.assertEqual(self.git('status', '--short', '--', 'alpha.txt'), 'M alpha.txt')
+        self.assertTrue(Path(opened['lane']['path']).is_dir())
 
     def test_worktree_release_accepts_a_clean_record_with_a_missing_path(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'missing-release', '--json').stdout)
