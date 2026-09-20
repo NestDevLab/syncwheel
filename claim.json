@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/dogfood-resume-fix"
-  ],
-  "claimed_at": "2026-09-20T23:30:15+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-20T23:46:49+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "669ed15b-aaa6-421a-b97d-26ce2c3735dc",
-  "publication_scope": "stack:dogfood-resume-fix",
+  "operation_token": "4049f05e-413f-49e3-aa47-fa38cb75ad15",
+  "publication_scope": "close:dogfood-resume-fix",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/dogfood-resume-fix",
-  "syncwheel_version": "0.43.25"
+  "syncwheel_version": "0.43.26"
 }
