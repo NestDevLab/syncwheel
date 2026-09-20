@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/syncwheel/draft/missing-managed-ref-repair"
-  ],
-  "claimed_at": "2026-09-20T08:48:32+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-20T17:22:57+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "706d043a-f81c-4baf-b279-eac8f7216337",
-  "publication_scope": "stack:missing-managed-ref-repair",
+  "operation_token": "f3b6acd4-f24f-47a4-8208-9280f6a9698f",
+  "publication_scope": "close:missing-managed-ref-repair",
+  "reason": "superseded-by-missing-managed-ref-repair-v2",
   "source_ref": "refs/heads/syncwheel/draft/missing-managed-ref-repair",
-  "syncwheel_version": "0.43.20"
+  "syncwheel_version": "0.43.21"
 }
