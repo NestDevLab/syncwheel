@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/promote-recovery-adoption"
+  ],
+  "claimed_at": "2026-09-20T18:47:29+00:00",
+  "coordination_id": "default",
+  "operation_token": "cf5c6e25-68e1-4963-8598-844fe75f920d",
+  "publication_scope": "promote:promote-recovery-adoption",
+  "source_ref": "refs/heads/pr/promote-recovery-adoption",
+  "syncwheel_version": "0.43.22"
+}
