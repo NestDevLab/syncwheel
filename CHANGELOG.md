@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.43.25 - 2026-09-20
+
+- Ignore unavailable integration objects from non-current coordination states
+  consistently while reconstructing closed-stack history. Current state and
+  shallow-clone verification remain strict, and an unavailable proof never
+  grants ownership to historical commits.
+- Preserve absorbed-stack evidence when its exact managed tip is a two-parent
+  reconciliation merge rooted at the declared stack commit, allowing a
+  patch-equivalent parent already present on integration to be classified.
+
 ## 0.43.24 - 2026-09-20
 
 - Add an explicit clone-local `checks: "none"` GitHub PR merge policy for
