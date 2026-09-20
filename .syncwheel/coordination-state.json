@@ -1,9 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/pr-checks-none": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68"
+    "refs/heads/pr/checks-none-policy": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68"
   },
   "claims": {
     "refs/heads/main-integration": "c2feb7491b8fd875e3466c21e7c8f61515b3f00f",
+    "refs/heads/pr/checks-none-policy": "d3554f6f3643cb5ca5fa8db251e03242589cde37",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
@@ -36,7 +37,7 @@
     "refs/heads/syncwheel/draft/missing-managed-ref-repair": "22a43e04737321f10db1bd4549a9fe58fb5191fb",
     "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "b380fe48a47cc32e90d009d5ca86a18f1b9b3e25",
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
-    "refs/heads/syncwheel/draft/pr-checks-none": "fa0b1fb7b8f3f6601f4dab4a6a6adb17ebfe7b40",
+    "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
@@ -44,12 +45,13 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T19:43:07+00:00",
+  "created_at": "2026-09-20T19:43:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
     "refs/heads/main-integration": "922c9904b07c4408e2dd1cc0de63a0ee05d81bca",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
+    "refs/heads/pr/checks-none-policy": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
@@ -155,24 +157,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/pr-checks-none",
+        "branch": "pr/checks-none-policy",
         "commits": [
           "baf68d9e0a7a1c861372225d2d699ed827b0377a"
         ],
         "id": "pr-checks-none",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "cf8b36ad-fc6f-4cf3-b798-24f5a859f90e",
-  "parent_state": "f91d55a00da97a69da042ca0c325045d58e083d3",
+  "operation_token": "c99d350f-871b-4ea4-bbd0-705103b327ab",
+  "parent_state": "c6bfc5196e6f181017f726c0d44a8c638e65a214",
   "projection_status": "partial",
-  "publication_id": "8a4c12a1-a604-4455-8b56-db193838ee30",
-  "publication_scope": "stack:pr-checks-none",
+  "publication_id": "1e3e342a-41df-4018-bf35-65cc3e320fc0",
+  "publication_scope": "promote:pr-checks-none",
   "schema_version": 2,
   "syncwheel_version": "0.43.23",
   "tombstones": [
@@ -671,6 +672,14 @@
       "ref": "refs/heads/pr/promote-recovery-adoption",
       "remote_tip": null,
       "stack": "promote-recovery-adoption"
+    },
+    {
+      "branch": "syncwheel/draft/pr-checks-none",
+      "closed_at": "2026-09-20T19:43:17+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/pr-checks-none",
+      "remote_tip": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68",
+      "stack": "pr-checks-none"
     }
   ]
 }
