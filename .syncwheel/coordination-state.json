@@ -23,7 +23,7 @@
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
-    "refs/heads/syncwheel/draft/historical-closed-missing-tip": "9149ef521b71038e001862b02e91bc16c404bea1",
+    "refs/heads/syncwheel/draft/historical-closed-missing-tip": "1c2b87ec8c59c85c99e4b56fe56a4c29692a01ff",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2": "d0afe6dc241d570e03d76df331b342fc65e1d9c9",
     "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
     "refs/heads/syncwheel/draft/historical-pr79": "0599c8b9faa842388bc8b3776c7171e859b69cfb",
@@ -46,7 +46,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T21:46:11+00:00",
+  "created_at": "2026-09-20T21:46:41+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -144,9 +144,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "historical-closed-missing-tip"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -154,29 +152,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "syncwheel/draft/historical-closed-missing-tip",
-        "commits": [],
-        "id": "historical-closed-missing-tip",
-        "integration_branch": "main-integration",
-        "state": "draft",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "59379e70446252b341e6a68fcd0f8760fb7e3606d5554a0f368c06236203c7b6",
-  "operation_token": "7af3b934-a5c0-454c-9dc3-d6d8d16cc7ba",
-  "parent_state": "8925142254604737c7737e4f105878424fac33e1",
+  "operation_token": "eb53403a-5d6e-4c28-938b-9295a4312194",
+  "parent_state": "a2c93384c48c60e712a88385f3608d5dca059c31",
   "projection_status": "partial",
-  "publication_id": "557659ab-3875-41ef-b70a-e31488cb75be",
-  "publication_scope": "close:historical-closed-missing-tip-v2",
+  "publication_id": "38cc027a-1bcd-4db9-8d76-8a14166b7ae2",
+  "publication_scope": "close:historical-closed-missing-tip",
   "schema_version": 2,
   "syncwheel_version": "0.43.24",
   "tombstones": [
@@ -707,6 +691,14 @@
       "ref": "refs/heads/pr/historical-closed-missing-tip-v2",
       "remote_tip": null,
       "stack": "historical-closed-missing-tip-v2"
+    },
+    {
+      "branch": "syncwheel/draft/historical-closed-missing-tip",
+      "closed_at": "2026-09-20T21:46:37+00:00",
+      "reason": "abandoned",
+      "ref": "refs/heads/syncwheel/draft/historical-closed-missing-tip",
+      "remote_tip": "037807635020af5799394857bc6d4c1dca9217c2",
+      "stack": "historical-closed-missing-tip"
     }
   ]
 }
