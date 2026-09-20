@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/dogfood-resume-fix"
   ],
-  "claimed_at": "2026-09-20T23:28:06+00:00",
+  "claimed_at": "2026-09-20T23:30:15+00:00",
   "coordination_id": "default",
-  "operation_token": "b4ce0859-f4a2-4ec6-8cc6-0f0427944a5e",
+  "operation_token": "669ed15b-aaa6-421a-b97d-26ce2c3735dc",
   "publication_scope": "stack:dogfood-resume-fix",
   "source_ref": "refs/heads/pr/dogfood-resume-fix",
   "syncwheel_version": "0.43.25"
