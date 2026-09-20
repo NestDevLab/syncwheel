@@ -23714,8 +23714,14 @@ def equivalent_remote_stack_promotion(
     from_ref = f'refs/heads/{from_branch}'
     to_ref = f'refs/heads/{to_branch}'
     promoted_tip = (state.get('managed_refs') or {}).get(to_ref)
-    local_tip = ref_tip(repo_root, from_branch) or ref_tip(repo_root, to_branch)
-    if not promoted_tip or local_tip != promoted_tip:
+    from_tip = ref_tip(repo_root, from_branch)
+    to_tip = ref_tip(repo_root, to_branch)
+    if (
+        not promoted_tip
+        or (from_tip is not None and from_tip != promoted_tip)
+        or (to_tip is not None and to_tip != promoted_tip)
+        or (from_tip is None and to_tip is None)
+    ):
         return None
     matching_tombstone = next((
         item for item in state.get('tombstones') or []
@@ -23951,10 +23957,36 @@ def command_stack_promote(args):
     stack = require_stack(manifest, args.stack)
     from_branch = stack['branch']
     to_branch = args.branch or f'pr/{safe_ref_segment(args.stack)}'
-    if stack.get('state', 'published') == 'draft' and adopt_equivalent_remote_stack_promotion(
-        repo_root, manifest, manifest_path, stack, from_branch, to_branch
-    ):
-        return 0
+    if to_branch != from_branch:
+        referencing_channels = channel_ids_referencing_stack(manifest, args.stack)
+        if referencing_channels:
+            raise SyncwheelError(
+                f"stack {args.stack} promotion would change branch {from_branch!r} to "
+                f"{to_branch!r}, but it is pinned by active channel(s): "
+                + ', '.join(referencing_channels)
+                + '; remove or replace the stack in those channels, or close the channels first'
+            )
+        if any(
+            other['id'] != args.stack and other['branch'] == to_branch
+            for other in manifest['stacks']
+        ):
+            raise SyncwheelError(f'stack branch already exists in manifest: {to_branch}')
+    if stack.get('state', 'published') == 'draft':
+        try:
+            if adopt_equivalent_remote_stack_promotion(
+                repo_root, manifest, manifest_path, stack, from_branch, to_branch
+            ):
+                return 0
+        except SyncwheelError as exc:
+            failure = coordinated_publish_command_failure(
+                repo_root,
+                coordination_config(manifest) if coordination_is_active(manifest) else None,
+                exc,
+                f'stack promote {args.stack}',
+            )
+            if failure is None:
+                raise
+            raise failure from exc
     pending_promotion = pending_coordination_publication_for_scope(
         repo_root, manifest_path, f'promote:{args.stack}'
     )
@@ -23978,19 +24010,6 @@ def command_stack_promote(args):
     if not branch_exists(repo_root, from_branch):
         raise SyncwheelError(f"{args.stack}: cannot promote draft without a materialized branch: {from_branch}")
     if to_branch != from_branch:
-        referencing_channels = channel_ids_referencing_stack(manifest, args.stack)
-        if referencing_channels:
-            raise SyncwheelError(
-                f"stack {args.stack} promotion would change branch {from_branch!r} to "
-                f"{to_branch!r}, but it is pinned by active channel(s): "
-                + ', '.join(referencing_channels)
-                + '; remove or replace the stack in those channels, or close the channels first'
-            )
-        if any(
-            other['id'] != args.stack and other['branch'] == to_branch
-            for other in manifest['stacks']
-        ):
-            raise SyncwheelError(f'stack branch already exists in manifest: {to_branch}')
         if branch_exists(repo_root, to_branch):
             raise SyncwheelError(f'cannot promote onto an existing local branch: {to_branch}')
 
