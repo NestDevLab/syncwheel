@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "5bf0e31471adef175e48b20c623af43a9f21a97c"
+  },
   "claims": {
-    "refs/heads/main-integration": "e685884ca9127ccca543702728f127099376563c",
+    "refs/heads/main-integration": "5bd4cd2744721f4261d613e8964eee5af9b8f75e",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
@@ -39,11 +41,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T17:58:55+00:00",
+  "created_at": "2026-09-20T18:02:59+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "c906135d4b85a3f9ace635c7c565fbef2eb6435c",
+    "refs/heads/main-integration": "5bf0e31471adef175e48b20c623af43a9f21a97c",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -141,14 +143,14 @@
     "stacks": [],
     "version": 2
   },
-  "manifest_digest": "007fc2f99ce96ab0862a0c3c81b260493405e533cab6652d5ee9b9db527b5ed2",
-  "operation_token": "8402e740-70af-4e89-8bfc-54a0ecc77fbc",
-  "parent_state": "1ab9d3603cc376f030c55bb9c2a952c0bc91c39f",
+  "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
+  "operation_token": "588879f4-83cb-4bfd-84ab-13b499227bb6",
+  "parent_state": "a4ce7de96945f8f13c6b5d3f0234040660b8ca44",
   "projection_status": "partial",
-  "publication_id": "26056653-6a40-48b0-9696-19c6a43ccdf4",
-  "publication_scope": "close:independent-integration-lanes",
+  "publication_id": "91905a72-f655-42ef-9fdf-53952bc014d5",
+  "publication_scope": "integration",
   "schema_version": 2,
-  "syncwheel_version": "0.43.21",
+  "syncwheel_version": "0.43.22",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
