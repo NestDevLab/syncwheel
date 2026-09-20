@@ -1,10 +1,11 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2": "e515208d404b7d504a5bb734053c91aa66557d49"
+    "refs/heads/pr/historical-closed-missing-tip-v2": "e515208d404b7d504a5bb734053c91aa66557d49"
   },
   "claims": {
     "refs/heads/main-integration": "7f002c6f4950aa921b19f8452c8da4c095d137fb",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
+    "refs/heads/pr/historical-closed-missing-tip-v2": "fb67a131bdcd2e9ee405a89307af828c7489e0d6",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
@@ -25,7 +26,7 @@
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip": "9149ef521b71038e001862b02e91bc16c404bea1",
-    "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2": "30db54d8552340d297116596649fc91d50e20647",
+    "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2": "d0afe6dc241d570e03d76df331b342fc65e1d9c9",
     "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
     "refs/heads/syncwheel/draft/historical-pr79": "0599c8b9faa842388bc8b3776c7171e859b69cfb",
     "refs/heads/syncwheel/draft/historical-pr80": "2b3d6924e6374cd66d99f81a7d1bf721b68e5955",
@@ -47,7 +48,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-20T21:32:00+00:00",
+  "created_at": "2026-09-20T21:32:18+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -62,6 +63,7 @@
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
+    "refs/heads/pr/historical-closed-missing-tip-v2": "e515208d404b7d504a5bb734053c91aa66557d49",
     "refs/heads/pr/historical-coordination-digest-04313": "b6d8d2fed2527936aa40ab13246873955b57bd9f",
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
@@ -175,24 +177,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/historical-closed-missing-tip-v2",
+        "branch": "pr/historical-closed-missing-tip-v2",
         "commits": [
           "e515208d404b7d504a5bb734053c91aa66557d49"
         ],
         "id": "historical-closed-missing-tip-v2",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "55c4cdf4-43cb-44c5-96cc-349decbe1498",
-  "parent_state": "a050b6a17f1d53e3b19f2a347e5fe272394f3f23",
+  "operation_token": "ca0debda-3490-477e-bd60-506d307c1957",
+  "parent_state": "975f960d7b39161773ab2ecc158c1151451bbb6d",
   "projection_status": "partial",
-  "publication_id": "e1f85b2b-6d20-4caf-b074-9ed0cbe94d77",
-  "publication_scope": "create:historical-closed-missing-tip-v2",
+  "publication_id": "09a442cf-c134-4ef3-9594-b39915c363c2",
+  "publication_scope": "promote:historical-closed-missing-tip-v2",
   "schema_version": 2,
   "syncwheel_version": "0.43.24",
   "tombstones": [
@@ -707,6 +708,14 @@
       "ref": "refs/heads/pr/checks-none-policy",
       "remote_tip": null,
       "stack": "pr-checks-none"
+    },
+    {
+      "branch": "syncwheel/draft/historical-closed-missing-tip-v2",
+      "closed_at": "2026-09-20T21:32:12+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2",
+      "remote_tip": "e515208d404b7d504a5bb734053c91aa66557d49",
+      "stack": "historical-closed-missing-tip-v2"
     }
   ]
 }
