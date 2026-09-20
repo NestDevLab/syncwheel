@@ -163,6 +163,7 @@ After adding commits and rebuilding integration, run `syncwheel publish` before
 transition against published coordination metadata; unpublished draft changes
 must be published first.
 
-Run `python3 scripts/cli-dogfood.py` for a disposable local-remote delivery and
+Install the candidate CLI (`python3 -m pip install .`) so guard hooks can resolve
+a stable executable. Run `python3 scripts/cli-dogfood.py` for a disposable local-remote delivery and
 second-clone resume check. Every subprocess is timed and bounded; its evidence
 directory is printed at startup.
