@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78"
+    "refs/heads/syncwheel/draft/read-only-git-auth": "aa613669e1487cc2b67589b3ef31172797fc0108"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -51,6 +51,7 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
+    "refs/heads/syncwheel/draft/read-only-git-auth": "3eec4e42fa50c1efb15f008dad366d35a1e83b35",
     "refs/heads/syncwheel/draft/revision-index-semantic-lease": "148a30915aad3ba2c462ebabafcf965597f8fa07",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
@@ -59,7 +60,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T21:13:52+00:00",
+  "created_at": "2026-09-21T21:14:18+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -134,6 +135,7 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/syncwheel/draft/pr-checks-none": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "47576d23feeaaa056886dc9367ae80a4528e5a9a",
+    "refs/heads/syncwheel/draft/read-only-git-auth": "aa613669e1487cc2b67589b3ef31172797fc0108",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
     "refs/heads/syncwheel/draft/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48",
@@ -169,7 +171,8 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "test-fixture-cache"
+        "test-fixture-cache",
+        "read-only-git-auth"
       ],
       "strategy": "cherry-pick"
     },
@@ -193,16 +196,29 @@
         "id": "test-fixture-cache",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/read-only-git-auth",
+        "commits": [],
+        "id": "read-only-git-auth",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "d4470a8c-904a-4766-963f-8b4ccc3a0613",
-  "parent_state": "41c7446a51c743118005ab18984ab77f71d4ed0b",
+  "operation_token": "9b32e108-e284-47dd-8784-8c8633586e7a",
+  "parent_state": "eaa057f0b6f87dc17cd77f83df52e7665ed5e39f",
   "projection_status": "partial",
-  "publication_id": "18e59c86-e3a0-4e33-9bb0-351136c4a417",
-  "publication_scope": "stack:test-fixture-cache",
+  "publication_id": "fdc838bb-a1db-4549-a10a-60dade960bf4",
+  "publication_scope": "create:read-only-git-auth",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
