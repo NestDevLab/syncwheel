@@ -47,7 +47,8 @@
       "base": "origin/main",
       "branch": "pr/close-published-recovery",
       "commits": [
-        "afcf7aab9211e39c789ec105ad469c0c1319a778"
+        "afcf7aab9211e39c789ec105ad469c0c1319a778",
+        "caf54f1f76a406e8d58f3f81d7b1fc6b8043747b"
       ],
       "id": "close-published-recovery",
       "integration_branch": "main-integration",
