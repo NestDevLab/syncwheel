@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.43.28 - 2026-09-21
+
+- Recover a failed published-stack close with a new reason or changed manifest only after proving its old token did not reach coordination. Check merged delivery against the freshly fetched target tip.
+- Allow a governed worktree to start at an explicit stack tip with `worktree open --into <stack> --base <ref>`, requiring the exact declared projection.
+
 ## 0.43.26 - 2026-09-20
 
 - Recognize initialization commits containing the manifest and the strictly validated managed ignore block during cross-clone resume.

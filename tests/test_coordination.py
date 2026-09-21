@@ -6935,6 +6935,102 @@ with module.coordination_publication_lock(Path(repo_path)):
             for event in events
         ))
 
+    def test_published_close_supersedes_unlanded_reason_after_delivery_advances(self):
+        origin = self.create_remote('published-close-new-proof')
+        repo = self.clone(origin, 'published-close-new-proof')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/close-first', 'close-first.txt')
+        self.run_cli(repo, 'stack', 'create', 'close-first', source,
+                     '--branch', 'pr/close-first')
+        self.run_cli(repo, 'stack', 'push', 'close-first')
+        self.git(repo, 'push', '-q', 'origin', f'{source}:main')
+        later = self.commit_on_branch(repo, 'pr/close-later', 'close-later.txt')
+        self.run_cli(repo, 'stack', 'create', 'close-later', later,
+                     '--branch', 'pr/close-later')
+
+        failed = self.run_cli(repo, 'stack', 'close', 'close-first',
+                              '--reason', 'absorbed', expected=2)
+        self.assertIn('Remote-first close did not save the manifest', failed.stderr)
+        module = self.load_module()
+        old = module.pending_stack_close_operation(repo, repo / '.syncwheel' / 'manifest.json', 'close-first')
+        self.assertEqual(old['reason'], 'absorbed')
+        self.run_cli(repo, 'stack', 'push', 'close-later')
+        self.git(repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git'))
+        unknown = self.run_cli(repo, 'stack', 'close', 'close-first',
+                               '--reason', 'merged', expected=2)
+        self.assertIn('Could not read from remote repository', unknown.stderr)
+        self.assertEqual(module.pending_stack_close_operation(
+            repo, repo / '.syncwheel' / 'manifest.json', 'close-first'
+        )['operation_token'], old['operation_token'])
+        self.git(repo, 'remote', 'set-url', 'origin', str(origin))
+
+        self.run_cli(repo, 'stack', 'close', 'close-first', '--reason', 'merged')
+
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('close-first', [stack['id'] for stack in manifest['stacks']])
+        events = module.load_ledger_events(repo)
+        self.assertTrue(any(event['type'] == 'stack_close_abandoned'
+                            and event['payload'].get('operation_token') == old['operation_token']
+                            for event in events))
+        closed = [event['payload'] for event in events
+                  if event['type'] == 'stack_closed'
+                  and event['payload'].get('stack') == 'close-first']
+        self.assertEqual(closed[-1]['reason'], 'merged')
+        self.assertNotEqual(closed[-1]['operation_token'], old['operation_token'])
+
+    def test_merged_close_checks_current_delivery_not_historical_stack_base(self):
+        origin = self.create_remote('merged-close-current-target')
+        repo = self.clone(origin, 'merged-close-current-target')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/merged-current', 'merged-current.txt')
+        self.run_cli(repo, 'stack', 'create', 'merged-current', source,
+                     '--branch', 'pr/merged-current')
+        self.run_cli(repo, 'stack', 'push', 'merged-current')
+        self.git(repo, 'push', '-q', 'origin', f'{source}:main')
+
+        self.run_cli(repo, 'stack', 'close', 'merged-current', '--reason', 'merged')
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('merged-current', [stack['id'] for stack in manifest['stacks']])
+
+    def test_reason_change_refuses_a_close_token_already_on_remote(self):
+        origin = self.create_remote('close-reason-landed')
+        repo = self.clone(origin, 'close-reason-landed')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/close-landed', 'close-landed.txt')
+        self.run_cli(repo, 'stack', 'create', 'close-landed', source,
+                     '--branch', 'pr/close-landed')
+        self.run_cli(repo, 'stack', 'push', 'close-landed')
+        self.git(repo, 'push', '-q', 'origin', f'{source}:main')
+        self.run_cli_sigkill_after(repo, 'authorized_push', 'stack', 'close',
+                                   'close-landed', '--reason', 'absorbed')
+
+        failed = self.run_cli(repo, 'stack', 'close', 'close-landed',
+                              '--reason', 'merged', expected=2)
+
+        self.assertIn('reached the coordination remote', failed.stderr)
+        events = self.load_module().load_ledger_events(repo)
+        self.assertFalse(any(event['type'] == 'stack_close_abandoned'
+                             and event['payload'].get('stack') == 'close-landed'
+                             for event in events))
+
+    def test_merged_close_refuses_commit_missing_from_current_delivery(self):
+        origin = self.create_remote('merged-close-undelivered')
+        repo = self.clone(origin, 'merged-close-undelivered')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'pr/merged-undelivered', 'merged-undelivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'merged-undelivered', source,
+                     '--branch', 'pr/merged-undelivered')
+
+        failed = self.run_cli(repo, 'stack', 'close', 'merged-undelivered',
+                              '--reason', 'merged', expected=2)
+
+        self.assertIn('NOT yet reachable', failed.stderr)
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('merged-undelivered', [stack['id'] for stack in manifest['stacks']])
+
     def test_close_fails_closed_when_the_coordination_remote_is_unreachable(self):
         origin = self.create_remote('round5-close-unreachable')
         repo = self.clone(origin, 'round5-close-unreachable')

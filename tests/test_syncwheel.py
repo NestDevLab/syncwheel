@@ -28,6 +28,14 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('absorbed for squash/rebase delivery', help_text)
         self.assertIn('not needed for a verified --reason absorbed close', help_text)
 
+    def test_forced_abandoned_close_stays_local_without_delivery_remote(self):
+        self.assertEqual(self.git('remote'), '')
+
+        self.run_cli('stack', 'close', 'feature-a', '--reason', 'abandoned', '--force')
+
+        manifest = self.read_manifest()
+        self.assertNotIn('feature-a', [stack['id'] for stack in manifest['stacks']])
+
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-test-'))
         self.repo = self.tmp / 'repo'
@@ -1030,6 +1038,59 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry = json.loads(Path(data['registry_path']).read_text())
         self.assertEqual(registry['version'], 1)
         self.assertEqual(registry['lanes'], [lane])
+
+    def test_worktree_open_explicit_base_uses_exact_stack_tip_from_other_checkout(self):
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'current-base', 'branch': 'syncwheel/draft/current-base',
+            'base': 'main', 'target_remote': 'origin', 'target_branch': 'main',
+            'integration_branch': 'main', 'commits': [], 'state': 'draft',
+            'publication': {'enabled': False},
+        })
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('branch', 'syncwheel/draft/current-base', 'main')
+        historical = self.tmp / 'historical-checkout'
+        self.git('worktree', 'add', '-q', '-b', 'historical', str(historical), 'main~1')
+        current = self.git('rev-parse', 'main')
+        old = self.git('rev-parse', 'main~1')
+
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'current-lane', '--into', 'current-base',
+            '--base', 'syncwheel/draft/current-base', '--json',
+            '--repo', str(historical), '--manifest', str(manifest_path),
+        ).stdout)['lane']
+
+        self.assertEqual(opened['base'], current)
+        self.assertEqual(opened['target'], 'current-base')
+        self.assertEqual(self.git('-C', opened['path'], 'rev-parse', 'HEAD'), current)
+        self.assertEqual(self.git('-C', str(historical), 'rev-parse', 'HEAD'), old)
+        self.assertTrue(Path(opened['path']).is_relative_to(self.repo / '.syncwheel' / 'wt'))
+
+    def test_worktree_open_explicit_base_refuses_stale_or_unowned_tip(self):
+        manifest = self.read_manifest()
+        manifest['stacks'].append({
+            'id': 'current-base', 'branch': 'syncwheel/draft/current-base',
+            'base': 'main', 'target_remote': 'origin', 'target_branch': 'main',
+            'integration_branch': 'main', 'commits': [], 'state': 'draft',
+            'publication': {'enabled': False},
+        })
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.git('branch', 'syncwheel/draft/current-base', 'main~1')
+
+        no_owner = self.run_cli(
+            'worktree', 'open', 'no-owner', '--base', 'main', expected=2
+        )
+        stale = self.run_cli(
+            'worktree', 'open', 'stale-base', '--into', 'current-base',
+            '--base', 'main~1', expected=2
+        )
+
+        self.assertIn('--base requires --into', no_owner.stderr)
+        self.assertIn('current exact projection', stale.stderr)
+        registry = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)[0]
+        self.assertEqual(registry['lanes'], [])
 
     def test_worktree_open_enforces_capacity_without_creating_a_fifth_lane(self):
         for number in range(4):
