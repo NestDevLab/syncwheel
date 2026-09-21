@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/close-published-recovery"
   ],
-  "claimed_at": "2026-09-21T10:35:19+00:00",
+  "claimed_at": "2026-09-21T11:10:48+00:00",
   "coordination_id": "default",
-  "operation_token": "c3c260db-36e7-4591-a524-144380c6d50d",
+  "operation_token": "7d1d2b20-fcb9-469a-a302-05cd8c0d25cc",
   "publication_scope": "stack:close-published-recovery",
   "source_ref": "refs/heads/pr/close-published-recovery",
   "syncwheel_version": "0.43.26"
