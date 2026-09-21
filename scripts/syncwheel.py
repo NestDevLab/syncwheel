@@ -19431,7 +19431,8 @@ def command_worktree_open(args):
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     lane_id = safe_ref_segment(args.lane)
     stack = require_stack(manifest, args.into) if args.into else None
-    if args.base and not stack:
+    base_ref = getattr(args, 'base', None)
+    if base_ref and not stack:
         raise SyncwheelError('worktree open --base requires --into <stack>')
     branch = f'syncwheel/lane/{lane_id}'
     root = governed_worktree_root(repo_root, manifest)
@@ -19474,10 +19475,10 @@ def command_worktree_open(args):
             raise SyncwheelError(
                 f'governed worktree path already exists and is not registered: {path}'
             )
-        base = ref_tip(repo_root, args.base or 'HEAD')
+        base = ref_tip(repo_root, base_ref or 'HEAD')
         if not base:
             raise SyncwheelError('cannot open a governed worktree: base commit is missing')
-        if args.base:
+        if base_ref:
             stack_tip = ref_tip(repo_root, stack['branch'])
             projected_tip = deterministic_stack_replay_tip(
                 repo_root, stack['base'], stack.get('commits') or []
