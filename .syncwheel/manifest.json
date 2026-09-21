@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "cli-module-tests"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,26 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "cli-module-tests",
+      "branch": "pr/cli-module-tests",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "0c497b76d1363ada77b3379324c5550835d182a9"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Cache CLI bytecode in coordination tests"
+      }
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
