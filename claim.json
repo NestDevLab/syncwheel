@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/revision-index-semantic-lease"
-  ],
-  "claimed_at": "2026-09-21T18:40:14+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-21T19:00:08+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "946e9166-eba3-47b4-9d00-583313ab0528",
-  "publication_scope": "promote:revision-index-semantic-lease",
+  "operation_token": "e794af60-0362-4b6b-8bf8-f15b912e406b",
+  "publication_scope": "close:revision-index-semantic-lease",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/revision-index-semantic-lease",
   "syncwheel_version": "0.43.30"
 }
