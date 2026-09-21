@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import unittest
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,6 +29,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--shard-count", type=int, required=True)
     parser.add_argument("--shard-index", type=int, required=True)
     parser.add_argument("--list", action="store_true", dest="list_only")
+    parser.add_argument(
+        "--durations",
+        type=Path,
+        help="write each test's wall time in seconds to this JSON file",
+    )
     args = parser.parse_args()
     if args.shard_count < 1:
         parser.error("--shard-count must be positive")
@@ -58,6 +64,19 @@ def shard_cases(
     return shards
 
 
+MEASURED_SECONDS: dict[str, float] = {}
+
+
+class TimedTextTestResult(unittest.TextTestResult):
+    def startTest(self, test: unittest.TestCase) -> None:
+        self._started = time.perf_counter()
+        super().startTest(test)
+
+    def stopTest(self, test: unittest.TestCase) -> None:
+        MEASURED_SECONDS[test.id()] = time.perf_counter() - self._started
+        super().stopTest(test)
+
+
 def main() -> int:
     args = parse_args()
     discovered = unittest.defaultTestLoader.discover("tests")
@@ -74,7 +93,13 @@ def main() -> int:
         f"{len(selected)} of {len(cases)} tests",
         flush=True,
     )
-    result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(selected))
+    result = unittest.TextTestRunner(
+        verbosity=2, resultclass=TimedTextTestResult
+    ).run(unittest.TestSuite(selected))
+    if args.durations:
+        args.durations.write_text(
+            json.dumps(MEASURED_SECONDS, indent=2, sort_keys=True) + "\n"
+        )
     return 0 if result.wasSuccessful() else 1
 
 
