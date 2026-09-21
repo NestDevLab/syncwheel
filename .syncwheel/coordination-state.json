@@ -1,10 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/pr/abandoned-history-reconciliation": "3b82631f3e1eb4d1a230168a2d996cdc515c1b49"
+    "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b"
   },
   "claims": {
     "refs/heads/main-integration": "a60258dff26baf6f28442cc31ee84ae18e22d8cb",
-    "refs/heads/pr/abandoned-history-reconciliation": "95a8ebb24011f9a00fb139cb09eb0874ee0cdff0",
+    "refs/heads/pr/abandoned-history-reconciliation": "283eb95341ba1605284e0de84530bc53c5000e91",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
@@ -53,12 +53,12 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T12:06:15+00:00",
+  "created_at": "2026-09-21T12:28:08+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
     "refs/heads/main-integration": "f8c21b075b6bc1e631520e45d659360149345bcb",
-    "refs/heads/pr/abandoned-history-reconciliation": "3b82631f3e1eb4d1a230168a2d996cdc515c1b49",
+    "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/checks-none-policy": "e517a63522249fad2612b667a564b52a0891cb56",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
@@ -175,7 +175,8 @@
         },
         "branch": "pr/abandoned-history-reconciliation",
         "commits": [
-          "3b82631f3e1eb4d1a230168a2d996cdc515c1b49"
+          "3b82631f3e1eb4d1a230168a2d996cdc515c1b49",
+          "6bc253124ec511f9b933e2a956c8c520b8bac58b"
         ],
         "id": "abandoned-history-reconciliation",
         "integration_branch": "main-integration",
@@ -185,13 +186,13 @@
     "version": 2
   },
   "manifest_digest": "59379e70446252b341e6a68fcd0f8760fb7e3606d5554a0f368c06236203c7b6",
-  "operation_token": "0b26bc44-4a44-46af-83e8-8305bd1671b3",
-  "parent_state": "55645e8cceb410fa1a03871e632f647202c466ea",
+  "operation_token": "21b1a598-84b3-4440-84ab-2017cc082301",
+  "parent_state": "93e149c0c35d243de8d8550c2c8243781accd06a",
   "projection_status": "partial",
-  "publication_id": "b6c64dca-8c47-4705-8c2c-26a1dc59c03d",
+  "publication_id": "a9010fc2-1376-4702-844c-2764d3769bea",
   "publication_scope": "stack:abandoned-history-reconciliation",
   "schema_version": 2,
-  "syncwheel_version": "0.43.28",
+  "syncwheel_version": "0.43.29",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
