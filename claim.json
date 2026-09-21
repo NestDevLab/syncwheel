@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/abandoned-history-reconciliation"
-  ],
-  "claimed_at": "2026-09-21T12:28:08+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-21T12:48:32+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "21b1a598-84b3-4440-84ab-2017cc082301",
-  "publication_scope": "stack:abandoned-history-reconciliation",
+  "operation_token": "ac429d7e-d090-46be-9871-5a16fd1f2b86",
+  "publication_scope": "close:abandoned-history-reconciliation",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/abandoned-history-reconciliation",
   "syncwheel_version": "0.43.29"
 }
