@@ -17,6 +17,7 @@ import shutil
 import shlex
 import socket
 import stat
+import struct
 import tempfile
 import subprocess
 import sys
@@ -27576,10 +27577,176 @@ def command_repo_tracking_set(args):
     return 0
 
 
+INDEX_OBJECT_FORMATS = {'sha1': (20, hashlib.sha1), 'sha256': (32, hashlib.sha256)}
+# Git rebuilds these from the entries, the worktree, or its own bookkeeping.
+INDEX_CACHE_ONLY_EXTENSIONS = frozenset({b'TREE', b'UNTR', b'FSMN', b'EOIE', b'IEOT'})
+INDEX_SEMANTIC_DIGEST_DOMAIN = b'syncwheel-index-semantic-v1\0'
+INDEX_ENTRY_ASSUME_VALID = 0x8000
+INDEX_ENTRY_EXTENDED = 0x4000
+INDEX_ENTRY_NAME_MASK = 0x0FFF
+
+
+def _index_varint(payload, offset, end):
+    if offset >= end:
+        return None, offset
+    byte = payload[offset]
+    offset += 1
+    value = byte & 0x7F
+    while byte & 0x80:
+        if offset >= end:
+            return None, offset
+        byte = payload[offset]
+        offset += 1
+        value = ((value + 1) << 7) | (byte & 0x7F)
+    return value, offset
+
+
+def parse_index_semantics(payload, object_format):
+    """Return the staged content of a Git index file, without stat data.
+
+    Returns None whenever the bytes alone cannot prove what Git would stage:
+    unknown object format or version, a required extension (split or sparse
+    index), truncation, or a trailer checksum mismatch.
+    """
+    spec = INDEX_OBJECT_FORMATS.get(object_format)
+    if spec is None:
+        return None
+    oid_size, hash_factory = spec
+    if len(payload) < 12 + oid_size or payload[:4] != b'DIRC':
+        return None
+    end = len(payload) - oid_size
+    if hash_factory(payload[:end]).digest() != payload[end:]:
+        return None
+    version, count = struct.unpack_from('>II', payload, 4)
+    if version not in (2, 3, 4):
+        return None
+    fixed_size = 40 + oid_size + 2
+    offset = 12
+    previous_path = b''
+    entries = []
+    for _ in range(count):
+        start = offset
+        if offset + fixed_size > end:
+            return None
+        (mode,) = struct.unpack_from('>I', payload, offset + 24)
+        oid = payload[offset + 40:offset + 40 + oid_size]
+        (flags,) = struct.unpack_from('>H', payload, offset + 40 + oid_size)
+        offset += fixed_size
+        extended = 0
+        if flags & INDEX_ENTRY_EXTENDED:
+            if version < 3 or offset + 2 > end:
+                return None
+            (extended,) = struct.unpack_from('>H', payload, offset)
+            offset += 2
+        if version == 4:
+            strip, offset = _index_varint(payload, offset, end)
+            if strip is None or strip > len(previous_path):
+                return None
+            terminator = payload.find(b'\0', offset, end)
+            if terminator < 0:
+                return None
+            path = previous_path[:len(previous_path) - strip] + payload[offset:terminator]
+            offset = terminator + 1
+        else:
+            terminator = payload.find(b'\0', offset, end)
+            if terminator < 0:
+                return None
+            path = payload[offset:terminator]
+            padded = start + ((terminator - start + 8) & ~7)
+            if padded > end or payload[terminator:padded].strip(b'\0'):
+                return None
+            offset = padded
+        if not path or flags & INDEX_ENTRY_NAME_MASK != min(len(path), INDEX_ENTRY_NAME_MASK):
+            return None
+        previous_path = path
+        entries.append((
+            path,
+            mode,
+            oid,
+            (flags >> 12) & 0x3,
+            bool(flags & INDEX_ENTRY_ASSUME_VALID),
+            extended,
+        ))
+    extensions = []
+    while offset < end:
+        if offset + 8 > end:
+            return None
+        signature = payload[offset:offset + 4]
+        (size,) = struct.unpack_from('>I', payload, offset + 4)
+        data_end = offset + 8 + size
+        if data_end > end:
+            return None
+        # only 'A'..'Z' extensions are optional, others (link, sdir) change
+        # how the entries have to be read
+        if not 0x41 <= signature[0] <= 0x5A:
+            return None
+        if signature not in INDEX_CACHE_ONLY_EXTENSIONS:
+            extensions.append((signature, payload[offset + 8:data_end]))
+        offset = data_end
+    return {'version': version, 'entries': entries, 'extensions': extensions}
+
+
+def index_semantic_digest(payload, object_format):
+    """Digest what an index stages, independent of stat fields and version."""
+    parsed = parse_index_semantics(payload, object_format)
+    if parsed is None:
+        return None
+    digest = hashlib.sha256(
+        INDEX_SEMANTIC_DIGEST_DOMAIN + object_format.encode('ascii') + b'\0'
+    )
+    digest.update(struct.pack('>I', len(parsed['entries'])))
+    for path, mode, oid, stage_number, assume_valid, extended in parsed['entries']:
+        digest.update(struct.pack('>I', len(path)) + path)
+        digest.update(struct.pack('>I', mode) + oid)
+        digest.update(struct.pack('>BBH', stage_number, assume_valid, extended))
+    for signature, data in parsed['extensions']:
+        digest.update(signature + struct.pack('>Q', len(data)) + data)
+    return digest.hexdigest()
+
+
+class IndexLease:
+    __slots__ = ('sha256', 'semantic')
+
+    def __init__(self, sha256, semantic):
+        self.sha256 = sha256
+        self.semantic = semantic
+
+
+class IndexObservation:
+    """One read of the real index, semantic digest parsed on demand."""
+
+    def __init__(self, payload, object_format):
+        self.payload = payload
+        self.object_format = object_format
+        self.sha256 = hashlib.sha256(payload).hexdigest()
+        self._semantic = None
+        self._parsed = False
+
+    @property
+    def semantic(self):
+        if not self._parsed:
+            self._semantic = (
+                index_semantic_digest(self.payload, self.object_format)
+                if self.object_format else None
+            )
+            self._parsed = True
+        return self._semantic
+
+
 class SyncwheelRevisionBackend:
     """In-process facade for the Agentwheel revision-provider protocol."""
 
     MANIFEST_PRODUCT_PATH = '.syncwheel/manifest.json'
+    INDEX_LEASE_KEYS = {
+        'baseline': ('baselineIndexSha256', 'baselineIndexSemantic'),
+        'product': ('productIndexSha256', 'productIndexSemantic'),
+        'control': ('controlIndexSha256', 'controlIndexSemantic'),
+    }
+    SEMANTIC_INDEX_MATCHES_KEY = 'indexLeaseSemanticMatches'
+    SEMANTIC_INDEX_MATCH_FIELDS = frozenset(
+        {'stage', 'oldSha256', 'newSha256', 'semanticDigest', 'at'}
+    )
+    INDEX_LOCK_WAIT_SECONDS = 2.0
 
     def __init__(self, provider_module):
         self.provider = provider_module
@@ -27772,36 +27939,61 @@ class SyncwheelRevisionBackend:
             env={'GIT_OPTIONAL_LOCKS': '0'},
         ).returncode == 0
 
-    def _dirty_paths(self, repo_root):
-        paths = set()
-        real_index = self._index_path(repo_root)
-        index_bytes, _ = self._read_regular_file(real_index, 'Git index')
-        index_sha = hashlib.sha256(index_bytes).hexdigest()
+    @contextlib.contextmanager
+    def _private_index_copy(self, index_path, payload):
+        """Git env that reads payload from a throwaway copy of the index.
+
+        Kept beside the real index so a split index still finds its shared
+        index. Git locks and rewrites only the copy.
+        """
         descriptor, temporary_name = tempfile.mkstemp(
-            prefix='index.syncwheel-observation-', dir=real_index.parent,
+            prefix='index.syncwheel-observation-', dir=index_path.parent,
         )
         observed_index = Path(temporary_name)
         try:
             with os.fdopen(descriptor, 'wb') as copied:
-                copied.write(index_bytes)
+                copied.write(payload)
             copied_bytes, _ = self._read_regular_file(observed_index, 'observational Git index')
-            if copied_bytes != index_bytes:
+            if copied_bytes != payload:
                 self._fail('observational Git index copy differs from the real index')
-            environment = {
+            yield {
                 'GIT_INDEX_FILE': str(observed_index),
                 'GIT_OPTIONAL_LOCKS': '0',
             }
+        finally:
+            observed_index.unlink(missing_ok=True)
+            Path(f'{temporary_name}.lock').unlink(missing_ok=True)
+
+    def _index_tree(self, repo_root, observed=None):
+        """Tree of the observed real-index bytes, never taking the real index.lock."""
+        index_path = self._index_path(repo_root)
+        if observed is None:
+            payload, _ = self._read_regular_file(index_path, 'Git index')
+        else:
+            payload = observed.payload
+        with self._private_index_copy(index_path, payload) as environment:
+            return git(repo_root, 'write-tree', env=environment).stdout.strip()
+
+    def _dirty_paths(self, repo_root, request=None):
+        paths = set()
+        real_index = self._index_path(repo_root)
+        index_bytes, _ = self._read_regular_file(real_index, 'Git index')
+        observed = IndexObservation(index_bytes, self._index_object_format(repo_root))
+        with self._private_index_copy(real_index, index_bytes) as environment:
             for arguments in (
                 ('diff', '--name-only', '-z'),
                 ('ls-files', '--others', '--exclude-standard', '-z'),
             ):
                 output = git(repo_root, *arguments, env=environment).stdout
                 paths.update(item for item in output.split('\0') if item)
-            if self._index_sha256(repo_root) != index_sha:
+            current = self._index_observation(repo_root)
+            # no request means no journal for the audit trail, so stay byte-strict
+            candidates = [(
+                'dirty-path observation',
+                observed if request is not None else IndexLease(observed.sha256, None),
+            )]
+            if self._matching_index_lease(request, current, candidates) is None:
                 self._fail('real Git index changed during dirty-path observation')
-        finally:
-            observed_index.unlink(missing_ok=True)
-            Path(f'{temporary_name}.lock').unlink(missing_ok=True)
         return paths
 
     def _dirty_snapshot(self, repo_root, paths):
@@ -27859,7 +28051,7 @@ class SyncwheelRevisionBackend:
 
     def _assert_unowned_dirty_unchanged(self, repo_root, request, *, allowed_outside=()):
         allowed = {item.path for item in request.paths} | set(allowed_outside)
-        outside = self._dirty_paths(repo_root) - allowed
+        outside = self._dirty_paths(repo_root, request) - allowed
         journal = self.load_journal(request)
         baseline = (journal or {}).get('baselineUnownedDirty')
         if baseline is None:
@@ -28043,13 +28235,130 @@ class SyncwheelRevisionBackend:
         payload, _ = self._read_regular_file(path, 'Git index')
         return hashlib.sha256(payload).hexdigest()
 
+    def _index_object_format(self, repo_root):
+        formats = self.__dict__.setdefault('_index_object_formats', {})
+        key = str(repo_root)
+        if key not in formats:
+            result = git(
+                repo_root, 'rev-parse', '--show-object-format', check=False,
+                env={'GIT_OPTIONAL_LOCKS': '0'},
+            )
+            value = result.stdout.strip() if result.returncode == 0 else ''
+            formats[key] = value if value in INDEX_OBJECT_FORMATS else None
+        return formats[key]
+
+    def _index_observation(self, repo_root):
+        payload, _ = self._read_regular_file(self._index_path(repo_root), 'Git index')
+        return IndexObservation(payload, self._index_object_format(repo_root))
+
+    def _journal_index_lease(self, journal, name):
+        sha_key, semantic_key = self.INDEX_LEASE_KEYS[name]
+        semantic = journal.get(semantic_key)
+        if semantic is not None and (
+            not isinstance(semantic, str) or not self.provider.HEX_64.fullmatch(semantic)
+        ):
+            self._fail(f'operation journal has an invalid {semantic_key}')
+        self._journal_semantic_index_matches(journal)
+        return IndexLease(journal.get(sha_key), semantic)
+
+    @staticmethod
+    def _journal_has_semantic_leases(journal):
+        # journals written before semantic leases existed keep byte-exact leases
+        return 'baselineIndexSemantic' in journal
+
+    def _journal_semantic_index_matches(self, journal):
+        key = self.SEMANTIC_INDEX_MATCHES_KEY
+        if key not in journal:
+            return []
+        recorded = journal[key]
+        hex_64 = self.provider.HEX_64
+        if not isinstance(recorded, list) or not all(
+            isinstance(item, dict)
+            and set(item) == self.SEMANTIC_INDEX_MATCH_FIELDS
+            and isinstance(item['stage'], str) and item['stage']
+            and isinstance(item['at'], str) and item['at']
+            and all(
+                isinstance(item[field], str) and hex_64.fullmatch(item[field])
+                for field in ('oldSha256', 'newSha256', 'semanticDigest')
+            )
+            for item in recorded
+        ):
+            self._fail(f'operation journal has an invalid {key}')
+        return list(recorded)
+
+    def _matching_index_lease(self, request, observed, candidates):
+        """Return the position of the first (stage, lease) the observed index holds.
+
+        Byte equality wins. Otherwise a lease holds only when both semantic
+        digests exist and agree, and that acceptance is kept as journal audit.
+        """
+        for position, (_, lease) in enumerate(candidates):
+            if observed.sha256 == lease.sha256:
+                return position
+        for position, (stage, lease) in enumerate(candidates):
+            expected = lease.semantic
+            if expected is None or observed.semantic != expected:
+                continue
+            self._record_semantic_index_match(
+                request, stage, lease.sha256, observed.sha256, expected
+            )
+            return position
+        return None
+
+    def _record_semantic_index_match(self, request, stage, old_sha, new_sha, semantic):
+        pending = self.__dict__.setdefault('_semantic_index_matches', [])
+        record = {
+            'operationId': request.operation_id,
+            'stage': stage,
+            'oldSha256': old_sha,
+            'newSha256': new_sha,
+            'semanticDigest': semantic,
+            'at': iso_utc_now(),
+        }
+        if not any(self._same_semantic_index_match(item, record) for item in pending):
+            pending.append(record)
+
+    @staticmethod
+    def _same_semantic_index_match(first, second):
+        fields = ('stage', 'oldSha256', 'newSha256', 'semanticDigest')
+        return all(first.get(field) == second.get(field) for field in fields)
+
+    def _merge_semantic_index_matches(self, request, journal):
+        # callers save their own journal copies, so every save re-adds all
+        # matches accepted in this process
+        recorded = self._journal_semantic_index_matches(journal)
+        pending = [
+            item for item in self.__dict__.get('_semantic_index_matches', [])
+            if item['operationId'] == request.operation_id
+        ]
+        if not pending:
+            return
+        for item in pending:
+            entry = {key: value for key, value in item.items() if key != 'operationId'}
+            if not any(
+                self._same_semantic_index_match(existing, entry) for existing in recorded
+            ):
+                recorded.append(entry)
+        journal[self.SEMANTIC_INDEX_MATCHES_KEY] = recorded
+
+    def aligned_index_semantic(self, request, journal, commit):
+        """Semantic lease for the index align_index wrote for commit, if any.
+
+        Journals written before semantic leases existed stay byte-strict.
+        """
+        if not self._journal_has_semantic_leases(journal):
+            return None
+        return self.__dict__.get('_aligned_index_semantics', {}).get(commit)
+
     def reprepare_index_lease(self, request, journal):
         """Recover one pre-effect index lease only after a fresh full preflight."""
         repo_root = self._repo_root(request)
-        current_sha = self._index_sha256(repo_root)
+        current = self._index_observation(repo_root)
+        current_sha = current.sha256
         old_sha = journal.get('baselineIndexSha256')
         if not isinstance(old_sha, str) or not self.provider.HEX_64.fullmatch(old_sha):
             self._fail('prepared journal has an invalid baseline index SHA-256')
+        self._journal_index_lease(journal, 'baseline')
         if current_sha == old_sha:
             return
         if request.action != 'recover' or journal.get('phase') != 'prepared':
@@ -28118,7 +28427,8 @@ class SyncwheelRevisionBackend:
             'request', 'phase', 'expectedHead', 'resultingHead',
             'baselineIndexSha256',
         }
-        if set(journal) != known:
+        optional = {'baselineIndexSemantic', self.SEMANTIC_INDEX_MATCHES_KEY}
+        if not known <= set(journal) <= known | optional:
             self._fail('prepared journal has missing or unexpected evidence')
         if changed or observation['head'] != request.expected_head:
             self._fail('fresh recovery preflight changed prepared leases: '
@@ -28131,6 +28441,8 @@ class SyncwheelRevisionBackend:
             'at': iso_utc_now(),
         }
         journal['baselineIndexSha256'] = current_sha
+        if self._journal_has_semantic_leases(journal):
+            journal['baselineIndexSemantic'] = current.semantic
         self.save_journal(request, journal)
         self.checkpoint('index_lease_reprepared')
 
@@ -28388,7 +28700,7 @@ class SyncwheelRevisionBackend:
         if require_clean:
             if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
                 self._fail('revision provider preflight requires a clean, conflict-free index')
-            forbidden = self._dirty_paths(repo_root) & (
+            forbidden = self._dirty_paths(repo_root, request) & (
                 {item.path for item in request.paths} | {self.MANIFEST_PRODUCT_PATH}
             )
             if forbidden:
@@ -28410,6 +28722,9 @@ class SyncwheelRevisionBackend:
         ref_transaction_refs = self._expand_symbolic_target_leases(
             repo_root, ref_transaction_refs
         )
+        worktrees = self._worktrees(repo_root)
+        composition_digest = integration_composition_digest(manifest)
+        index = self._index_observation(repo_root)
         return {
             'repoRoot': repo_root,
             'manifest': manifest,
@@ -28417,7 +28732,7 @@ class SyncwheelRevisionBackend:
             'manifestDigest': digest,
             'head': head,
             'integrationBranch': integration_branch,
-            'worktrees': self._worktrees(repo_root),
+            'worktrees': worktrees,
             'remoteRefs': remote_refs,
             'managedLocalRefs': managed_local_refs,
             'refTransactionRefs': ref_transaction_refs,
@@ -28428,8 +28743,9 @@ class SyncwheelRevisionBackend:
             'baseRefObservation': base_ref_observation,
             'projectionBaseSha': base_ref_sha,
             'projectionBaseKind': 'manifest-base',
-            'integrationCompositionDigest': integration_composition_digest(manifest),
-            'indexSha256': self._index_sha256(repo_root),
+            'integrationCompositionDigest': composition_digest,
+            'indexSha256': index.sha256,
+            'indexSemantic': index.semantic,
             'unmappedIntegrationCommits': unmapped,
             'coordination': coordination,
         }
@@ -28478,6 +28794,7 @@ class SyncwheelRevisionBackend:
             os.close(descriptor)
 
     def save_journal(self, request, journal):
+        self._merge_semantic_index_matches(request, journal)
         path = self._journal_path(request)
         path.parent.mkdir(parents=True, exist_ok=True)
         encoded = json.dumps(journal, indent=2, sort_keys=True) + '\n'
@@ -28679,7 +28996,7 @@ class SyncwheelRevisionBackend:
             expected_refs[f'refs/heads/{request.draft_branch}'] = None
             self._assert_ref_leases(repo_root, expected_refs)
             self._assert_index_lease(
-                repo_root, journal['baselineIndexSha256'], 'preflight'
+                repo_root, request, journal, 'baseline', 'preflight'
             )
         self._ensure_after_scope(repo_root, request)
 
@@ -29019,7 +29336,7 @@ class SyncwheelRevisionBackend:
             return
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control ref update requires a clean, conflict-free index')
-        dirty = self._dirty_paths(repo_root)
+        dirty = self._dirty_paths(repo_root, request)
         if self.MANIFEST_PRODUCT_PATH not in dirty:
             self._fail(
                 'control ref update requires .syncwheel/manifest.json; found: '
@@ -29042,12 +29359,17 @@ class SyncwheelRevisionBackend:
         if drift:
             self._fail('managed local ref lease was lost: ' + '; '.join(drift))
 
-    def _assert_index_lease(self, repo_root, expected, stage):
-        actual = self._index_sha256(repo_root)
-        if actual != expected:
+    def _assert_index_lease(self, repo_root, request, journal, lease_name, stage):
+        lease = self._journal_index_lease(journal, lease_name)
+        if not isinstance(lease.sha256, str) or not self.provider.HEX_64.fullmatch(
+            lease.sha256
+        ):
+            self._fail(f'{stage} index lease is missing from the operation journal')
+        observed = self._index_observation(repo_root)
+        if self._matching_index_lease(request, observed, [(stage, lease)]) is None:
             self._fail(
                 f'real Git index lease was lost before {stage}: '
-                f'expected {expected}, found {actual}'
+                f'expected {lease.sha256}, found {observed.sha256}'
             )
 
     def _expand_symbolic_target_leases(self, repo_root, expected):
@@ -29370,7 +29692,7 @@ class SyncwheelRevisionBackend:
         self._verify_worktree_objects(repo_root, journal['productPathObjects'])
         self._verify_draft_candidate(repo_root, request, journal)
         self._assert_index_lease(
-            repo_root, journal['baselineIndexSha256'], 'draft ownership'
+            repo_root, request, journal, 'baseline', 'draft ownership'
         )
         expected = self._expected_managed_refs(
             request, journal, request.expected_head, draft_owned=False
@@ -29466,6 +29788,7 @@ class SyncwheelRevisionBackend:
             observed_paths[relative] = None if observed is None else {
                 'sha256': observed['sha256'], 'mode': observed['mode'],
             }
+        index = self._index_observation(repo_root)
         return {
             'allRefs': self._all_refs(repo_root),
             'headSymbolic': git(
@@ -29473,8 +29796,8 @@ class SyncwheelRevisionBackend:
             ).stdout.strip() or None,
             'headObject': ref_tip(repo_root, 'HEAD'),
             'worktreePorcelain': self._worktree_porcelain(repo_root),
-            'indexSha256': self._index_sha256(repo_root),
-            'indexTree': git(repo_root, 'write-tree').stdout.strip(),
+            'index': index,
+            'indexTree': self._index_tree(repo_root, index),
             'status': git(
                 repo_root,
                 'status',
@@ -29515,14 +29838,12 @@ class SyncwheelRevisionBackend:
             request, journal, integration_tip, draft_owned=draft_owned
         )
         self._assert_ref_leases(repo_root, expected_refs)
-        expected_index = (
-            journal['baselineIndexSha256']
-            if kind == 'product'
-            else journal.get('productIndexSha256')
-        )
-        if not expected_index:
+        lease_name = 'baseline' if kind == 'product' else 'product'
+        if not self._journal_index_lease(journal, lease_name).sha256:
             self._fail(f'{kind} index lease is missing from the operation journal')
-        self._assert_index_lease(repo_root, expected_index, f'{kind} hook validation')
+        self._assert_index_lease(
+            repo_root, request, journal, lease_name, f'{kind} hook validation'
+        )
         before = self._hook_repository_snapshot(repo_root, path_objects)
         rejection = None
         try:
@@ -29530,7 +29851,11 @@ class SyncwheelRevisionBackend:
         except self.provider.RevisionProviderError as exc:
             rejection = exc
         after = self._hook_repository_snapshot(repo_root, path_objects)
-        if after != before:
+        index_before = before.pop('index')
+        index_after = after.pop('index')
+        if after != before or self._matching_index_lease(
+            request, index_after, [(f'{kind} hook snapshot', index_before)]
+        ) is None:
             self._fail(
                 'commit hook changed repository state; no subsequent managed ref was moved'
             )
@@ -29556,7 +29881,7 @@ class SyncwheelRevisionBackend:
         current_head = ref_tip(repo_root, 'HEAD')
         if current_head not in {expected_parent, commit}:
             self._fail('integration HEAD changed before compare-and-swap publication')
-        index_tree = git(repo_root, 'write-tree').stdout.strip()
+        index_tree = self._index_tree(repo_root)
         if index_tree not in {ref_tree(repo_root, expected_parent), ref_tree(repo_root, commit)}:
             self._fail('real index changed before compare-and-swap publication')
         manifest, _ = self._manifest(repo_root)
@@ -29565,7 +29890,7 @@ class SyncwheelRevisionBackend:
             self._fail('primary checkout left the integration branch')
         if expected_parent == request.expected_head:
             derived = journal.get('projectionRoute') == 'derived'
-            expected_index = journal['baselineIndexSha256']
+            lease_name = 'baseline'
             if not journal.get('productHooksValidated'):
                 self._fail('product hooks were not durably validated before draft ownership')
             if not derived and ref_tip(repo_root, request.draft_branch) != journal.get(
@@ -29587,8 +29912,8 @@ class SyncwheelRevisionBackend:
                 request, journal, expected_parent, draft_owned=not derived
             )
         else:
-            expected_index = journal.get('productIndexSha256')
-            if not expected_index:
+            lease_name = 'product'
+            if not journal.get('productIndexSha256'):
                 self._fail('product index lease is missing before control publication')
             if not journal.get('controlHooksValidated'):
                 self._fail('control hooks were not durably validated before publication')
@@ -29612,7 +29937,9 @@ class SyncwheelRevisionBackend:
             self._assert_ref_leases(repo_root, expected_refs)
             self.verify_recovery_gate(request, journal)
             return commit
-        self._assert_index_lease(repo_root, expected_index, 'integration publication')
+        self._assert_index_lease(
+            repo_root, request, journal, lease_name, 'integration publication'
+        )
         self._assert_ref_leases(repo_root, expected_refs)
         self._cas_ref_with_leases(repo_root, integration_ref, commit, expected_refs)
         self.verify_recovery_gate(request, journal)
@@ -29782,16 +30109,32 @@ class SyncwheelRevisionBackend:
         os.unlink(backing)
         self._fsync_directory(backing.parent)
 
+    def _index_lock_present(self, lock_path):
+        return lock_path.exists() or lock_path.is_symlink()
+
+    def _wait_for_foreign_index_lock(self, lock_path, deadline):
+        """Poll until another process drops index.lock, False once the deadline passes.
+
+        A plain `git status` holds index.lock briefly while refreshing stat data,
+        so only a lock outliving the wait is an error.
+        """
+        delay = 0.005
+        while self._index_lock_present(lock_path):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(delay, remaining))
+            delay = min(delay * 2, 0.1)
+        return True
+
     def recover_owned_index_lock(self, request, journal):
         index_path = self._index_path(self._repo_root(request))
         lock_path = Path(f'{index_path}.lock')
-        if not (lock_path.exists() or lock_path.is_symlink()):
+        if not self._index_lock_present(lock_path):
             return
         alignments = journal.get('indexAlignments')
-        if not isinstance(alignments, dict):
-            self._fail(f'Git index is locked by another writer: {lock_path}')
-        owned = []
-        for kind, record in alignments.items():
+        records = []
+        for kind, record in (alignments.items() if isinstance(alignments, dict) else ()):
             if kind not in {'product', 'control'} or not isinstance(record, dict):
                 self._fail('operation journal has invalid index-alignment ownership state')
             commit = record.get('commitSha')
@@ -29809,8 +30152,13 @@ class SyncwheelRevisionBackend:
             ):
                 self._fail('operation journal has invalid index-alignment ownership state')
             backing = self._index_alignment_directory(request) / expected_filename
-            if self._same_regular_inode(lock_path, backing):
-                owned.append((kind, record, backing))
+            records.append((kind, record, backing))
+        owned = [item for item in records if self._same_regular_inode(lock_path, item[2])]
+        if not owned:
+            deadline = time.monotonic() + self.INDEX_LOCK_WAIT_SECONDS
+            if self._wait_for_foreign_index_lock(lock_path, deadline):
+                return
+            self._fail(f'Git index is locked by another writer: {lock_path}')
         if len(owned) != 1:
             self._fail(f'Git index is locked by another writer: {lock_path}')
         kind, record, backing = owned[0]
@@ -29820,16 +30168,61 @@ class SyncwheelRevisionBackend:
                 f'journaled {kind} index.lock is not aligned with current HEAD; '
                 'automatic recovery is unsafe'
             )
-        current_sha = self._index_sha256(repo_root)
-        if current_sha not in {
-            record['expectedSha256'], record['desiredSha256']
-        }:
+        current = self._index_observation(repo_root)
+        predecessor = self._journal_index_lease(
+            journal, 'baseline' if kind == 'product' else 'product'
+        )
+        backing_payload, _ = self._read_regular_file(
+            backing, 'journaled index-alignment backing file'
+        )
+        desired = IndexObservation(backing_payload, self._index_object_format(repo_root))
+        stage = f'{kind} index.lock recovery'
+        candidates = [
+            (stage, IndexLease(
+                record['expectedSha256'],
+                predecessor.semantic
+                if predecessor.sha256 == record['expectedSha256'] else None,
+            )),
+            (stage, IndexLease(
+                record['desiredSha256'],
+                desired.semantic
+                if self._journal_has_semantic_leases(journal)
+                and desired.sha256 == record['desiredSha256'] else None,
+            )),
+        ]
+        if self._matching_index_lease(request, current, candidates) is None:
             self._fail(
                 f'real Git index lease was lost while recovering {kind} index.lock'
             )
         if not self._remove_owned_index_lock(lock_path, backing):
             self._fail('journaled index.lock ownership changed during recovery')
         self.checkpoint(f'{kind}_index_lock_recovered')
+
+    def _take_alignment_lock(self, lock_path, backing, already_aligned, reassert):
+        """Link backing as index.lock unless the index is already aligned.
+
+        Returns (already_aligned, lock_owned). Foreign locks get at most
+        INDEX_LOCK_WAIT_SECONDS in total, and the lease is asserted again after
+        every wait because the lock holder may have rewritten the index.
+        """
+        deadline = time.monotonic() + self.INDEX_LOCK_WAIT_SECONDS
+        while True:
+            if already_aligned:
+                if (
+                    not self._index_lock_present(lock_path)
+                    or self._remove_owned_index_lock(lock_path, backing)
+                ):
+                    return True, False
+            else:
+                try:
+                    os.link(backing, lock_path, follow_symlinks=False)
+                    return False, True
+                except FileExistsError:
+                    if self._same_regular_inode(lock_path, backing):
+                        return False, True
+            if not self._wait_for_foreign_index_lock(lock_path, deadline):
+                self._fail(f'Git index is locked by another writer: {lock_path}')
+            already_aligned = reassert()
 
     def align_index(self, request, commit):
         repo_root = self._repo_root(request)
@@ -29840,12 +30233,13 @@ class SyncwheelRevisionBackend:
             self._fail('index alignment requires an operation journal')
         if commit == journal.get('candidateProductCommitSha'):
             kind = 'product'
-            expected_sha = journal['baselineIndexSha256']
+            predecessor = self._journal_index_lease(journal, 'baseline')
         elif commit == journal.get('candidateControlCommitSha'):
             kind = 'control'
-            expected_sha = journal.get('productIndexSha256')
+            predecessor = self._journal_index_lease(journal, 'product')
         else:
             self._fail('index alignment commit is not owned by this operation')
+        expected_sha = predecessor.sha256
         if not expected_sha:
             self._fail(f'{kind} index alignment has no predecessor lease')
 
@@ -29858,13 +30252,25 @@ class SyncwheelRevisionBackend:
                 else ()
             ),
         )
-        current_sha = self._index_sha256(repo_root)
-        if current_sha not in {expected_sha, desired_sha}:
-            self._fail(
-                f'real Git index lease was lost before {kind} alignment: '
-                f'expected {expected_sha}, found {current_sha}'
-            )
+        desired = IndexObservation(desired_payload, self._index_object_format(repo_root))
+        self.__dict__.setdefault('_aligned_index_semantics', {})[commit] = desired.semantic
+        leased = (f'{kind} alignment', predecessor)
+        aligned = (f'{kind} alignment result', IndexLease(
+            desired_sha,
+            desired.semantic if self._journal_has_semantic_leases(journal) else None,
+        ))
 
+        def assert_leased_or_aligned():
+            observed = self._index_observation(repo_root)
+            matched = self._matching_index_lease(request, observed, [leased, aligned])
+            if matched is None:
+                self._fail(
+                    f'real Git index lease was lost before {kind} alignment: '
+                    f'expected {expected_sha}, found {observed.sha256}'
+                )
+            return matched == 1
+
+        assert_leased_or_aligned()
         self.checkpoint(f'before_{kind}_index_lock')
         index_path = self._index_path(repo_root)
         lock_path = Path(f'{index_path}.lock')
@@ -29874,12 +30280,7 @@ class SyncwheelRevisionBackend:
         except FileNotFoundError:
             self._fail(f'revision provider requires an existing Git index: {index_path}')
 
-        current_sha = self._index_sha256(repo_root)
-        if current_sha not in {expected_sha, desired_sha}:
-            self._fail(
-                f'real Git index lease was lost before {kind} alignment: '
-                f'expected {expected_sha}, found {current_sha}'
-            )
+        already_aligned = assert_leased_or_aligned()
         record = self._index_alignment_record(
             request, journal, kind, commit, expected_sha, desired_sha
         )
@@ -29887,44 +30288,31 @@ class SyncwheelRevisionBackend:
             request, record, desired_payload, mode
         )
 
-        if current_sha == desired_sha:
-            if lock_path.exists() or lock_path.is_symlink():
-                if not self._remove_owned_index_lock(lock_path, backing):
-                    self._fail(f'Git index is locked by another writer: {lock_path}')
-            self._fsync_directory(index_path.parent)
-            self._remove_index_backing(backing)
-            if git(repo_root, 'write-tree').stdout.strip() != ref_tree(repo_root, commit):
-                self._fail('aligned index hash does not produce the current commit tree')
-            return desired_sha
-
         lock_owned = False
         try:
-            try:
-                os.link(backing, lock_path, follow_symlinks=False)
-                lock_owned = True
+            already_aligned, lock_owned = self._take_alignment_lock(
+                lock_path, backing, already_aligned, assert_leased_or_aligned
+            )
+            if not already_aligned:
                 self._fsync_directory(lock_path.parent)
-            except FileExistsError:
                 if not self._same_regular_inode(lock_path, backing):
-                    self._fail(f'Git index is locked by another writer: {lock_path}')
-                lock_owned = True
-            if not self._same_regular_inode(lock_path, backing):
-                self._fail('journaled index.lock ownership could not be proven')
-            self.checkpoint(f'{kind}_index_lock_owned')
-            locked_sha = self._index_sha256(repo_root)
-            if locked_sha != expected_sha:
-                self._fail(
-                    f'real Git index lease was lost before {kind} alignment: '
-                    f'expected {expected_sha}, found {locked_sha}'
-                )
-            final_sha = self._index_sha256(repo_root)
-            if final_sha != expected_sha:
-                self._fail(
-                    f'real Git index changed while {kind} alignment held index.lock'
-                )
-            os.replace(lock_path, index_path)
-            lock_owned = False
-            fsync_directory_path(index_path.parent)
-            self.checkpoint(f'{kind}_index_cas')
+                    self._fail('journaled index.lock ownership could not be proven')
+                self.checkpoint(f'{kind}_index_lock_owned')
+                locked = self._index_observation(repo_root)
+                if self._matching_index_lease(request, locked, [leased]) is None:
+                    self._fail(
+                        f'real Git index lease was lost before {kind} alignment: '
+                        f'expected {expected_sha}, found {locked.sha256}'
+                    )
+                final = self._index_observation(repo_root)
+                if self._matching_index_lease(request, final, [leased]) is None:
+                    self._fail(
+                        f'real Git index changed while {kind} alignment held index.lock'
+                    )
+                os.replace(lock_path, index_path)
+                lock_owned = False
+                fsync_directory_path(index_path.parent)
+                self.checkpoint(f'{kind}_index_cas')
         except BaseException:
             if lock_owned:
                 self._remove_owned_index_lock(lock_path, backing)
@@ -29932,10 +30320,17 @@ class SyncwheelRevisionBackend:
         finally:
             if lock_owned:
                 self._remove_owned_index_lock(lock_path, backing)
+        if already_aligned:
+            self._fsync_directory(index_path.parent)
+            self._remove_index_backing(backing)
+            if self._index_tree(repo_root) != ref_tree(repo_root, commit):
+                self._fail('aligned index hash does not produce the current commit tree')
+            return desired_sha
         self._remove_index_backing(backing)
-        if self._index_sha256(repo_root) != desired_sha:
+        retained = self._index_observation(repo_root)
+        if self._matching_index_lease(request, retained, [aligned]) is None:
             self._fail(f'real Git index did not retain the {kind} replacement bytes')
-        if git(repo_root, 'write-tree').stdout.strip() != ref_tree(repo_root, commit):
+        if self._index_tree(repo_root, retained) != ref_tree(repo_root, commit):
             self._fail(f'real Git index did not align to the {kind} commit tree')
         return desired_sha
 
@@ -30128,7 +30523,7 @@ class SyncwheelRevisionBackend:
             self._fail('control commit requires the product commit at integration HEAD')
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('control commit requires a clean, conflict-free index')
-        dirty = self._dirty_paths(repo_root)
+        dirty = self._dirty_paths(repo_root, request)
         if self.MANIFEST_PRODUCT_PATH not in dirty:
             self._fail(
                 'control commit requires .syncwheel/manifest.json; found: '
@@ -30202,14 +30597,17 @@ class SyncwheelRevisionBackend:
                 request, journal, expected_head, draft_owned=False
             )
         self._assert_ref_leases(repo_root, expected_refs)
-        expected_index = (
-            (journal.get('controlIndexSha256') or journal.get('productIndexSha256'))
-            if journal.get('productCommitSha')
-            else journal['baselineIndexSha256']
-        )
-        if not expected_index:
+        if not journal.get('productCommitSha'):
+            lease_name = 'baseline'
+        elif journal.get('controlIndexSha256'):
+            lease_name = 'control'
+        else:
+            lease_name = 'product'
+        if not self._journal_index_lease(journal, lease_name).sha256:
             self._fail('terminal index lease is missing from the operation journal')
-        self._assert_index_lease(repo_root, expected_index, 'terminal verification')
+        self._assert_index_lease(
+            repo_root, request, journal, lease_name, 'terminal verification'
+        )
         self.verify_recovery_gate(request, journal)
         return {
             'resultingHead': expected_head,
@@ -30284,7 +30682,7 @@ class SyncwheelRevisionBackend:
         )
         self._assert_ref_leases(repo_root, expected_refs)
         self._assert_index_lease(
-            repo_root, journal['baselineIndexSha256'], 'operation release'
+            repo_root, request, journal, 'baseline', 'operation release'
         )
 
     def checkpoint(self, phase):
