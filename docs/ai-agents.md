@@ -179,6 +179,9 @@ active-active channel must use the coordination remote.
 
 - do not author or commit in the shared primary checkout, even when it is clean;
   open a governed lane first with `syncwheel worktree open <lane> --into <stack>`
+- when the calling checkout is behind the stack, use `worktree open <lane> --into
+  <stack> --base <stack-branch>`; the explicit base must resolve to the stack's
+  exact current projected tip, and the lane records that commit as its base
 - do not run a built-in mutation while the primary is dirty: it stops before side
   effects and names `worktree open` or `stack capture-integration` for the work
 - read-only diagnostics remain usable when the primary is dirty; treat their yellow

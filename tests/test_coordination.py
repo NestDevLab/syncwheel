@@ -3332,6 +3332,148 @@ with module.coordination_publication_lock(Path(repo_path)):
                 delivery_tip=module.ref_tip(repo, 'origin/main'),
             )
 
+    def test_abandoned_history_requires_exact_current_delivery_for_its_paths(self):
+        origin = self.create_remote('abandoned-history')
+        repo = self.clone(origin, 'abandoned-history')
+        self.init_coordinated(repo, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        old = self.commit_on_branch(repo, 'scratch/old', 'old.txt')
+        self.run_cli(repo, 'stack', 'create', 'old', old, '--branch', 'pr/old')
+        self.run_cli(repo, 'stack', 'rebuild', 'old')
+        self.run_cli(repo, 'stack', 'push', 'old')
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'project old stack')
+        self.run_cli(repo, 'int', 'push')
+
+        other = self.commit_on_branch(repo, 'scratch/other', 'other.txt')
+        self.run_cli(repo, 'stack', 'create', 'other', other, '--draft')
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'project other stack')
+        self.run_cli(repo, 'int', 'push')
+        publisher = self.clone(origin, 'abandoned-history-publisher')
+        (publisher / 'old.txt').write_text('scratch/old\n')
+        self.git(publisher, 'add', 'old.txt')
+        self.git(publisher, 'commit', '-qm', 'feat: supersede old path')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        self.git(repo, 'fetch', '-q', 'origin', '+refs/heads/main:refs/remotes/origin/main')
+        module = self.load_module()
+        before_manifest, _ = module.load_manifest(repo)
+        before_observation = module.observe_published_integration_tip(repo, before_manifest)
+        before_delivery = module.integration_projection_ref_observation(
+            repo, 'base', 'integration', before_manifest['integration']['base']
+        )
+        self.assertNotIn(old, module.historically_closed_integration_commits(
+            repo, module.ref_tip(repo, before_manifest['integration']['branch']),
+            before_observation, candidates=[old], delivery_tip=before_delivery['tip'],
+            delivery_observation=before_delivery, abandonment_only=True,
+        ))
+        self.run_cli(repo, 'stack', 'close', 'old', '--reason', 'abandoned', '--force')
+        self.run_cli(repo, 'int', 'push')
+
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        tip = module.ref_tip(repo, manifest['integration']['branch'])
+        delivery = module.integration_projection_ref_observation(
+            repo, 'base', 'integration', manifest['integration']['base']
+        )
+        self.assertNotEqual(
+            module.tree_path_entry(repo, tip, 'other.txt'),
+            module.tree_path_entry(repo, delivery['tip'], 'other.txt'),
+        )
+        self.assertIn(old, module.historically_closed_integration_commits(
+            repo, tip, observation, candidates=[old], delivery_tip=delivery['tip'],
+            delivery_observation=delivery, abandonment_only=True,
+        ))
+        provider = subprocess.run(
+            ['python3', str(CLI), 'revision-provider'], cwd=repo,
+            input=json.dumps({
+                'protocolVersion': 1, 'action': 'check',
+                'operationId': 'abandoned-history-check',
+                'repositoryRoot': str(repo.resolve()),
+                'expectedHead': tip, 'commandName': 'agentwheel install',
+                'reason': 'Check superseded abandoned history',
+                'noCommit': False, 'paths': [],
+            }), text=True, capture_output=True, env={**os.environ, **self.environment},
+        )
+        self.assertEqual(provider.returncode, 0, provider.stdout + provider.stderr)
+
+        (repo / 'old.txt').write_text('local undelivered change\n')
+        self.git(repo, 'add', 'old.txt')
+        self.git(repo, 'commit', '-qm', 'test: local old path differs from delivery')
+        local_tip = module.ref_tip(repo, manifest['integration']['branch'])
+        self.assertNotIn(old, module.historically_closed_integration_commits(
+            repo, local_tip, observation, candidates=[old], delivery_tip=delivery['tip'],
+            delivery_observation=delivery, abandonment_only=True,
+        ))
+        rejected = self.run_cli(
+            repo, 'int', 'rebuild', '--reason', 'refuse undelivered old path', expected=2,
+        )
+        self.assertIn('unexplained product paths', rejected.stderr)
+        self.git(repo, 'reset', '--hard', tip)
+
+        (repo / 'unknown.txt').write_text('unowned work\n')
+        self.git(repo, 'add', 'unknown.txt')
+        self.git(repo, 'commit', '-qm', 'test: unknown integration history')
+        unknown = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.assertNotIn(unknown, module.historically_closed_integration_commits(
+            repo, unknown, observation, candidates=[unknown], delivery_tip=delivery['tip'],
+            delivery_observation=delivery, abandonment_only=True,
+        ))
+        self.git(repo, 'reset', '--hard', tip)
+
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'retain other stack after old delivery')
+        self.assertEqual(
+            module.tree_path_entry(repo, module.ref_tip(repo, manifest['integration']['branch']), 'other.txt'),
+            module.tree_path_entry(repo, other, 'other.txt'),
+        )
+
+    def test_abandoned_path_proof_checks_user_ignore_and_every_commit_parent(self):
+        origin = self.create_remote('abandoned-paths')
+        repo = self.clone(origin, 'abandoned-paths')
+        module = self.load_module()
+        self.git(repo, 'switch', '-q', '-c', 'old-source', 'origin/main')
+        (repo / '.gitignore').write_text('user-owned-rule\n')
+        (repo / 'old.txt').write_text('delivered\n')
+        self.git(repo, 'add', '.gitignore', 'old.txt')
+        self.git(repo, 'commit', '-qm', 'feat: old source with user ignore rule')
+        old = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / '.gitignore').write_text('user-owned-rule\n')
+        (repo / 'old.txt').write_text('delivered\n')
+        self.git(repo, 'add', '.gitignore', 'old.txt')
+        self.git(repo, 'commit', '-qm', 'feat: deliver old paths')
+        delivered = module.ref_tip(repo, 'HEAD')
+        self.assertTrue(module.abandoned_stack_paths_match_delivery(
+            repo, [old], old, old, delivered,
+        ))
+
+        self.git(repo, 'switch', '-q', 'old-source')
+        (repo / '.gitignore').write_text('unique-user-rule\n')
+        self.git(repo, 'add', '.gitignore')
+        self.git(repo, 'commit', '-qm', 'test: unique user ignore rule')
+        divergent = module.ref_tip(repo, 'HEAD')
+        self.assertFalse(module.abandoned_stack_paths_match_delivery(
+            repo, [old], divergent, old, delivered,
+        ))
+        self.assertFalse(module.abandoned_stack_paths_match_delivery(
+            repo, [old], old, divergent, delivered,
+        ))
+
+        self.git(repo, 'switch', '-q', '-c', 'published-divergent', old)
+        (repo / 'old.txt').write_text('undelivered published bytes\n')
+        self.git(repo, 'add', 'old.txt')
+        self.git(repo, 'commit', '-qm', 'test: published old path differs')
+        published_divergent = module.ref_tip(repo, 'HEAD')
+        self.assertFalse(module.abandoned_stack_paths_match_delivery(
+            repo, [old], old, published_divergent, delivered,
+        ))
+
+        self.git(repo, 'switch', '-q', 'old-source')
+        self.git(repo, 'merge', '-q', '--no-ff', '-s', 'ours', 'main', '-m', 'test: merge')
+        merge = module.ref_tip(repo, 'HEAD')
+        self.assertFalse(module.abandoned_stack_paths_match_delivery(
+            repo, [old, merge], old, old, delivered,
+        ))
+
     def test_closed_stack_history_ignores_unavailable_non_head_control_tip(self):
         origin = self.create_remote('closed-history-pruned-tip')
         repo = self.clone(origin, 'closed-history-pruned-tip')
@@ -6934,6 +7076,102 @@ with module.coordination_publication_lock(Path(repo_path)):
             and event['payload'].get('recovered')
             for event in events
         ))
+
+    def test_published_close_supersedes_unlanded_reason_after_delivery_advances(self):
+        origin = self.create_remote('published-close-new-proof')
+        repo = self.clone(origin, 'published-close-new-proof')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/close-first', 'close-first.txt')
+        self.run_cli(repo, 'stack', 'create', 'close-first', source,
+                     '--branch', 'pr/close-first')
+        self.run_cli(repo, 'stack', 'push', 'close-first')
+        self.git(repo, 'push', '-q', 'origin', f'{source}:main')
+        later = self.commit_on_branch(repo, 'pr/close-later', 'close-later.txt')
+        self.run_cli(repo, 'stack', 'create', 'close-later', later,
+                     '--branch', 'pr/close-later')
+
+        failed = self.run_cli(repo, 'stack', 'close', 'close-first',
+                              '--reason', 'absorbed', expected=2)
+        self.assertIn('Remote-first close did not save the manifest', failed.stderr)
+        module = self.load_module()
+        old = module.pending_stack_close_operation(repo, repo / '.syncwheel' / 'manifest.json', 'close-first')
+        self.assertEqual(old['reason'], 'absorbed')
+        self.run_cli(repo, 'stack', 'push', 'close-later')
+        self.git(repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git'))
+        unknown = self.run_cli(repo, 'stack', 'close', 'close-first',
+                               '--reason', 'merged', expected=2)
+        self.assertIn('Could not read from remote repository', unknown.stderr)
+        self.assertEqual(module.pending_stack_close_operation(
+            repo, repo / '.syncwheel' / 'manifest.json', 'close-first'
+        )['operation_token'], old['operation_token'])
+        self.git(repo, 'remote', 'set-url', 'origin', str(origin))
+
+        self.run_cli(repo, 'stack', 'close', 'close-first', '--reason', 'merged')
+
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('close-first', [stack['id'] for stack in manifest['stacks']])
+        events = module.load_ledger_events(repo)
+        self.assertTrue(any(event['type'] == 'stack_close_abandoned'
+                            and event['payload'].get('operation_token') == old['operation_token']
+                            for event in events))
+        closed = [event['payload'] for event in events
+                  if event['type'] == 'stack_closed'
+                  and event['payload'].get('stack') == 'close-first']
+        self.assertEqual(closed[-1]['reason'], 'merged')
+        self.assertNotEqual(closed[-1]['operation_token'], old['operation_token'])
+
+    def test_merged_close_checks_current_delivery_not_historical_stack_base(self):
+        origin = self.create_remote('merged-close-current-target')
+        repo = self.clone(origin, 'merged-close-current-target')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/merged-current', 'merged-current.txt')
+        self.run_cli(repo, 'stack', 'create', 'merged-current', source,
+                     '--branch', 'pr/merged-current')
+        self.run_cli(repo, 'stack', 'push', 'merged-current')
+        self.git(repo, 'push', '-q', 'origin', f'{source}:main')
+
+        self.run_cli(repo, 'stack', 'close', 'merged-current', '--reason', 'merged')
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('merged-current', [stack['id'] for stack in manifest['stacks']])
+
+    def test_reason_change_refuses_a_close_token_already_on_remote(self):
+        origin = self.create_remote('close-reason-landed')
+        repo = self.clone(origin, 'close-reason-landed')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/close-landed', 'close-landed.txt')
+        self.run_cli(repo, 'stack', 'create', 'close-landed', source,
+                     '--branch', 'pr/close-landed')
+        self.run_cli(repo, 'stack', 'push', 'close-landed')
+        self.git(repo, 'push', '-q', 'origin', f'{source}:main')
+        self.run_cli_sigkill_after(repo, 'authorized_push', 'stack', 'close',
+                                   'close-landed', '--reason', 'absorbed')
+
+        failed = self.run_cli(repo, 'stack', 'close', 'close-landed',
+                              '--reason', 'merged', expected=2)
+
+        self.assertIn('reached the coordination remote', failed.stderr)
+        events = self.load_module().load_ledger_events(repo)
+        self.assertFalse(any(event['type'] == 'stack_close_abandoned'
+                             and event['payload'].get('stack') == 'close-landed'
+                             for event in events))
+
+    def test_merged_close_refuses_commit_missing_from_current_delivery(self):
+        origin = self.create_remote('merged-close-undelivered')
+        repo = self.clone(origin, 'merged-close-undelivered')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'pr/merged-undelivered', 'merged-undelivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'merged-undelivered', source,
+                     '--branch', 'pr/merged-undelivered')
+
+        failed = self.run_cli(repo, 'stack', 'close', 'merged-undelivered',
+                              '--reason', 'merged', expected=2)
+
+        self.assertIn('NOT yet reachable', failed.stderr)
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('merged-undelivered', [stack['id'] for stack in manifest['stacks']])
 
     def test_close_fails_closed_when_the_coordination_remote_is_unreachable(self):
         origin = self.create_remote('round5-close-unreachable')

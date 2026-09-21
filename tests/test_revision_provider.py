@@ -776,6 +776,71 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
     def tearDown(self):
         self.fixture.close()
 
+    def test_preflight_does_not_refresh_index_for_three_unchanged_rewrites(self):
+        fixture = self.fixture
+        request = fixture.request('preflight', operation_id='unchanged-rewrites')
+        for relative in ('base.txt', '.gitignore', '.syncwheel/manifest.json'):
+            path = fixture.repo / relative
+            path.write_bytes(path.read_bytes())
+        (fixture.repo / 'feature.txt').write_text('feature\n')
+        before_index = fixture.raw_index_bytes()
+        prepared, _ = fixture.protocol_request(request)
+        self.assertEqual(prepared['status'], 'prepared')
+        self.assertEqual(fixture.raw_index_bytes(), before_index)
+        completed, _ = fixture.protocol_request({**request, 'action': 'finalize'})
+        self.assertEqual(completed['status'], 'verified')
+
+    def test_touched_unchanged_siblings_do_not_refresh_real_index_after_check(self):
+        fixture = self.fixture
+        fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        fixture.enable_derived_paths('locks/')
+        request = fixture.request(
+            'preflight', operation_id='touched-siblings', path='locks/codex.lock',
+            before=fixture.sha256('first-owner\n'), after_content='second-owner\n',
+        )
+        ready, _ = fixture.protocol_request(fixture.check_request(request))
+        self.assertEqual(ready['status'], 'ready')
+        for relative in ('.gitignore', '.syncwheel/manifest.json'):
+            path = fixture.repo / relative
+            path.write_bytes(path.read_bytes())
+            future = time.time_ns() + 2_000_000_000
+            os.utime(path, ns=(future, future))
+        (fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        leased_index = fixture.raw_index_bytes()
+        prepared, _ = fixture.protocol_request(request)
+        self.assertEqual(prepared['status'], 'prepared')
+        self.assertEqual(fixture.raw_index_bytes(), leased_index)
+        journal = json.loads(
+            (fixture.provider_journal_root() / 'touched-siblings.json').read_text()
+        )
+        self.assertEqual(
+            journal['baselineIndexSha256'], hashlib.sha256(leased_index).hexdigest()
+        )
+        completed, _ = fixture.protocol_request({**request, 'action': 'finalize'})
+        self.assertEqual(completed['status'], 'verified')
+
+    def test_dirty_path_observation_uses_private_split_index(self):
+        fixture = self.fixture
+        fixture.git('update-index', '--split-index')
+        for relative in ('.gitignore', '.syncwheel/manifest.json'):
+            path = fixture.repo / relative
+            path.write_bytes(path.read_bytes())
+        os.chmod(fixture.repo / '.gitignore', 0o755)
+        (fixture.repo / 'base.txt').write_text('staged\n')
+        fixture.git('add', 'base.txt')
+        (fixture.repo / 'base.txt').write_text('unstaged\n')
+        (fixture.repo / 'untracked.txt').write_text('untracked\n')
+        leased_index = fixture.raw_index_bytes()
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        self.assertEqual(
+            backend._dirty_paths(fixture.repo),
+            {'.gitignore', 'base.txt', 'untracked.txt'},
+        )
+        self.assertFalse(backend._index_is_clean(fixture.repo))
+        self.assertEqual(fixture.raw_index_bytes(), leased_index)
+
     def test_base_ref_cannot_alias_any_managed_branch_before_journaling(self):
         fixture = RevisionProviderRepository(base_ref='main-integration')
         try:
@@ -4110,6 +4175,160 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
 
 
 class RevisionProviderRecoveryTest(unittest.TestCase):
+    def _prepared_with_refreshed_index(self, fixture, operation_id):
+        payload = fixture.request('preflight', operation_id=operation_id)
+        (fixture.repo / 'feature.txt').write_text('feature\n')
+        prepared, _ = fixture.protocol_request(payload)
+        self.assertEqual(prepared['status'], 'prepared')
+        old_index = fixture.raw_index_bytes()
+        unchanged = fixture.repo / 'base.txt'
+        unchanged.write_bytes(unchanged.read_bytes())
+        metadata = unchanged.stat()
+        os.utime(unchanged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
+        fixture.git('status', '--porcelain')
+        self.assertNotEqual(fixture.raw_index_bytes(), old_index)
+        return payload
+
+    def test_only_recover_can_reprepare_clean_index_after_stat_refresh(self):
+        fixture = RevisionProviderRepository()
+        try:
+            payload = self._prepared_with_refreshed_index(fixture, 'index-stat-refresh')
+            before = fixture.raw_index_bytes()
+            rejected, _ = fixture.protocol_request({**payload, 'action': 'finalize'}, expected=2)
+            self.assertIn('index lease was lost', rejected['error'])
+            self.assertEqual(fixture.raw_index_bytes(), before)
+            recovered, _ = fixture.protocol_request({**payload, 'action': 'recover'})
+            self.assertEqual(recovered['status'], 'verified')
+            journal = json.loads((fixture.provider_journal_root() / 'index-stat-refresh.json').read_text())
+            marker = journal['indexLeaseReprepared']
+            self.assertNotEqual(marker['oldSha256'], marker['newSha256'])
+            self.assertEqual(journal['baselineIndexSha256'], marker['newSha256'])
+        finally:
+            fixture.close()
+
+    def test_index_reprepare_refuses_changed_content_staging_and_head(self):
+        for change in ('content', 'staged', 'head'):
+            with self.subTest(change=change):
+                fixture = RevisionProviderRepository()
+                try:
+                    payload = self._prepared_with_refreshed_index(fixture, 'index-refuse-' + change)
+                    if change == 'content':
+                        (fixture.repo / 'feature.txt').write_text('different\n')
+                    elif change == 'staged':
+                        fixture.git('add', 'feature.txt')
+                    else:
+                        (fixture.repo / 'other.txt').write_text('other\n')
+                        fixture.git('add', 'other.txt')
+                        fixture.git('commit', '-q', '-m', 'test: change head')
+                    rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
+                    self.assertIn('error', rejected)
+                    journal = json.loads((fixture.provider_journal_root() / (payload['operationId'] + '.json')).read_text())
+                    self.assertNotIn('indexLeaseReprepared', journal)
+                finally:
+                    fixture.close()
+
+    def test_index_reprepare_refuses_changed_ref_and_foreign_index_lock(self):
+        for change in ('ref', 'index-lock'):
+            with self.subTest(change=change):
+                fixture = RevisionProviderRepository()
+                try:
+                    payload = self._prepared_with_refreshed_index(fixture, 'index-refuse-' + change)
+                    if change == 'ref':
+                        fixture.git(
+                            'update-ref', 'refs/remotes/origin/side',
+                            payload['expectedHead'],
+                        )
+                    else:
+                        index_path = Path(fixture.git('rev-parse', '--git-path', 'index'))
+                        if not index_path.is_absolute():
+                            index_path = fixture.repo / index_path
+                        lock_path = Path(f'{index_path}.lock')
+                        lock_path.write_bytes(b'foreign index writer\n')
+                    rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
+                    self.assertIn(
+                        'prepared leases' if change == 'ref' else 'locked by another writer',
+                        rejected['error'],
+                    )
+                    journal = json.loads((fixture.provider_journal_root() / (payload['operationId'] + '.json')).read_text())
+                    self.assertNotIn('indexLeaseReprepared', journal)
+                    if change == 'index-lock':
+                        self.assertEqual(lock_path.read_bytes(), b'foreign index writer\n')
+                finally:
+                    fixture.close()
+
+    def test_index_reprepare_refuses_missing_prepared_evidence(self):
+        for missing_key in (
+            'productPathObjects', 'baseRefFullName', 'baseRefObjectSha',
+            'baselineIndexSha256',
+        ):
+            with self.subTest(missing_key=missing_key):
+                fixture = RevisionProviderRepository()
+                try:
+                    payload = self._prepared_with_refreshed_index(
+                        fixture, 'index-missing-' + missing_key.lower()
+                    )
+                    request = protocol.parse_request(payload)
+                    backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+                    journal = backend.load_journal(request)
+                    journal.pop(missing_key)
+                    backend.save_journal(request, journal)
+                    rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
+                    self.assertIn('error', rejected)
+                    self.assertNotIn('indexLeaseReprepared', backend.load_journal(request))
+                finally:
+                    fixture.close()
+
+    def test_index_reprepare_refuses_candidate_and_second_lease_change(self):
+        class StopAfterCandidate(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(self, phase):
+                if phase == 'product_objects_prepared':
+                    raise protocol.RevisionProviderError('stopped after product candidate')
+
+        fixture = RevisionProviderRepository()
+        try:
+            payload = fixture.request('preflight', operation_id='index-candidate')
+            (fixture.repo / 'feature.txt').write_text('feature\n')
+            request = protocol.parse_request(payload)
+            backend = StopAfterCandidate(protocol)
+            protocol.handle_request(backend, request)
+            with self.assertRaisesRegex(protocol.RevisionProviderError, 'stopped after product candidate'):
+                protocol.handle_request(backend, replace(request, action='finalize'))
+            journal = backend.load_journal(request)
+            self.assertIsNotNone(journal['candidateProductCommitSha'])
+            unchanged = fixture.repo / 'base.txt'
+            unchanged.write_bytes(unchanged.read_bytes())
+            metadata = unchanged.stat()
+            os.utime(unchanged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
+            fixture.git('status', '--porcelain')
+            rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
+            self.assertIn('index lease', rejected['error'])
+            self.assertNotIn('indexLeaseReprepared', backend.load_journal(request))
+        finally:
+            fixture.close()
+
+        class StopAfterReprepare(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(self, phase):
+                if phase == 'index_lease_reprepared':
+                    raise protocol.RevisionProviderError('stopped after durable reprepare')
+
+        fixture = RevisionProviderRepository()
+        try:
+            payload = self._prepared_with_refreshed_index(fixture, 'index-second-change')
+            request = protocol.parse_request(payload)
+            with self.assertRaisesRegex(protocol.RevisionProviderError, 'stopped after durable reprepare'):
+                protocol.handle_request(StopAfterReprepare(protocol), replace(request, action='recover'))
+            journal = SYNCWHEEL.SyncwheelRevisionBackend(protocol).load_journal(request)
+            self.assertIn('indexLeaseReprepared', journal)
+            unchanged = fixture.repo / '.gitignore'
+            unchanged.write_bytes(unchanged.read_bytes())
+            metadata = unchanged.stat()
+            os.utime(unchanged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
+            fixture.git('status', '--porcelain')
+            rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
+            self.assertIn('one-shot recovery', rejected['error'])
+        finally:
+            fixture.close()
+
     def test_manifest_ownership_recovery_preserves_unrelated_dirty_path(self):
         fixture = RevisionProviderRepository()
         unrelated = fixture.repo / 'unrelated.txt'

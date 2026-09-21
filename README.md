@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.27`
+Current version: `0.43.30`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1344,7 +1344,7 @@ Four ratified working rules (MGT-0206), in full in
 [docs/ai-agents.md](docs/ai-agents.md#ratified-working-rules-read-this-first):
 
 1. never author or commit in the primary checkout — open a governed lane with
-   `syncwheel worktree open <lane> [--into <stack>] [--full]`
+   `syncwheel worktree open <lane> [--into <stack> [--base <stack-branch>]] [--full]`
 2. never resolve a replay conflict with raw git — retry with `--replay-mode desk`, then
    resolve through `stack absorb` / `stack resolve-integration`
 3. integration composition is declared and visible — check `syncwheel int show` before

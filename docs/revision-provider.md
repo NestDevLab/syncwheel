@@ -217,7 +217,18 @@ and removes exactly the listed locks. The hook can also perform arbitrary local
 or external side effects that the provider cannot prove or undo; repositories
 must keep it deterministic and side-effect-free.
 
-The real Git index is also an exact lease. For product and control alignment,
+The real Git index is also an exact lease. Read-only dirt and staged checks
+disable Git's optional index locks so preflight does not refresh index stat
+entries itself. If index bytes change while the journal is still prepared and
+no repository effects have begun, explicit `recover` may renew that lease once.
+It reruns the full preflight under the operation lock, compares every other
+recorded observation, requires a clean conflict-free index and no `index.lock`,
+and journals both index hashes before proceeding. Recovery proves fresh baseline
+equivalence; it does not try to classify the cause of the byte change.
+`finalize` and all later phases keep the original strict lease; a second index
+change is refused.
+
+For product and control alignment,
 the provider prepares and refreshes the complete replacement index separately,
 durably journals an operation-specific backing file, and fsyncs it before
 acquiring Git's `index.lock` as a hard link to that file. The shared inode is a

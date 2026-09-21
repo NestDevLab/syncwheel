@@ -206,6 +206,10 @@ class RevisionBackend(Protocol):
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> None: ...
 
+    def reprepare_index_lease(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> None: ...
+
     def verify_recovery_gate(
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> None: ...
@@ -638,6 +642,12 @@ def _advance(
     if journal["phase"] == "verified":
         status = journal.get("terminalStatus") or "verified"
         return _mutation_response(request, journal, status=status)
+    if (
+        request.action == "recover"
+        and journal["phase"] == "prepared"
+        and journal.get("candidateProductCommitSha") is None
+    ):
+        backend.reprepare_index_lease(request, journal)
     backend.recover_owned_index_lock(request, journal)
 
     if request.no_commit:
