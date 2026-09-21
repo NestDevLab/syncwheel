@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a"
+    "refs/heads/pr/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -25,6 +25,7 @@
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
+    "refs/heads/pr/revision-index-semantic-lease": "e463aad2328dcf20b3ee0c02bbb9088dd33e9cf1",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
@@ -47,14 +48,14 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
-    "refs/heads/syncwheel/draft/revision-index-semantic-lease": "a9308a5f4358b276eab6af3825fb524fc073e5bd",
+    "refs/heads/syncwheel/draft/revision-index-semantic-lease": "148a30915aad3ba2c462ebabafcf965597f8fa07",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T18:39:59+00:00",
+  "created_at": "2026-09-21T18:40:15+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -97,6 +98,7 @@
     "refs/heads/pr/resume-manifest-replay-digest": "ecf6c1f63c58450b3fc47ee5030a82c725ad3a0b",
     "refs/heads/pr/resume-preserve-published-source": "16e485f31c268b656c29d11a51b9f05d064ac29d",
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
+    "refs/heads/pr/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
@@ -175,24 +177,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/revision-index-semantic-lease",
+        "branch": "pr/revision-index-semantic-lease",
         "commits": [
           "78f4c9a5055d7455059aa009b2550621545f679a"
         ],
         "id": "revision-index-semantic-lease",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "d70d3adf-1bfb-4507-8466-a2ed89a95293",
-  "parent_state": "f558b98a7c2d10e8c8e9abf95823b630c2b97761",
+  "operation_token": "946e9166-eba3-47b4-9d00-583313ab0528",
+  "parent_state": "e5dacdf0ba8d272fe27bfafb4ff599a8b55b46bc",
   "projection_status": "partial",
-  "publication_id": "fb429cfb-fded-4150-b2b5-2966a1c50cb9",
-  "publication_scope": "stack:revision-index-semantic-lease",
+  "publication_id": "7320fbf3-245e-4acf-84fc-3a727cfa9a5d",
+  "publication_scope": "promote:revision-index-semantic-lease",
   "schema_version": 2,
   "syncwheel_version": "0.43.30",
   "tombstones": [
@@ -771,6 +772,14 @@
       "ref": "refs/heads/pr/abandoned-history-reconciliation",
       "remote_tip": null,
       "stack": "abandoned-history-reconciliation"
+    },
+    {
+      "branch": "syncwheel/draft/revision-index-semantic-lease",
+      "closed_at": "2026-09-21T18:40:10+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/revision-index-semantic-lease",
+      "remote_tip": "78f4c9a5055d7455059aa009b2550621545f679a",
+      "stack": "revision-index-semantic-lease"
     }
   ]
 }
