@@ -4,6 +4,7 @@
 
 - Recover a failed published-stack close with a new reason or changed manifest only after proving its old token did not reach coordination. Check merged delivery against the freshly fetched target tip.
 - Allow a governed worktree to start at an explicit stack tip with `worktree open --into <stack> --base <ref>`, requiring the exact declared projection.
+- Keep revision-provider read-only Git checks from refreshing the real index. Recover one prepared, pre-effect index-byte change only after a full fresh preflight proves every other lease unchanged.
 
 ## 0.43.26 - 2026-09-20
 
