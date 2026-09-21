@@ -790,6 +790,57 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         completed, _ = fixture.protocol_request({**request, 'action': 'finalize'})
         self.assertEqual(completed['status'], 'verified')
 
+    def test_touched_unchanged_siblings_do_not_refresh_real_index_after_check(self):
+        fixture = self.fixture
+        fixture.install_existing_stack(
+            path='locks/codex.lock', content='first-owner\n'
+        )
+        fixture.enable_derived_paths('locks/')
+        request = fixture.request(
+            'preflight', operation_id='touched-siblings', path='locks/codex.lock',
+            before=fixture.sha256('first-owner\n'), after_content='second-owner\n',
+        )
+        ready, _ = fixture.protocol_request(fixture.check_request(request))
+        self.assertEqual(ready['status'], 'ready')
+        for relative in ('.gitignore', '.syncwheel/manifest.json'):
+            path = fixture.repo / relative
+            path.write_bytes(path.read_bytes())
+            future = time.time_ns() + 2_000_000_000
+            os.utime(path, ns=(future, future))
+        (fixture.repo / 'locks' / 'codex.lock').write_text('second-owner\n')
+        leased_index = fixture.raw_index_bytes()
+        prepared, _ = fixture.protocol_request(request)
+        self.assertEqual(prepared['status'], 'prepared')
+        self.assertEqual(fixture.raw_index_bytes(), leased_index)
+        journal = json.loads(
+            (fixture.provider_journal_root() / 'touched-siblings.json').read_text()
+        )
+        self.assertEqual(
+            journal['baselineIndexSha256'], hashlib.sha256(leased_index).hexdigest()
+        )
+        completed, _ = fixture.protocol_request({**request, 'action': 'finalize'})
+        self.assertEqual(completed['status'], 'verified')
+
+    def test_dirty_path_observation_uses_private_split_index(self):
+        fixture = self.fixture
+        fixture.git('update-index', '--split-index')
+        for relative in ('.gitignore', '.syncwheel/manifest.json'):
+            path = fixture.repo / relative
+            path.write_bytes(path.read_bytes())
+        os.chmod(fixture.repo / '.gitignore', 0o755)
+        (fixture.repo / 'base.txt').write_text('staged\n')
+        fixture.git('add', 'base.txt')
+        (fixture.repo / 'base.txt').write_text('unstaged\n')
+        (fixture.repo / 'untracked.txt').write_text('untracked\n')
+        leased_index = fixture.raw_index_bytes()
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        self.assertEqual(
+            backend._dirty_paths(fixture.repo),
+            {'.gitignore', 'base.txt', 'untracked.txt'},
+        )
+        self.assertFalse(backend._index_is_clean(fixture.repo))
+        self.assertEqual(fixture.raw_index_bytes(), leased_index)
+
     def test_base_ref_cannot_alias_any_managed_branch_before_journaling(self):
         fixture = RevisionProviderRepository(base_ref='main-integration')
         try:

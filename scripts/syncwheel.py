@@ -27465,14 +27465,34 @@ class SyncwheelRevisionBackend:
 
     def _dirty_paths(self, repo_root):
         paths = set()
-        for arguments in (
-            ('diff', '--name-only', '-z'),
-            ('ls-files', '--others', '--exclude-standard', '-z'),
-        ):
-            output = git(
-                repo_root, *arguments, env={'GIT_OPTIONAL_LOCKS': '0'}
-            ).stdout
-            paths.update(item for item in output.split('\0') if item)
+        real_index = self._index_path(repo_root)
+        index_bytes, _ = self._read_regular_file(real_index, 'Git index')
+        index_sha = hashlib.sha256(index_bytes).hexdigest()
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix='index.syncwheel-observation-', dir=real_index.parent,
+        )
+        observed_index = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, 'wb') as copied:
+                copied.write(index_bytes)
+            copied_bytes, _ = self._read_regular_file(observed_index, 'observational Git index')
+            if copied_bytes != index_bytes:
+                self._fail('observational Git index copy differs from the real index')
+            environment = {
+                'GIT_INDEX_FILE': str(observed_index),
+                'GIT_OPTIONAL_LOCKS': '0',
+            }
+            for arguments in (
+                ('diff', '--name-only', '-z'),
+                ('ls-files', '--others', '--exclude-standard', '-z'),
+            ):
+                output = git(repo_root, *arguments, env=environment).stdout
+                paths.update(item for item in output.split('\0') if item)
+            if self._index_sha256(repo_root) != index_sha:
+                self._fail('real Git index changed during dirty-path observation')
+        finally:
+            observed_index.unlink(missing_ok=True)
+            Path(f'{temporary_name}.lock').unlink(missing_ok=True)
         return paths
 
     def _dirty_snapshot(self, repo_root, paths):
