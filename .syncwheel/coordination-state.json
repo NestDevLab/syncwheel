@@ -1,11 +1,11 @@
 {
   "changed_refs": {
-    "refs/heads/pr/close-published-recovery": "afcf7aab9211e39c789ec105ad469c0c1319a778"
+    "refs/heads/pr/close-published-recovery": "caf54f1f76a406e8d58f3f81d7b1fc6b8043747b"
   },
   "claims": {
     "refs/heads/main-integration": "a60258dff26baf6f28442cc31ee84ae18e22d8cb",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
-    "refs/heads/pr/close-published-recovery": "3752ccb7e1897bd17f255ec1219c51e2c70ec8c1",
+    "refs/heads/pr/close-published-recovery": "290e266c324d551395298ff0869a7da01bcdf624",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -51,7 +51,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T10:23:20+00:00",
+  "created_at": "2026-09-21T10:35:20+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -59,7 +59,7 @@
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/checks-none-policy": "e517a63522249fad2612b667a564b52a0891cb56",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
-    "refs/heads/pr/close-published-recovery": "afcf7aab9211e39c789ec105ad469c0c1319a778",
+    "refs/heads/pr/close-published-recovery": "caf54f1f76a406e8d58f3f81d7b1fc6b8043747b",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
@@ -171,7 +171,8 @@
         },
         "branch": "pr/close-published-recovery",
         "commits": [
-          "afcf7aab9211e39c789ec105ad469c0c1319a778"
+          "afcf7aab9211e39c789ec105ad469c0c1319a778",
+          "caf54f1f76a406e8d58f3f81d7b1fc6b8043747b"
         ],
         "id": "close-published-recovery",
         "integration_branch": "main-integration",
@@ -181,11 +182,11 @@
     "version": 2
   },
   "manifest_digest": "59379e70446252b341e6a68fcd0f8760fb7e3606d5554a0f368c06236203c7b6",
-  "operation_token": "8c88fd73-df5e-4689-a5be-a1812a8dc2ae",
-  "parent_state": "cc60e3f95933c9a1826158cb5027c848b93034e6",
+  "operation_token": "c3c260db-36e7-4591-a524-144380c6d50d",
+  "parent_state": "21fd0b53308e19dfa9a7428db76f418d3ed889ed",
   "projection_status": "partial",
-  "publication_id": "67571e54-5cae-44d4-95cc-87c3c49541d2",
-  "publication_scope": "promote:close-published-recovery",
+  "publication_id": "e40576dd-9611-4a3c-b4e1-eea833978a59",
+  "publication_scope": "stack:close-published-recovery",
   "schema_version": 2,
   "syncwheel_version": "0.43.26",
   "tombstones": [
