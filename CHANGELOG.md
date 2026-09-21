@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.43.27 - 2026-09-21
+
+- Add `journal pull` for journal repositories. It fetches the journal branch,
+  stops on divergence, accepts only local worktree or index changes that are
+  byte-identical to the remote tip, and fast-forwards under a Syncwheel
+  ref-move authorization, so a consuming clone no longer needs to bypass the
+  `reference-transaction` guard.
+- Write the journal branch, not the normalized default integration branch, to
+  the primary guard when installing hooks in a journal repository.
+
 ## 0.43.26 - 2026-09-20
 
 - Recognize initialization commits containing the manifest and the strictly validated managed ignore block during cross-clone resume.

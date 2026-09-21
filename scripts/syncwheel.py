@@ -888,8 +888,10 @@ def atomic_write_private_json(path, payload, *, indent=None):
 
 
 def primary_guard_payload(manifest, *, enabled=True, reason=None):
-    integration = manifest.get('integration') or {}
-    branch = integration.get('branch')
+    if manifest.get('repository_mode') == 'journal':
+        branch = (manifest.get('journal') or {}).get('branch')
+    else:
+        branch = (manifest.get('integration') or {}).get('branch')
     if not isinstance(branch, str) or not branch:
         raise SyncwheelError('cannot persist primary guard without an integration branch')
     payload = {
@@ -16296,6 +16298,163 @@ def command_journal_publish(args):
     return 0
 
 
+def journal_pull_blob_matches(repo_root, path, entry):
+    """Return True when the working-tree path is byte-identical to its entry at the target tip."""
+    absolute = repo_root / path
+    if entry is None:
+        return not os.path.lexists(absolute)
+    mode, object_id = entry
+    if not os.path.lexists(absolute):
+        return False
+    if mode == '120000':
+        if not absolute.is_symlink():
+            return False
+        content = os.readlink(absolute).encode()
+    elif mode in {'100644', '100755'}:
+        if absolute.is_symlink() or not absolute.is_file():
+            return False
+        if (mode == '100755') != bool(absolute.stat().st_mode & 0o111):
+            return False
+        content = absolute.read_bytes()
+    else:
+        return False
+    stored = git_bytes(repo_root, 'cat-file', 'blob', object_id)
+    return content == stored
+
+
+def git_bytes(repo_root, *args):
+    result = subprocess.run(
+        ['git', *args], cwd=repo_root, capture_output=True, env=managed_process_env(authorize=False),
+    )
+    if result.returncode != 0:
+        raise SyncwheelError(result.stderr.decode(errors='replace').strip() or f"git {' '.join(args)} failed")
+    return result.stdout
+
+
+def journal_pull_tree_entries(repo_root, commit, paths):
+    if not paths:
+        return {}
+    listed = git_bytes(repo_root, '--literal-pathspecs', 'ls-tree', '-z', commit, '--', *paths)
+    entries = {}
+    for record in listed.split(b'\0'):
+        if not record:
+            continue
+        meta, name = record.split(b'\t', 1)
+        mode, _kind, object_id = meta.decode().split()
+        entries[name.decode()] = (mode, object_id)
+    return {path: entries.get(path) for path in paths}
+
+
+def journal_pull_index_entries(repo_root):
+    """Map each path whose index entry differs from HEAD to its (mode, object) or None."""
+    changed = git_bytes(repo_root, 'diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD')
+    paths = [name.decode() for name in changed.split(b'\0') if name]
+    if not paths:
+        return {}
+    listed = git_bytes(repo_root, '--literal-pathspecs', 'ls-files', '--stage', '-z', '--', *paths)
+    entries = {path: None for path in paths}
+    for record in listed.split(b'\0'):
+        if not record:
+            continue
+        meta, name = record.split(b'\t', 1)
+        mode, object_id, stage = meta.decode().split()
+        if stage != '0':
+            raise SyncwheelError(f'journal pull refuses an unmerged index entry: {name.decode()}')
+        entries[name.decode()] = (mode, object_id)
+    return entries
+
+
+def journal_pull_plan(repo_root, manifest, fetch=True):
+    journal = manifest['journal']
+    branch, remote = journal['branch'], journal['remote']
+    current = get_current_branch(repo_root)
+    if current != branch:
+        raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}, found {current!r}')
+    tracking_ref = f'refs/remotes/{remote}/{branch}'
+    if fetch:
+        git(repo_root, 'fetch', '--quiet', remote, f'+refs/heads/{branch}:{tracking_ref}')
+    remote_tip = ref_tip(repo_root, tracking_ref)
+    if not remote_tip:
+        raise SyncwheelError(f'journal remote branch {remote}/{branch} is missing; nothing to pull')
+    head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
+    plan = {
+        'mode': 'plan', 'branch': branch, 'remote': remote, 'head': head,
+        'remote_tip': remote_tip, 'relation': None, 'identical_dirty': [],
+        'changed': False,
+    }
+    if head == remote_tip:
+        plan['relation'] = 'aligned'
+        return plan
+    if git(repo_root, 'merge-base', '--is-ancestor', remote_tip, head, check=False).returncode == 0:
+        plan['relation'] = 'ahead'
+        return plan
+    if git(repo_root, 'merge-base', '--is-ancestor', head, remote_tip, check=False).returncode != 0:
+        raise SyncwheelError(
+            f'journal local branch {branch} diverged from {remote}/{branch}; '
+            'STOP without merge, reset, rebase, or force'
+        )
+    plan['relation'] = 'behind'
+    dirty = [entry['path'] for entry in journal_status_entries(repo_root)]
+    targets = journal_pull_tree_entries(repo_root, remote_tip, dirty)
+    staged = journal_pull_index_entries(repo_root)
+    blocking = [
+        path for path in dirty
+        if not journal_pull_blob_matches(repo_root, path, targets[path])
+        or (path in staged and staged[path] != targets[path])
+    ]
+    if blocking:
+        raise SyncwheelError(
+            'journal pull refuses local changes that differ from the remote tip: '
+            + ', '.join(sorted(blocking))
+            + '; publish or remove them first'
+        )
+    plan['identical_dirty'] = sorted(dirty)
+    return plan
+
+
+def journal_pull(repo_root, manifest, apply=False):
+    plan = journal_pull_plan(repo_root, manifest)
+    if not apply or plan['relation'] != 'behind':
+        plan['mode'] = 'apply' if apply else 'plan'
+        return plan
+    head, remote_tip = plan['head'], plan['remote_tip']
+    with journal_lock(repo_root):
+        # Re-run the whole proof under the snapshot lock so a concurrent
+        # snapshot or edit cannot slip in between the check and the move.
+        locked = journal_pull_plan(repo_root, manifest, fetch=False)
+        if (locked['head'], locked['remote_tip'], locked['relation']) != (head, remote_tip, 'behind'):
+            raise SyncwheelError('journal state changed during pull; retry')
+        already_staged = journal_pull_index_entries(repo_root)
+        staged = [path for path in locked['identical_dirty'] if path not in already_staged]
+        if staged:
+            # Staging the byte-identical paths makes the index agree with the
+            # target tree, so git's own fast-forward accepts them and still
+            # refuses anything that changed after the proof.
+            git(repo_root, '--literal-pathspecs', 'add', '-A', '--', *staged)
+        merged = git(repo_root, 'merge', '--ff-only', '--no-edit', remote_tip, check=False)
+        if merged.returncode != 0:
+            if staged:
+                git(repo_root, '--literal-pathspecs', 'reset', '-q', 'HEAD', '--', *staged, check=False)
+            raise SyncwheelError(
+                'journal fast-forward failed; local branch left unchanged: '
+                + (merged.stderr.strip() or merged.stdout.strip())
+            )
+    updated = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
+    if updated != remote_tip:
+        raise SyncwheelError(f'journal fast-forward landed on {updated}, expected {remote_tip}; STOP')
+    changed_paths = git(repo_root, 'diff', '--name-only', head, remote_tip).stdout.splitlines()
+    locked.update({'mode': 'apply', 'changed': True, 'head': updated, 'previous_head': head,
+                   'changed_paths': changed_paths})
+    return locked
+
+
+def command_journal_pull(args):
+    repo_root, manifest, _ = require_journal_manifest(args)
+    payload = journal_pull(repo_root, manifest, apply=args.apply)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def journal_unit_id(repo_root):
     safe = ''.join(char.lower() if char.isalnum() else '-' for char in repo_root.name).strip('-') or 'repo'
     digest = hashlib.sha256(str(repo_root.resolve()).encode()).hexdigest()[:12]
@@ -30405,7 +30564,7 @@ def build_parser():
     channel_reconcile_p.set_defaults(func=command_channel_reconcile_outcome)
 
     journal_p = sub.add_parser(
-        'journal', help='inspect, snapshot, publish, or schedule a journal repository'
+        'journal', help='inspect, snapshot, publish, pull, or schedule a journal repository'
     )
     journal_sub = journal_p.add_subparsers(dest='journal_command', required=True)
     journal_status_p = journal_sub.add_parser('status', parents=[common])
@@ -30417,6 +30576,12 @@ def build_parser():
     journal_publish_p = journal_sub.add_parser('publish', parents=[common])
     journal_publish_p.add_argument('-a', '--apply', action='store_true')
     journal_publish_p.set_defaults(func=command_journal_publish)
+    journal_pull_p = journal_sub.add_parser(
+        'pull', parents=[common],
+        help='fast-forward the journal branch to the remote tip when it is a strict ancestor',
+    )
+    journal_pull_p.add_argument('-a', '--apply', action='store_true')
+    journal_pull_p.set_defaults(func=command_journal_pull)
     journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
     journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))
     journal_schedule_p.add_argument('-a', '--apply', action='store_true')
@@ -31140,6 +31305,7 @@ def entrypoint_behavior_table():
     register((
         command_journal_snapshot,
         command_journal_publish,
+        command_journal_pull,
     ), mutates='apply')
     # digest-heal is the one repair class that appends a local ledger event
     # alongside the remote state CAS.
@@ -31631,7 +31797,7 @@ def execute_parsed_command(args):
             )
     guarded_publishers = {
         command_stack_push, command_int_push, command_journal_publish,
-        command_channel_publish, command_reconcile, command_resume,
+        command_journal_pull, command_channel_publish, command_reconcile, command_resume,
         command_sync, command_publish, command_stack_land,
     }
     if args.func in guarded_publishers and hasattr(args, 'repo'):

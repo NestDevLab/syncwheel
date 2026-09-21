@@ -273,6 +273,117 @@ class JournalModeTest(unittest.TestCase):
         finally:
             os.chdir(old_cwd)
 
+    def publish_from_other_clone(self, files, deleted=()):
+        other = self.root / 'other'
+        if not other.exists():
+            subprocess.run(['git', 'clone', '-q', str(self.remote), str(other)], check=True)
+            subprocess.run(['git', 'checkout', '-q', 'journal'], cwd=other, check=True)
+            subprocess.run(['git', 'config', 'user.name', 'Other'], cwd=other, check=True)
+            subprocess.run(['git', 'config', 'user.email', 'other@example.invalid'], cwd=other, check=True)
+        subprocess.run(['git', 'pull', '-q', '--ff-only'], cwd=other, check=True)
+        for name, content in files.items():
+            (other / name).write_text(content)
+            subprocess.run(['git', 'add', name], cwd=other, check=True)
+        for name in deleted:
+            subprocess.run(['git', 'rm', '-q', name], cwd=other, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'remote update'], cwd=other, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'journal'], cwd=other, check=True)
+        return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=other, text=True).strip()
+
+    def arm_ref_guard(self):
+        (self.repo / '.syncwheel' / 'profile.local.json').unlink()
+        self.cli('hooks', 'install', '--apply')
+        guard = json.loads((self.repo / '.git' / 'syncwheel' / 'guard.json').read_text())
+        self.assertEqual(guard['integrationBranch'], 'journal')
+
+    def test_pull_fast_forwards_behind_branch_and_reports_aligned_or_ahead(self):
+        head = self.git('rev-parse', 'HEAD')
+        aligned = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+        self.assertEqual((aligned['relation'], aligned['changed']), ('aligned', False))
+
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        planned = json.loads(self.cli('journal', 'pull').stdout)
+        self.assertEqual((planned['relation'], planned['changed']), ('behind', False))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+        self.assertEqual((pulled['relation'], pulled['changed']), ('behind', True))
+        self.assertEqual(pulled['changed_paths'], ['remote.txt'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual((self.repo / 'remote.txt').read_text(), 'remote\n')
+
+        (self.repo / 'local.txt').write_text('local\n')
+        self.cli('journal', 'snapshot', '--apply')
+        ahead = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+        self.assertEqual((ahead['relation'], ahead['changed']), ('ahead', False))
+
+    def test_pull_refuses_divergence_and_changes_that_differ_from_the_remote_tip(self):
+        self.publish_from_other_clone({'notes.txt': 'remote\n'})
+        (self.repo / 'notes.txt').write_text('local edit\n')
+        head = self.git('rev-parse', 'HEAD')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('differ from the remote tip: notes.txt', result.stderr)
+        (self.repo / 'unrelated.txt').write_text('mine\n')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('notes.txt, unrelated.txt', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'local edit\n')
+        (self.repo / 'unrelated.txt').unlink()
+
+        self.git('add', 'notes.txt')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('differ from the remote tip: notes.txt', result.stderr)
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'notes.txt')
+        self.git('reset', '-q', 'notes.txt')
+
+        self.cli('journal', 'snapshot', '--apply')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('diverged', result.stderr)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'local edit\n')
+
+    def test_pull_accepts_local_changes_identical_to_the_remote_tip(self):
+        (self.repo / 'gone.txt').write_text('gone\n')
+        self.git('add', 'gone.txt')
+        self.git('commit', '-q', '-m', 'seed deletion')
+        self.git('push', '-q', 'origin', 'journal')
+        tip = self.publish_from_other_clone(
+            {'notes.txt': 'same\n', 'added.txt': 'added\n'}, deleted=('gone.txt',)
+        )
+        (self.repo / 'notes.txt').write_text('same\n')
+        (self.repo / 'added.txt').write_text('added\n')
+        (self.repo / 'gone.txt').unlink()
+        (self.repo / 'excluded').mkdir()
+
+        planned = json.loads(self.cli('journal', 'pull').stdout)
+        self.assertEqual(planned['identical_dirty'], ['added.txt', 'gone.txt', 'notes.txt'])
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+
+        self.assertTrue(pulled['changed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_pull_moves_the_branch_under_an_armed_ref_guard(self):
+        self.arm_ref_guard()
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        self.git('fetch', '-q', 'origin')
+        head = self.git('rev-parse', 'HEAD')
+
+        refused = subprocess.run(
+            ['git', 'merge', '--ff-only', 'origin/journal'], cwd=self.repo,
+            text=True, capture_output=True,
+        )
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn('refusing unauthorized primary integration ref move', refused.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        # The refused fast-forward already rewrote the index and worktree.
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'remote.txt')
+
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+
+        self.assertTrue(pulled['changed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
     def test_scheduler_is_hermetic_dry_run_apply_status_remove(self):
         fake_bin = self.root / 'bin'
         fake_bin.mkdir()

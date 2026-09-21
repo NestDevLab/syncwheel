@@ -130,10 +130,12 @@ local.
 ## The contract
 
 When the manifest declares `repository_mode: "journal"`, use only
-`syncwheel journal status`, plan-first `journal snapshot` / `journal publish`,
-and `journal schedule`. Add `--apply` only with mutation authority. Journal mode
+`syncwheel journal status`, plan-first `journal snapshot` / `journal publish` /
+`journal pull`, and `journal schedule`. Add `--apply` only with mutation authority. Journal mode
 forbids stack, integration, reconcile, sync, and delivery publish commands; its
 publisher stops on remote-ahead, divergence, or lease loss without history surgery.
+`journal pull --apply` is the only governed catch-up: it fast-forwards a strictly
+behind branch and refuses local changes that differ from the remote tip.
 
 A deployment channel pins an exact base revision plus an ordered branch
 composition of exact stack revisions, commit lists, base provenance, and

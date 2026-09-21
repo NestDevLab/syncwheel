@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.26`
+Current version: `0.43.27`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1248,6 +1248,7 @@ python3 scripts/syncwheel.py publish --help
 python3 scripts/syncwheel.py journal status --help
 python3 scripts/syncwheel.py journal snapshot --help
 python3 scripts/syncwheel.py journal publish --help
+python3 scripts/syncwheel.py journal pull --help
 python3 scripts/syncwheel.py journal schedule --help
 python3 scripts/syncwheel.py channel --help
 python3 scripts/syncwheel.py channel contract
@@ -1276,6 +1277,8 @@ syncwheel journal snapshot            # plan
 syncwheel journal snapshot --apply    # locked temporary-index commit
 syncwheel journal publish             # plan snapshot and exact-lease push
 syncwheel journal publish --apply
+syncwheel journal pull                # fetch and plan a fast-forward to the remote tip
+syncwheel journal pull --apply
 syncwheel journal schedule install    # plan a Linux systemd user timer
 syncwheel journal schedule install --apply
 ```
@@ -1283,6 +1286,14 @@ syncwheel journal schedule install --apply
 Journal snapshots refuse a dirty real index, sensitive paths, oversized files,
 and high-confidence secrets. Publication stops on remote-ahead, divergence, or
 lease loss; it never merges, resets, rebases, or force-updates a remote.
+
+`journal pull` is how a consuming clone catches up with another publisher. It
+fetches the journal branch and reports `aligned`, `ahead`, or `behind`; it
+stops on divergence. When behind, it accepts only local changes (worktree or
+index) that are byte-identical to the remote tip, including the residue of a
+fast-forward the ref guard refused, and then fast-forwards under a Syncwheel
+ref-move authorization. Raw `git merge` or `git pull` on the journal branch
+stays refused by the `reference-transaction` guard.
 
 Common aliases:
 - `check` -> `ck`

@@ -30,7 +30,9 @@ syncwheel handoff
 
 For `repository_mode: "journal"`, do not use stack or integration commands.
 Run `journal status`, then plan with `journal snapshot` or `journal publish`;
-add `--apply` only for an authorized commit or exact-lease push. Scheduler
+add `--apply` only for an authorized commit or exact-lease push. To catch up
+with a remote publisher, use `journal pull` (plan) and `journal pull --apply`,
+never a raw `git merge` or `git pull`. Scheduler
 install/remove is also plan-first and Linux-only.
 
 When Agentwheel delegates Git revisioning to `syncwheel revision-provider`, it
