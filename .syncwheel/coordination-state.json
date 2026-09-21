@@ -5,7 +5,7 @@
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
-    "refs/heads/pr/balance-test-shards": "dac39a3e03b54cc2bd5bdf176ccabc06269f4caa",
+    "refs/heads/pr/balance-test-shards": "741fa9ac11b4d902689b0d59ab44b2f28c624c8c",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
@@ -59,7 +59,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T20:56:38+00:00",
+  "created_at": "2026-09-21T20:56:56+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -197,11 +197,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "0dd73901-3d46-4601-a52f-6cd1e286ce17",
-  "parent_state": "8073c88475f6d4ab16bd082637a6393dc4b20fdd",
+  "operation_token": "1c8d53fe-57cd-4086-b31b-1e0f8d69d0ca",
+  "parent_state": "64d360e54d04ce67ce201dd01d164b272c53d28b",
   "projection_status": "partial",
-  "publication_id": "87a63e8d-3f3b-4ef4-b58d-223f93bac46d",
-  "publication_scope": "promote:test-fixture-cache",
+  "publication_id": "e46834ac-fd06-4bf1-8d26-5eff56ebb5a6",
+  "publication_scope": "stack:test-fixture-cache",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
