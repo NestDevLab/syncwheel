@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.43.32 - 2026-09-21
+
+- Run coordination test CLI subprocesses through the module loader to reuse cached Python bytecode and shorten the test cycle. Runtime CLI behavior is unchanged.
+
 ## 0.43.31 - 2026-09-21
 
 - Keep revision-provider index leases valid across benign Git stat refreshes. A lease still holds when the index bytes change but a parsed semantic digest of every entry's path, mode, object id, stage, and flags, plus resolve-undo and other non-cache extensions, is unchanged. Each such acceptance is journaled with both byte hashes. Split, sparse, unknown, and corrupt indexes stay byte-exact. Leases journaled before this release stay byte-exact until their operation ends; snapshots compared within one provider call are compared semantically.
