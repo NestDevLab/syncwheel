@@ -6468,9 +6468,32 @@ def historical_managed_tip_has_exact_squash_delivery(
     )
 
 
+def abandoned_stack_paths_match_delivery(repo_root, commits, local_tip, published_tip, delivery_tip):
+    """An abandoned source has no unique product path in either integration tree."""
+    if (
+        not commits or not published_tip or not delivery_tip
+        or any(
+            not commit_exists(repo_root, commit)
+            or commit_parent_count(repo_root, commit) != 1
+            for commit in commits
+        )
+    ):
+        return False
+    paths = {
+        path for commit in commits
+        for path in commit_changed_files(repo_root, commit)
+    } - {'.syncwheel/manifest.json'}
+    return bool(paths) and all(
+        tree_path_entry(repo_root, candidate, path)
+        == tree_path_entry(repo_root, delivery_tip, path)
+        for candidate in (local_tip, published_tip)
+        for path in paths
+    )
+
+
 def historically_closed_integration_commits(
     repo_root, tip, observation, candidates=None, delivery_tip=None,
-    delivery_observation=None, merge_parent_candidates=None,
+    delivery_observation=None, merge_parent_candidates=None, abandonment_only=False,
 ):
     """Return exact commits covered by a durable coordinated close proof.
 
@@ -6502,6 +6525,7 @@ def historically_closed_integration_commits(
     }
     head = current
     closed_sources = set()
+    abandoned_sources = set()
     owned_merge_parents = set()
     trusted_stack_generations = {}
     state_cache = {}
@@ -6558,7 +6582,7 @@ def historically_closed_integration_commits(
             tombstones = [
                 item for item in state.get('tombstones') or []
                 if item.get('stack') == stack_id
-                and item.get('reason') in {'absorbed', 'merged'}
+                and item.get('reason') in {'absorbed', 'merged', 'abandoned'}
                 and coordination_tombstone_ref(item) not in parent_tombstones
             ]
             parent_stacks = [
@@ -6587,6 +6611,9 @@ def historically_closed_integration_commits(
                         *stack_integration_commits(stack),
                         *stack_integration_only_commits(stack),
                     ]
+                    declared_complete = all(
+                        commit_exists(repo_root, commit) for commit in declared
+                    )
                     reason = tombstones[0].get('reason')
                     managed_tip = (
                         parent_state.get('managed_refs') or {}
@@ -6613,38 +6640,70 @@ def historically_closed_integration_commits(
                         commit_full_sha(repo_root, commit)
                         for commit in declared if commit_exists(repo_root, commit)
                     ]
-                    declared_patches = commit_patch_ids(repo_root, declared)
-                    relevant = bool(
-                        set(declared).intersection(candidates)
-                        or candidate_patch_values.intersection(
-                            value for value in declared_patches.values() if value
+                    if reason == 'abandoned':
+                        # Abandonment does not prove delivery.  It only explains
+                        # the exact historical commits once every path they
+                        # changed is now supplied by the live delivery base in
+                        # both integration trees.  Never admit patch-equivalent
+                        # commits through this proof.
+                        base_observation = delivery_observation or {}
+                        base_tip = base_observation.get('tip')
+                        defaults = (parent_state.get('manifest') or {}).get('defaults') or {}
+                        target_remote = (
+                            stack.get('target_remote')
+                            or defaults.get('canonical_remote')
+                            or config.get('remote')
                         )
-                    )
-                    if reason == 'absorbed' or (
-                        relevant and historical_stack_has_exact_squash_delivery(
-                            repo_root,
-                            stack,
-                            delivery_observation,
-                            (parent_state.get('manifest') or {}).get('defaults') or {},
-                            config.get('remote'),
+                        target_branch = stack.get('target_branch') or defaults.get('base_branch')
+                        published_tip = observation.get('published_tip')
+                        if (
+                            declared and declared_complete and base_tip
+                            and managed_tip
+                            and tombstones[0].get('remote_tip') in {None, managed_tip}
+                            and base_tip == delivery_tip
+                            and base_observation.get('remote') == target_remote
+                            and base_observation.get('remoteRef') == f'refs/heads/{target_branch}'
+                            and base_observation.get('remoteTip') == base_tip
+                            and published_tip
+                            and branch_contains(repo_root, tip, published_tip)
+                            and abandoned_stack_paths_match_delivery(
+                                repo_root, declared, tip, published_tip, base_tip,
+                            )
+                        ):
+                            abandoned_sources.update(declared)
+                    else:
+                        declared_patches = commit_patch_ids(repo_root, declared)
+                        relevant = bool(
+                            set(declared).intersection(candidates)
+                            or candidate_patch_values.intersection(
+                                value for value in declared_patches.values() if value
+                            )
                         )
-                    ):
-                        closed_sources.update(declared)
-                        if reason == 'absorbed':
-                            trusted_stack_generations[stack_id] = {
-                                'digest': canonical_json_digest(stack),
-                                'managed_tip': managed_tip,
-                                'exact_squash_delivery': (
-                                    historical_managed_tip_has_exact_squash_delivery(
+                        if reason == 'absorbed' or (
+                            relevant and historical_stack_has_exact_squash_delivery(
+                                repo_root,
+                                stack,
+                                delivery_observation,
+                                (parent_state.get('manifest') or {}).get('defaults') or {},
+                                config.get('remote'),
+                            )
+                        ):
+                            closed_sources.update(declared)
+                            if reason == 'absorbed':
+                                trusted_stack_generations[stack_id] = {
+                                    'digest': canonical_json_digest(stack),
+                                    'managed_tip': managed_tip,
+                                    'exact_squash_delivery': (
+                                        historical_managed_tip_has_exact_squash_delivery(
                                         repo_root,
                                         managed_tip,
                                         stack,
                                         delivery_observation,
                                         (parent_state.get('manifest') or {}).get('defaults') or {},
                                         config.get('remote'),
-                                    )
-                                ),
-                            }
+                                        )
+                                    ),
+                                }
         if (
             parent
             and str(state.get('publication_scope') or '').startswith('promote:')
@@ -6826,8 +6885,10 @@ def historically_closed_integration_commits(
                     'managed_tip': parent_managed_tip,
                 }
         current = parent
+    if abandonment_only:
+        return abandoned_sources.intersection(candidates)
     if not closed_sources:
-        return set()
+        return abandoned_sources.intersection(candidates)
     source_patches = {
         value for value in commit_patch_ids(repo_root, closed_sources).values()
         if value
@@ -6838,7 +6899,29 @@ def historically_closed_integration_commits(
         or (candidate_patches.get(commit) and candidate_patches[commit] in source_patches)
     }
     closed.update(owned_merge_parents.intersection(merge_parent_candidates))
+    closed.update(abandoned_sources.intersection(candidates))
     return closed
+
+
+def historically_abandoned_unmapped_commits(repo_root, manifest, commits):
+    """Narrow a validation warning using a fresh, exact abandoned-close proof."""
+    if not commits or not coordination_is_active(manifest):
+        return set()
+    observation = observe_published_integration_tip(repo_root, manifest)
+    if not observation or observation.get('status') != 'current':
+        return set()
+    delivery = integration_projection_ref_observation(
+        repo_root, 'base', 'integration', manifest['integration']['base']
+    )
+    return historically_closed_integration_commits(
+        repo_root,
+        ref_tip(repo_root, manifest['integration']['branch']),
+        observation,
+        candidates=commits,
+        delivery_tip=delivery['tip'],
+        delivery_observation=delivery,
+        abandonment_only=True,
+    )
 
 
 def integration_control_only_transition(repo_root, commit, parent):
@@ -27382,14 +27465,34 @@ class SyncwheelRevisionBackend:
 
     def _dirty_paths(self, repo_root):
         paths = set()
-        for arguments in (
-            ('diff', '--name-only', '-z'),
-            ('ls-files', '--others', '--exclude-standard', '-z'),
-        ):
-            output = git(
-                repo_root, *arguments, env={'GIT_OPTIONAL_LOCKS': '0'}
-            ).stdout
-            paths.update(item for item in output.split('\0') if item)
+        real_index = self._index_path(repo_root)
+        index_bytes, _ = self._read_regular_file(real_index, 'Git index')
+        index_sha = hashlib.sha256(index_bytes).hexdigest()
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix='index.syncwheel-observation-', dir=real_index.parent,
+        )
+        observed_index = Path(temporary_name)
+        try:
+            with os.fdopen(descriptor, 'wb') as copied:
+                copied.write(index_bytes)
+            copied_bytes, _ = self._read_regular_file(observed_index, 'observational Git index')
+            if copied_bytes != index_bytes:
+                self._fail('observational Git index copy differs from the real index')
+            environment = {
+                'GIT_INDEX_FILE': str(observed_index),
+                'GIT_OPTIONAL_LOCKS': '0',
+            }
+            for arguments in (
+                ('diff', '--name-only', '-z'),
+                ('ls-files', '--others', '--exclude-standard', '-z'),
+            ):
+                output = git(repo_root, *arguments, env=environment).stdout
+                paths.update(item for item in output.split('\0') if item)
+            if self._index_sha256(repo_root) != index_sha:
+                self._fail('real Git index changed during dirty-path observation')
+        finally:
+            observed_index.unlink(missing_ok=True)
+            Path(f'{temporary_name}.lock').unlink(missing_ok=True)
         return paths
 
     def _dirty_snapshot(self, repo_root, paths):
@@ -27967,9 +28070,12 @@ class SyncwheelRevisionBackend:
             )
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
-            self._fail(
-                'integration already contains unmapped commits: ' + ', '.join(unmapped)
-            )
+            abandoned = historically_abandoned_unmapped_commits(repo_root, manifest, unmapped)
+            unmapped = [commit for commit in unmapped if commit not in abandoned]
+            if unmapped:
+                self._fail(
+                    'integration already contains unmapped commits: ' + ', '.join(unmapped)
+                )
         if require_clean:
             if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
                 self._fail('revision provider preflight requires a clean, conflict-free index')
@@ -29769,7 +29875,10 @@ class SyncwheelRevisionBackend:
             self._fail('post-operation Syncwheel validation failed: ' + '; '.join(validation['errors']))
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
-            self._fail('operation left unmapped integration commits: ' + ', '.join(unmapped))
+            abandoned = historically_abandoned_unmapped_commits(repo_root, manifest, unmapped)
+            unmapped = [commit for commit in unmapped if commit not in abandoned]
+            if unmapped:
+                self._fail('operation left unmapped integration commits: ' + ', '.join(unmapped))
         if self._worktrees(repo_root) != journal['baselineWorktrees']:
             self._fail('operation leaked or removed a Git worktree')
         if self._remote_refs(repo_root) != journal['baselineRemoteRefs']:

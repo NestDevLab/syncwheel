@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.43.29 - 2026-09-21
+
+- Recognize an exact historical commit from a coordinated abandoned stack only when every path it changed has the same mode and blob in the local integration, published integration, and current delivery base. Keep unknown history and undelivered paths blocked in rebuild and revision-provider checks.
+- Inspect revision-provider dirty paths through a verified temporary index copy so Git stat refreshes cannot change the leased real index. Preserve staged, unstaged, mode, untracked, and split-index observations.
+
 ## 0.43.28 - 2026-09-21
 
 - Recover a failed published-stack close with a new reason or changed manifest only after proving its old token did not reach coordination. Check merged delivery against the freshly fetched target tip.
