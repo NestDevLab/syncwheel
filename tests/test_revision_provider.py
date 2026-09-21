@@ -150,12 +150,15 @@ class RevisionProviderRepository:
             )
         return result.stdout.strip()
 
-    def cli(self, *args, expected=0, payload=None):
-        return self.cli_at(self.repo, *args, expected=expected, payload=payload)
+    def cli(self, *args, expected=0, payload=None, extra_env=None):
+        return self.cli_at(
+            self.repo, *args, expected=expected, payload=payload, extra_env=extra_env
+        )
 
-    def cli_at(self, cwd, *args, expected=0, payload=None):
+    def cli_at(self, cwd, *args, expected=0, payload=None, extra_env=None):
         env = os.environ.copy()
         env['SYNCWHEEL_UPDATE_MODE'] = 'off'
+        env.update(extra_env or {})
         result = subprocess.run(
             ['python3', str(CLI), *args],
             cwd=cwd,
@@ -205,8 +208,10 @@ class RevisionProviderRepository:
             ],
         }
 
-    def protocol_request(self, payload, expected=0):
-        result = self.cli('revision-provider', expected=expected, payload=payload)
+    def protocol_request(self, payload, expected=0, extra_env=None):
+        result = self.cli(
+            'revision-provider', expected=expected, payload=payload, extra_env=extra_env
+        )
         lines = result.stdout.splitlines()
         if len(lines) != 1:
             raise AssertionError(f'expected one stdout response, got {lines!r}')
@@ -4189,20 +4194,46 @@ class RevisionProviderRecoveryTest(unittest.TestCase):
         self.assertNotEqual(fixture.raw_index_bytes(), old_index)
         return payload
 
-    def test_only_recover_can_reprepare_clean_index_after_stat_refresh(self):
+    def test_stat_refresh_after_preflight_does_not_fail_finalize(self):
         fixture = RevisionProviderRepository()
         try:
             payload = self._prepared_with_refreshed_index(fixture, 'index-stat-refresh')
-            before = fixture.raw_index_bytes()
-            rejected, _ = fixture.protocol_request({**payload, 'action': 'finalize'}, expected=2)
-            self.assertIn('index lease was lost', rejected['error'])
-            self.assertEqual(fixture.raw_index_bytes(), before)
+            journal_path = fixture.provider_journal_root() / 'index-stat-refresh.json'
+            prepared = json.loads(journal_path.read_text())
+            refreshed_sha = hashlib.sha256(fixture.raw_index_bytes()).hexdigest()
+            completed, _ = fixture.protocol_request({**payload, 'action': 'finalize'})
+            self.assertEqual(completed['status'], 'verified')
+            journal = json.loads(journal_path.read_text())
+            self.assertNotIn('indexLeaseReprepared', journal)
+            self.assertEqual(
+                journal['baselineIndexSha256'], prepared['baselineIndexSha256']
+            )
+            matches = journal['indexLeaseSemanticMatches']
+            self.assertEqual(matches[0]['stage'], 'preflight')
+            for match in matches:
+                self.assertEqual(match['oldSha256'], prepared['baselineIndexSha256'])
+                self.assertEqual(match['newSha256'], refreshed_sha)
+                self.assertEqual(
+                    match['semanticDigest'], prepared['baselineIndexSemantic']
+                )
+        finally:
+            fixture.close()
+
+    def test_recover_reprepares_clean_index_after_stat_refresh(self):
+        fixture = RevisionProviderRepository()
+        try:
+            payload = self._prepared_with_refreshed_index(fixture, 'index-stat-recover')
+            journal_path = fixture.provider_journal_root() / 'index-stat-recover.json'
+            prepared = json.loads(journal_path.read_text())
             recovered, _ = fixture.protocol_request({**payload, 'action': 'recover'})
             self.assertEqual(recovered['status'], 'verified')
-            journal = json.loads((fixture.provider_journal_root() / 'index-stat-refresh.json').read_text())
+            journal = json.loads(journal_path.read_text())
             marker = journal['indexLeaseReprepared']
             self.assertNotEqual(marker['oldSha256'], marker['newSha256'])
             self.assertEqual(journal['baselineIndexSha256'], marker['newSha256'])
+            self.assertEqual(
+                journal['baselineIndexSemantic'], prepared['baselineIndexSemantic']
+            )
         finally:
             fixture.close()
 
@@ -4284,27 +4315,34 @@ class RevisionProviderRecoveryTest(unittest.TestCase):
                 if phase == 'product_objects_prepared':
                     raise protocol.RevisionProviderError('stopped after product candidate')
 
-        fixture = RevisionProviderRepository()
-        try:
-            payload = fixture.request('preflight', operation_id='index-candidate')
-            (fixture.repo / 'feature.txt').write_text('feature\n')
-            request = protocol.parse_request(payload)
-            backend = StopAfterCandidate(protocol)
-            protocol.handle_request(backend, request)
-            with self.assertRaisesRegex(protocol.RevisionProviderError, 'stopped after product candidate'):
-                protocol.handle_request(backend, replace(request, action='finalize'))
-            journal = backend.load_journal(request)
-            self.assertIsNotNone(journal['candidateProductCommitSha'])
-            unchanged = fixture.repo / 'base.txt'
-            unchanged.write_bytes(unchanged.read_bytes())
-            metadata = unchanged.stat()
-            os.utime(unchanged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
-            fixture.git('status', '--porcelain')
-            rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
-            self.assertIn('index lease', rejected['error'])
-            self.assertNotIn('indexLeaseReprepared', backend.load_journal(request))
-        finally:
-            fixture.close()
+        for change in ('stat-refresh', 'assume-unchanged'):
+            with self.subTest(change=change):
+                fixture = RevisionProviderRepository()
+                try:
+                    payload = fixture.request('preflight', operation_id='index-candidate')
+                    (fixture.repo / 'feature.txt').write_text('feature\n')
+                    request = protocol.parse_request(payload)
+                    backend = StopAfterCandidate(protocol)
+                    protocol.handle_request(backend, request)
+                    with self.assertRaisesRegex(protocol.RevisionProviderError, 'stopped after product candidate'):
+                        protocol.handle_request(backend, replace(request, action='finalize'))
+                    journal = backend.load_journal(request)
+                    self.assertIsNotNone(journal['candidateProductCommitSha'])
+                    if change == 'stat-refresh':
+                        unchanged = fixture.repo / 'base.txt'
+                        unchanged.write_bytes(unchanged.read_bytes())
+                        metadata = unchanged.stat()
+                        os.utime(unchanged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
+                        fixture.git('status', '--porcelain')
+                        recovered, _ = fixture.protocol_request({**payload, 'action': 'recover'})
+                        self.assertEqual(recovered['status'], 'verified')
+                    else:
+                        fixture.git('update-index', '--assume-unchanged', 'base.txt')
+                        rejected, _ = fixture.protocol_request({**payload, 'action': 'recover'}, expected=2)
+                        self.assertIn('index lease', rejected['error'])
+                    self.assertNotIn('indexLeaseReprepared', backend.load_journal(request))
+                finally:
+                    fixture.close()
 
         class StopAfterReprepare(SYNCWHEEL.SyncwheelRevisionBackend):
             def checkpoint(self, phase):
@@ -5487,6 +5525,966 @@ class DirtyPathPhaseMarkerTest(unittest.TestCase):
                 self.backend.verify_no_repository_delta(
                     self.request, {'observedManifestDigest': 'unchanged'}
                 )
+
+
+
+class PlainIndexRepository:
+    """A bare-bones Git checkout for exercising index bytes written by Git."""
+
+    def __init__(self, *, object_format='sha1'):
+        self.temp = tempfile.TemporaryDirectory(prefix='syncwheel-index-semantic-')
+        self.repo = Path(self.temp.name) / 'repo'
+        self.object_format = object_format
+        subprocess.run(
+            ['git', 'init', '-q', f'--object-format={object_format}', str(self.repo)],
+            check=True,
+        )
+        self.git('config', 'user.name', 'Index Semantic Test')
+        self.git('config', 'user.email', 'index-semantic@example.invalid')
+        for relative, content in (
+            ('a.txt', 'a\n'),
+            ('b.txt', 'b\n'),
+            ('dir/sub/one.txt', 'one\n'),
+            ('dir/sub/two.txt', 'two\n'),
+            ('dir/zeta.txt', 'zeta\n'),
+        ):
+            self.write(relative, content)
+        self.git('add', '.')
+        self.git('commit', '-q', '-m', 'test: initialize')
+
+    def close(self):
+        self.temp.cleanup()
+
+    def git(self, *args, check=True):
+        result = subprocess.run(
+            ['git', *args], cwd=self.repo, text=True, capture_output=True
+        )
+        if check and result.returncode:
+            raise AssertionError(f'git {args} failed: {result.stderr}')
+        return result.stdout
+
+    def write(self, relative, content):
+        path = self.repo / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+
+    @property
+    def index_path(self):
+        return self.repo / '.git' / 'index'
+
+    def index_bytes(self):
+        return self.index_path.read_bytes()
+
+    def rewrite_unchanged(self, relative):
+        path = self.repo / relative
+        data = path.read_bytes()
+        temporary = path.with_name(path.name + '.rewrite')
+        temporary.write_bytes(data)
+        os.replace(temporary, path)
+        future = time.time_ns() + 3_000_000_000
+        os.utime(path, ns=(future, future))
+
+    def staged_entries(self):
+        entries = []
+        for record in self.git('ls-files', '--stage', '-z').split('\0'):
+            if not record:
+                continue
+            metadata, _, path = record.partition('\t')
+            mode, oid, stage_number = metadata.split(' ')
+            entries.append((path.encode(), int(mode, 8), oid, int(stage_number)))
+        return entries
+
+
+def parsed_entries(parsed):
+    return [
+        (path, mode, oid.hex(), stage_number)
+        for path, mode, oid, stage_number, _, _ in parsed['entries']
+    ]
+
+
+def reseal_index(payload, hash_factory=hashlib.sha1, oid_size=20):
+    body = payload[:-oid_size]
+    return body + hash_factory(body).digest()
+
+
+class RevisionIndexSemanticParserTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = PlainIndexRepository()
+
+    def tearDown(self):
+        self.fixture.close()
+
+    def parse(self, payload=None):
+        return SYNCWHEEL.parse_index_semantics(
+            self.fixture.index_bytes() if payload is None else payload, 'sha1'
+        )
+
+    def digest(self, payload=None):
+        return SYNCWHEEL.index_semantic_digest(
+            self.fixture.index_bytes() if payload is None else payload, 'sha1'
+        )
+
+    def test_version_2_entries_match_git_and_skip_cache_tree(self):
+        fixture = self.fixture
+        fixture.git('write-tree')
+        self.assertIn(b'TREE', fixture.index_bytes())
+        parsed = self.parse()
+        self.assertEqual(parsed['version'], 2)
+        self.assertEqual(parsed_entries(parsed), fixture.staged_entries())
+        self.assertEqual(parsed['extensions'], [])
+        for _, _, _, _, assume_valid, extended in parsed['entries']:
+            self.assertFalse(assume_valid)
+            self.assertEqual(extended, 0)
+
+    def test_version_3_keeps_skip_worktree_and_intent_to_add_flags(self):
+        fixture = self.fixture
+        plain = self.digest()
+        fixture.git('update-index', '--skip-worktree', 'a.txt')
+        fixture.write('new.txt', 'new\n')
+        fixture.git('add', '--intent-to-add', 'new.txt')
+        parsed = self.parse()
+        self.assertEqual(parsed['version'], 3)
+        self.assertEqual(parsed_entries(parsed), fixture.staged_entries())
+        flags = {path: extended for path, _, _, _, _, extended in parsed['entries']}
+        self.assertEqual(flags[b'a.txt'], 0x4000)
+        self.assertEqual(flags[b'new.txt'], 0x2000)
+        self.assertEqual(flags[b'b.txt'], 0)
+        self.assertNotEqual(self.digest(), plain)
+
+    def test_version_4_prefix_compressed_paths_match_version_2(self):
+        fixture = self.fixture
+        version_2 = self.digest()
+        fixture.git('update-index', '--index-version', '4')
+        parsed = self.parse()
+        self.assertEqual(parsed['version'], 4)
+        self.assertEqual(parsed_entries(parsed), fixture.staged_entries())
+        self.assertEqual(self.digest(), version_2)
+
+    def test_split_index_is_unavailable(self):
+        fixture = self.fixture
+        fixture.git('update-index', '--split-index')
+        self.assertIn(b'link', fixture.index_bytes())
+        self.assertIsNone(self.parse())
+        self.assertIsNone(self.digest())
+
+    def test_corrupt_truncated_or_unknown_indexes_are_unavailable(self):
+        payload = self.fixture.index_bytes()
+        self.assertIsNotNone(self.digest(payload))
+        corrupted = bytearray(payload)
+        corrupted[20] ^= 0x01
+        truncated = reseal_index(payload[:-40] + payload[-20:])
+        unknown_version = reseal_index(payload[:4] + (5).to_bytes(4, 'big') + payload[8:])
+        required_extension = reseal_index(
+            payload[:-20] + b'sdir' + (0).to_bytes(4, 'big') + payload[-20:]
+        )
+        for label, candidate in (
+            ('checksum', bytes(corrupted)),
+            ('truncated', truncated),
+            ('version', unknown_version),
+            ('required-extension', required_extension),
+            ('object-format', payload),
+        ):
+            with self.subTest(label=label):
+                object_format = 'sha256' if label == 'object-format' else 'sha1'
+                self.assertIsNone(
+                    SYNCWHEEL.index_semantic_digest(candidate, object_format)
+                )
+
+    def test_sha256_repository_entries_match_git(self):
+        fixture = PlainIndexRepository(object_format='sha256')
+        try:
+            parsed = SYNCWHEEL.parse_index_semantics(fixture.index_bytes(), 'sha256')
+            self.assertEqual(parsed_entries(parsed), fixture.staged_entries())
+            self.assertIsNone(
+                SYNCWHEEL.index_semantic_digest(fixture.index_bytes(), 'sha1')
+            )
+        finally:
+            fixture.close()
+
+
+class RevisionIndexSemanticLeaseTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = PlainIndexRepository()
+        self.backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        self.request = mock.Mock(operation_id='semantic-lease')
+
+    def tearDown(self):
+        self.fixture.close()
+
+    def observe(self):
+        return self.backend._index_observation(self.fixture.repo)
+
+    def holds(self, lease, observed):
+        return self.backend._matching_index_lease(
+            self.request, observed, [('unit lease', lease)]
+        ) is not None
+
+    def audit(self):
+        return self.backend.__dict__.get('_semantic_index_matches', [])
+
+    def lease_survives(self, change):
+        baseline = self.observe()
+        lease = SYNCWHEEL.IndexLease(baseline.sha256, baseline.semantic)
+        self.assertIsNotNone(lease.semantic)
+        change()
+        current = self.observe()
+        self.assertNotEqual(current.sha256, baseline.sha256)
+        return self.holds(lease, current)
+
+    def stat_refresh(self):
+        self.fixture.rewrite_unchanged('a.txt')
+        self.fixture.git('status', '--porcelain')
+
+    def test_benign_stat_refresh_is_accepted_with_an_audit_record(self):
+        baseline = self.observe()
+        self.assertTrue(self.lease_survives(self.stat_refresh))
+        current = self.observe()
+        self.assertEqual(
+            [
+                {key: record[key] for key in ('operationId', 'stage', 'oldSha256', 'newSha256', 'semanticDigest')}
+                for record in self.audit()
+            ],
+            [{
+                'operationId': 'semantic-lease',
+                'stage': 'unit lease',
+                'oldSha256': baseline.sha256,
+                'newSha256': current.sha256,
+                'semanticDigest': baseline.semantic,
+            }],
+        )
+
+    def test_staged_changes_break_the_lease(self):
+        fixture = self.fixture
+
+        def content():
+            fixture.write('a.txt', 'changed\n')
+            fixture.git('add', 'a.txt')
+
+        def mode():
+            fixture.git('update-index', '--chmod=+x', 'a.txt')
+
+        def added():
+            fixture.write('added.txt', 'added\n')
+            fixture.git('add', 'added.txt')
+
+        def removed():
+            fixture.git('rm', '-q', '--cached', 'b.txt')
+
+        def intent_to_add():
+            fixture.write('intent.txt', 'intent\n')
+            fixture.git('add', '--intent-to-add', 'intent.txt')
+
+        changes = {
+            'content': content,
+            'mode': mode,
+            'assume-unchanged': lambda: fixture.git(
+                'update-index', '--assume-unchanged', 'a.txt'
+            ),
+            'skip-worktree': lambda: fixture.git(
+                'update-index', '--skip-worktree', 'a.txt'
+            ),
+            'intent-to-add': intent_to_add,
+            'path-added': added,
+            'path-removed': removed,
+        }
+        for label, change in changes.items():
+            with self.subTest(change=label):
+                self.assertFalse(self.lease_survives(change))
+                fixture.git('reset', '-q', '--hard')
+                fixture.git('update-index', '--no-assume-unchanged', 'a.txt')
+                fixture.git('update-index', '--no-skip-worktree', 'a.txt')
+                fixture.git('clean', '-q', '-fd')
+        with self.subTest(change='conflict-stages'):
+            fixture.git('switch', '-q', '-c', 'side')
+            fixture.write('a.txt', 'side\n')
+            fixture.git('commit', '-q', '-am', 'test: side')
+            fixture.git('switch', '-q', '-')
+            fixture.write('a.txt', 'main\n')
+            fixture.git('commit', '-q', '-am', 'test: main')
+            self.assertFalse(self.lease_survives(
+                lambda: fixture.git('merge', '-q', 'side', check=False)
+            ))
+            self.assertIn(' 3\ta.txt', fixture.git('ls-files', '--stage'))
+        self.assertEqual(self.audit(), [])
+
+    def test_resolve_undo_change_breaks_the_lease(self):
+        fixture = self.fixture
+        fixture.git('switch', '-q', '-c', 'side')
+        fixture.write('a.txt', 'side\n')
+        fixture.git('commit', '-q', '-am', 'test: side')
+        fixture.git('switch', '-q', '-')
+        fixture.write('a.txt', 'main\n')
+        fixture.git('commit', '-q', '-am', 'test: main')
+        fixture.git('merge', '-q', 'side', check=False)
+        fixture.write('a.txt', 'resolved\n')
+        fixture.git('add', 'a.txt')
+        resolved = self.observe()
+        parsed = SYNCWHEEL.parse_index_semantics(resolved.payload, 'sha1')
+        self.assertEqual([signature for signature, _ in parsed['extensions']], [b'REUC'])
+
+        without_undo = Path(self.fixture.temp.name) / 'without-undo.index'
+        tree = fixture.git('write-tree').strip()
+        subprocess.run(
+            ['git', 'read-tree', tree], cwd=fixture.repo, check=True,
+            env={**os.environ, 'GIT_INDEX_FILE': str(without_undo)},
+        )
+        replacement = SYNCWHEEL.IndexObservation(without_undo.read_bytes(), 'sha1')
+        replacement_parsed = SYNCWHEEL.parse_index_semantics(replacement.payload, 'sha1')
+        self.assertEqual(replacement_parsed['entries'], parsed['entries'])
+        self.assertEqual(replacement_parsed['extensions'], [])
+        lease = SYNCWHEEL.IndexLease(resolved.sha256, resolved.semantic)
+        self.assertFalse(self.holds(lease, replacement))
+        self.assertEqual(self.audit(), [])
+
+    def test_unavailable_semantics_on_either_side_stay_byte_strict(self):
+        fixture = self.fixture
+        baseline = self.observe()
+        raw_only = SYNCWHEEL.IndexLease(baseline.sha256, None)
+        self.stat_refresh()
+        refreshed = self.observe()
+        self.assertNotEqual(refreshed.sha256, baseline.sha256)
+        self.assertEqual(refreshed.semantic, baseline.semantic)
+        self.assertFalse(self.holds(raw_only, refreshed))
+
+        lease = SYNCWHEEL.IndexLease(refreshed.sha256, refreshed.semantic)
+        fixture.git('update-index', '--split-index')
+        split = self.observe()
+        self.assertNotEqual(split.sha256, refreshed.sha256)
+        self.assertIsNone(split.semantic)
+        self.assertFalse(self.holds(lease, split))
+        self.assertEqual(self.audit(), [])
+
+
+CONCURRENT_READER_SOURCE = r"""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+spec = json.loads(Path(sys.argv[1]).read_text())
+repo = Path(spec['repo'])
+index = Path(spec['index'])
+
+
+def index_sha256():
+    return hashlib.sha256(index.read_bytes()).hexdigest()
+
+
+before = index_sha256()
+for relative in spec['rewrite']:
+    path = repo / relative
+    data = path.read_bytes()
+    temporary = path.with_name(path.name + '.reader-rewrite')
+    temporary.write_bytes(data)
+    os.chmod(temporary, path.stat().st_mode & 0o7777)
+    os.replace(temporary, path)
+    future = time.time_ns() + 3_000_000_000
+    os.utime(path, ns=(future, future))
+clean_env = {'PATH': spec['path'], 'HOME': spec['home']}
+for relative, content in spec['stage'].items():
+    (repo / relative).write_text(content)
+    subprocess.run(
+        [spec['git'], '-C', str(repo), 'add', '--', relative],
+        env=clean_env, check=True,
+    )
+status = subprocess.run(
+    [spec['git'], '-C', str(repo), 'status', '--porcelain'],
+    env=clean_env, capture_output=True, text=True,
+)
+Path(spec['record']).write_text(json.dumps({
+    'before': before,
+    'after': index_sha256(),
+    'statusExit': status.returncode,
+    'pid': os.getpid(),
+}))
+"""
+
+LOCK_HOLDER_SOURCE = r"""
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+spec = json.loads(Path(sys.argv[1]).read_text())
+lock = Path(spec['index'] + '.lock')
+record = Path(spec['record'])
+ready_read, ready_write = os.pipe()
+if os.fork():
+    os.close(ready_write)
+    sys.exit(0 if os.read(ready_read, 1) == b'1' else 3)
+os.close(ready_read)
+os.setsid()
+devnull = os.open(os.devnull, os.O_RDWR)
+for descriptor in (0, 1, 2):
+    os.dup2(devnull, descriptor)
+result = {'held': False}
+try:
+    clean_env = {'PATH': spec['path'], 'HOME': spec['home']}
+    frozen = None
+    attempts = 0
+    while frozen is None and attempts < 200:
+        attempts += 1
+        status = subprocess.Popen(
+            [spec['git'], '-C', spec['repo'], 'status', '--porcelain'], env=clean_env
+        )
+        while status.poll() is None:
+            if not lock.exists():
+                continue
+            os.kill(status.pid, signal.SIGSTOP)
+            if status.poll() is None and lock.exists():
+                frozen = status
+                break
+            if status.poll() is None:
+                os.kill(status.pid, signal.SIGCONT)
+        if frozen is None:
+            status.wait()
+    result['attempts'] = attempts
+    if frozen is not None:
+        result['held'] = True
+        os.write(ready_write, b'1')
+        held_at = time.monotonic()
+        release = spec.get('releaseWhen')
+        while time.monotonic() - held_at < spec['maxHold']:
+            if release and any(Path(release[0]).glob(release[1])):
+                time.sleep(spec['settle'])
+                result['releasedBy'] = 'releaseWhen'
+                break
+            time.sleep(0.005)
+        result['heldSeconds'] = time.monotonic() - held_at
+        os.kill(frozen.pid, signal.SIGCONT)
+        result['statusExit'] = frozen.wait()
+except BaseException as exc:
+    result['error'] = repr(exc)
+finally:
+    os.close(ready_write)
+    partial = record.with_name(record.name + '.partial')
+    partial.write_text(json.dumps(result))
+    os.replace(partial, record)
+    os._exit(0)
+"""
+
+STATUS_LOOP_SOURCE = r"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+spec = json.loads(Path(sys.argv[1]).read_text())
+stop = Path(spec['stop'])
+clean_env = {'PATH': spec['path'], 'HOME': spec['home']}
+runs = 0
+while not stop.exists():
+    subprocess.run(
+        [spec['git'], '-C', spec['repo'], 'status', '--porcelain'],
+        env=clean_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    runs += 1
+Path(spec['record']).write_text(json.dumps({'runs': runs}))
+"""
+
+# a hold freezes a separate plain `git status` holding the real index.lock, once,
+# around the first matching call. HOLD_BEFORE ignores temp indexes outside the git dir
+GIT_SHIM_SOURCE = r"""#!/bin/sh
+hold_index_lock() {
+    "$SYNCWHEEL_TEST_PYTHON" "$SYNCWHEEL_TEST_HOLDER" "$SYNCWHEEL_TEST_HOLDER_SPEC" || exit 98
+}
+if [ "$1" = write-tree ] && [ -z "$GIT_INDEX_FILE" ] \
+    && [ -n "$SYNCWHEEL_TEST_REAL_INDEX_LOG" ]; then
+    echo "$*" >> "$SYNCWHEEL_TEST_REAL_INDEX_LOG"
+fi
+if [ -n "$SYNCWHEEL_TEST_HOLD_BEFORE" ] \
+    && [ "$*" = "$SYNCWHEEL_TEST_HOLD_BEFORE" ] \
+    && { [ -z "$GIT_INDEX_FILE" ] \
+        || [ "${GIT_INDEX_FILE%/*}" = "$SYNCWHEEL_TEST_INDEX_DIR" ]; } \
+    && mkdir "$SYNCWHEEL_TEST_HOLD_ONCE" 2>/dev/null; then
+    hold_index_lock
+fi
+"$SYNCWHEEL_TEST_REAL_GIT" "$@"
+status=$?
+if [ -n "$SYNCWHEEL_TEST_HOLD_AFTER" ] \
+    && [ "$*" = "$SYNCWHEEL_TEST_HOLD_AFTER" ] \
+    && mkdir "$SYNCWHEEL_TEST_HOLD_ONCE" 2>/dev/null; then
+    hold_index_lock
+fi
+if [ -n "$SYNCWHEEL_TEST_READER_TRIGGER" ] \
+    && [ "$*" = "$SYNCWHEEL_TEST_READER_TRIGGER" ] \
+    && mkdir "$SYNCWHEEL_TEST_READER_ONCE" 2>/dev/null; then
+    "$SYNCWHEEL_TEST_PYTHON" "$SYNCWHEEL_TEST_READER" "$SYNCWHEEL_TEST_READER_SPEC" || exit 97
+fi
+exit "$status"
+"""
+
+# _verify_invariants lists remote refs right before its index lease check.
+TERMINAL_WINDOW_TRIGGER = 'for-each-ref --format=%(refname) refs/remotes/'
+
+
+class RevisionIndexConcurrentReaderTest(unittest.TestCase):
+    """A separate plain `git status` must not fail an unchanged operation."""
+
+    def setUp(self):
+        self.fixture = RevisionProviderRepository()
+        self.real_git = shutil.which('git')
+        self.clean_path = os.environ.get('PATH', os.defpath)
+        self.tools = self.fixture.root / 'reader-tools'
+        self.tools.mkdir()
+        self.reader = self.tools / 'reader.py'
+        self.reader.write_text(CONCURRENT_READER_SOURCE)
+        shim_dir = self.tools / 'bin'
+        shim_dir.mkdir()
+        shim = shim_dir / 'git'
+        shim.write_text(GIT_SHIM_SOURCE)
+        shim.chmod(0o755)
+        self.shim_path = f'{shim_dir}{os.pathsep}{self.clean_path}'
+        self.holder = self.tools / 'holder.py'
+        self.holder.write_text(LOCK_HOLDER_SOURCE)
+        self.status_loop = self.tools / 'status_loop.py'
+        self.status_loop.write_text(STATUS_LOOP_SOURCE)
+        index = Path(self.fixture.git('rev-parse', '--git-path', 'index'))
+        if not index.is_absolute():
+            index = self.fixture.repo / index
+        self.index = Path(os.path.realpath(index))
+
+    def tearDown(self):
+        self.fixture.close()
+
+    def reader_spec(self, name, *, rewrite=(), stage=None):
+        index = Path(self.fixture.git('rev-parse', '--git-path', 'index'))
+        if not index.is_absolute():
+            index = self.fixture.repo / index
+        spec = self.tools / f'{name}.json'
+        spec.write_text(json.dumps({
+            'repo': str(self.fixture.repo),
+            'index': str(index),
+            'git': self.real_git,
+            'path': self.clean_path,
+            'home': str(self.tools),
+            'rewrite': list(rewrite),
+            'stage': dict(stage or {}),
+            'record': str(self.tools / f'{name}.record.json'),
+        }))
+        return spec
+
+    def reader_record(self, spec):
+        return json.loads(Path(json.loads(spec.read_text())['record']).read_text())
+
+    def run_reader_now(self, spec):
+        subprocess.run(
+            [sys.executable, str(self.reader), str(spec)],
+            env={'PATH': self.clean_path, 'HOME': str(self.tools)},
+            check=True,
+        )
+
+    def terminal_window_env(self, spec):
+        return {
+            'PATH': self.shim_path,
+            'SYNCWHEEL_TEST_REAL_GIT': self.real_git,
+            'SYNCWHEEL_TEST_PYTHON': sys.executable,
+            'SYNCWHEEL_TEST_READER': str(self.reader),
+            'SYNCWHEEL_TEST_READER_SPEC': str(spec),
+            'SYNCWHEEL_TEST_READER_TRIGGER': TERMINAL_WINDOW_TRIGGER,
+            'SYNCWHEEL_TEST_READER_ONCE': str(spec.with_suffix('.once')),
+        }
+
+    def holder_env(
+        self, name, *, before=None, after=None, max_hold=0.5, release_when=None, settle=0.0
+    ):
+        spec = self.tools / f'{name}.json'
+        spec.write_text(json.dumps({
+            'repo': str(self.fixture.repo),
+            'index': str(self.index),
+            'git': self.real_git,
+            'path': self.clean_path,
+            'home': str(self.tools),
+            'maxHold': max_hold,
+            'releaseWhen': release_when,
+            'settle': settle,
+            'record': str(self.tools / f'{name}.record.json'),
+        }))
+        environment = {
+            'PATH': self.shim_path,
+            'SYNCWHEEL_TEST_REAL_GIT': self.real_git,
+            'SYNCWHEEL_TEST_PYTHON': sys.executable,
+            'SYNCWHEEL_TEST_HOLDER': str(self.holder),
+            'SYNCWHEEL_TEST_HOLDER_SPEC': str(spec),
+            'SYNCWHEEL_TEST_HOLD_ONCE': str(spec.with_suffix('.once')),
+            'SYNCWHEEL_TEST_INDEX_DIR': str(self.index.parent),
+            'SYNCWHEEL_TEST_REAL_INDEX_LOG': str(spec.with_suffix('.real-index.log')),
+        }
+        if before is not None:
+            environment['SYNCWHEEL_TEST_HOLD_BEFORE'] = before
+        if after is not None:
+            environment['SYNCWHEEL_TEST_HOLD_AFTER'] = after
+        return spec, environment
+
+    def holder_record(self, spec):
+        record = Path(json.loads(spec.read_text())['record'])
+        deadline = time.monotonic() + 30
+        while not record.exists():
+            if time.monotonic() >= deadline:
+                self.fail(f'index.lock holder did not finish: {record}')
+            time.sleep(0.02)
+        result = json.loads(record.read_text())
+        self.assertTrue(result['held'], result)
+        self.assertEqual(result.get('statusExit'), 0, result)
+        return result
+
+    def stale_index_request(self, operation_id, *, owned_path):
+        """Rewrite tracked files unchanged, as Agentwheel does, then preflight."""
+        fixture = self.fixture
+        payload = fixture.request('preflight', operation_id=operation_id)
+        if owned_path:
+            (fixture.repo / 'feature.txt').write_text('feature\n')
+        else:
+            payload['paths'] = []
+        for relative in ('base.txt', '.gitignore', '.syncwheel/manifest.json'):
+            path = fixture.repo / relative
+            path.write_bytes(path.read_bytes())
+            future = time.time_ns() + 2_000_000_000
+            os.utime(path, ns=(future, future))
+        leased = fixture.raw_index_bytes()
+        prepared, _ = fixture.protocol_request(payload)
+        self.assertEqual(prepared['status'], 'prepared')
+        self.assertEqual(fixture.raw_index_bytes(), leased)
+        return payload
+
+    def journal(self, operation_id):
+        return json.loads(
+            (self.fixture.provider_journal_root() / f'{operation_id}.json').read_text()
+        )
+
+    def assert_stat_only_reader(self, spec):
+        record = self.reader_record(spec)
+        self.assertEqual(record['statusExit'], 0)
+        self.assertNotEqual(record['before'], record['after'])
+        return record
+
+    def test_reader_in_terminal_window_accepts_unchanged_no_delta_operation(self):
+        payload = self.stale_index_request('reader-terminal-no-delta', owned_path=False)
+        spec = self.reader_spec('terminal-no-delta')
+        completed, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'finalize'},
+            extra_env=self.terminal_window_env(spec),
+        )
+        self.assertEqual(completed['status'], 'no-repository-delta')
+        record = self.assert_stat_only_reader(spec)
+        journal = self.journal('reader-terminal-no-delta')
+        self.assertEqual(
+            journal['indexLeaseSemanticMatches'],
+            [{
+                'stage': 'terminal verification',
+                'oldSha256': journal['baselineIndexSha256'],
+                'newSha256': record['after'],
+                'semanticDigest': journal['baselineIndexSemantic'],
+                'at': journal['indexLeaseSemanticMatches'][0]['at'],
+            }],
+        )
+        self.assertEqual(record['before'], journal['baselineIndexSha256'])
+
+    def test_reader_in_terminal_window_accepts_owned_path_operation(self):
+        payload = self.stale_index_request('reader-terminal-owned', owned_path=True)
+        spec = self.reader_spec('terminal-owned', rewrite=('base.txt',))
+        completed, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'finalize'},
+            extra_env=self.terminal_window_env(spec),
+        )
+        self.assertEqual(completed['status'], 'verified')
+        record = self.assert_stat_only_reader(spec)
+        journal = self.journal('reader-terminal-owned')
+        self.assertEqual(record['before'], journal['controlIndexSha256'])
+        self.assertEqual(
+            [
+                (match['stage'], match['oldSha256'], match['newSha256'], match['semanticDigest'])
+                for match in journal['indexLeaseSemanticMatches']
+            ],
+            [(
+                'terminal verification',
+                journal['controlIndexSha256'],
+                record['after'],
+                journal['controlIndexSemantic'],
+            )],
+        )
+
+    def test_reader_between_preflight_and_finalize_accepts_both_operations(self):
+        for owned_path in (False, True):
+            with self.subTest(owned_path=owned_path):
+                operation_id = f'reader-between-{int(owned_path)}'
+                payload = self.stale_index_request(operation_id, owned_path=owned_path)
+                spec = self.reader_spec(operation_id)
+                self.run_reader_now(spec)
+                record = self.assert_stat_only_reader(spec)
+                completed, _ = self.fixture.protocol_request(
+                    {**payload, 'action': 'finalize'}
+                )
+                self.assertEqual(
+                    completed['status'],
+                    'verified' if owned_path else 'no-repository-delta',
+                )
+                journal = self.journal(operation_id)
+                matches = journal['indexLeaseSemanticMatches']
+                self.assertEqual(matches[0]['stage'], 'preflight')
+                if owned_path:
+                    self.assertIn(
+                        'product alignment', [match['stage'] for match in matches]
+                    )
+                for match in matches:
+                    self.assertEqual(match['oldSha256'], journal['baselineIndexSha256'])
+                    self.assertEqual(match['newSha256'], record['after'])
+                    self.assertEqual(
+                        match['semanticDigest'], journal['baselineIndexSemantic']
+                    )
+                self.assertEqual(self.fixture.git('status', '--porcelain'), '')
+
+    def test_status_holding_index_lock_across_tree_checks_does_not_fail(self):
+        payload = self.stale_index_request('lock-tree-check', owned_path=True)
+        spec, environment = self.holder_env('lock-tree-check', before='write-tree')
+        completed, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'finalize'}, extra_env=environment
+        )
+        self.assertEqual(completed['status'], 'verified')
+        self.holder_record(spec)
+        self.assertFalse(spec.with_suffix('.real-index.log').exists())
+        self.assertEqual(self.fixture.git('status', '--porcelain'), '')
+
+    def test_status_holding_index_lock_at_finalize_start_is_waited_out(self):
+        for owned_path in (False, True):
+            with self.subTest(owned_path=owned_path):
+                operation_id = f'lock-finalize-start-{int(owned_path)}'
+                payload = self.stale_index_request(operation_id, owned_path=owned_path)
+                # first index path lookup is recover_owned_index_lock
+                spec, environment = self.holder_env(
+                    operation_id, after='rev-parse --git-path index'
+                )
+                completed, _ = self.fixture.protocol_request(
+                    {**payload, 'action': 'finalize'}, extra_env=environment
+                )
+                self.assertEqual(
+                    completed['status'],
+                    'verified' if owned_path else 'no-repository-delta',
+                )
+                self.holder_record(spec)
+                self.assertEqual(self.fixture.git('status', '--porcelain'), '')
+
+    def test_status_holding_index_lock_at_alignment_is_waited_out(self):
+        operation_id = 'lock-alignment'
+        payload = self.stale_index_request(operation_id, owned_path=True)
+        backing = self.fixture.provider_journal_root() / 'index-alignment'
+        # product replacement index refresh, just before align_index links
+        # its backing file as index.lock
+        spec, environment = self.holder_env(
+            operation_id,
+            after='update-index --refresh',
+            max_hold=1.8,
+            release_when=[str(backing), f'{operation_id}-product-*.index'],
+            settle=0.3,
+        )
+        completed, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'finalize'}, extra_env=environment
+        )
+        self.assertEqual(completed['status'], 'verified')
+        self.assertEqual(self.holder_record(spec).get('releasedBy'), 'releaseWhen')
+        stages = [
+            match['stage']
+            for match in self.journal(operation_id)['indexLeaseSemanticMatches']
+        ]
+        self.assertIn('product alignment', stages)
+        self.assertEqual(self.fixture.git('status', '--porcelain'), '')
+
+    def test_plain_status_loop_during_owned_path_finalize(self):
+        payload = self.stale_index_request('status-loop', owned_path=True)
+        spec = self.tools / 'status-loop.json'
+        stop = self.tools / 'status-loop.stop'
+        record = self.tools / 'status-loop.record.json'
+        spec.write_text(json.dumps({
+            'repo': str(self.fixture.repo),
+            'git': self.real_git,
+            'path': self.clean_path,
+            'home': str(self.tools),
+            'stop': str(stop),
+            'record': str(record),
+        }))
+        loop = subprocess.Popen(
+            [sys.executable, str(self.status_loop), str(spec)],
+            env={'PATH': self.clean_path, 'HOME': str(self.tools)},
+        )
+        try:
+            completed, _ = self.fixture.protocol_request({**payload, 'action': 'finalize'})
+        finally:
+            stop.write_text('')
+            loop.wait(timeout=60)
+        self.assertEqual(completed['status'], 'verified')
+        self.assertGreater(json.loads(record.read_text())['runs'], 0)
+        self.assertEqual(self.fixture.git('status', '--porcelain'), '')
+
+    def test_staged_content_change_in_terminal_window_still_fails(self):
+        payload = self.stale_index_request('reader-terminal-staged', owned_path=False)
+        spec = self.reader_spec('terminal-staged', stage={'base.txt': 'concurrent\n'})
+        rejected, _ = self.fixture.protocol_request(
+            {**payload, 'action': 'finalize'},
+            expected=2,
+            extra_env=self.terminal_window_env(spec),
+        )
+        record = self.reader_record(spec)
+        journal = self.journal('reader-terminal-staged')
+        self.assertEqual(
+            rejected['error'],
+            'real Git index lease was lost before terminal verification: '
+            f"expected {journal['baselineIndexSha256']}, found {record['after']}",
+        )
+        self.assertNotIn('indexLeaseSemanticMatches', journal)
+        self.assertEqual(self.fixture.git('show', ':base.txt'), 'concurrent')
+
+
+
+class RevisionIndexJournalCompatibilityTest(unittest.TestCase):
+    """Journals without baselineIndexSemantic keep byte-exact journaled leases."""
+
+    def prepared(self, fixture, operation_id, *, owned_path=True, edit=None):
+        payload = fixture.request('preflight', operation_id=operation_id)
+        if owned_path:
+            (fixture.repo / 'feature.txt').write_text('feature\n')
+        else:
+            payload['paths'] = []
+        prepared, _ = fixture.protocol_request(payload)
+        self.assertEqual(prepared['status'], 'prepared')
+        if edit is not None:
+            path = self.journal_path(fixture, operation_id)
+            journal = json.loads(path.read_text())
+            edit(journal)
+            path.write_text(json.dumps(journal, indent=2, sort_keys=True) + '\n')
+        return payload
+
+    def journal_path(self, fixture, operation_id):
+        return fixture.provider_journal_root() / f'{operation_id}.json'
+
+    def journal(self, fixture, operation_id):
+        return json.loads(self.journal_path(fixture, operation_id).read_text())
+
+    def stat_refresh(self, fixture):
+        unchanged = fixture.repo / 'base.txt'
+        unchanged.write_bytes(unchanged.read_bytes())
+        metadata = unchanged.stat()
+        os.utime(unchanged, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
+        before = fixture.raw_index_bytes()
+        fixture.git('status', '--porcelain')
+        self.assertNotEqual(fixture.raw_index_bytes(), before)
+
+    @staticmethod
+    def drop_semantic_baseline(journal):
+        del journal['baselineIndexSemantic']
+
+    def test_pre_upgrade_journal_keeps_byte_exact_preflight_lease(self):
+        for owned_path in (False, True):
+            with self.subTest(owned_path=owned_path):
+                fixture = RevisionProviderRepository()
+                try:
+                    operation_id = f'pre-upgrade-{int(owned_path)}'
+                    payload = self.prepared(
+                        fixture, operation_id, owned_path=owned_path,
+                        edit=self.drop_semantic_baseline,
+                    )
+                    self.stat_refresh(fixture)
+                    rejected, _ = fixture.protocol_request(
+                        {**payload, 'action': 'finalize'}, expected=2
+                    )
+                    journal = self.journal(fixture, operation_id)
+                    current = hashlib.sha256(fixture.raw_index_bytes()).hexdigest()
+                    self.assertEqual(
+                        rejected['error'],
+                        'real Git index lease was lost before preflight: '
+                        f"expected {journal['baselineIndexSha256']}, found {current}",
+                    )
+                    self.assertEqual(journal['phase'], 'prepared')
+                    self.assertNotIn('baselineIndexSemantic', journal)
+                    self.assertNotIn('indexLeaseSemanticMatches', journal)
+                finally:
+                    fixture.close()
+
+    def test_pre_upgrade_journal_keeps_byte_exact_alignment_result(self):
+        test = self
+
+        class RefreshAfterProductCas(SYNCWHEEL.SyncwheelRevisionBackend):
+            def checkpoint(self, phase):
+                if phase == 'product_index_cas':
+                    test.stat_refresh(fixture)
+
+        for pre_upgrade in (True, False):
+            with self.subTest(pre_upgrade=pre_upgrade):
+                fixture = RevisionProviderRepository()
+                try:
+                    operation_id = f'alignment-result-{int(pre_upgrade)}'
+                    payload = self.prepared(
+                        fixture, operation_id,
+                        edit=self.drop_semantic_baseline if pre_upgrade else None,
+                    )
+                    request = protocol.parse_request({**payload, 'action': 'finalize'})
+                    backend = RefreshAfterProductCas(protocol)
+                    if pre_upgrade:
+                        with self.assertRaisesRegex(
+                            protocol.RevisionProviderError,
+                            '^real Git index did not retain the product replacement bytes$',
+                        ):
+                            protocol.handle_request(backend, request)
+                        journal = self.journal(fixture, operation_id)
+                        self.assertEqual(journal['phase'], 'prepared')
+                        self.assertFalse(journal['manifestReplaced'])
+                        self.assertFalse(journal['ledgerAppended'])
+                        self.assertNotIn('indexLeaseSemanticMatches', journal)
+                    else:
+                        completed = protocol.handle_request(backend, request)
+                        self.assertEqual(completed['status'], 'verified')
+                        stages = [
+                            match['stage'] for match in
+                            self.journal(fixture, operation_id)['indexLeaseSemanticMatches']
+                        ]
+                        self.assertIn('product alignment result', stages)
+                finally:
+                    fixture.close()
+
+    def test_malformed_semantic_journal_fields_fail_closed(self):
+        valid_match = {
+            'stage': 'preflight',
+            'oldSha256': '1' * 64,
+            'newSha256': '2' * 64,
+            'semanticDigest': '3' * 64,
+            'at': '2026-09-21T00:00:00Z',
+        }
+        cases = {
+            'integer-baseline': ('baselineIndexSemantic', 7),
+            'uppercase-baseline': ('baselineIndexSemantic', 'A' * 64),
+            'audit-not-a-list': ('indexLeaseSemanticMatches', 'not-a-list'),
+            'audit-missing-field': (
+                'indexLeaseSemanticMatches',
+                [{key: value for key, value in valid_match.items() if key != 'at'}],
+            ),
+            'audit-bad-digest': (
+                'indexLeaseSemanticMatches', [{**valid_match, 'newSha256': 'x' * 64}],
+            ),
+        }
+        for label, (key, value) in cases.items():
+            with self.subTest(case=label):
+                fixture = RevisionProviderRepository()
+                try:
+                    payload = self.prepared(
+                        fixture, f'malformed-{label}', owned_path=False,
+                        edit=lambda journal: journal.__setitem__(key, value),
+                    )
+                    rejected, _ = fixture.protocol_request(
+                        {**payload, 'action': 'finalize'}, expected=2
+                    )
+                    self.assertEqual(
+                        rejected['error'], f'operation journal has an invalid {key}'
+                    )
+                    self.assertEqual(
+                        self.journal(fixture, f'malformed-{label}')[key], value
+                    )
+                finally:
+                    fixture.close()
 
 
 if __name__ == '__main__':

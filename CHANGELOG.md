@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.43.31 - 2026-09-21
+
+- Keep revision-provider index leases valid across benign Git stat refreshes. A lease still holds when the index bytes change but a parsed semantic digest of every entry's path, mode, object id, stage, and flags, plus resolve-undo and other non-cache extensions, is unchanged. Each such acceptance is journaled with both byte hashes. Split, sparse, unknown, and corrupt indexes stay byte-exact. Leases journaled before this release stay byte-exact until their operation ends; snapshots compared within one provider call are compared semantically.
+- Stop revision-provider index checks from contending with a concurrent `git status`. Index trees are computed from a private copy of the observed index instead of the real index, and a foreign `index.lock` at the start of `finalize` or `recover` or at the alignment lock step is waited out for up to two seconds, with the lease rechecked, before failing closed. Recovering a prepared journal whose index bytes changed still fails at once on a foreign lock.
+- A journal prepared by this release cannot be recovered by 0.43.30 or older: those versions reject the new lease keys and fail closed.
+
 ## 0.43.30 - 2026-09-21
 
 - Add `journal pull` so several clones can write to one journal. It fetches

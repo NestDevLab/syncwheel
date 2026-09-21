@@ -182,6 +182,10 @@ class RevisionBackend(Protocol):
 
     def align_index(self, request: RevisionRequest, commit: str) -> str: ...
 
+    def aligned_index_semantic(
+        self, request: RevisionRequest, journal: dict[str, Any], commit: str
+    ) -> str | None: ...
+
     def ensure_stack_owned(
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
@@ -553,6 +557,7 @@ def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[
         "derivedPathsDigest": None,
         "derivedContentDigest": None,
         "baselineIndexSha256": observation["indexSha256"],
+        "baselineIndexSemantic": observation.get("indexSemantic"),
         "baselineUnownedDirty": observation["unownedDirty"],
         "productIndexSha256": None,
         "controlIndexSha256": None,
@@ -732,6 +737,9 @@ def _advance(
                 "integration HEAD changed before product commit publication; refusing recovery"
             )
         journal["productIndexSha256"] = backend.align_index(request, candidate)
+        journal["productIndexSemantic"] = backend.aligned_index_semantic(
+            request, journal, candidate
+        )
         journal["productCommitSha"] = candidate
         journal["resultingHead"] = candidate
         backend.save_journal(request, journal)
@@ -780,6 +788,9 @@ def _advance(
                 "integration HEAD changed before control commit publication; refusing recovery"
             )
         journal["controlIndexSha256"] = backend.align_index(request, candidate)
+        journal["controlIndexSemantic"] = backend.aligned_index_semantic(
+            request, journal, candidate
+        )
         journal["controlCommitSha"] = candidate
         journal["resultingHead"] = candidate
         backend.save_journal(request, journal)
