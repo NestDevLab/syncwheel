@@ -49,10 +49,13 @@ class SyncwheelFixtureTest(unittest.TestCase):
     def run_cli(self, *args, expected=0, extra_env=None, cwd=None):
         env = dict(**os.environ)
         env['SYNCWHEEL_REPO_REGISTRY'] = str(self.registry)
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            str(CLI.parent), env.get('PYTHONPATH', ''),
+        )))
         if extra_env:
             env.update(extra_env)
         result = subprocess.run(
-            ['python3', str(CLI), *args],
+            ['python3', '-m', 'syncwheel', *args],
             cwd=cwd or self.repo,
             text=True,
             capture_output=True,
