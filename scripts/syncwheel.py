@@ -338,8 +338,48 @@ def managed_process_env(extra=None, authorize=True):
     return process_env
 
 
+# These never reach pre-commit or reference-transaction, so a ref-move
+# authorization (a synced file write) would go unused.
+READ_ONLY_GIT_COMMANDS = frozenset({
+    'cat-file', 'check-ignore', 'check-ref-format', 'diff', 'diff-files',
+    'diff-index', 'diff-tree', 'for-each-ref', 'log', 'ls-files', 'ls-remote',
+    'ls-tree', 'merge-base', 'patch-id', 'rev-list', 'rev-parse', 'show',
+    'show-ref',
+})
+READ_ONLY_GIT_SUBCOMMANDS = {
+    'config': frozenset({'--get', '--get-all', '--get-regexp'}),
+    'remote': frozenset({'get-url'}),
+    'worktree': frozenset({'list'}),
+}
+GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset({'-C', '-c', '--git-dir', '--work-tree'})
+
+
+def git_command_is_read_only(cmd):
+    if not cmd or cmd[0] != 'git':
+        return False
+    index = 1
+    while index < len(cmd) and cmd[index].startswith('-'):
+        option = cmd[index]
+        if option in GIT_GLOBAL_OPTIONS_WITH_VALUE:
+            index += 2
+        elif option.startswith(('--git-dir=', '--work-tree=')) or option == '--no-pager':
+            index += 1
+        else:
+            return False
+    if index >= len(cmd):
+        return False
+    subcommand, rest = cmd[index], cmd[index + 1:]
+    if subcommand in READ_ONLY_GIT_COMMANDS:
+        return True
+    if subcommand == 'remote' and not rest:
+        return True
+    return bool(rest) and rest[0] in READ_ONLY_GIT_SUBCOMMANDS.get(subcommand, ())
+
+
 def run(cmd, cwd=None, check=True, input_text=None, env=None, authorize=True):
-    process_env = managed_process_env(env, authorize=authorize)
+    process_env = managed_process_env(
+        env, authorize=authorize and not git_command_is_read_only(cmd)
+    )
     result = subprocess.run(
         cmd,
         cwd=cwd,

@@ -305,6 +305,47 @@ class ManagedRefGuardTests(unittest.TestCase):
         # would silently disarm the guard for everything else in the process.
         self.assertNotIn(syncwheel.MANAGED_REF_MOVE_AUTH_ENV, os.environ)
 
+    def test_only_read_only_git_commands_skip_ref_move_authorization(self):
+        read_only = [
+            ['git', 'rev-parse', 'HEAD'],
+            ['git', '-C', 'repo', 'cat-file', '-e', 'HEAD'],
+            ['git', '--git-dir=repo/.git', 'ls-remote', 'origin'],
+            ['git', 'config', '--get', 'user.name'],
+            ['git', 'worktree', 'list', '--porcelain'],
+            ['git', 'remote'],
+            ['git', 'remote', 'get-url', 'origin'],
+        ]
+        ref_moving = [
+            ['git', 'commit', '-m', 'x'],
+            ['git', 'update-ref', 'refs/heads/x', 'HEAD'],
+            ['git', 'fetch', 'origin'],
+            ['git', 'config', 'user.name', 'x'],
+            ['git', 'worktree', 'add', 'lane'],
+            ['git', 'remote', 'rename', 'origin', 'upstream'],
+            ['git', '-c', 'core.hooksPath=hooks', 'commit', '-m', 'x'],
+            ['git', '--literal-pathspecs', 'rev-parse', 'HEAD'],
+            ['git'],
+            ['sh', '-c', 'git rev-parse HEAD'],
+        ]
+        for command in read_only:
+            self.assertTrue(syncwheel.git_command_is_read_only(command), command)
+        for command in ref_moving:
+            self.assertFalse(syncwheel.git_command_is_read_only(command), command)
+
+    def test_read_only_git_children_get_no_ref_move_authorization(self):
+        directory = syncwheel.ref_auth_dir(self.repo)
+        with mock.patch.object(syncwheel, 'SYNCWHEEL_OWNS_REF_MOVES', True), \
+                mock.patch.object(syncwheel, 'SYNCWHEEL_REF_AUTH_REPO', self.repo), \
+                mock.patch.object(syncwheel.subprocess, 'run', wraps=subprocess.run) as spawned:
+            syncwheel.git(self.repo, 'rev-parse', 'HEAD')
+            self.assertNotIn(
+                syncwheel.MANAGED_REF_MOVE_AUTH_ENV, spawned.call_args.kwargs['env']
+            )
+            self.assertFalse(directory.exists() and any(directory.iterdir()))
+            syncwheel.git(self.repo, 'update-ref', 'refs/heads/authorized', 'HEAD')
+            nonce = spawned.call_args.kwargs['env'][syncwheel.MANAGED_REF_MOVE_AUTH_ENV]
+            self.assertTrue((directory / nonce).exists())
+
     def _seed_remote(self):
         """A separate repository with its own commit, so a fetch moves refs."""
         remote = self.temp_root / 'remote'
