@@ -17,6 +17,7 @@ from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / 'scripts' / 'syncwheel.py'
+CLI_MODULE_COMMAND = ['python3', '-m', 'syncwheel']
 
 
 class ActiveActiveCoordinationTest(unittest.TestCase):
@@ -32,6 +33,9 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
             'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(self.settings),
             'SYNCWHEEL_REPO_REGISTRY': str(self.registry),
             'PATH': f"{self.bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+            'PYTHONPATH': os.pathsep.join(filter(None, (
+                str(CLI.parent), os.environ.get('PYTHONPATH', ''),
+            ))),
         }
         self.environment_patch = mock.patch.dict(os.environ, self.environment, clear=False)
         self.environment_patch.start()
@@ -80,7 +84,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         env = dict(os.environ)
         env.update(self.environment)
         return subprocess.run(
-            ['python3', str(CLI), *args],
+            [*CLI_MODULE_COMMAND, *args],
             cwd=repo,
             text=True,
             capture_output=True,
@@ -93,7 +97,7 @@ class ActiveActiveCoordinationTest(unittest.TestCase):
         if extra_env:
             env.update(extra_env)
         result = subprocess.run(
-            ['python3', str(CLI), *args],
+            [*CLI_MODULE_COMMAND, *args],
             cwd=repo,
             text=True,
             capture_output=True,
@@ -188,7 +192,7 @@ module.main()
         env = dict(os.environ)
         env.update(self.environment)
         return subprocess.Popen(
-            ['python3', str(CLI), *args],
+            [*CLI_MODULE_COMMAND, *args],
             cwd=repo,
             text=True,
             stdout=subprocess.PIPE,
