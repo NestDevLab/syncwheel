@@ -50,7 +50,9 @@
       "target_remote": "origin",
       "target_branch": "main",
       "integration_branch": "main-integration",
-      "commits": [],
+      "commits": [
+        "3b82631f3e1eb4d1a230168a2d996cdc515c1b49"
+      ],
       "state": "draft",
       "publication": {
         "enabled": false
