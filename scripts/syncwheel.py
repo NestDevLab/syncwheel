@@ -27375,7 +27375,10 @@ class SyncwheelRevisionBackend:
         return bool(git(repo_root, 'ls-files', '-u').stdout.strip())
 
     def _index_is_clean(self, repo_root):
-        return git(repo_root, 'diff', '--cached', '--quiet', check=False).returncode == 0
+        return git(
+            repo_root, 'diff', '--cached', '--quiet', check=False,
+            env={'GIT_OPTIONAL_LOCKS': '0'},
+        ).returncode == 0
 
     def _dirty_paths(self, repo_root):
         paths = set()
@@ -27383,7 +27386,9 @@ class SyncwheelRevisionBackend:
             ('diff', '--name-only', '-z'),
             ('ls-files', '--others', '--exclude-standard', '-z'),
         ):
-            output = git(repo_root, *arguments).stdout
+            output = git(
+                repo_root, *arguments, env={'GIT_OPTIONAL_LOCKS': '0'}
+            ).stdout
             paths.update(item for item in output.split('\0') if item)
         return paths
 
@@ -27625,6 +27630,97 @@ class SyncwheelRevisionBackend:
         path = self._index_path(repo_root)
         payload, _ = self._read_regular_file(path, 'Git index')
         return hashlib.sha256(payload).hexdigest()
+
+    def reprepare_index_lease(self, request, journal):
+        """Recover one pre-effect index lease only after a fresh full preflight."""
+        repo_root = self._repo_root(request)
+        current_sha = self._index_sha256(repo_root)
+        old_sha = journal.get('baselineIndexSha256')
+        if not isinstance(old_sha, str) or not self.provider.HEX_64.fullmatch(old_sha):
+            self._fail('prepared journal has an invalid baseline index SHA-256')
+        if current_sha == old_sha:
+            return
+        if request.action != 'recover' or journal.get('phase') != 'prepared':
+            self._fail('index lease changed outside recoverable prepared preflight')
+        if 'indexLeaseReprepared' in journal:
+            self._fail('index lease changed again after one-shot recovery')
+        initial = {
+            'projectionRoute': None, 'derivedPaths': None,
+            'derivedPathsDigest': None, 'derivedContentDigest': None,
+            'productIndexSha256': None, 'controlIndexSha256': None,
+            'indexAlignments': {}, 'candidateProductCommitSha': None,
+            'candidateProductTreeSha': None, 'productPathObjects': None,
+            'candidateDraftCommitSha': None, 'candidateDraftTreeSha': None,
+            'productHooksValidated': False, 'draftRefOwned': False,
+            'productCommitSha': None, 'draftStackId': None, 'draftBranch': None,
+            'candidateControlCommitSha': None, 'candidateControlTreeSha': None,
+            'controlPathObjects': None, 'controlHooksValidated': False,
+            'manifestReplaced': False, 'ledgerAppended': False,
+            'controlCommitSha': None, 'published': False, 'expiration': None,
+        }
+        if any(key not in journal or journal[key] != value
+               for key, value in initial.items()):
+            self._fail('index lease changed after revision effects began')
+        if 'publicationState' in journal:
+            self._fail('prepared journal contains unexpected publication evidence')
+        if (
+            journal.get('request') != request.intent_json()
+            or journal.get('expectedHead') != request.expected_head
+            or journal.get('resultingHead') != request.expected_head
+        ):
+            self._fail('prepared request or HEAD lease changed')
+        index_lock = Path(f'{self._index_path(repo_root)}.lock')
+        if index_lock.exists() or index_lock.is_symlink():
+            self._fail(f'Git index is locked by another writer: {index_lock}')
+        if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+            self._fail('index lease recovery requires a clean, conflict-free index')
+        observation = self.preflight(request)
+        if self._index_sha256(repo_root) != current_sha:
+            self._fail('index changed during fresh recovery preflight')
+        leases = {
+            'observedManifestDigest': 'manifestDigest',
+            'manifestDigest': 'manifestDigest',
+            'baselineWorktrees': 'worktrees',
+            'baselineRemoteRefs': 'remoteRefs',
+            'managedLocalRefs': 'managedLocalRefs',
+            'refTransactionRefs': 'refTransactionRefs',
+            'integrationBranch': 'integrationBranch',
+            'baseRef': 'baseRef',
+            'baseRefFullName': 'baseRefFullName',
+            'baseRefSha': 'baseRefSha',
+            'baseRefObjectSha': 'baseRefObjectSha',
+            'baseRefObservation': 'baseRefObservation',
+            'projectionBaseSha': 'projectionBaseSha',
+            'projectionBaseKind': 'projectionBaseKind',
+            'integrationCompositionDigest': 'integrationCompositionDigest',
+            'baselineUnownedDirty': 'unownedDirty',
+            'unmappedIntegrationCommits': 'unmappedIntegrationCommits',
+            'coordination': 'coordination',
+        }
+        changed = [
+            key for key, observed in leases.items()
+            if key not in journal or journal[key] != observation.get(observed)
+        ]
+        known = set(initial) | set(leases) | {
+            'schemaVersion', 'providerId', 'operationId', 'planDigest',
+            'request', 'phase', 'expectedHead', 'resultingHead',
+            'baselineIndexSha256',
+        }
+        if set(journal) != known:
+            self._fail('prepared journal has missing or unexpected evidence')
+        if changed or observation['head'] != request.expected_head:
+            self._fail('fresh recovery preflight changed prepared leases: '
+                       + ', '.join(changed or ['head']))
+        if self._index_sha256(repo_root) != current_sha:
+            self._fail('index changed before recovery lease could be journaled')
+        journal['indexLeaseReprepared'] = {
+            'oldSha256': old_sha,
+            'newSha256': current_sha,
+            'at': iso_utc_now(),
+        }
+        journal['baselineIndexSha256'] = current_sha
+        self.save_journal(request, journal)
+        self.checkpoint('index_lease_reprepared')
 
     def _resolve_base_ref(self, repo_root, manifest):
         base_ref = manifest['defaults']['base_ref']
