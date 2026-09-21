@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/revision-index-semantic-lease"
+  ],
+  "claimed_at": "2026-09-21T18:40:14+00:00",
+  "coordination_id": "default",
+  "operation_token": "946e9166-eba3-47b4-9d00-583313ab0528",
+  "publication_scope": "promote:revision-index-semantic-lease",
+  "source_ref": "refs/heads/pr/revision-index-semantic-lease",
+  "syncwheel_version": "0.43.30"
+}
