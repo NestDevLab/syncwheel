@@ -48,7 +48,8 @@
       "branch": "pr/cli-module-tests",
       "commits": [
         "0c497b76d1363ada77b3379324c5550835d182a9",
-        "e48c990f07e84f099920e05f4bfaf5fa012565bd"
+        "e48c990f07e84f099920e05f4bfaf5fa012565bd",
+        "4712d7b8ae064e196c084910d4b4a135efc7b713"
       ],
       "id": "cli-module-tests",
       "integration_branch": "main-integration",
