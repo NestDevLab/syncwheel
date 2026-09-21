@@ -54,11 +54,11 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
-    "refs/heads/syncwheel/draft/test-fixture-cache": "e2cd4d918d591f5b7212338199b241dbedb80d7c",
+    "refs/heads/syncwheel/draft/test-fixture-cache": "9ec7f6ea505682ecbfe3c5e1d1ae3548683e0cad",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T20:31:38+00:00",
+  "created_at": "2026-09-21T20:56:04+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -184,7 +184,9 @@
           "role": "canonical"
         },
         "branch": "syncwheel/draft/test-fixture-cache",
-        "commits": [],
+        "commits": [
+          "deb7259055a01f6510eb561ade85429bb3a5e3b9"
+        ],
         "id": "test-fixture-cache",
         "integration_branch": "main-integration",
         "state": "draft",
@@ -194,11 +196,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "48fecb4f-3288-450d-b1bd-5f975851fc44",
-  "parent_state": "f0a950d59773dd59cf4dfacefa5157e1e37559f2",
+  "operation_token": "571cc977-0759-4ffe-aff8-fbcaf417c47e",
+  "parent_state": "fdcda27efa55fb7d155adab6e5ff08a4acdd65a2",
   "projection_status": "partial",
-  "publication_id": "294cbfff-3048-4534-829e-069779d7cd6d",
-  "publication_scope": "create:test-fixture-cache",
+  "publication_id": "dd39fff0-3f98-4735-99ed-34baa671b0b8",
+  "publication_scope": "stack:test-fixture-cache",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
