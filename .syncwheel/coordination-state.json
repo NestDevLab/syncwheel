@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/cli-module-tests": "e48c990f07e84f099920e05f4bfaf5fa012565bd"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -9,7 +7,7 @@
     "refs/heads/pr/cli-module-tests": "3d0631791a23eff900143d6bb89810ad1181f8c5",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
-    "refs/heads/pr/fixture-cli-tests": "da41458384384478e617c8566af3865311eef3aa",
+    "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
@@ -57,7 +55,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T19:39:33+00:00",
+  "created_at": "2026-09-21T20:04:58+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -165,8 +163,7 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "cli-module-tests",
-        "fixture-cli-tests"
+        "cli-module-tests"
       ],
       "strategy": "cherry-pick"
     },
@@ -190,30 +187,16 @@
         "id": "cli-module-tests",
         "integration_branch": "main-integration",
         "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/fixture-cli-tests",
-        "commits": [
-          "4712d7b8ae064e196c084910d4b4a135efc7b713"
-        ],
-        "id": "fixture-cli-tests",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "fb55a996-0661-4f0d-91e5-34661372770e",
-  "parent_state": "2c726c5ad33c9b404a8c0207a594f13864822006",
+  "operation_token": "bdcd6fe8-48fc-4413-9db2-f881178c814a",
+  "parent_state": "e6e876d0a785048ae2bee04d76e2d6ef27898042",
   "projection_status": "partial",
-  "publication_id": "ac2f94e6-c121-4039-89b6-c6a9973cf327",
-  "publication_scope": "stack:cli-module-tests",
+  "publication_id": "457bef23-1cee-4192-8e00-4d11cc383f17",
+  "publication_scope": "close:fixture-cli-tests",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -808,6 +791,14 @@
       "ref": "refs/heads/pr/revision-index-semantic-lease",
       "remote_tip": null,
       "stack": "revision-index-semantic-lease"
+    },
+    {
+      "branch": "pr/fixture-cli-tests",
+      "closed_at": "2026-09-21T20:04:54+00:00",
+      "reason": "abandoned",
+      "ref": "refs/heads/pr/fixture-cli-tests",
+      "remote_tip": null,
+      "stack": "fixture-cli-tests"
     }
   ]
 }
