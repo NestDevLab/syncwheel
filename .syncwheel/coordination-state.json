@@ -1,10 +1,12 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/cli-module-tests": "ad14e805fb75396b661b88f0707726306e43972b"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
-    "refs/heads/pr/cli-module-tests": "3d0631791a23eff900143d6bb89810ad1181f8c5",
+    "refs/heads/pr/cli-module-tests": "dd2b6f9c5eee8b2cc847dfb8c45162ca6f102152",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -55,7 +57,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T20:04:58+00:00",
+  "created_at": "2026-09-21T20:05:29+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -63,7 +65,7 @@
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/checks-none-policy": "e517a63522249fad2612b667a564b52a0891cb56",
-    "refs/heads/pr/cli-module-tests": "e48c990f07e84f099920e05f4bfaf5fa012565bd",
+    "refs/heads/pr/cli-module-tests": "ad14e805fb75396b661b88f0707726306e43972b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/close-published-recovery": "51416e3150206d76eda43ff61809a7301b346883",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
@@ -182,7 +184,8 @@
         "branch": "pr/cli-module-tests",
         "commits": [
           "0c497b76d1363ada77b3379324c5550835d182a9",
-          "e48c990f07e84f099920e05f4bfaf5fa012565bd"
+          "e48c990f07e84f099920e05f4bfaf5fa012565bd",
+          "4712d7b8ae064e196c084910d4b4a135efc7b713"
         ],
         "id": "cli-module-tests",
         "integration_branch": "main-integration",
@@ -192,11 +195,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "bdcd6fe8-48fc-4413-9db2-f881178c814a",
-  "parent_state": "e6e876d0a785048ae2bee04d76e2d6ef27898042",
+  "operation_token": "8361ba08-ac22-4435-9550-b73317b2a623",
+  "parent_state": "a16fb477b47b70af22f65c3444dfd6389f5f3667",
   "projection_status": "partial",
-  "publication_id": "457bef23-1cee-4192-8e00-4d11cc383f17",
-  "publication_scope": "close:fixture-cli-tests",
+  "publication_id": "eeb4bf9d-1e94-442d-bb0f-8b008d4e56a1",
+  "publication_scope": "stack:cli-module-tests",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
