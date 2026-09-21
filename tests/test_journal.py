@@ -211,7 +211,7 @@ class JournalModeTest(unittest.TestCase):
                 module.journal_snapshot(self.repo, manifest, apply=False)
         self.assertTrue(target.is_symlink())
 
-    def test_publish_equal_then_remote_ahead_and_diverged_stop(self):
+    def test_publish_catches_up_with_remote_ahead_and_stops_on_divergence(self):
         (self.repo / 'notes.txt').write_text('two\n')
         self.cli('journal', 'snapshot', '--apply')
         (self.repo / 'new.txt').write_text('new\n')
@@ -229,12 +229,22 @@ class JournalModeTest(unittest.TestCase):
         subprocess.run(['git', 'add', 'ahead.txt'], cwd=other, check=True)
         subprocess.run(['git', 'commit', '-q', '-m', 'ahead'], cwd=other, check=True)
         subprocess.run(['git', 'push', '-q', 'origin', 'journal'], cwd=other, check=True)
-        result = self.cli('journal', 'publish', '--apply', expected=2)
-        self.assertIn('remote tip mismatch', result.stderr)
         (self.repo / 'local.txt').write_text('local\n')
+        caught_up = json.loads(self.cli('journal', 'publish', '--apply').stdout)
+        self.assertEqual(caught_up['pull']['relation'], 'behind')
+        self.assertEqual(caught_up['pull']['kept_local'], ['local.txt'])
+        self.assertEqual(self.git('ls-remote', 'origin', 'refs/heads/journal').split()[0], caught_up['published_tip'])
+        self.assertTrue((self.repo / 'ahead.txt').exists())
+        self.assertEqual(self.git('show', 'HEAD:local.txt'), 'local')
+
+        subprocess.run(['git', 'pull', '-q', '--ff-only'], cwd=other, check=True)
+        (other / 'ahead.txt').write_text('ahead again\n')
+        subprocess.run(['git', 'commit', '-q', '-am', 'ahead again'], cwd=other, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'journal'], cwd=other, check=True)
+        (self.repo / 'local.txt').write_text('local again\n')
         self.cli('journal', 'snapshot', '--apply')
         result = self.cli('journal', 'publish', '--apply', expected=2)
-        self.assertIn('remote tip mismatch', result.stderr)
+        self.assertIn('diverged', result.stderr)
 
     def test_publish_bootstraps_missing_remote_journal_ref(self):
         subprocess.run(
@@ -267,11 +277,187 @@ class JournalModeTest(unittest.TestCase):
         old_cwd = os.getcwd()
         os.chdir(self.repo)
         try:
+            head = self.git('rev-parse', 'HEAD')
             with mock.patch.object(module, 'git', side_effect=reject_push):
                 with self.assertRaisesRegex(module.SyncwheelError, 'lease lost'):
                     module.command_journal_publish(args)
         finally:
             os.chdir(old_cwd)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'two\n')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+        self.assertEqual(self.git('status', '--porcelain'), 'M notes.txt')
+
+    def publish_from_other_clone(self, files, deleted=()):
+        other = self.root / 'other'
+        if not other.exists():
+            subprocess.run(['git', 'clone', '-q', str(self.remote), str(other)], check=True)
+            subprocess.run(['git', 'checkout', '-q', 'journal'], cwd=other, check=True)
+            subprocess.run(['git', 'config', 'user.name', 'Other'], cwd=other, check=True)
+            subprocess.run(['git', 'config', 'user.email', 'other@example.invalid'], cwd=other, check=True)
+        subprocess.run(['git', 'pull', '-q', '--ff-only'], cwd=other, check=True)
+        for name, content in files.items():
+            (other / name).write_text(content)
+            subprocess.run(['git', 'add', name], cwd=other, check=True)
+        for name in deleted:
+            subprocess.run(['git', 'rm', '-q', name], cwd=other, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'remote update'], cwd=other, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'journal'], cwd=other, check=True)
+        return subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=other, text=True).strip()
+
+    def arm_ref_guard(self):
+        (self.repo / '.syncwheel' / 'profile.local.json').unlink()
+        self.cli('hooks', 'install', '--apply')
+        guard = json.loads((self.repo / '.git' / 'syncwheel' / 'guard.json').read_text())
+        self.assertEqual(guard['integrationBranch'], 'journal')
+
+    def test_pull_fast_forwards_behind_branch_and_reports_aligned_or_ahead(self):
+        head = self.git('rev-parse', 'HEAD')
+        aligned = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+        self.assertEqual((aligned['relation'], aligned['changed']), ('aligned', False))
+
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        planned = json.loads(self.cli('journal', 'pull').stdout)
+        self.assertEqual((planned['relation'], planned['changed']), ('behind', False))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+        self.assertEqual((pulled['relation'], pulled['changed']), ('behind', True))
+        self.assertEqual(pulled['changed_paths'], ['remote.txt'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual((self.repo / 'remote.txt').read_text(), 'remote\n')
+
+        (self.repo / 'local.txt').write_text('local\n')
+        self.cli('journal', 'snapshot', '--apply')
+        ahead = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+        self.assertEqual((ahead['relation'], ahead['changed']), ('ahead', False))
+
+    def test_pull_refuses_divergence_and_changes_that_differ_from_the_remote_tip(self):
+        self.publish_from_other_clone({'notes.txt': 'remote\n'})
+        (self.repo / 'notes.txt').write_text('local edit\n')
+        head = self.git('rev-parse', 'HEAD')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('differ from the remote tip: notes.txt', result.stderr)
+        self.assertIn('--park-conflicts', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'local edit\n')
+
+        self.git('add', 'notes.txt')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('differ from the remote tip: notes.txt', result.stderr)
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'notes.txt')
+        self.git('reset', '-q', 'notes.txt')
+
+        self.cli('journal', 'snapshot', '--apply')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('diverged', result.stderr)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'local edit\n')
+
+    def test_pull_accepts_local_changes_identical_to_the_remote_tip(self):
+        (self.repo / 'gone.txt').write_text('gone\n')
+        self.git('add', 'gone.txt')
+        self.git('commit', '-q', '-m', 'seed deletion')
+        self.git('push', '-q', 'origin', 'journal')
+        tip = self.publish_from_other_clone(
+            {'notes.txt': 'same\n', 'added.txt': 'added\n'}, deleted=('gone.txt',)
+        )
+        (self.repo / 'notes.txt').write_text('same\n')
+        (self.repo / 'added.txt').write_text('added\n')
+        (self.repo / 'gone.txt').unlink()
+        (self.repo / 'excluded').mkdir()
+
+        planned = json.loads(self.cli('journal', 'pull').stdout)
+        self.assertEqual(planned['identical_dirty'], ['added.txt', 'gone.txt', 'notes.txt'])
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+
+        self.assertTrue(pulled['changed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_pull_moves_the_branch_under_an_armed_ref_guard(self):
+        self.arm_ref_guard()
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        self.git('fetch', '-q', 'origin')
+        head = self.git('rev-parse', 'HEAD')
+
+        refused = subprocess.run(
+            ['git', 'merge', '--ff-only', 'origin/journal'], cwd=self.repo,
+            text=True, capture_output=True,
+        )
+        self.assertNotEqual(refused.returncode, 0, refused.stdout)
+        self.assertIn('refusing unauthorized primary integration ref move', refused.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        # The refused fast-forward already rewrote the index and worktree.
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'remote.txt')
+
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+
+        self.assertTrue(pulled['changed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_pull_keeps_local_changes_the_remote_did_not_touch(self):
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        (self.repo / 'notes.txt').write_text('local edit\n')
+        (self.repo / 'mine.txt').write_text('mine\n')
+
+        pulled = json.loads(self.cli('journal', 'pull', '--apply').stdout)
+
+        self.assertEqual(pulled['kept_local'], ['mine.txt', 'notes.txt'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'local edit\n')
+        self.assertEqual((self.repo / 'mine.txt').read_text(), 'mine\n')
+
+    def test_pull_treats_a_file_directory_clash_as_a_conflict(self):
+        self.publish_from_other_clone({'clash': 'remote file\n'})
+        (self.repo / 'clash').mkdir()
+        (self.repo / 'clash' / 'inner.txt').write_text('local\n')
+        result = self.cli('journal', 'pull', '--apply', expected=2)
+        self.assertIn('clash/inner.txt', result.stderr)
+
+    def test_park_conflicts_merges_disjoint_edits_back_into_the_worktree(self):
+        lines = ''.join(f'line {number}\n' for number in range(1, 9))
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest_path.read_text())
+        data['journal']['max_file_bytes'] = 4096
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        (self.repo / 'log.md').write_text(lines)
+        self.git('add', '-A')
+        self.git('commit', '-q', '-m', 'seed log')
+        self.git('push', '-q', 'origin', 'journal')
+        tip = self.publish_from_other_clone({'log.md': lines.replace('line 8', 'remote 8')})
+        (self.repo / 'log.md').write_text(lines.replace('line 1', 'local 1'))
+
+        pulled = json.loads(self.cli('journal', 'pull', '--apply', '--park-conflicts').stdout)
+
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertFalse(pulled['resolution_required'])
+        self.assertEqual(pulled['parked']['entries'][0]['status'], 'merged')
+        merged = (self.repo / 'log.md').read_text()
+        self.assertIn('local 1', merged)
+        self.assertIn('remote 8', merged)
+        published = json.loads(self.cli('journal', 'publish', '--apply').stdout)
+        self.assertEqual(self.git('show', f"{published['published_tip']}:log.md") + '\n', merged)
+
+    def test_park_conflicts_leaves_overlapping_edits_for_the_resolver(self):
+        tip = self.publish_from_other_clone({'notes.txt': 'remote\n'})
+        (self.repo / 'notes.txt').write_text('local\n')
+
+        result = self.cli('journal', 'pull', '--apply', '--park-conflicts')
+        pulled = json.loads(result.stdout)
+
+        self.assertIn('unresolved conflicts parked', result.stderr)
+        self.assertTrue(pulled['resolution_required'])
+        entry = pulled['parked']['entries'][0]
+        self.assertEqual((entry['path'], entry['status']), ('notes.txt', 'conflict'))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'remote\n')
+        self.assertEqual(Path(entry['ours']).read_text(), 'local\n')
+        conflict = Path(entry['conflict']).read_text()
+        self.assertIn('<<<<<<< local', conflict)
+        self.assertIn('>>>>>>> remote', conflict)
+        record = json.loads((Path(pulled['parked']['directory']) / 'conflicts.json').read_text())
+        self.assertEqual(record['entries'][0]['status'], 'conflict')
 
     def test_scheduler_is_hermetic_dry_run_apply_status_remove(self):
         fake_bin = self.root / 'bin'

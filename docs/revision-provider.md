@@ -21,7 +21,8 @@ Syncwheel does not intercept ordinary Agentwheel or Git commands.
    worktree, a clean index, and the absence of undeclared dirty paths. It then
    repeats the fresh active-active handoff check and persists the operation
    lease only if the observed state is still aligned. The lease includes the
-   raw index hash and the one-time resolution of `defaults.base_ref`. Protocol
+   raw and semantic index digests and the one-time resolution of
+   `defaults.base_ref`. Protocol
    v1 accepts only an exact lowercase 40-hex commit SHA or an unambiguous direct
    ref. Accepted direct forms are branch/tag shorthand, `remote/branch`,
    `heads/...`, `remotes/...`, `tags/...`, and their full `refs/...` names.
@@ -217,29 +218,59 @@ and removes exactly the listed locks. The hook can also perform arbitrary local
 or external side effects that the provider cannot prove or undo; repositories
 must keep it deterministic and side-effect-free.
 
-The real Git index is also an exact lease. Read-only dirt and staged checks
-disable Git's optional index locks so preflight does not refresh index stat
-entries itself. If index bytes change while the journal is still prepared and
-no repository effects have begun, explicit `recover` may renew that lease once.
-It reruns the full preflight under the operation lock, compares every other
+The real Git index is also leased. Read-only dirt and staged checks disable
+Git's optional index locks so preflight does not refresh index stat entries
+itself. Each lease records the index SHA-256 and a semantic digest parsed from
+the same bytes: every entry's path, mode, object id, stage, assume-valid bit,
+and extended flags (skip-worktree, intent-to-add) in stored order, plus every
+optional extension except the cache-only `TREE`, `UNTR`, `FSMN`, `EOIE`, and
+`IEOT`, so resolve-undo (`REUC`) data is covered. Stat fields and the index
+version are ignored. Any other Git process refreshing stat data, such as a plain
+`git status`, rewrites the index without changing its semantic digest, so a
+check holds when the bytes match or both semantic digests exist and match. Each
+semantic-only acceptance is appended to the journal's
+`indexLeaseSemanticMatches` with the old and new byte hashes, and a malformed
+audit list fails the operation closed. The semantic view is unavailable, and the check
+stays byte-exact, for split or sparse indexes, any required extension, an
+unknown version or object format, truncation, or a trailer checksum mismatch
+(including `index.skipHash`). A journal written before semantic leases existed
+has no `baselineIndexSemantic`, and every lease read from it stays byte-exact
+until the operation ends: the preflight baseline, the product and control
+alignment results, `index.lock` recovery, and terminal verification. Snapshots
+compared within one provider call, the dirty-path observation and the commit
+hook before/after snapshot, are compared semantically for every operation.
+
+The provider never rewrites the real index to make a lease hold and never takes
+the real `index.lock` for a read. Index trees for hook snapshots, publication,
+and alignment checks come from `git write-tree` on a private copy of the
+observed index bytes, like the dirty-path observation.
+
+If index bytes change while the journal is still prepared and no repository
+effects have begun, explicit `recover` may still renew the byte lease once. It
+reruns the full preflight under the operation lock, compares every other
 recorded observation, requires a clean conflict-free index and no `index.lock`,
-and journals both index hashes before proceeding. Recovery proves fresh baseline
-equivalence; it does not try to classify the cause of the byte change.
-`finalize` and all later phases keep the original strict lease; a second index
-change is refused.
+and journals both index hashes before proceeding; the semantic digest is renewed
+from the same bytes. Recovery proves fresh baseline equivalence; it does not try
+to classify the cause of the byte change, and a second renewal is refused.
 
 For product and control alignment,
 the provider prepares and refreshes the complete replacement index separately,
 durably journals an operation-specific backing file, and fsyncs it before
 acquiring Git's `index.lock` as a hard link to that file. The shared inode is a
 provable ownership token: after `SIGKILL`, recovery may remove and reacquire only
-that exact journaled lock, while an unrelated lock remains untouched and causes
-a fail-closed rejection. With the lock held, the provider rechecks the
-predecessor byte hash, atomically renames the replacement, and fsyncs the parent
-directory. A concurrent staged or index write is retained and the operation
-stops; it is never overwritten. The successfully installed hash is journaled as
-the predecessor for the next phase, including recovery after the narrow windows
-before rename and between rename and journal persistence.
+that exact journaled lock. An unrelated lock is never removed. Because a plain
+`git status` holds `index.lock` briefly, the lock check at the start of every
+`finalize` and `recover` and the alignment lock step wait up to two seconds in
+total for a foreign lock to disappear. Alignment rechecks the index lease after
+each wait before linking again. A foreign lock that outlives the wait causes a
+fail-closed rejection, and the one-time prepared lease renewal above still
+requires no `index.lock` at all. With the lock held, the provider rechecks the
+predecessor index lease, atomically renames the replacement, and fsyncs the
+parent directory. A concurrent staged or index write is retained and the
+operation stops; it is never overwritten. The successfully installed hash and
+semantic digest are journaled as the predecessor for the next phase, including
+recovery after the narrow windows before rename and between rename and journal
+persistence.
 
 The draft projection never uses a worktree or `cherry-pick`. Syncwheel applies
 the product delta with `merge-tree` and routes only blob-reproducing results to
