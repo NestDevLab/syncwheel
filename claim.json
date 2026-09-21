@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/fixture-cli-tests"
-  ],
-  "claimed_at": "2026-09-21T19:36:44+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-21T20:04:58+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "b687b6f1-ba85-4f4f-963e-1e5319eeb2c1",
-  "publication_scope": "stack:fixture-cli-tests",
+  "operation_token": "bdcd6fe8-48fc-4413-9db2-f881178c814a",
+  "publication_scope": "close:fixture-cli-tests",
+  "reason": "abandoned",
   "source_ref": "refs/heads/pr/fixture-cli-tests",
   "syncwheel_version": "0.43.31"
 }
