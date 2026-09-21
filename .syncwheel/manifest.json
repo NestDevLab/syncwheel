@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "abandoned-history-reconciliation"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,24 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "abandoned-history-reconciliation",
+      "branch": "syncwheel/draft/abandoned-history-reconciliation",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Classify exact superseded abandoned integration history"
+      }
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
