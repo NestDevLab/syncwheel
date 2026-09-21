@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/test-fixture-cache"
+  ],
+  "claimed_at": "2026-09-21T20:31:38+00:00",
+  "coordination_id": "default",
+  "operation_token": "48fecb4f-3288-450d-b1bd-5f975851fc44",
+  "publication_scope": "create:test-fixture-cache",
+  "source_ref": "refs/heads/syncwheel/draft/test-fixture-cache",
+  "syncwheel_version": "0.43.31"
+}
