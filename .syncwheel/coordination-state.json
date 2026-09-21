@@ -1,10 +1,11 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/test-fixture-cache": "aa613669e1487cc2b67589b3ef31172797fc0108"
+    "refs/heads/pr/balance-test-shards": "deb7259055a01f6510eb561ade85429bb3a5e3b9"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
+    "refs/heads/pr/balance-test-shards": "dac39a3e03b54cc2bd5bdf176ccabc06269f4caa",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
@@ -54,17 +55,18 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
-    "refs/heads/syncwheel/draft/test-fixture-cache": "9ec7f6ea505682ecbfe3c5e1d1ae3548683e0cad",
+    "refs/heads/syncwheel/draft/test-fixture-cache": "179289ae429567a1a18a590578b6a0fe4b78c255",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T20:56:04+00:00",
+  "created_at": "2026-09-21T20:56:38+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
     "refs/heads/main-integration": "8255d2266647b7d83c93f044954a2cb371752697",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
+    "refs/heads/pr/balance-test-shards": "deb7259055a01f6510eb561ade85429bb3a5e3b9",
     "refs/heads/pr/checks-none-policy": "e517a63522249fad2612b667a564b52a0891cb56",
     "refs/heads/pr/cli-module-tests": "ad14e805fb75396b661b88f0707726306e43972b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
@@ -183,24 +185,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/test-fixture-cache",
+        "branch": "pr/balance-test-shards",
         "commits": [
           "deb7259055a01f6510eb561ade85429bb3a5e3b9"
         ],
         "id": "test-fixture-cache",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "571cc977-0759-4ffe-aff8-fbcaf417c47e",
-  "parent_state": "fdcda27efa55fb7d155adab6e5ff08a4acdd65a2",
+  "operation_token": "0dd73901-3d46-4601-a52f-6cd1e286ce17",
+  "parent_state": "8073c88475f6d4ab16bd082637a6393dc4b20fdd",
   "projection_status": "partial",
-  "publication_id": "dd39fff0-3f98-4735-99ed-34baa671b0b8",
-  "publication_scope": "stack:test-fixture-cache",
+  "publication_id": "87a63e8d-3f3b-4ef4-b58d-223f93bac46d",
+  "publication_scope": "promote:test-fixture-cache",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -811,6 +812,14 @@
       "ref": "refs/heads/pr/cli-module-tests",
       "remote_tip": null,
       "stack": "cli-module-tests"
+    },
+    {
+      "branch": "syncwheel/draft/test-fixture-cache",
+      "closed_at": "2026-09-21T20:56:33+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/test-fixture-cache",
+      "remote_tip": "aa613669e1487cc2b67589b3ef31172797fc0108",
+      "stack": "test-fixture-cache"
     }
   ]
 }
