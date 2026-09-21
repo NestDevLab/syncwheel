@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/balance-test-shards"
   ],
-  "claimed_at": "2026-09-21T20:56:56+00:00",
+  "claimed_at": "2026-09-21T21:13:52+00:00",
   "coordination_id": "default",
-  "operation_token": "1c8d53fe-57cd-4086-b31b-1e0f8d69d0ca",
+  "operation_token": "d4470a8c-904a-4766-963f-8b4ccc3a0613",
   "publication_scope": "stack:test-fixture-cache",
   "source_ref": "refs/heads/pr/balance-test-shards",
   "syncwheel_version": "0.43.31"
