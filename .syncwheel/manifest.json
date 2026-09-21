@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -38,9 +38,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -63,22 +63,22 @@
       "target_remote": "origin"
     },
     {
-      "id": "fixture-cli-tests",
-      "branch": "pr/fixture-cli-tests",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/fixture-cli-tests",
       "commits": [
         "4712d7b8ae064e196c084910d4b4a135efc7b713"
       ],
-      "state": "published",
+      "id": "fixture-cli-tests",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Cache CLI bytecode in fixture tests"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Cache CLI bytecode in fixture tests"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
