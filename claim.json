@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/close-published-recovery"
+    "refs/heads/pr/close-published-recovery"
   ],
-  "claimed_at": "2026-09-21T10:23:01+00:00",
+  "claimed_at": "2026-09-21T10:23:20+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "85e4ab8a-1a63-46b3-8741-674fbdaf71bd",
-  "publication_scope": "stack:close-published-recovery",
+  "operation_token": "8c88fd73-df5e-4689-a5be-a1812a8dc2ae",
+  "publication_scope": "promote:close-published-recovery",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/close-published-recovery",
   "syncwheel_version": "0.43.26"
 }
