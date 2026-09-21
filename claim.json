@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/abandoned-history-reconciliation"
   ],
-  "claimed_at": "2026-09-21T12:06:14+00:00",
+  "claimed_at": "2026-09-21T12:28:08+00:00",
   "coordination_id": "default",
-  "operation_token": "0b26bc44-4a44-46af-83e8-8305bd1671b3",
+  "operation_token": "21b1a598-84b3-4440-84ab-2017cc082301",
   "publication_scope": "stack:abandoned-history-reconciliation",
   "source_ref": "refs/heads/pr/abandoned-history-reconciliation",
-  "syncwheel_version": "0.43.28"
+  "syncwheel_version": "0.43.29"
 }
