@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.43.30 - 2026-09-21
+
+- Add `journal pull` so several clones can write to one journal. It fetches
+  the journal branch, stops on divergence, keeps local edits the remote did
+  not touch, accepts edits identical to the remote tip, and fast-forwards under
+  a Syncwheel ref-move authorization instead of bypassing the
+  `reference-transaction` guard.
+- Add `journal pull --park-conflicts`: conflicting local versions are saved
+  under the git dir and three-way merged back after the fast-forward. Overlapping
+  edits stay parked with their base, local, and remote versions for an agent to
+  resolve.
+- `journal publish --apply` now pulls before publishing and returns an
+  unpublished snapshot to the working tree when its push loses the lease.
+- Write the journal branch, not the normalized default integration branch, to
+  the primary guard when installing hooks in a journal repository.
+
 ## 0.43.29 - 2026-09-21
 
 - Recognize an exact historical commit from a coordinated abandoned stack only when every path it changed has the same mode and blob in the local integration, published integration, and current delivery base. Keep unknown history and undelivered paths blocked in rebuild and revision-provider checks.
