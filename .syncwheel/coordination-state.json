@@ -1,11 +1,11 @@
 {
   "changed_refs": {
-    "refs/heads/pr/balance-test-shards": "deb7259055a01f6510eb561ade85429bb3a5e3b9"
+    "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
-    "refs/heads/pr/balance-test-shards": "741fa9ac11b4d902689b0d59ab44b2f28c624c8c",
+    "refs/heads/pr/balance-test-shards": "d37a93033c87f7b98b579a653582a91aabcfdd06",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
@@ -59,14 +59,14 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T20:56:56+00:00",
+  "created_at": "2026-09-21T21:13:52+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
     "refs/heads/main-integration": "8255d2266647b7d83c93f044954a2cb371752697",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
-    "refs/heads/pr/balance-test-shards": "deb7259055a01f6510eb561ade85429bb3a5e3b9",
+    "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
     "refs/heads/pr/checks-none-policy": "e517a63522249fad2612b667a564b52a0891cb56",
     "refs/heads/pr/cli-module-tests": "ad14e805fb75396b661b88f0707726306e43972b",
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
@@ -187,7 +187,8 @@
         },
         "branch": "pr/balance-test-shards",
         "commits": [
-          "deb7259055a01f6510eb561ade85429bb3a5e3b9"
+          "deb7259055a01f6510eb561ade85429bb3a5e3b9",
+          "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78"
         ],
         "id": "test-fixture-cache",
         "integration_branch": "main-integration",
@@ -197,10 +198,10 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "1c8d53fe-57cd-4086-b31b-1e0f8d69d0ca",
-  "parent_state": "64d360e54d04ce67ce201dd01d164b272c53d28b",
+  "operation_token": "d4470a8c-904a-4766-963f-8b4ccc3a0613",
+  "parent_state": "41c7446a51c743118005ab18984ab77f71d4ed0b",
   "projection_status": "partial",
-  "publication_id": "e46834ac-fd06-4bf1-8d26-5eff56ebb5a6",
+  "publication_id": "18e59c86-e3a0-4e33-9bb0-351136c4a417",
   "publication_scope": "stack:test-fixture-cache",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
