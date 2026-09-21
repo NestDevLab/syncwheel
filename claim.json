@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/cli-module-tests"
-  ],
-  "claimed_at": "2026-09-21T20:05:29+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-21T20:28:58+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "8361ba08-ac22-4435-9550-b73317b2a623",
-  "publication_scope": "stack:cli-module-tests",
+  "operation_token": "b6fd9630-ad88-4df4-92dc-fbdfe361885c",
+  "publication_scope": "close:cli-module-tests",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/cli-module-tests",
   "syncwheel_version": "0.43.31"
 }
