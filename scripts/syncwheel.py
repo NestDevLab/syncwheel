@@ -16260,19 +16260,33 @@ def command_journal_snapshot(args):
 
 def command_journal_publish(args):
     repo_root, manifest, _ = require_journal_manifest(args)
+    payload = journal_publish(repo_root, manifest, apply=args.apply)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
+def journal_unroll_snapshot(repo_root, branch, commit, parent):
+    """Turn an unpublished snapshot commit back into working-tree changes."""
+    with journal_lock(repo_root):
+        moved = git(repo_root, 'update-ref', f'refs/heads/{branch}', parent, commit, check=False)
+        if moved.returncode != 0:
+            raise SyncwheelError(
+                'journal publish lease lost and the local snapshot could not be unrolled; STOP'
+            )
+        git(repo_root, 'read-tree', parent)
+
+
+def journal_publish(repo_root, manifest, apply=False):
     journal = manifest['journal']
-    observed = journal_remote_tip(repo_root, journal['remote'], journal['branch'])
-    tracking_ref = f"refs/remotes/{journal['remote']}/{journal['branch']}"
-    expected_parent = ref_tip(repo_root, tracking_ref) or observed
-    if observed != expected_parent:
-        raise SyncwheelError(
-            f'journal remote tip mismatch; expected parent {expected_parent}, observed {observed or "missing"}; STOP'
-        )
-    if not args.apply:
+    branch, remote = journal['branch'], journal['remote']
+    # Another clone may have published since the last run; catching up first
+    # keeps two writers from wedging each other on remote-ahead.
+    pull = journal_pull(repo_root, manifest, apply=apply)
+    expected_parent = pull['remote_tip']
+    if not apply:
         payload = journal_snapshot(repo_root, manifest, apply=False)
-        payload.update({'remote': journal['remote'], 'expected_remote_tip': expected_parent})
-        print(json.dumps(payload, indent=2))
-        return 0
+        payload.update({'remote': remote, 'expected_remote_tip': expected_parent, 'pull': pull})
+        return payload
     local_head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
     if expected_parent and git(
         repo_root, 'merge-base', '--is-ancestor', expected_parent, local_head, check=False
@@ -16280,26 +16294,32 @@ def command_journal_publish(args):
         raise SyncwheelError('journal local branch diverged from the expected remote parent; STOP')
     snapshot = journal_snapshot(repo_root, manifest, apply=True)
     tip = snapshot['commit'] or local_head
-    if tip != observed:
-        refspec = f'{tip}:refs/heads/{journal["branch"]}'
-        expected_ref = observed or ''
-        lease = f'--force-with-lease=refs/heads/{journal["branch"]}:{expected_ref}'
+    if tip != expected_parent:
+        refspec = f'{tip}:refs/heads/{branch}'
+        lease = f'--force-with-lease=refs/heads/{branch}:{expected_parent or ""}'
         pushed = run_authorized_push(
             repo_root,
-            ['git', 'push', '--porcelain', lease, journal['remote'], refspec],
-            journal['remote'],
-            [f'refs/heads/{journal["branch"]}'],
+            ['git', 'push', '--porcelain', lease, remote, refspec],
+            remote,
+            [f'refs/heads/{branch}'],
             check=False,
         )
         if pushed.returncode != 0:
-            raise SyncwheelError('journal publish lease lost; STOP without merge, reset, rebase, or force')
-    snapshot.update({'remote': journal['remote'], 'expected_remote_tip': expected_parent, 'published_tip': tip})
-    print(json.dumps(snapshot, indent=2))
-    return 0
+            if snapshot['commit']:
+                journal_unroll_snapshot(repo_root, branch, snapshot['commit'], snapshot['parent'])
+            raise SyncwheelError(
+                'journal publish lease lost; local changes are back in the working tree. '
+                'Retry journal publish --apply, which pulls first'
+            )
+    snapshot.update({
+        'remote': remote, 'expected_remote_tip': expected_parent,
+        'published_tip': tip, 'pull': pull,
+    })
+    return snapshot
 
 
 def journal_pull_blob_matches(repo_root, path, entry):
-    """Return True when the working-tree path is byte-identical to its entry at the target tip."""
+    """Return True when the working-tree path is byte-identical to a tree entry."""
     absolute = repo_root / path
     if entry is None:
         return not os.path.lexists(absolute)
@@ -16318,15 +16338,14 @@ def journal_pull_blob_matches(repo_root, path, entry):
         content = absolute.read_bytes()
     else:
         return False
-    stored = git_bytes(repo_root, 'cat-file', 'blob', object_id)
-    return content == stored
+    return content == git_bytes(repo_root, 'cat-file', 'blob', object_id)
 
 
-def git_bytes(repo_root, *args):
+def git_bytes(repo_root, *args, ok_codes=(0,)):
     result = subprocess.run(
         ['git', *args], cwd=repo_root, capture_output=True, env=managed_process_env(authorize=False),
     )
-    if result.returncode != 0:
+    if result.returncode not in ok_codes:
         raise SyncwheelError(result.stderr.decode(errors='replace').strip() or f"git {' '.join(args)} failed")
     return result.stdout
 
@@ -16371,17 +16390,22 @@ def journal_pull_plan(repo_root, manifest, fetch=True):
     if current != branch:
         raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}, found {current!r}')
     tracking_ref = f'refs/remotes/{remote}/{branch}'
-    if fetch:
-        git(repo_root, 'fetch', '--quiet', remote, f'+refs/heads/{branch}:{tracking_ref}')
-    remote_tip = ref_tip(repo_root, tracking_ref)
-    if not remote_tip:
-        raise SyncwheelError(f'journal remote branch {remote}/{branch} is missing; nothing to pull')
     head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
     plan = {
         'mode': 'plan', 'branch': branch, 'remote': remote, 'head': head,
-        'remote_tip': remote_tip, 'relation': None, 'identical_dirty': [],
-        'changed': False,
+        'remote_tip': None, 'relation': None, 'identical_dirty': [],
+        'kept_local': [], 'conflicts': [], 'changed': False,
     }
+    if fetch:
+        if journal_remote_tip(repo_root, remote, branch) is None:
+            plan['relation'] = 'remote-missing'
+            return plan
+        git(repo_root, 'fetch', '--quiet', remote, f'+refs/heads/{branch}:{tracking_ref}')
+    remote_tip = ref_tip(repo_root, tracking_ref)
+    plan['remote_tip'] = remote_tip
+    if not remote_tip:
+        plan['relation'] = 'remote-missing'
+        return plan
     if head == remote_tip:
         plan['relation'] = 'aligned'
         return plan
@@ -16394,36 +16418,145 @@ def journal_pull_plan(repo_root, manifest, fetch=True):
             'STOP without merge, reset, rebase, or force'
         )
     plan['relation'] = 'behind'
+    upstream = {
+        name.decode()
+        for name in git_bytes(
+            repo_root, 'diff', '--name-only', '--no-renames', '-z', head, remote_tip
+        ).split(b'\0')
+        if name
+    }
     dirty = [entry['path'] for entry in journal_status_entries(repo_root)]
-    targets = journal_pull_tree_entries(repo_root, remote_tip, dirty)
+    touched = [path for path in dirty if path in upstream]
+    targets = journal_pull_tree_entries(repo_root, remote_tip, touched)
     staged = journal_pull_index_entries(repo_root)
-    blocking = [
-        path for path in dirty
-        if not journal_pull_blob_matches(repo_root, path, targets[path])
-        or (path in staged and staged[path] != targets[path])
-    ]
-    if blocking:
-        raise SyncwheelError(
-            'journal pull refuses local changes that differ from the remote tip: '
-            + ', '.join(sorted(blocking))
-            + '; publish or remove them first'
-        )
-    plan['identical_dirty'] = sorted(dirty)
+    for path in sorted(dirty):
+        if path not in upstream:
+            # A local file where upstream now needs a directory (or the reverse)
+            # cannot survive the fast-forward either.
+            prefix = path + '/'
+            if any(other.startswith(prefix) or path.startswith(other + '/') for other in upstream):
+                plan['conflicts'].append(path)
+            else:
+                plan['kept_local'].append(path)
+        elif journal_pull_blob_matches(repo_root, path, targets[path]) and (
+            path not in staged or staged[path] == targets[path]
+        ):
+            plan['identical_dirty'].append(path)
+        else:
+            plan['conflicts'].append(path)
     return plan
 
 
-def journal_pull(repo_root, manifest, apply=False):
+def journal_conflict_error(conflicts):
+    return SyncwheelError(
+        'journal pull refuses local changes that differ from the remote tip: '
+        + ', '.join(conflicts)
+        + '. Resolve with: syncwheel journal pull --apply --park-conflicts'
+    )
+
+
+def journal_regular_file(path):
+    return os.path.lexists(path) and not os.path.islink(path) and os.path.isfile(path)
+
+
+def journal_park_conflicts(repo_root, plan):
+    """Save each conflicting local version outside the worktree and restore the path to HEAD."""
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    directory = (
+        git_common_dir(repo_root) / 'syncwheel' / 'journal-conflicts'
+        / f"{stamp}-{plan['remote_tip'][:12]}"
+    )
+    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+    paths = plan['conflicts']
+    in_head = journal_pull_tree_entries(repo_root, plan['head'], paths)
+    entries = []
+    for path in paths:
+        source = repo_root / path
+        ours = None
+        if os.path.lexists(source):
+            if not journal_regular_file(source):
+                raise SyncwheelError(f'journal conflict on a non-regular path needs manual resolution: {path}')
+            ours = directory / 'ours' / path
+            ours.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, ours)
+        entries.append({'path': path, 'ours': str(ours) if ours else None})
+    tracked = [path for path in paths if in_head[path]]
+    if tracked:
+        git(repo_root, '--literal-pathspecs', 'restore', '--source=HEAD', '--staged', '--worktree', '--', *tracked)
+    for path in paths:
+        if in_head[path]:
+            continue
+        git(repo_root, '--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '--', path)
+        if os.path.lexists(repo_root / path):
+            (repo_root / path).unlink()
+    return {'directory': directory, 'base': plan['head'], 'theirs': plan['remote_tip'], 'entries': entries}
+
+
+def journal_merge_parked(repo_root, parked):
+    """Three-way merge each parked file; clean results land in the worktree, the rest stay parked."""
+    directory = parked['directory']
+    paths = [entry['path'] for entry in parked['entries']]
+    bases = journal_pull_tree_entries(repo_root, parked['base'], paths)
+    for entry in parked['entries']:
+        path = entry['path']
+        target = repo_root / path
+        entry['theirs'] = f"{parked['theirs']}:{path}"
+        entry['base'] = f"{parked['base']}:{path}"
+        if entry['ours'] is None or bases[path] is None or not journal_regular_file(target):
+            entry['status'] = 'conflict'
+            entry['reason'] = 'deleted or added on one side; no common base to merge'
+            continue
+        base_file = directory / 'base' / path
+        base_file.parent.mkdir(parents=True, exist_ok=True)
+        base_file.write_bytes(git_bytes(repo_root, 'cat-file', 'blob', bases[path][1]))
+        theirs_file = directory / 'theirs' / path
+        theirs_file.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target, theirs_file)
+        result = subprocess.run(
+            ['git', 'merge-file', '-p', '-L', 'local', '-L', 'base', '-L', 'remote',
+             entry['ours'], str(base_file), str(theirs_file)],
+            cwd=repo_root, capture_output=True, env=managed_process_env(authorize=False),
+        )
+        if result.returncode == 0:
+            target.write_bytes(result.stdout)
+            entry['status'] = 'merged'
+        else:
+            conflict_file = directory / 'conflict' / path
+            conflict_file.parent.mkdir(parents=True, exist_ok=True)
+            conflict_file.write_bytes(result.stdout)
+            entry['status'] = 'conflict'
+            entry['conflict'] = str(conflict_file)
+            entry['reason'] = 'overlapping edits' if result.returncode > 0 else 'binary or unmergeable content'
+    atomic_write_private_json(directory / 'conflicts.json', {
+        'base': parked['base'], 'theirs': parked['theirs'], 'entries': parked['entries'],
+    })
+    return parked['entries']
+
+
+def journal_pull(repo_root, manifest, apply=False, park_conflicts=False):
     plan = journal_pull_plan(repo_root, manifest)
+    if plan['conflicts'] and not (apply and park_conflicts):
+        raise journal_conflict_error(plan['conflicts'])
     if not apply or plan['relation'] != 'behind':
         plan['mode'] = 'apply' if apply else 'plan'
         return plan
     head, remote_tip = plan['head'], plan['remote_tip']
+    parked = None
     with journal_lock(repo_root):
         # Re-run the whole proof under the snapshot lock so a concurrent
         # snapshot or edit cannot slip in between the check and the move.
         locked = journal_pull_plan(repo_root, manifest, fetch=False)
         if (locked['head'], locked['remote_tip'], locked['relation']) != (head, remote_tip, 'behind'):
             raise SyncwheelError('journal state changed during pull; retry')
+        if locked['conflicts']:
+            if not park_conflicts:
+                raise journal_conflict_error(locked['conflicts'])
+            parked = journal_park_conflicts(repo_root, locked)
+            locked = journal_pull_plan(repo_root, manifest, fetch=False)
+            if locked['conflicts']:
+                raise SyncwheelError(
+                    f"journal conflicts remain after parking in {parked['directory']}; STOP"
+                )
         already_staged = journal_pull_index_entries(repo_root)
         staged = [path for path in locked['identical_dirty'] if path not in already_staged]
         if staged:
@@ -16435,23 +16568,40 @@ def journal_pull(repo_root, manifest, apply=False):
         if merged.returncode != 0:
             if staged:
                 git(repo_root, '--literal-pathspecs', 'reset', '-q', 'HEAD', '--', *staged, check=False)
+            parked_note = f"; local versions are parked in {parked['directory']}" if parked else ''
             raise SyncwheelError(
-                'journal fast-forward failed; local branch left unchanged: '
+                'journal fast-forward failed; local branch left unchanged'
+                + parked_note + ': '
                 + (merged.stderr.strip() or merged.stdout.strip())
             )
     updated = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
     if updated != remote_tip:
         raise SyncwheelError(f'journal fast-forward landed on {updated}, expected {remote_tip}; STOP')
     changed_paths = git(repo_root, 'diff', '--name-only', head, remote_tip).stdout.splitlines()
-    locked.update({'mode': 'apply', 'changed': True, 'head': updated, 'previous_head': head,
-                   'changed_paths': changed_paths})
+    locked.update({
+        'mode': 'apply', 'changed': True, 'head': updated, 'previous_head': head,
+        'changed_paths': changed_paths, 'conflicts': plan['conflicts'],
+    })
+    if parked:
+        entries = journal_merge_parked(repo_root, parked)
+        locked['parked'] = {'directory': str(parked['directory']), 'entries': entries}
+        locked['resolution_required'] = any(entry['status'] == 'conflict' for entry in entries)
     return locked
 
 
 def command_journal_pull(args):
     repo_root, manifest, _ = require_journal_manifest(args)
-    payload = journal_pull(repo_root, manifest, apply=args.apply)
+    payload = journal_pull(
+        repo_root, manifest, apply=args.apply, park_conflicts=args.park_conflicts
+    )
     print(json.dumps(payload, indent=2))
+    if payload.get('resolution_required'):
+        print(
+            'journal pull: unresolved conflicts parked in '
+            f"{payload['parked']['directory']}; merge them into the working tree, "
+            'then run syncwheel journal publish --apply',
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -30581,6 +30731,11 @@ def build_parser():
         help='fast-forward the journal branch to the remote tip when it is a strict ancestor',
     )
     journal_pull_p.add_argument('-a', '--apply', action='store_true')
+    journal_pull_p.add_argument(
+        '--park-conflicts', action='store_true',
+        help='with --apply, save conflicting local versions under the git dir, '
+        'fast-forward, and three-way merge them back where possible',
+    )
     journal_pull_p.set_defaults(func=command_journal_pull)
     journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
     journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))

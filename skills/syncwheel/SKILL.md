@@ -133,9 +133,15 @@ When the manifest declares `repository_mode: "journal"`, use only
 `syncwheel journal status`, plan-first `journal snapshot` / `journal publish` /
 `journal pull`, and `journal schedule`. Add `--apply` only with mutation authority. Journal mode
 forbids stack, integration, reconcile, sync, and delivery publish commands; its
-publisher stops on remote-ahead, divergence, or lease loss without history surgery.
+publisher pulls first, stops on divergence, and never rewrites history.
 `journal pull --apply` is the only governed catch-up: it fast-forwards a strictly
-behind branch and refuses local changes that differ from the remote tip.
+behind branch, keeps local edits the remote did not touch, and stops on a path
+changed differently on both sides. Resolve that conflict yourself, without
+handing it to the user: run `journal pull --apply --park-conflicts`, merge each
+parked `conflict` entry (`ours/`, `base/`, `theirs/`, `conflict/` under the
+reported directory) into the working tree keeping both sides' intent, run
+`journal publish --apply`, and delete the parked directory. Ask only when the two
+sides contradict each other.
 
 A deployment channel pins an exact base revision plus an ordered branch
 composition of exact stack revisions, commit lists, base provenance, and

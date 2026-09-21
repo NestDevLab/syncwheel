@@ -1279,21 +1279,46 @@ syncwheel journal publish             # plan snapshot and exact-lease push
 syncwheel journal publish --apply
 syncwheel journal pull                # fetch and plan a fast-forward to the remote tip
 syncwheel journal pull --apply
+syncwheel journal pull --apply --park-conflicts   # save, fast-forward, three-way merge
 syncwheel journal schedule install    # plan a Linux systemd user timer
 syncwheel journal schedule install --apply
 ```
 
 Journal snapshots refuse a dirty real index, sensitive paths, oversized files,
-and high-confidence secrets. Publication stops on remote-ahead, divergence, or
-lease loss; it never merges, resets, rebases, or force-updates a remote.
+and high-confidence secrets. Publication never merges, resets, rebases, or
+force-updates a remote.
 
-`journal pull` is how a consuming clone catches up with another publisher. It
-fetches the journal branch and reports `aligned`, `ahead`, or `behind`; it
-stops on divergence. When behind, it accepts only local changes (worktree or
-index) that are byte-identical to the remote tip, including the residue of a
-fast-forward the ref guard refused, and then fast-forwards under a Syncwheel
-ref-move authorization. Raw `git merge` or `git pull` on the journal branch
-stays refused by the `reference-transaction` guard.
+Several clones may write to the same journal. `journal pull` fetches the
+journal branch, reports `aligned`, `ahead`, or `behind`, and stops on
+divergence. When behind, it keeps local changes to paths the remote did not
+touch, accepts changes that are byte-identical to the remote tip (including
+the residue of a fast-forward the ref guard refused), and fast-forwards under a
+Syncwheel ref-move authorization. `journal publish --apply` runs the same pull
+first, so a publisher that fell behind catches up instead of stopping. If its
+push loses the lease, the unpublished snapshot returns to the working tree and
+the next run retries. Raw `git merge` or `git pull` on the journal branch stays
+refused by the `reference-transaction` guard.
+
+A path changed differently on both sides is a conflict. The default pull stops
+and names it. `journal pull --apply --park-conflicts` saves each local version
+under `.git/syncwheel/journal-conflicts/<stamp>/`, restores the path,
+fast-forwards, and runs a three-way merge. A clean merge lands in the working
+tree. An overlapping or binary edit stays parked with `ours/`, `base/`,
+`theirs/`, and a `conflict/` file with markers, listed in `conflicts.json`, and
+the working tree keeps the remote version. Conflict markers never enter the
+working tree, so a scheduled publish cannot record them.
+
+AI agents resolve journal conflicts themselves rather than handing them to a
+human:
+
+1. Run `syncwheel journal pull --apply --park-conflicts`.
+2. For each `conflict` entry, read the parked versions and write one merged
+   file into the working tree that keeps the intent of both sides. For
+   append-only logs and notes, keep both entries in chronological order.
+3. Run `syncwheel journal publish --apply`, then delete the parked directory.
+
+Stop and ask only when the two sides contradict each other in a way that needs
+a human decision, such as two different values for the same setting.
 
 Common aliases:
 - `check` -> `ck`

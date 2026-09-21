@@ -2,11 +2,17 @@
 
 ## 0.43.27 - 2026-09-21
 
-- Add `journal pull` for journal repositories. It fetches the journal branch,
-  stops on divergence, accepts only local worktree or index changes that are
-  byte-identical to the remote tip, and fast-forwards under a Syncwheel
-  ref-move authorization, so a consuming clone no longer needs to bypass the
+- Add `journal pull` so several clones can write to one journal. It fetches
+  the journal branch, stops on divergence, keeps local edits the remote did
+  not touch, accepts edits identical to the remote tip, and fast-forwards under
+  a Syncwheel ref-move authorization instead of bypassing the
   `reference-transaction` guard.
+- Add `journal pull --park-conflicts`: conflicting local versions are saved
+  under the git dir and three-way merged back after the fast-forward. Overlapping
+  edits stay parked with their base, local, and remote versions for an agent to
+  resolve.
+- `journal publish --apply` now pulls before publishing and returns an
+  unpublished snapshot to the working tree when its push loses the lease.
 - Write the journal branch, not the normalized default integration branch, to
   the primary guard when installing hooks in a journal repository.
 
