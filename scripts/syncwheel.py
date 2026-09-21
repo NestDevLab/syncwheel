@@ -19430,8 +19430,10 @@ def command_worktree_open(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     lane_id = safe_ref_segment(args.lane)
-    if args.into:
-        require_stack(manifest, args.into)
+    stack = require_stack(manifest, args.into) if args.into else None
+    base_ref = getattr(args, 'base', None)
+    if base_ref and not stack:
+        raise SyncwheelError('worktree open --base requires --into <stack>')
     branch = f'syncwheel/lane/{lane_id}'
     root = governed_worktree_root(repo_root, manifest)
     path = root / branch.replace('/', '-').replace('\\', '-')
@@ -19473,9 +19475,21 @@ def command_worktree_open(args):
             raise SyncwheelError(
                 f'governed worktree path already exists and is not registered: {path}'
             )
-        base = ref_tip(repo_root, 'HEAD')
+        base = ref_tip(repo_root, base_ref or 'HEAD')
         if not base:
-            raise SyncwheelError('cannot open a governed worktree without a current commit')
+            raise SyncwheelError('cannot open a governed worktree: base commit is missing')
+        if base_ref:
+            stack_tip = ref_tip(repo_root, stack['branch'])
+            projected_tip = deterministic_stack_replay_tip(
+                repo_root, stack['base'], stack.get('commits') or []
+            )
+            if projected_tip:
+                projected_tip = commit_full_sha(repo_root, projected_tip)
+            if not stack_tip or base != stack_tip or base != projected_tip:
+                raise SyncwheelError(
+                    f'worktree open --base must resolve to the current exact projection '
+                    f'of stack {args.into!r}; rebuild or align that stack before opening a lane'
+                )
         now = datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0)
         lane = {
             'id': lane_id,
@@ -22717,6 +22731,58 @@ def abandon_superseded_stack_close(repo_root, manifest_path, pending):
     )
 
 
+def supersede_unpublished_stack_close(repo_root, manifest, manifest_path, stack, pending):
+    """Retire an obsolete close intent only while its stack is still published.
+
+    A different close reason is a new operation. Reusing the old token would
+    attach its receipt to a different manifest and proof. Inspect both remote
+    histories before retiring it; an unreachable or inconsistent remote stops.
+    """
+    if coordination_is_active(manifest):
+        config = coordination_config(manifest)
+        observed = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        state = observed.get('state') or {}
+        closed_ref = pending.get('closed_ref')
+        if closed_ref != f"refs/heads/{stack['branch']}":
+            raise SyncwheelError('pending close names a different stack branch')
+        token = pending['operation_token']
+        for commit in coordination_state_commits_since(repo_root, observed['tip'], None):
+            document = coordination_state_document_from_commit(repo_root, commit)
+            if document is None:
+                raise SyncwheelError('pending close cannot be superseded: state history is unreadable')
+            if document.get('operation_token') == token:
+                raise SyncwheelError('pending close reached the coordination remote; recover it instead')
+        remote_stack = stack_snapshot_map(state.get('manifest') or {}).get(stack['id'])
+        if not remote_stack or remote_stack.get('branch') != stack['branch']:
+            raise SyncwheelError('pending close cannot be superseded: remote stack is absent or changed')
+        claim_ref = coordination_claim_ref(closed_ref)
+        refs = remote_ref_tips(repo_root, config['remote'], [closed_ref, claim_ref])
+        claim_tip = refs[claim_ref]
+        if not refs[closed_ref] or not claim_tip or state.get('claims', {}).get(closed_ref) != claim_tip:
+            raise SyncwheelError('pending close cannot be superseded: remote ref or claim is inconsistent')
+        claim = fetch_coordination_claim(repo_root, config['remote'], claim_ref, claim_tip)
+        if (claim.get('coordination_id') != config['id']
+                or claim.get('source_ref') != closed_ref
+                or claim.get('closed') is True):
+            raise SyncwheelError('pending close cannot be superseded: remote claim is closed or foreign')
+        if not commit_exists(repo_root, claim_tip):
+            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], claim_ref, check=False)
+            if fetched.returncode != 0 or not commit_exists(repo_root, claim_tip):
+                raise SyncwheelError('pending close cannot be superseded: claim history is unavailable')
+        history = git(repo_root, 'rev-list', claim_tip, check=False)
+        if history.returncode != 0:
+            raise SyncwheelError('pending close cannot be superseded: claim history is unreadable')
+        for commit in history.stdout.split():
+            old_claim = coordination_claim_from_commit(repo_root, commit)
+            if old_claim.get('operation_token') == token:
+                raise SyncwheelError('pending close reached the coordination remote; recover it instead')
+        if remote_stack.get('commits') != stack.get('commits'):
+            raise SyncwheelError('pending close cannot be superseded: remote stack generation changed')
+    abandon_superseded_stack_close(repo_root, manifest_path, pending)
+
+
 def published_close_tombstone(repo_root, manifest, pending):
     config = coordination_config(manifest)
     if not config or not pending.get('remote_first'):
@@ -22794,8 +22860,6 @@ def command_stack_close(args):
             )
         raise SyncwheelError(f'unknown stack: {args.stack}')
     branch = stack['branch']
-    base_ref = stack.get('base') or manifest['defaults']['base_ref']
-
     referencing_channels = channel_ids_referencing_stack(manifest, args.stack)
     if referencing_channels:
         raise SyncwheelError(
@@ -22815,10 +22879,7 @@ def command_stack_close(args):
             + '; close or update those dependent stacks first'
         )
 
-    reason = (
-        pending_close.get('reason')
-        if pending_close else (args.reason or 'closed')
-    )
+    reason = args.reason or (pending_close.get('reason') if pending_close else 'closed')
     pending_remote_state = None
     if (
         pending_close
@@ -22912,10 +22973,22 @@ def command_stack_close(args):
                 'would drop it. Deliver or preserve the stack first, then use a different close reason.'
             )
 
-    # Check whether every commit in the stack is already reachable from base_ref.
+    # The stack's pinned base is historical; delivery ancestry belongs to the
+    # current target ref, observed and fetched for this close attempt.
+    needs_delivery_ancestry = reason == 'merged' or not args.force
+    ancestry_ref = (
+        delivery_tip if reason == 'absorbed' else
+        fetch_observed_delivery_tip(repo_root, stack['target_remote'], stack['target_branch'])
+        if needs_delivery_ancestry else
+        stack.get('base') or manifest['defaults']['base_ref']
+    )
+    ancestry_label = (
+        f"{stack['target_remote']}/{stack['target_branch']} at {ancestry_ref}"
+        if reason == 'absorbed' or needs_delivery_ancestry else ancestry_ref
+    )
     unmerged = []
     for sha in stack.get('commits') or []:
-        result = git(repo_root, 'merge-base', '--is-ancestor', sha, base_ref, check=False)
+        result = git(repo_root, 'merge-base', '--is-ancestor', sha, ancestry_ref, check=False)
         if result.returncode != 0:
             unmerged.append(sha)
 
@@ -22925,14 +22998,14 @@ def command_stack_close(args):
         short = [commit_short_sha(repo_root, sha) for sha in unmerged[:5]]
         extra = f' (and {len(unmerged) - 5} more)' if len(unmerged) > 5 else ''
         raise SyncwheelError(
-            f"{args.stack}: {len(unmerged)} commit(s) are NOT yet reachable from {base_ref}: "
+            f"{args.stack}: {len(unmerged)} commit(s) are NOT yet reachable from {ancestry_label}: "
             f"{', '.join(short)}{extra}\n"
             f"For a squash/rebase delivery, retry with --reason absorbed so Syncwheel fetches "
             f"and verifies the delivered content. Use --force only for a deliberate close "
             f"without ancestry or absorption proof."
         )
 
-    merged_note = '' if unmerged else f' (all commits confirmed in {base_ref})'
+    merged_note = '' if unmerged else f' (all commits confirmed in {ancestry_label})'
 
     # Remove from stacks list.
     manifest['stacks'] = [s for s in manifest['stacks'] if s['id'] != args.stack]
@@ -22944,6 +23017,19 @@ def command_stack_close(args):
 
     if pending_close is None and args.reason is None:
         reason = 'merged' if not unmerged else 'closed'
+    if pending_close and pending_close.get('remote_first') and reason != pending_close.get('reason'):
+        raise SyncwheelError(
+            f'{args.stack}: interrupted remote-first close is bound to reason '
+            f'{pending_close.get("reason")!r}; recover that operation before changing reason'
+        )
+    if (pending_close and not pending_close.get('remote_first') and (
+        reason != pending_close.get('reason')
+        or pending_close.get('manifest_digest_after') != manifest_digest(manifest)
+    )):
+        supersede_unpublished_stack_close(
+            repo_root, original_manifest, manifest_path, stack, pending_close
+        )
+        pending_close = None
     coordination_result = None
     config = None
     closed_ref = f'refs/heads/{branch}'
@@ -27289,7 +27375,10 @@ class SyncwheelRevisionBackend:
         return bool(git(repo_root, 'ls-files', '-u').stdout.strip())
 
     def _index_is_clean(self, repo_root):
-        return git(repo_root, 'diff', '--cached', '--quiet', check=False).returncode == 0
+        return git(
+            repo_root, 'diff', '--cached', '--quiet', check=False,
+            env={'GIT_OPTIONAL_LOCKS': '0'},
+        ).returncode == 0
 
     def _dirty_paths(self, repo_root):
         paths = set()
@@ -27297,7 +27386,9 @@ class SyncwheelRevisionBackend:
             ('diff', '--name-only', '-z'),
             ('ls-files', '--others', '--exclude-standard', '-z'),
         ):
-            output = git(repo_root, *arguments).stdout
+            output = git(
+                repo_root, *arguments, env={'GIT_OPTIONAL_LOCKS': '0'}
+            ).stdout
             paths.update(item for item in output.split('\0') if item)
         return paths
 
@@ -27539,6 +27630,97 @@ class SyncwheelRevisionBackend:
         path = self._index_path(repo_root)
         payload, _ = self._read_regular_file(path, 'Git index')
         return hashlib.sha256(payload).hexdigest()
+
+    def reprepare_index_lease(self, request, journal):
+        """Recover one pre-effect index lease only after a fresh full preflight."""
+        repo_root = self._repo_root(request)
+        current_sha = self._index_sha256(repo_root)
+        old_sha = journal.get('baselineIndexSha256')
+        if not isinstance(old_sha, str) or not self.provider.HEX_64.fullmatch(old_sha):
+            self._fail('prepared journal has an invalid baseline index SHA-256')
+        if current_sha == old_sha:
+            return
+        if request.action != 'recover' or journal.get('phase') != 'prepared':
+            self._fail('index lease changed outside recoverable prepared preflight')
+        if 'indexLeaseReprepared' in journal:
+            self._fail('index lease changed again after one-shot recovery')
+        initial = {
+            'projectionRoute': None, 'derivedPaths': None,
+            'derivedPathsDigest': None, 'derivedContentDigest': None,
+            'productIndexSha256': None, 'controlIndexSha256': None,
+            'indexAlignments': {}, 'candidateProductCommitSha': None,
+            'candidateProductTreeSha': None, 'productPathObjects': None,
+            'candidateDraftCommitSha': None, 'candidateDraftTreeSha': None,
+            'productHooksValidated': False, 'draftRefOwned': False,
+            'productCommitSha': None, 'draftStackId': None, 'draftBranch': None,
+            'candidateControlCommitSha': None, 'candidateControlTreeSha': None,
+            'controlPathObjects': None, 'controlHooksValidated': False,
+            'manifestReplaced': False, 'ledgerAppended': False,
+            'controlCommitSha': None, 'published': False, 'expiration': None,
+        }
+        if any(key not in journal or journal[key] != value
+               for key, value in initial.items()):
+            self._fail('index lease changed after revision effects began')
+        if 'publicationState' in journal:
+            self._fail('prepared journal contains unexpected publication evidence')
+        if (
+            journal.get('request') != request.intent_json()
+            or journal.get('expectedHead') != request.expected_head
+            or journal.get('resultingHead') != request.expected_head
+        ):
+            self._fail('prepared request or HEAD lease changed')
+        index_lock = Path(f'{self._index_path(repo_root)}.lock')
+        if index_lock.exists() or index_lock.is_symlink():
+            self._fail(f'Git index is locked by another writer: {index_lock}')
+        if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
+            self._fail('index lease recovery requires a clean, conflict-free index')
+        observation = self.preflight(request)
+        if self._index_sha256(repo_root) != current_sha:
+            self._fail('index changed during fresh recovery preflight')
+        leases = {
+            'observedManifestDigest': 'manifestDigest',
+            'manifestDigest': 'manifestDigest',
+            'baselineWorktrees': 'worktrees',
+            'baselineRemoteRefs': 'remoteRefs',
+            'managedLocalRefs': 'managedLocalRefs',
+            'refTransactionRefs': 'refTransactionRefs',
+            'integrationBranch': 'integrationBranch',
+            'baseRef': 'baseRef',
+            'baseRefFullName': 'baseRefFullName',
+            'baseRefSha': 'baseRefSha',
+            'baseRefObjectSha': 'baseRefObjectSha',
+            'baseRefObservation': 'baseRefObservation',
+            'projectionBaseSha': 'projectionBaseSha',
+            'projectionBaseKind': 'projectionBaseKind',
+            'integrationCompositionDigest': 'integrationCompositionDigest',
+            'baselineUnownedDirty': 'unownedDirty',
+            'unmappedIntegrationCommits': 'unmappedIntegrationCommits',
+            'coordination': 'coordination',
+        }
+        changed = [
+            key for key, observed in leases.items()
+            if key not in journal or journal[key] != observation.get(observed)
+        ]
+        known = set(initial) | set(leases) | {
+            'schemaVersion', 'providerId', 'operationId', 'planDigest',
+            'request', 'phase', 'expectedHead', 'resultingHead',
+            'baselineIndexSha256',
+        }
+        if set(journal) != known:
+            self._fail('prepared journal has missing or unexpected evidence')
+        if changed or observation['head'] != request.expected_head:
+            self._fail('fresh recovery preflight changed prepared leases: '
+                       + ', '.join(changed or ['head']))
+        if self._index_sha256(repo_root) != current_sha:
+            self._fail('index changed before recovery lease could be journaled')
+        journal['indexLeaseReprepared'] = {
+            'oldSha256': old_sha,
+            'newSha256': current_sha,
+            'at': iso_utc_now(),
+        }
+        journal['baselineIndexSha256'] = current_sha
+        self.save_journal(request, journal)
+        self.checkpoint('index_lease_reprepared')
 
     def _resolve_base_ref(self, repo_root, manifest):
         base_ref = manifest['defaults']['base_ref']
@@ -30144,6 +30326,7 @@ def build_parser():
     worktree_open_p = worktree_sub.add_parser('open', parents=[common])
     worktree_open_p.add_argument('lane')
     worktree_open_p.add_argument('--into', help='optional existing stack that will own this lane\'s commits')
+    worktree_open_p.add_argument('--base', help='with --into, start at that stack\'s exact projected tip instead of the current checkout HEAD')
     worktree_open_p.add_argument('--full', action='store_true', help='mark this explicitly requested lane as eligible for dependency, build, test, and debug work')
     worktree_open_p.add_argument('-j', '--json', action='store_true')
     worktree_open_p.set_defaults(func=command_worktree_open)
