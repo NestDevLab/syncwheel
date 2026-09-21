@@ -32,8 +32,7 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "cli-module-tests",
-      "fixture-cli-tests"
+      "cli-module-tests"
     ],
     "strategy": "cherry-pick"
   },
@@ -55,24 +54,6 @@
       "integration_branch": "main-integration",
       "meta": {
         "purpose": "Cache CLI bytecode in coordination tests"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/fixture-cli-tests",
-      "commits": [
-        "4712d7b8ae064e196c084910d4b4a135efc7b713"
-      ],
-      "id": "fixture-cli-tests",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Cache CLI bytecode in fixture tests"
       },
       "publication": {
         "enabled": true
