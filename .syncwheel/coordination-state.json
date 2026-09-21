@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/test-fixture-cache": "aa613669e1487cc2b67589b3ef31172797fc0108"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -52,10 +54,11 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
+    "refs/heads/syncwheel/draft/test-fixture-cache": "e2cd4d918d591f5b7212338199b241dbedb80d7c",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T20:28:58+00:00",
+  "created_at": "2026-09-21T20:31:38+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -134,6 +137,7 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "f799fab9552824263f1f08a1c4f41b47f1da48b1",
     "refs/heads/syncwheel/draft/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
+    "refs/heads/syncwheel/draft/test-fixture-cache": "aa613669e1487cc2b67589b3ef31172797fc0108",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68"
   },
   "manifest": {
@@ -162,7 +166,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "test-fixture-cache"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -170,15 +176,29 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/test-fixture-cache",
+        "commits": [],
+        "id": "test-fixture-cache",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "b6fd9630-ad88-4df4-92dc-fbdfe361885c",
-  "parent_state": "e1332838439ac77c89d8ea2d2d773f58ef7feb8c",
+  "operation_token": "48fecb4f-3288-450d-b1bd-5f975851fc44",
+  "parent_state": "f0a950d59773dd59cf4dfacefa5157e1e37559f2",
   "projection_status": "partial",
-  "publication_id": "eb4e23ad-64b9-4637-abee-4b809a15276d",
-  "publication_scope": "close:cli-module-tests",
+  "publication_id": "294cbfff-3048-4534-829e-069779d7cd6d",
+  "publication_scope": "create:test-fixture-cache",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
