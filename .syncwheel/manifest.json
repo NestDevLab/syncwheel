@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -37,29 +37,29 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "close-published-recovery",
-      "branch": "syncwheel/draft/close-published-recovery",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "syncwheel/draft/close-published-recovery",
       "commits": [
         "afcf7aab9211e39c789ec105ad469c0c1319a778"
       ],
-      "state": "draft",
+      "id": "close-published-recovery",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Repair published stack close recovery and merged delivery proof"
+      },
       "publication": {
         "enabled": false
       },
-      "meta": {
-        "purpose": "Repair published stack close recovery and merged delivery proof"
-      }
+      "state": "draft",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
