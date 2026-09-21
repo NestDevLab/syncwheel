@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "8255d2266647b7d83c93f044954a2cb371752697"
+    "refs/heads/syncwheel/draft/revision-index-semantic-lease": "4109170d09a5155f2f96c264a14da2f93f04dd22"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -47,13 +47,14 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
+    "refs/heads/syncwheel/draft/revision-index-semantic-lease": "6c11c6953db178193ebfcda64d2241930025df2a",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T12:48:57+00:00",
+  "created_at": "2026-09-21T13:03:58+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -125,6 +126,7 @@
     "refs/heads/syncwheel/draft/pr-checks-none": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "47576d23feeaaa056886dc9367ae80a4528e5a9a",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
+    "refs/heads/syncwheel/draft/revision-index-semantic-lease": "4109170d09a5155f2f96c264a14da2f93f04dd22",
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "721fcca99f88dfea65180af9f2f8747a5db81f48",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "f799fab9552824263f1f08a1c4f41b47f1da48b1",
     "refs/heads/syncwheel/draft/skill-close-guidance": "5ff365de4d0dd97deed4f999cd9ea4d3e03d1a20",
@@ -156,7 +158,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "revision-index-semantic-lease"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -164,15 +168,29 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/revision-index-semantic-lease",
+        "commits": [],
+        "id": "revision-index-semantic-lease",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "f1cbf7b1-cf1c-4686-9dba-a89aea31acd1",
-  "parent_state": "86cad43070fef7908168fd0ed2ace0e53f841cfe",
+  "operation_token": "cf7f6b6e-374a-4a6c-9999-c7b6b8f992fc",
+  "parent_state": "9e94fa6adba488a53bb2117289a99ebb11120cb1",
   "projection_status": "partial",
-  "publication_id": "139912ed-90a4-402a-8f06-e4976dc82835",
-  "publication_scope": "integration",
+  "publication_id": "b6f441f9-b16f-4991-a117-c5230613f13f",
+  "publication_scope": "create:revision-index-semantic-lease",
   "schema_version": 2,
   "syncwheel_version": "0.43.29",
   "tombstones": [
