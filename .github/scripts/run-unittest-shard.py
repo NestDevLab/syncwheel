@@ -64,15 +64,16 @@ def shard_cases(
     return shards
 
 
-class TimedTextTestResult(unittest.TextTestResult):
-    durations: dict[str, float] = {}
+MEASURED_SECONDS: dict[str, float] = {}
 
+
+class TimedTextTestResult(unittest.TextTestResult):
     def startTest(self, test: unittest.TestCase) -> None:
         self._started = time.perf_counter()
         super().startTest(test)
 
     def stopTest(self, test: unittest.TestCase) -> None:
-        self.durations[test.id()] = time.perf_counter() - self._started
+        MEASURED_SECONDS[test.id()] = time.perf_counter() - self._started
         super().stopTest(test)
 
 
@@ -97,7 +98,7 @@ def main() -> int:
     ).run(unittest.TestSuite(selected))
     if args.durations:
         args.durations.write_text(
-            json.dumps(TimedTextTestResult.durations, indent=2, sort_keys=True) + "\n"
+            json.dumps(MEASURED_SECONDS, indent=2, sort_keys=True) + "\n"
         )
     return 0 if result.wasSuccessful() else 1
 
