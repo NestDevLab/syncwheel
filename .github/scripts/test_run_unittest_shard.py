@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -22,13 +23,16 @@ class SyntheticCase:
         return self.test_id
 
 
+def load_runner():
+    spec = importlib.util.spec_from_file_location("run_unittest_shard", RUNNER_PATH)
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+    return runner
+
+
 class ShardAssignmentContractTest(unittest.TestCase):
     def test_assignment_is_deterministic_complete_and_exactly_once(self):
-        spec = importlib.util.spec_from_file_location("run_unittest_shard", RUNNER_PATH)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        runner = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(runner)
+        runner = load_runner()
 
         weights = {
             "synthetic.Case.test_slow": 9.0,
@@ -66,6 +70,24 @@ class ShardAssignmentContractTest(unittest.TestCase):
         assigned = [test_id for shard in expected for test_id in shard]
         self.assertEqual(Counter(assigned), Counter(test_ids))
         self.assertTrue(all(count == 1 for count in Counter(assigned).values()))
+
+    def test_timed_result_records_every_test(self):
+        runner = load_runner()
+
+        class Sample(unittest.TestCase):
+            def test_passes(self):
+                pass
+
+            def test_fails(self):
+                self.fail("expected")
+
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(Sample)
+        test_ids = sorted(case.id() for case in suite)
+        unittest.TextTestRunner(
+            stream=io.StringIO(), resultclass=runner.TimedTextTestResult
+        ).run(suite)
+        self.assertEqual(sorted(runner.MEASURED_SECONDS), test_ids)
+        self.assertTrue(all(seconds >= 0 for seconds in runner.MEASURED_SECONDS.values()))
 
 
 if __name__ == "__main__":
