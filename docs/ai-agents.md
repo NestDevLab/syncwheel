@@ -29,7 +29,12 @@ existed, it just was not prominent enough. Follow all four exactly.
    (`syncwheel hooks install --apply`), a manual commit or unauthorized integration-ref
    move in the primary is refused, and mutating commands refuse while it is dirty. The only
    opt-out is a reasoned, ledgered disable: `syncwheel hooks remove --disable --reason
-   "<why>" --apply`.
+   "<why>" --apply`. Export `SYNCWHEEL_LANE_OWNER=<agent-name>` for the whole session:
+   it owns the lanes you open and is recorded as `actor` on stack create, add, set,
+   capture, promote, close-intent, and push ledger events, so a refusal blocked by your
+   unpublished stack names you. Without it the actor is `<user>@<host>:<parent-pid>`.
+   A lane with a named owner is reaped only after its lease expires, never early
+   because the opening process died.
 2. Never resolve a replay conflict with raw git. Take the retry the conflict names:
    `syncwheel stack rebuild <id> --replay-mode desk`, then resolve through the manifest with
    `syncwheel stack absorb <stack> [<path>...|--staged]` or `syncwheel stack
@@ -210,6 +215,11 @@ active-active channel must use the coordination remote.
   inspection or fallback
 - for an active-active manifest, use `handoff` before taking over from another
   device or agent; never bypass the coordinated publisher with `git push`
+- when a publication or revision-provider check is blocked by another stack's
+  unpublished declaration, contact the owner it names and run `syncwheel
+  handoff`; the only command these refusals suggest is `syncwheel stack set <id>
+  --published`, offered for a stale local commit change whose published commits
+  are present locally (it prints the command that restores them)
 - if a coordinated publish reports a mergeable race, do not retry silently;
   review the handoff and use `publish --accept-merge` only for that explicit
   disjoint-stack decision

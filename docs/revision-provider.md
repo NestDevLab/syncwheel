@@ -408,6 +408,46 @@ enable such side effects in these validation hooks.
 the draft stack. An empty `paths` array converges as `no-repository-delta` and
 also creates no stack.
 
+## Refusals caused by pending declarations
+
+`check` and `preflight` refuse while the checkout holds a stack declaration
+that is not published yet:
+
+- `integration declared stack(s) are missing from integration` when a stack in
+  `integration.stacks` has commits the integration branch lacks;
+- `active-active handoff manifest is not aligned with fresh coordination state`
+  when the local control manifest differs from the published one.
+
+Both refusals name each pending stack, its state, and its owner:
+
+```text
+integration declared stack(s) are missing from integration: x (local proposal,
+missing <sha>; owner: last local stack_create by agent-a at <time>). The owner of
+each listed stack must publish or reset it; run syncwheel handoff for details
+
+active-active handoff manifest is not aligned with fresh coordination state:
+unpublished local proposal: x (added; owner: ...); integration changed: stacks.
+The owner of each listed stack must publish or reset it; run syncwheel handoff for details
+```
+
+- The state is `published` or `local proposal` for a missing stack, and `added`,
+  `changed <fields>`, or `published but absent locally` for a handoff mismatch.
+- The owner is the last local ledger event about the stack with its actor, then
+  the newest published state that touched it (within 50 states) with its time,
+  installation id, and the author of its last declared commit, or
+  `owner unknown`.
+- The handoff refusal adds `syncwheel stack set <id> --published` for each stack
+  whose only change is its commit list and whose published commits are present
+  locally.
+- Lists stop with `and N more stack(s)`, and at five commits per stack with
+  `and N more`, so the whole refusal stays inside the protocol's
+  error-length limit.
+- `syncwheel int rebuild` and `syncwheel int push` are named only when the local
+  and published snapshots are equal and just the control-manifest digest
+  differs: `the local integration control manifest is not published; run
+  syncwheel int rebuild, then syncwheel int push`. A difference the stack list
+  does not explain, such as a channel, points to `syncwheel handoff` instead.
+
 ## Terminal handoff: owned but unpublished
 
 A successful `status: "verified"` result means **owned-but-unpublished**, not

@@ -62,6 +62,7 @@ class ControlManifestAlignmentDrift(SyncwheelError):
         self.observed_tip = observed_tip
 
 
+
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
@@ -222,6 +223,10 @@ GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
 COORDINATION_PUBLICATION_LOCK_TIMEOUT_SECONDS = 5
 COORDINATION_PUBLICATION_LOCK_STALE_SECONDS = 300
 COORDINATION_CLAIM_HISTORY_SCAN_LIMIT = 500
+STACK_OWNER_STATE_SCAN_LIMIT = 50
+PENDING_STACK_LIST_LIMIT = 2600
+PENDING_RESET_LIST_LIMIT = 600
+PENDING_STACK_COMMIT_LIMIT = 5
 COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES = (
     'coordination_publish_completed',
     'coordination_publish_abandoned',
@@ -2594,6 +2599,23 @@ def composed_stack_projection_tip(repo_root, stack):
     if not projected_tip or ref_tree(repo_root, projected_tip) != ref_tree(repo_root, materialized_tip):
         return None
     return projected_tip
+
+
+def stack_content_absorbed_at(repo_root, stack, tip):
+    commits = stack.get('commits') or []
+    projected_tip = composed_stack_projection_tip(repo_root, stack)
+    if (
+        not projected_tip and commits and not ref_tip(repo_root, stack['branch'])
+        and commit_exists(repo_root, commits[0])
+    ):
+        # no local branch to take the base from: replay from the first commit's parent
+        base = commit_first_parent(repo_root, commits[0])
+        projected_tip = base and deterministic_stack_replay_tip(repo_root, base, commits)
+    return bool(
+        projected_tip and stack_content_is_present_at_delivery_tip(
+            repo_root, stack, tip, projected_tip=projected_tip,
+        )
+    ) or merged_stack_tip_matches_delivery(repo_root, stack, tip)
 
 
 def merged_stack_tip_matches_delivery(repo_root, stack, delivery_tip):
@@ -13407,6 +13429,224 @@ def changed_stack_ids(base, candidate):
     }
 
 
+def changed_snapshot_fields(base, candidate):
+    return sorted(
+        key for key in set(base) | set(candidate)
+        if base.get(key) != candidate.get(key)
+    )
+
+
+def local_proposal_diff(local_snapshot, published_snapshot):
+    local_stacks = stack_snapshot_map(local_snapshot or {})
+    published_stacks = stack_snapshot_map(published_snapshot or {})
+    return {
+        'added': sorted(set(local_stacks) - set(published_stacks)),
+        'changed': {
+            stack_id: changed_snapshot_fields(
+                published_stacks[stack_id], local_stacks[stack_id]
+            )
+            for stack_id in sorted(set(local_stacks) & set(published_stacks))
+            if local_stacks[stack_id] != published_stacks[stack_id]
+        },
+        'removed': sorted(set(published_stacks) - set(local_stacks)),
+        'integration': changed_snapshot_fields(
+            (published_snapshot or {}).get('integration') or {},
+            (local_snapshot or {}).get('integration') or {},
+        ),
+    }
+
+
+def local_proposal_lines(diff):
+    lines = [f'added stack: {stack_id}' for stack_id in diff['added']]
+    lines.extend(
+        f"changed stack: {stack_id} ({', '.join(fields)})"
+        for stack_id, fields in diff['changed'].items()
+    )
+    lines.extend(f'removed stack: {stack_id}' for stack_id in diff['removed'])
+    if diff['integration']:
+        lines.append(f"integration changed: {', '.join(diff['integration'])}")
+    return lines
+
+
+def published_stack_owner(repo_root, stack_id, state_tip):
+    scopes = {
+        f'{kind}:{stack_id}' for kind in ('create', 'stack', 'promote', 'demote', 'close')
+    }
+    commit = state_tip
+    for _ in range(STACK_OWNER_STATE_SCAN_LIMIT):
+        document = coordination_state_document_from_commit(repo_root, commit) if commit else None
+        if document is None:
+            return None
+        stack = stack_snapshot_map(document.get('manifest') or {}).get(stack_id)
+        ref = f"refs/heads/{stack['branch']}" if stack else None
+        changed = document.get('changed_refs') or {}
+        if document.get('publication_scope') in scopes or ref in changed:
+            commits = (stack or {}).get('commits') or []
+            last = commits[-1] if commits else None
+            author = (
+                git(repo_root, 'show', '-s', '--format=%an <%ae>', last, check=False).stdout.strip()
+                if last and commit_exists(repo_root, last) else ''
+            )
+            return {
+                'state': commit,
+                'scope': document.get('publication_scope'),
+                'created_at': document.get('created_at'),
+                'installation_id': document.get('installation_id'),
+                'author': author or None,
+            }
+        commit = document.get('parent_state')
+    return None
+
+
+def stack_owner_summary(repo_root, manifest_path, config, stack_id, state_tip=None):
+    """Last local ledger event about a stack, plus the newest published state touching it."""
+    summary = {'stack': stack_id, 'local': None, 'published': None}
+    try:
+        events = load_ledger_events(repo_root, manifest_path)
+    except SyncwheelError:
+        events = []
+    for event in reversed(events):
+        payload = event.get('payload') or {}
+        context = payload.get('context') or {}
+        if event.get('type') == 'manifest_saved' and context.get('stack') == stack_id:
+            summary['local'] = {
+                'event': payload.get('reason'), 'ts': event.get('ts'), 'actor': context.get('actor'),
+            }
+            break
+        if (
+            event.get('type') in {'stack_pushed', 'stack_promoted', 'stack_close_intent'}
+            and payload.get('stack') == stack_id
+        ):
+            summary['local'] = {
+                'event': event['type'], 'ts': event.get('ts'), 'actor': payload.get('actor'),
+            }
+            break
+    if config and config.get('mode') == 'active-active':
+        try:
+            if state_tip is None:
+                state_tip = read_remote_coordination_state(repo_root, config, fetch=True)['tip']
+            summary['published'] = published_stack_owner(repo_root, stack_id, state_tip)
+        except SyncwheelError:
+            pass
+    return summary
+
+
+def format_stack_owner(summary):
+    parts = []
+    local = summary.get('local')
+    if local:
+        parts.append(
+            f"last local {local['event']} by {local.get('actor') or 'unknown actor'} "
+            f"at {local.get('ts')}"
+        )
+    published = summary.get('published')
+    if published:
+        parts.append(
+            f"last published {published['scope']} at {published['created_at']} "
+            f"from installation {published['installation_id']}"
+            + (f", commit author {published['author']}" if published.get('author') else '')
+        )
+    return f"owner: {'; '.join(parts)}" if parts else 'owner unknown'
+
+
+def bounded_stack_entries(entries, limit=PENDING_STACK_LIST_LIMIT):
+    shown, used = [], 0
+    for entry in entries:
+        if shown and used + len(entry) > limit:
+            break
+        shown.append(entry)
+        used += len(entry) + 2
+    hidden = len(entries) - len(shown)
+    return '; '.join(shown) + (f'; and {hidden} more stack(s)' if hidden else '')
+
+
+def stack_reset_is_safe(repo_root, published_stack, local_stack):
+    return changed_snapshot_fields(published_stack, local_stack) == ['commits'] and all(
+        commit_exists(repo_root, commit) for commit in published_stack.get('commits') or []
+    )
+
+
+def missing_declared_stacks_message(repo_root, manifest_path, manifest, missing):
+    config = coordination_config(manifest) if coordination_is_active(manifest) else None
+    published = local = tip = None
+    if config:
+        try:
+            observed = read_remote_coordination_state(
+                repo_root, config, fetch=True, local_manifest_version=manifest['version']
+            )
+            tip = observed['tip']
+            published = stack_snapshot_map((observed.get('state') or {}).get('manifest') or {})
+            local = stack_snapshot_map(coordination_manifest_snapshot(manifest, repo_root))
+        except SyncwheelError:
+            config = published = None
+    entries = []
+    for stack_id, commits in missing.items():
+        status = ''
+        if published is not None:
+            status = (
+                'published, ' if published.get(stack_id) == local.get(stack_id)
+                else 'local proposal, '
+            )
+        owner = format_stack_owner(stack_owner_summary(
+            repo_root, manifest_path, config, stack_id, state_tip=tip
+        ))
+        hidden = len(commits) - PENDING_STACK_COMMIT_LIMIT
+        shas = ','.join(commits[:PENDING_STACK_COMMIT_LIMIT]) + (
+            f' and {hidden} more' if hidden > 0 else ''
+        )
+        entries.append(f'{stack_id} ({status}missing {shas}; {owner})')
+    return (
+        bounded_stack_entries(entries)
+        + '. The owner of each listed stack must publish or reset it; '
+        'run syncwheel handoff for details'
+    )
+
+
+def handoff_misalignment_detail(repo_root, manifest_path, manifest, config, observed):
+    published = (observed.get('state') or {}).get('manifest')
+    try:
+        local = coordination_manifest_snapshot(manifest, repo_root)
+    except SyncwheelError:
+        return ''
+    if local == published:
+        return (
+            ': the local integration control manifest is not published; run '
+            'syncwheel int rebuild, then syncwheel int push'
+        )
+    diff = local_proposal_diff(local, published)
+    pending = [*diff['added'], *diff['changed']]
+    if not pending and not diff['removed'] and not diff['integration']:
+        return (
+            ': the local manifest differs from the published state outside its stack '
+            'list; run syncwheel handoff for details'
+        )
+    entries = []
+    for stack_id in [*pending, *diff['removed']]:
+        change = (
+            f"changed {', '.join(diff['changed'][stack_id])}" if stack_id in diff['changed']
+            else 'added' if stack_id in diff['added'] else 'published but absent locally'
+        )
+        owner = format_stack_owner(stack_owner_summary(
+            repo_root, manifest_path, config, stack_id, state_tip=observed.get('tip')
+        ))
+        entries.append(f'{stack_id} ({change}; {owner})')
+    listed = bounded_stack_entries(entries)
+    if diff['integration']:
+        listed += f"; integration changed: {', '.join(diff['integration'])}"
+    remedy = '. The owner of each listed stack must publish or reset it; run syncwheel handoff for details'
+    published_stacks = stack_snapshot_map(published or {})
+    local_stacks = stack_snapshot_map(local)
+    resettable = [
+        f'syncwheel stack set {stack_id} --published' for stack_id in diff['changed']
+        if stack_reset_is_safe(repo_root, published_stacks[stack_id], local_stacks[stack_id])
+    ]
+    if resettable:
+        remedy += '; to drop a local commit change, run ' + bounded_stack_entries(
+            resettable, PENDING_RESET_LIST_LIMIT
+        )
+    return ': unpublished local proposal: ' + listed + remedy
+
+
 def snapshot_globals(snapshot):
     return {
         'version': snapshot.get('version'),
@@ -13941,6 +14181,7 @@ def validate_coordination_publication_base(
     state_transition=None,
     remedy_stack=None,
     creation_remedy=False,
+    manifest_path=None,
 ):
     """Fail closed when a stale manifest would erase or overwrite published state."""
     state = expected.get('state') if expected else None
@@ -14164,8 +14405,18 @@ def validate_coordination_publication_base(
             continue
         if stack_id not in changed_stack_refs:
             if stack_id != transition_stack:
+                owner = format_stack_owner(stack_owner_summary(
+                    repo_root, manifest_path, config, stack_id,
+                    state_tip=expected.get('tip'),
+                ))
+                advice = (
+                    f'drop the local change with syncwheel stack set {stack_id} --published'
+                    if stack_reset_is_safe(repo_root, remote_stack, local_stack)
+                    else 'the owner must publish or reset it; run syncwheel handoff for details'
+                )
                 raise SyncwheelError(
-                    f'{stack_id}: local manifest differs from published state without publishing its managed branch'
+                    f'{stack_id}: local manifest differs from published state without '
+                    f'publishing its managed branch ({owner}); {advice}'
                 )
             continue
 
@@ -15208,6 +15459,7 @@ def coordinated_publish_cycle(
         state_transition=state_transition,
         remedy_stack=remedy_stack,
         creation_remedy=creation_remedy,
+        manifest_path=manifest_path,
     )
     for ref, sha in changed_refs.items():
         if not sha:
@@ -15800,6 +16052,9 @@ def command_handoff(args):
                     else 'local_proposal_differs'
                 )
             ),
+            'local_proposal': (
+                local_proposal_diff(local_snapshot, state.get('manifest')) if state else None
+            ),
             'ownership_conflicts': ownership,
             'pending_merge': local_coordination.get('pending_merge'),
             'locks': local_coordination.get('locks') or {},
@@ -15815,6 +16070,9 @@ def command_handoff(args):
         if coordination.get('mode') == 'active-active':
             print(f"state: {coordination['state_status']} ({coordination.get('state_tip') or 'none'})")
             print(f"manifest relation: {coordination['manifest_relation']}")
+            if coordination['local_proposal']:
+                for line in local_proposal_lines(coordination['local_proposal']):
+                    print(f'  {line}')
             print(f"ownership conflicts: {len(coordination['ownership_conflicts'])}")
             print(f"gc candidates: {len(coordination['gc']['candidates'])}")
     has_ownership_conflict = bool(output['coordination'].get('ownership_conflicts'))
@@ -17810,8 +18068,11 @@ def replay_step(kind, argv=None, env=None, render=None):
     }
 
 
-def replay_exec_step(argv, env=None):
-    return replay_step('exec', argv=argv, env=env, render=quoted(argv))
+def replay_exec_step(argv, env=None, stack_id=None):
+    step = replay_step('exec', argv=argv, env=env, render=quoted(argv))
+    if stack_id is not None:
+        step['stack_id'] = stack_id
+    return step
 
 
 def replay_shell_step(render, **details):
@@ -18017,6 +18278,7 @@ def replay_plan(repo_root, manifest, target, mode):
         'emit_output': not projection,
     }
     steps = []
+    stacks = {}
     if projection:
         if mode != 'desk' or worktree is None:
             raise SyncwheelError('tree projection requires a desk worktree')
@@ -18094,21 +18356,23 @@ def replay_plan(repo_root, manifest, target, mode):
                 replay_commit_env(repo_root, commit),
             ))
     elif integration.get('strategy', 'cherry-pick') == 'cherry-pick':
-        stacks_by_id = stack_map(manifest)
+        stacks_by_id = stacks = stack_map(manifest)
         for stack_id in integration['stacks']:
             for commit in stack_integration_base_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
                     [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                     replay_commit_env(repo_root, commit),
+                    stack_id=stack_id,
                 ))
         for stack_id in integration['stacks']:
             for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
                     [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
                     replay_commit_env(repo_root, commit),
+                    stack_id=stack_id,
                 ))
     elif integration.get('strategy') == 'merge-stacks':
-        stacks_by_id = stack_map(manifest)
+        stacks_by_id = stacks = stack_map(manifest)
         stack_ref_overrides = target.get('stack_ref_overrides') or {}
         for stack_id in integration['stacks']:
             stack = stacks_by_id[stack_id]
@@ -18123,12 +18387,14 @@ def replay_plan(repo_root, manifest, target, mode):
                     f"Merge stack '{stack_id}' into {branch}",
                 ],
                 replay_commit_env(repo_root, stack_ref),
+                stack_id=stack_id,
             ))
         for stack_id in integration['stacks']:
             for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
                 steps.append(replay_exec_step(
                     [*prefix, 'cherry-pick', commit],
                     replay_commit_env(repo_root, commit),
+                    stack_id=stack_id,
                 ))
     else:
         raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
@@ -18146,6 +18412,7 @@ def replay_plan(repo_root, manifest, target, mode):
         'target': plan_target,
         'steps': steps,
         'fallback_from': None,
+        'stacks': stacks,
     }
 
 
@@ -18167,6 +18434,57 @@ def bind_ephemeral_worktree(plan, worktree):
     return {**plan, 'target': target, 'steps': steps}
 
 
+def replay_stacks_touching(repo_root, steps, stack_id, paths):
+    """Other stacks whose already replayed commits change any of ``paths``."""
+    touching = []
+    for step in steps:
+        other = step.get('stack_id')
+        if other in (None, stack_id) or other in touching or 'cherry-pick' not in step['argv']:
+            continue
+        if set(commit_changed_files(repo_root, step['argv'][-1])) & set(paths):
+            touching.append(other)
+    return touching
+
+
+def integration_replay_step_failure(repo_root, plan, index, exc):
+    target = plan['target']
+    step = plan['steps'][index]
+    stack_id = step['stack_id']
+    label = 'integration projection' if target.get('return_tree') else 'integration replay'
+    base = target['base']
+    argv = step['argv']
+    commit = argv[-1]
+    short = commit_short_sha(repo_root, commit)
+    if stack_content_absorbed_at(repo_root, plan['stacks'][stack_id], base):
+        return SyncwheelError(
+            f'{label}: stack {stack_id} is already contained in {base} (stopped at '
+            f'commit {short}); close it with syncwheel stack close {stack_id} '
+            '--reason absorbed, then retry'
+        )
+    command_cwd = git_command_cwd(repo_root, argv)
+    merge_base = f"{commit}^{argv[argv.index('-m') + 1] if '-m' in argv else ''}"
+    onto_head = git(
+        command_cwd, 'merge-tree', '--write-tree', f'--merge-base={merge_base}',
+        'HEAD', commit, check=False,
+    )
+    if onto_head.returncode == 1:
+        paths = merge_tree_conflict_paths(onto_head.stdout)
+    elif onto_head.returncode == 0 and onto_head.stdout.split()[:1] == [ref_tree(command_cwd, 'HEAD')]:
+        paths = commit_changed_files(repo_root, commit)
+    else:
+        paths = []
+    others = replay_stacks_touching(repo_root, plan['steps'][:index], stack_id, paths)
+    detail = (
+        f"stack(s) {', '.join(others)} already changed {', '.join(paths)}" if others
+        else f"conflict in {', '.join(paths)}" if onto_head.returncode == 1 and paths
+        else (str(exc).splitlines() or ['replay failed'])[0]
+    )
+    return SyncwheelError(
+        f'{label}: stack {stack_id} commit {short} does not replay onto {base} '
+        f'({detail})\nRetry with a desk worktree:\n  {replay_conflict_retry_command(target)}'
+    )
+
+
 def execute_replay_steps(repo_root, plan):
     """Execute an already-materialized replay plan."""
     target = plan['target']
@@ -18182,7 +18500,7 @@ def execute_replay_steps(repo_root, plan):
     }
     cleanup_worktree = target['worktree'] if target.get('return_tree') else None
     try:
-        for step in plan['steps']:
+        for index, step in enumerate(plan['steps']):
             if step['kind'] == 'exec':
                 argv = step['argv']
                 env = step['env']
@@ -18194,7 +18512,18 @@ def execute_replay_steps(repo_root, plan):
                     if branch_contains(command_cwd, 'HEAD', argv[-1]):
                         continue
                 effective_argv = argv if env is not None else with_git_identity(repo_root, argv)
-                run(effective_argv, cwd=repo_root, env=env)
+                try:
+                    run(effective_argv, cwd=repo_root, env=env)
+                except SyncwheelError as exc:
+                    if not (
+                        target.get('skip_contained')
+                        and step.get('stack_id')
+                        and 'cherry-pick' in argv
+                    ):
+                        raise
+                    raise integration_replay_step_failure(
+                        repo_root, plan, index, exc
+                    ) from exc
             elif step['kind'] == 'shell':
                 process_env = managed_process_env(step['env'])
                 result_shell = subprocess.run(
@@ -23141,12 +23470,34 @@ def stack_closed_payload(intent, coordination_state=None, recovered=False):
     }
 
 
-def remote_first_close_failure(stack_id, exc):
+def remote_first_close_failure(repo_root, manifest, stack_id, exc, kind='remote-first', retry=None):
+    config = coordination_config(manifest)
+    if config and coordination_remote_is_reachable(repo_root, config['remote']):
+        return SyncwheelError(str(exc))
     return SyncwheelError(
-        f'{stack_id}: remote-first close could not inspect the coordination remote; '
-        f'restore remote access, then retry:\n  '
-        f'syncwheel stack close {stack_id} --force'
+        f'{stack_id}: {kind} close could not inspect the coordination remote: {exc}\n'
+        'Restore remote access, then retry:\n  '
+        + (retry or f'syncwheel stack close {stack_id} --force')
     )
+
+
+def manifest_scope_options(args):
+    options = []
+    for flag, value in (
+        ('--repo', args.repo), ('--manifest', args.manifest), ('--personal', args.personal),
+    ):
+        if value:
+            options.extend([flag, value])
+    return options
+
+
+def stack_close_command(args):
+    command = ['syncwheel', 'stack', 'close', args.stack]
+    if args.reason:
+        command.extend(['--reason', args.reason])
+    if args.force:
+        command.append('--force')
+    return quoted([*command, *manifest_scope_options(args)])
 
 
 def abandon_superseded_stack_close(repo_root, manifest_path, pending):
@@ -23159,61 +23510,105 @@ def abandon_superseded_stack_close(repo_root, manifest_path, pending):
             'operation_token': pending['operation_token'],
             'reason': 'close_superseded',
             'status': 'close_superseded',
+            'close_reason': pending.get('reason'),
         },
         manifest_path,
     )
 
 
-def supersede_unpublished_stack_close(repo_root, manifest, manifest_path, stack, pending):
-    """Retire an obsolete close intent only while its stack is still published.
+def abandoned_close_reason(repo_root, manifest_path, stack_id):
+    """The reason of an abandoned close this stack never replaced with a new one."""
+    reason = None
+    for event in load_ledger_events(repo_root, manifest_path):
+        payload = event.get('payload') or {}
+        if payload.get('stack') != stack_id:
+            continue
+        if event.get('type') == 'stack_close_abandoned':
+            reason = payload.get('close_reason')
+        elif event.get('type') in {'stack_close_intent', 'stack_closed'}:
+            reason = None
+    return reason
 
-    A different close reason is a new operation. Reusing the old token would
-    attach its receipt to a different manifest and proof. Inspect both remote
-    histories before retiring it; an unreachable or inconsistent remote stops.
-    """
-    if coordination_is_active(manifest):
-        config = coordination_config(manifest)
-        observed = read_remote_coordination_state(
-            repo_root, config, fetch=True, local_manifest_version=manifest['version']
-        )
-        state = observed.get('state') or {}
-        closed_ref = pending.get('closed_ref')
-        if closed_ref != f"refs/heads/{stack['branch']}":
-            raise SyncwheelError('pending close names a different stack branch')
-        token = pending['operation_token']
-        for commit in coordination_state_commits_since(repo_root, observed['tip'], None):
-            document = coordination_state_document_from_commit(repo_root, commit)
-            if document is None:
-                raise SyncwheelError('pending close cannot be superseded: state history is unreadable')
-            if document.get('operation_token') == token:
-                raise SyncwheelError('pending close reached the coordination remote; recover it instead')
-        remote_stack = stack_snapshot_map(state.get('manifest') or {}).get(stack['id'])
-        if not remote_stack or remote_stack.get('branch') != stack['branch']:
-            raise SyncwheelError('pending close cannot be superseded: remote stack is absent or changed')
-        claim_ref = coordination_claim_ref(closed_ref)
-        refs = remote_ref_tips(repo_root, config['remote'], [closed_ref, claim_ref])
-        claim_tip = refs[claim_ref]
-        if not refs[closed_ref] or not claim_tip or state.get('claims', {}).get(closed_ref) != claim_tip:
-            raise SyncwheelError('pending close cannot be superseded: remote ref or claim is inconsistent')
-        claim = fetch_coordination_claim(repo_root, config['remote'], claim_ref, claim_tip)
-        if (claim.get('coordination_id') != config['id']
-                or claim.get('source_ref') != closed_ref
-                or claim.get('closed') is True):
-            raise SyncwheelError('pending close cannot be superseded: remote claim is closed or foreign')
-        if not commit_exists(repo_root, claim_tip):
-            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], claim_ref, check=False)
-            if fetched.returncode != 0 or not commit_exists(repo_root, claim_tip):
-                raise SyncwheelError('pending close cannot be superseded: claim history is unavailable')
-        history = git(repo_root, 'rev-list', claim_tip, check=False)
-        if history.returncode != 0:
-            raise SyncwheelError('pending close cannot be superseded: claim history is unreadable')
-        for commit in history.stdout.split():
-            old_claim = coordination_claim_from_commit(repo_root, commit)
-            if old_claim.get('operation_token') == token:
-                raise SyncwheelError('pending close reached the coordination remote; recover it instead')
-        if remote_stack.get('commits') != stack.get('commits'):
-            raise SyncwheelError('pending close cannot be superseded: remote stack generation changed')
+
+def supersede_unpublished_stack_close(repo_root, manifest_path, pending):
+    """Retire an obsolete close intent in a repository without coordination."""
     abandon_superseded_stack_close(repo_root, manifest_path, pending)
+
+
+def stack_recreated_after_close_intent(repo_root, manifest_path, pending):
+    """Whether the stack id was declared again after this close intent was journaled."""
+    journaled = False
+    for event in load_ledger_events(repo_root, manifest_path):
+        payload = event.get('payload') or {}
+        if (
+            event.get('type') == 'stack_close_intent'
+            and payload.get('operation_token') == pending['operation_token']
+        ):
+            journaled = True
+        elif (
+            journaled and event.get('type') == 'manifest_saved'
+            and payload.get('reason') == 'stack_create'
+            and (payload.get('context') or {}).get('stack') == pending['stack']
+        ):
+            return True
+    return False
+
+
+def published_close_reached_remote(repo_root, config, observed, pending):
+    """Whether a close token is in the state history or its tombstone claim history."""
+    token = pending['operation_token']
+    recorded_tip = pending.get('expected_coordination_state_tip')
+    if recorded_tip and token in {
+        coordination_commit_operation_token(repo_root, commit)
+        for commit in coordination_state_commits_since(repo_root, observed['tip'], recorded_tip)
+    }:
+        return True
+    closed_ref = pending['closed_ref']
+    claim_ref = coordination_claim_ref(closed_ref)
+    claim_tip = remote_ref_tips(repo_root, config['remote'], [claim_ref])[claim_ref]
+    return coordination_claim_history_carries_token(
+        repo_root, config, claim_tip, closed_ref, token
+    )
+
+
+def abandon_unlanded_stack_close(repo_root, config, manifest_path, pending, observed):
+    """Retire a close token that never landed; the retry writes a fresh intent.
+
+    Refuses when the stack's published entry changed since the recorded state, so
+    an old close never acts on a stack generation it did not see.
+    """
+    stack_id = pending['stack']
+    recorded_tip = pending.get('expected_coordination_state_tip')
+    try:
+        unchanged = recorded_tip is None or (
+            stack_snapshot_map(coordination_state_from_commit(
+                repo_root, recorded_tip, config['id'], config.get('claims', 'advisory'),
+            ).get('manifest') or {}).get(stack_id)
+            == stack_snapshot_map((observed.get('state') or {}).get('manifest') or {}).get(stack_id)
+        )
+    except SyncwheelError:
+        unchanged = False
+    abandon_superseded_stack_close(repo_root, manifest_path, pending)
+    if not unchanged:
+        raise SyncwheelError(
+            f'{stack_id}: close_superseded; its published entry changed after the '
+            'interrupted close, so that close was abandoned and this retry changed '
+            'neither the manifest nor the remote; review syncwheel handoff, then '
+            'run the close again'
+        )
+
+
+def scoped_close_publication_manifest(manifest, snapshot, stack_id):
+    """The published snapshot without one stack; local proposals stay local."""
+    publication = apply_coordination_snapshot(manifest, snapshot)
+    publication['stacks'] = [
+        item for item in publication['stacks'] if item['id'] != stack_id
+    ]
+    publication['integration']['stacks'] = [
+        item for item in publication['integration'].get('stacks', [])
+        if item != stack_id
+    ]
+    return publication
 
 
 def published_close_tombstone(repo_root, manifest, pending):
@@ -23245,19 +23640,28 @@ def published_close_tombstone(repo_root, manifest, pending):
 
 
 def recover_pending_stack_close(repo_root, manifest, manifest_path, pending):
+    state_tip = pending.get('coordination_state')
     if manifest_digest(manifest) != pending.get('manifest_digest_after'):
-        return False
-    published = published_close_tombstone(repo_root, manifest, pending)
-    if pending.get('remote_first') and not published:
-        return False
+        # the manifest moved on after the close saved it: only a landed close,
+        # proved on the remote, can still be terminalized
+        if pending.get('remote_first') or not coordination_is_active(manifest):
+            return False
+        config = coordination_config(manifest)
+        observed = read_remote_coordination_state(
+            repo_root, config, fetch=True, local_manifest_version=manifest['version']
+        )
+        if not published_close_reached_remote(repo_root, config, observed, pending):
+            return False
+        state_tip = observed['tip']
+    else:
+        published = published_close_tombstone(repo_root, manifest, pending)
+        if pending.get('remote_first') and not published:
+            return False
+        state_tip = (published or {}).get('state_tip') or state_tip
     append_ledger_event(
         repo_root,
         'stack_closed',
-        stack_closed_payload(
-            pending,
-            coordination_state=(published or {}).get('state_tip') or pending.get('coordination_state'),
-            recovered=True,
-        ),
+        stack_closed_payload(pending, coordination_state=state_tip, recovered=True),
         manifest_path,
     )
     return True
@@ -23285,7 +23689,9 @@ def command_stack_close(args):
                     print(f'{args.stack}: recovered interrupted stack close')
                     return 0
             except SyncwheelError as exc:
-                raise remote_first_close_failure(args.stack, exc) from exc
+                raise remote_first_close_failure(
+                    repo_root, manifest, args.stack, exc, retry=stack_close_command(args),
+                ) from exc
             raise SyncwheelError(
                 f'{args.stack}: interrupted stack close found, but the manifest no longer '
                 'matches its intended result; inspect the stack_close_intent ledger event '
@@ -23312,7 +23718,56 @@ def command_stack_close(args):
             + '; close or update those dependent stacks first'
         )
 
-    reason = args.reason or (pending_close.get('reason') if pending_close else 'closed')
+    recovered_reason = (
+        None if args.reason or pending_close
+        else abandoned_close_reason(repo_root, manifest_path, args.stack)
+    )
+    reason = (
+        args.reason
+        or (pending_close.get('reason') if pending_close else recovered_reason)
+        or 'closed'
+    )
+    landed_close = None
+    published_observation = None
+    if pending_close and coordination_is_active(manifest) and not pending_close.get('remote_first'):
+        config = coordination_config(manifest)
+        try:
+            published_observation = read_remote_coordination_state(
+                repo_root, config, fetch=True, local_manifest_version=manifest['version'],
+            )
+        except SyncwheelError as exc:
+            raise remote_first_close_failure(
+                repo_root, manifest, args.stack, exc,
+                kind='published', retry=stack_close_command(args),
+            ) from exc
+        if published_close_reached_remote(
+            repo_root, config, published_observation, pending_close
+        ):
+            published_entry = stack_snapshot_map(
+                (published_observation.get('state') or {}).get('manifest') or {}
+            ).get(args.stack)
+            local_entry = stack_snapshot_map(
+                coordination_manifest_snapshot(manifest, repo_root)
+            ).get(args.stack)
+            if (
+                published_entry is not None and published_entry == local_entry
+            ) or stack_recreated_after_close_intent(repo_root, manifest_path, pending_close):
+                # this stack id was declared again after the close landed: that
+                # close is done, and this one is a new operation
+                append_ledger_event(
+                    repo_root,
+                    'stack_closed',
+                    stack_closed_payload(
+                        pending_close,
+                        coordination_state=published_observation['tip'],
+                        recovered=True,
+                    ),
+                    manifest_path,
+                )
+                pending_close = None
+                reason = args.reason or 'closed'
+            else:
+                landed_close = published_observation
     pending_remote_state = None
     if (
         pending_close
@@ -23338,7 +23793,9 @@ def command_stack_close(args):
                 else None
             )
         except SyncwheelError as exc:
-            raise remote_first_close_failure(args.stack, exc) from exc
+            raise remote_first_close_failure(
+                repo_root, manifest, args.stack, exc, retry=stack_close_command(args),
+            ) from exc
         if published:
             require_manifest_transaction_current(manifest_path)
             save_manifest(manifest_path, recovered_manifest)
@@ -23377,7 +23834,9 @@ def command_stack_close(args):
                 repo_root, config['remote'], generation_refs
             )
         except SyncwheelError as exc:
-            raise remote_first_close_failure(args.stack, exc) from exc
+            raise remote_first_close_failure(
+                repo_root, manifest, args.stack, exc, retry=stack_close_command(args),
+            ) from exc
         if current_refs != generation_refs:
             abandon_superseded_stack_close(
                 repo_root, manifest_path, pending_close
@@ -23388,17 +23847,12 @@ def command_stack_close(args):
                 'the manifest nor the remote'
             )
     delivery_tip = None
-    if reason == 'absorbed':
+    if reason == 'absorbed' and landed_close is None:
         delivery_base = f"{stack['target_remote']}/{stack['target_branch']}"
-        projected_tip = composed_stack_projection_tip(repo_root, stack)
         delivery_tip = fetch_observed_delivery_tip(
             repo_root, stack['target_remote'], stack['target_branch']
         )
-        if not (
-            projected_tip and stack_content_is_present_at_delivery_tip(
-                repo_root, stack, delivery_tip, projected_tip=projected_tip,
-            )
-        ) and not merged_stack_tip_matches_delivery(repo_root, stack, delivery_tip):
+        if not stack_content_absorbed_at(repo_root, stack, delivery_tip):
             raise SyncwheelError(
                 f"{args.stack}: cannot close as absorbed: content is not reachable from delivery base "
                 f"{delivery_base} at {delivery_tip}; rebuilding integration projection "
@@ -23408,7 +23862,9 @@ def command_stack_close(args):
 
     # The stack's pinned base is historical; delivery ancestry belongs to the
     # current target ref, observed and fetched for this close attempt.
-    needs_delivery_ancestry = reason == 'merged' or not args.force
+    needs_delivery_ancestry = (
+        landed_close is None and (reason == 'merged' or not args.force)
+    )
     ancestry_ref = (
         delivery_tip if reason == 'absorbed' else
         fetch_observed_delivery_tip(repo_root, stack['target_remote'], stack['target_branch'])
@@ -23420,7 +23876,7 @@ def command_stack_close(args):
         if reason == 'absorbed' or needs_delivery_ancestry else ancestry_ref
     )
     unmerged = []
-    for sha in stack.get('commits') or []:
+    for sha in (stack.get('commits') or []) if landed_close is None else []:
         result = git(repo_root, 'merge-base', '--is-ancestor', sha, ancestry_ref, check=False)
         if result.returncode != 0:
             unmerged.append(sha)
@@ -23438,7 +23894,10 @@ def command_stack_close(args):
             f"without ancestry or absorption proof."
         )
 
-    merged_note = '' if unmerged else f' (all commits confirmed in {ancestry_label})'
+    merged_note = (
+        '' if unmerged or landed_close is not None
+        else f' (all commits confirmed in {ancestry_label})'
+    )
 
     # Remove from stacks list.
     manifest['stacks'] = [s for s in manifest['stacks'] if s['id'] != args.stack]
@@ -23448,20 +23907,19 @@ def command_stack_close(args):
             s for s in manifest['integration']['stacks'] if s != args.stack
         ]
 
-    if pending_close is None and args.reason is None:
+    if pending_close is None and args.reason is None and recovered_reason is None:
         reason = 'merged' if not unmerged else 'closed'
     if pending_close and pending_close.get('remote_first') and reason != pending_close.get('reason'):
         raise SyncwheelError(
             f'{args.stack}: interrupted remote-first close is bound to reason '
             f'{pending_close.get("reason")!r}; recover that operation before changing reason'
         )
-    if (pending_close and not pending_close.get('remote_first') and (
+    if (pending_close and not pending_close.get('remote_first')
+            and not coordination_is_active(manifest) and (
         reason != pending_close.get('reason')
         or pending_close.get('manifest_digest_after') != manifest_digest(manifest)
     )):
-        supersede_unpublished_stack_close(
-            repo_root, original_manifest, manifest_path, stack, pending_close
-        )
+        supersede_unpublished_stack_close(repo_root, manifest_path, pending_close)
         pending_close = None
     coordination_result = None
     config = None
@@ -23483,16 +23941,14 @@ def command_stack_close(args):
                 local_manifest_version=manifest['version'],
             )
             published_state = expected_state.get('state') or {}
-            published_stacks = stack_snapshot_map(published_state.get('manifest') or {})
-            if args.stack not in published_stacks:
-                if published_state.get('manifest'):
-                    publication_manifest = apply_coordination_snapshot(
-                        manifest, published_state['manifest']
-                    )
-                else:
-                    publication_manifest = copy.deepcopy(manifest)
-                    publication_manifest['stacks'] = []
-                    publication_manifest['integration']['stacks'] = []
+            if published_state.get('manifest'):
+                publication_manifest = scoped_close_publication_manifest(
+                    manifest, published_state['manifest'], args.stack
+                )
+            else:
+                publication_manifest = copy.deepcopy(manifest)
+                publication_manifest['stacks'] = []
+                publication_manifest['integration']['stacks'] = []
             managed = list(dict.fromkeys([
                 *managed_ref_names(publication_manifest), closed_ref,
             ]))
@@ -23512,7 +23968,56 @@ def command_stack_close(args):
                         f'{claim["coordination_id"]}; refusing close'
                     )
         except SyncwheelError as exc:
-            raise remote_first_close_failure(args.stack, exc) from exc
+            raise remote_first_close_failure(
+                repo_root, manifest, args.stack, exc, retry=stack_close_command(args),
+            ) from exc
+    elif coordination_is_active(manifest):
+        config = coordination_config(manifest)
+        expected_state = published_observation
+        if expected_state is None:
+            try:
+                expected_state = read_remote_coordination_state(
+                    repo_root, config, fetch=True,
+                    local_manifest_version=manifest['version'],
+                )
+            except SyncwheelError as exc:
+                raise remote_first_close_failure(
+                    repo_root, manifest, args.stack, exc,
+                    kind='published', retry=stack_close_command(args),
+                ) from exc
+        if landed_close is not None:
+            if reason != pending_close['reason']:
+                raise SyncwheelError(
+                    f"{args.stack}: the interrupted close already reached the coordination "
+                    f"remote with reason {pending_close['reason']!r}; retry with "
+                    f"--reason {pending_close['reason']}"
+                )
+            coordination_result = {
+                'status': 'already_published', 'state_tip': expected_state['tip'],
+            }
+        elif pending_close:
+            abandon_unlanded_stack_close(
+                repo_root, config, manifest_path, pending_close, expected_state
+            )
+            pending_close = None
+        if coordination_result is None and expected_state.get('state'):
+            publication_manifest = scoped_close_publication_manifest(
+                manifest, expected_state['state']['manifest'], args.stack
+            )
+    if publication_manifest is not manifest:
+        published_users = sorted({
+            *channel_ids_referencing_stack(publication_manifest, args.stack),
+            *(
+                item['id'] for item in publication_manifest['stacks']
+                if args.stack in item.get('depends_on', [])
+            ),
+        })
+        if published_users:
+            raise SyncwheelError(
+                f'stack {args.stack} is still used by published channel(s) or stack(s): '
+                + ', '.join(published_users)
+                + '; run syncwheel handoff and update them before closing'
+            )
     operation_token = (
         pending_close.get('operation_token') if pending_close else str(uuid.uuid4())
     )
@@ -23535,6 +24040,7 @@ def command_stack_close(args):
             coordination_manifest_snapshot(publication_manifest, repo_root)
         ),
         'delivery_tip': delivery_tip,
+        'actor': governed_worktree_owner(),
     }
     if pending_close is None:
         append_ledger_event(
@@ -23543,7 +24049,7 @@ def command_stack_close(args):
     else:
         close_intent = pending_close
     require_manifest_transaction_current(manifest_path)
-    if coordination_is_active(manifest):
+    if coordination_is_active(manifest) and coordination_result is None:
         config = config or coordination_config(manifest)
         try:
             coordination_result = coordinated_publish(
@@ -23572,9 +24078,12 @@ def command_stack_close(args):
                 publication_manifest=publication_manifest,
             )
         except SyncwheelError as exc:
+            retry = (
+                '' if 'Retry:\n' in str(exc)
+                else f' Retry:\n  {stack_close_command(args)}'
+            )
             raise SyncwheelError(
-                f'{exc}\nRemote-first close did not save the manifest. Retry:\n  '
-                f'syncwheel stack close {args.stack} --force'
+                f'{exc}\nRemote-first close did not save the manifest.{retry}'
             ) from exc
     save_manifest(manifest_path, manifest)
     close_intent['coordination_state'] = (
@@ -23811,6 +24320,7 @@ def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
         {source_ref: planned_tip},
         remedy_stack=stack['id'],
         creation_remedy=True,
+        manifest_path=manifest_path,
     )
     atomic_push_capability_probe(repo_root, config['remote'])
     return {
@@ -23861,6 +24371,7 @@ def command_stack_create(args):
                         'branch': existing['branch'],
                         'operation_token': pending_operation,
                         'recovered': True,
+                        'actor': governed_worktree_owner(),
                     },
                 ),
                 manifest_path,
@@ -23954,6 +24465,7 @@ def command_stack_create(args):
                         'operation_token': operation_token,
                         'coordination_state': coordination_result.get('state_tip'),
                         'recovered': True,
+                        'actor': governed_worktree_owner(),
                     },
                 )
                 capture_governed_worktrees_for_stack(repo_root, manifest, args.stack)
@@ -24034,6 +24546,7 @@ def command_stack_create(args):
             'branch': branch,
             'operation_token': operation_token,
             'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+            'actor': governed_worktree_owner(),
         },
     )
     capture_governed_worktrees_for_stack(
@@ -24368,6 +24881,7 @@ def adopt_equivalent_remote_stack_promotion(
             'branch': to_branch,
             'coordination_state': proof['state_tip'],
             'adopted': True,
+            'actor': governed_worktree_owner(),
         },
         manifest_path,
     )
@@ -24442,6 +24956,7 @@ def recover_pending_stack_promote(
             'branch': stack['branch'],
             'coordination_state': result.get('state_tip'),
             'recovered': True,
+            'actor': governed_worktree_owner(),
         },
         manifest_path,
     )
@@ -24705,6 +25220,7 @@ def command_stack_promote(args):
             'from_branch': from_branch,
             'branch': to_branch,
             'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
+            'actor': governed_worktree_owner(),
         },
         manifest_path,
     )
@@ -24928,6 +25444,12 @@ def command_stack_set(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
+    if args.published:
+        if args.specs:
+            raise SyncwheelError('stack set --published takes no commit specs')
+        return reset_stack_to_published(repo_root, manifest, manifest_path, stack, args)
+    if not args.specs:
+        raise SyncwheelError('stack set requires commit specs, or --published')
     commits = []
     for spec in args.specs:
         commits.extend(commit_list_for_spec(repo_root, spec))
@@ -24937,9 +25459,71 @@ def command_stack_set(args):
         manifest_path,
         manifest,
         'stack_set',
-        {'stack': args.stack, 'branch': stack['branch']},
+        {'stack': args.stack, 'branch': stack['branch'], 'actor': governed_worktree_owner()},
     )
     print(f"{args.stack}: set {len(stack['commits'])} commits")
+    return 0
+
+
+def reset_stack_to_published(repo_root, manifest, manifest_path, stack, args):
+    if not coordination_is_active(manifest):
+        raise SyncwheelError('stack set --published requires active-active coordination')
+    config = coordination_config(manifest)
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version'],
+    )
+    snapshot = (observed.get('state') or {}).get('manifest') or {}
+    if stack['id'] not in stack_snapshot_map(snapshot):
+        raise SyncwheelError(
+            f"{stack['id']}: stack is not published, so there is no published entry to reset to"
+        )
+    local_entry = stack_snapshot_map(coordination_manifest_snapshot(manifest, repo_root))[stack['id']]
+    published_entry = stack_snapshot_map(snapshot)[stack['id']]
+    other_fields = [
+        field for field in changed_snapshot_fields(published_entry, local_entry)
+        if field != 'commits'
+    ]
+    if other_fields:
+        raise SyncwheelError(
+            f"{stack['id']}: local entry differs from the published one in "
+            f"{', '.join(other_fields)}; stack set --published only resets commits"
+        )
+    missing = [
+        commit for commit in published_entry['commits'] if not commit_exists(repo_root, commit)
+    ]
+    if missing:
+        git(repo_root, 'fetch', '--quiet', config['remote'], check=False)
+        missing = [commit for commit in missing if not commit_exists(repo_root, commit)]
+    if missing:
+        owner = format_stack_owner(stack_owner_summary(
+            repo_root, manifest_path, config, stack['id'], state_tip=observed['tip']
+        ))
+        raise SyncwheelError(
+            f"{stack['id']}: published commit(s) {', '.join(missing)} are not reachable "
+            f"from {config['remote']}; the owner must publish them ({owner})"
+        )
+    previous = list(stack['commits'])
+    stack['commits'] = list(published_entry['commits'])
+    save_manifest_with_ledger(
+        repo_root,
+        manifest_path,
+        manifest,
+        'stack_set',
+        {
+            'stack': stack['id'],
+            'branch': stack['branch'],
+            'published_state': observed['tip'],
+            'previous_commits': previous,
+            'actor': governed_worktree_owner(),
+        },
+    )
+    restore = quoted([
+        'syncwheel', 'stack', 'set', stack['id'],
+        *(previous or [f"{stack['base']}..{stack['base']}"]),
+        *manifest_scope_options(args),
+    ])
+    print(f"{stack['id']}: reset to the published entry ({len(stack['commits'])} commits)")
+    print(f'Restore the previous local commits with:\n  {restore}')
     return 0
 
 
@@ -25150,7 +25734,12 @@ def command_stack_add(args):
         manifest_path,
         manifest,
         'stack_add',
-        {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
+        {
+            'stack': args.stack,
+            'branch': stack['branch'],
+            'added_commits': added_commits,
+            'actor': governed_worktree_owner(),
+        },
     )
     capture_governed_worktrees_for_stack(
         repo_root,
@@ -25264,7 +25853,12 @@ def command_stack_capture_integration(args):
         manifest_path,
         manifest,
         'stack_capture_integration',
-        {'stack': args.stack, 'branch': stack['branch'], 'added_commits': added_commits},
+        {
+            'stack': args.stack,
+            'branch': stack['branch'],
+            'added_commits': added_commits,
+            'actor': governed_worktree_owner(),
+        },
     )
     capture_governed_worktrees_for_stack(
         repo_root,
@@ -25415,6 +26009,7 @@ def command_stack_push(args):
                     'coordination_status': result['status'],
                     'operation_token': publication_operation['operation_token'],
                     'recovered': bool(result.get('recovered')),
+                    'actor': governed_worktree_owner(),
                 },
                 manifest_path,
             )
@@ -25442,6 +26037,7 @@ def command_stack_push(args):
             'branch': stack['branch'],
             'remote': remote,
             'tip': ref_tip(repo_root, stack['branch']),
+            'actor': governed_worktree_owner(),
         },
         manifest_path,
     )
@@ -26312,6 +26908,7 @@ def command_reconcile(args):
                     'stack': stack['id'],
                     'branch': stack['branch'],
                     'tip': coordinated_refs[ref],
+                    'actor': governed_worktree_owner(),
                 })
                 continue
             remote = stack_push_remote(manifest, stack, args.remote)
@@ -26328,6 +26925,7 @@ def command_reconcile(args):
                     'branch': stack['branch'],
                     'remote': remote,
                     'tip': ref_tip(repo_root, stack['branch']),
+                    'actor': governed_worktree_owner(),
                 },
                 manifest_path,
             )
@@ -26599,6 +27197,7 @@ def command_reconcile(args):
                             'stack': stack['id'],
                             'branch': stack['branch'],
                             'tip': tip,
+                            'actor': governed_worktree_owner(),
                         })
                     elif ref == integration_ref:
                         coordinated_events.append({
@@ -28580,7 +29179,7 @@ class SyncwheelRevisionBackend:
                 'integration, stack, or channel branch'
             )
 
-    def _fresh_coordination_handoff(self, repo_root, manifest):
+    def _fresh_coordination_handoff(self, repo_root, manifest, manifest_path=None):
         if not coordination_is_active(manifest):
             return {'mode': 'disabled', 'stateTip': None, 'manifestDigest': None}
         config = coordination_config(manifest)
@@ -28612,6 +29211,9 @@ class SyncwheelRevisionBackend:
             if state.get('manifest_digest') != local_digest:
                 self._fail(
                     'active-active handoff manifest is not aligned with fresh coordination state'
+                    + handoff_misalignment_detail(
+                        repo_root, manifest_path, manifest, config, remote
+                    )
                 )
             if not coordination_state_matches_remote(repo_root, config, state):
                 self._fail(
@@ -28731,9 +29333,11 @@ class SyncwheelRevisionBackend:
         if missing_declared:
             self._fail(
                 'integration declared stack(s) are missing from integration: '
-                + '; '.join(
-                    f"{item['id']}=" + ','.join(item['missing_from_integration'])
-                    for item in missing_declared
+                + missing_declared_stacks_message(
+                    repo_root,
+                    manifest_path,
+                    manifest,
+                    {item['id']: item['missing_from_integration'] for item in missing_declared},
                 )
             )
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
@@ -28754,7 +29358,7 @@ class SyncwheelRevisionBackend:
                 self._fail('revision provider preflight has dirty owned paths: '
                            + ', '.join(sorted(forbidden)))
             self._validate_hashes(repo_root, request, 'before')
-        coordination = self._fresh_coordination_handoff(repo_root, manifest)
+        coordination = self._fresh_coordination_handoff(repo_root, manifest, manifest_path)
         remote_refs = self._remote_refs(repo_root)
         managed_local_refs = self._managed_local_refs(repo_root, manifest)
         ref_transaction_refs = dict(managed_local_refs)
@@ -31605,7 +32209,12 @@ def build_parser():
 
     stack_set_p = stack_sub.add_parser('set', parents=[common])
     stack_set_p.add_argument('stack')
-    stack_set_p.add_argument('specs', nargs='+')
+    stack_set_p.add_argument('specs', nargs='*')
+    stack_set_p.add_argument(
+        '--published',
+        action='store_true',
+        help="reset the stack's commits to its entry in the published coordination state",
+    )
     stack_set_p.set_defaults(func=command_stack_set)
 
     stack_resolve_p = stack_sub.add_parser(
@@ -32767,7 +33376,14 @@ def main():
         marker = raw_args.index('--')
         passthrough = raw_args[marker + 1:]
         raw_args = raw_args[:marker]
-    args = parser.parse_args(raw_args)
+    args, extras = parser.parse_known_args(raw_args)
+    if extras:
+        # argparse leaves specs after `stack set <id> --published` unparsed
+        if getattr(args, 'func', None) is not command_stack_set or any(
+            extra.startswith('-') for extra in extras
+        ):
+            parser.error('unrecognized arguments: ' + ' '.join(extras))
+        args.specs = [*args.specs, *extras]
     args.git_args = passthrough
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
