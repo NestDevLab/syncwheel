@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/half-state-coordination"
-  ],
-  "claimed_at": "2026-09-22T19:42:26+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-22T19:52:42+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "3758f4af-0d94-48ed-9617-4343979f6125",
-  "publication_scope": "promote:half-state-coordination",
+  "operation_token": "57ab1f62-86a7-4b12-9ffa-4d580995e97b",
+  "publication_scope": "close:half-state-coordination",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/half-state-coordination",
   "syncwheel_version": "0.43.31"
 }
