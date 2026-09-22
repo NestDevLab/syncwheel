@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.43.34 - 2026-09-22
+
+- Let revision-provider `recover` accept a benign Git stat refresh of a prepared journal the way `finalize` does. When the index still stages the same content, the match is recorded in `indexLeaseSemanticMatches` as `recovery preflight` and the one-time lease renewal stays unused. Only a real index change, or any byte change in a journal written before 0.43.31, spends that renewal, which now waits up to two seconds for a foreign `index.lock` before failing closed. This corrects the 0.43.31 note saying that recovering a prepared journal still fails at once on a foreign lock.
+- Let `recover` resume an interrupted index alignment after a tracked file's stat data changed. A rebuilt replacement index that differs from the journaled one only in stat data reuses the journaled backing file while it exists, or replaces the alignment record once the backing is gone. Both cases are recorded as `product alignment replay` or `control alignment replay`. Journals written before 0.43.31 stay byte-exact, a changed backing file or any staged content, mode, flag, stage, or path change still fails closed, and the real index is never refreshed or written to make a check pass.
+
 ## 0.43.33 - 2026-09-21
 
 - Stop minting a ref-move authorization for Git children that can never move a ref (`rev-parse`, `cat-file`, `ls-files`, `log`, `config --get` and similar read-only commands). Each authorization cost a synced file write plus a `rev-parse --git-common-dir`, so an `int rebuild` on a small repository spent most of its time on them: 5.6 s before, 1.9 s after. Every command that can commit or move a ref still gets its authorization exactly as before.

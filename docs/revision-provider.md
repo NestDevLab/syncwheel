@@ -246,12 +246,16 @@ and alignment checks come from `git write-tree` on a private copy of the
 observed index bytes, like the dirty-path observation.
 
 If index bytes change while the journal is still prepared and no repository
-effects have begun, explicit `recover` may still renew the byte lease once. It
-reruns the full preflight under the operation lock, compares every other
-recorded observation, requires a clean conflict-free index and no `index.lock`,
-and journals both index hashes before proceeding; the semantic digest is renewed
-from the same bytes. Recovery proves fresh baseline equivalence; it does not try
-to classify the cause of the byte change, and a second renewal is refused.
+effects have begun, explicit `recover` first checks the baseline lease like
+`finalize`: a byte or semantic match continues without renewal, and a semantic
+match is audited as `recovery preflight`. Only a semantic change, or any byte
+change in a journal without semantic leases, may renew the byte lease once. The
+renewal waits up to two seconds for a foreign `index.lock`, reruns the full
+preflight under the operation lock, compares every other recorded observation,
+requires a clean conflict-free index, and journals both index hashes before
+proceeding; the semantic digest is renewed from the same bytes. Recovery proves
+fresh baseline equivalence; it does not try to classify the cause of the byte
+change, and a second renewal is refused.
 
 For product and control alignment,
 the provider prepares and refreshes the complete replacement index separately,
@@ -263,14 +267,23 @@ that exact journaled lock. An unrelated lock is never removed. Because a plain
 `finalize` and `recover` and the alignment lock step wait up to two seconds in
 total for a foreign lock to disappear. Alignment rechecks the index lease after
 each wait before linking again. A foreign lock that outlives the wait causes a
-fail-closed rejection, and the one-time prepared lease renewal above still
-requires no `index.lock` at all. With the lock held, the provider rechecks the
+fail-closed rejection. With the lock held, the provider rechecks the
 predecessor index lease, atomically renames the replacement, and fsyncs the
 parent directory. A concurrent staged or index write is retained and the
 operation stops; it is never overwritten. The successfully installed hash and
 semantic digest are journaled as the predecessor for the next phase, including
 recovery after the narrow windows before rename and between rename and journal
 persistence.
+
+Recovery rebuilds the replacement index from the pinned commit, so a tracked
+file rewritten with identical bytes after an interrupted alignment changes only
+the rebuilt stat data. For a journal with semantic leases, a rebuild whose
+semantic digest matches the journaled backing file reuses the journaled bytes,
+and a rebuild whose backing file is already removed replaces the alignment
+ownership record, because that record no longer owns a file or `index.lock`.
+Both are audited as `<kind> alignment replay`. A changed backing file still
+fails closed, and journals without semantic leases keep the byte-exact record
+check.
 
 The draft projection never uses a worktree or `cherry-pick`. Syncwheel applies
 the product delta with `merge-tree` and routes only blob-reproducing results to

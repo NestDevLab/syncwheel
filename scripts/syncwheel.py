@@ -28393,14 +28393,24 @@ class SyncwheelRevisionBackend:
     def reprepare_index_lease(self, request, journal):
         """Recover one pre-effect index lease only after a fresh full preflight."""
         repo_root = self._repo_root(request)
-        current = self._index_observation(repo_root)
-        current_sha = current.sha256
         old_sha = journal.get('baselineIndexSha256')
         if not isinstance(old_sha, str) or not self.provider.HEX_64.fullmatch(old_sha):
             self._fail('prepared journal has an invalid baseline index SHA-256')
-        self._journal_index_lease(journal, 'baseline')
-        if current_sha == old_sha:
-            return
+        baseline = self._journal_index_lease(journal, 'baseline')
+        index_lock = Path(f'{self._index_path(repo_root)}.lock')
+        deadline = time.monotonic() + self.INDEX_LOCK_WAIT_SECONDS
+        while True:
+            current = self._index_observation(repo_root)
+            # stat-only refresh stages the same content, no renewal needed
+            if self._matching_index_lease(
+                request, current, [('recovery preflight', baseline)]
+            ) is not None:
+                return
+            if not self._index_lock_present(index_lock):
+                break
+            if not self._wait_for_foreign_index_lock(index_lock, deadline):
+                self._fail(f'Git index is locked by another writer: {index_lock}')
+        current_sha = current.sha256
         if request.action != 'recover' or journal.get('phase') != 'prepared':
             self._fail('index lease changed outside recoverable prepared preflight')
         if 'indexLeaseReprepared' in journal:
@@ -28430,9 +28440,6 @@ class SyncwheelRevisionBackend:
             or journal.get('resultingHead') != request.expected_head
         ):
             self._fail('prepared request or HEAD lease changed')
-        index_lock = Path(f'{self._index_path(repo_root)}.lock')
-        if index_lock.exists() or index_lock.is_symlink():
-            self._fail(f'Git index is locked by another writer: {index_lock}')
         if self._index_conflicts(repo_root) or not self._index_is_clean(repo_root):
             self._fail('index lease recovery requires a clean, conflict-free index')
         observation = self.preflight(request)
@@ -30045,7 +30052,7 @@ class SyncwheelRevisionBackend:
         return directory
 
     def _index_alignment_record(
-        self, request, journal, kind, commit, expected_sha, desired_sha
+        self, request, journal, kind, commit, expected_sha, desired_sha, *, replace=False
     ):
         filename = (
             f'{request.operation_id}-{kind}-{desired_sha}.index'
@@ -30064,9 +30071,9 @@ class SyncwheelRevisionBackend:
         if not isinstance(alignments, dict):
             self._fail('operation journal has invalid index-alignment ownership state')
         existing = alignments.get(kind)
-        if existing is not None and existing != record:
+        if existing is not None and existing != record and not replace:
             self._fail(f'{kind} index-alignment ownership record changed')
-        if existing is None:
+        if existing != record:
             updated = copy.deepcopy(journal)
             updated_alignments = dict(alignments)
             updated_alignments[kind] = record
@@ -30074,6 +30081,51 @@ class SyncwheelRevisionBackend:
             self.save_journal(request, updated)
             self.checkpoint(f'{kind}_index_alignment_prepared')
         return record
+
+    def _resumed_index_alignment(
+        self, request, repo_root, journal, kind, commit, expected_sha, payload, sha
+    ):
+        """Return (payload, sha, replace_record) for a rebuild that differs only in stat data.
+
+        Journals without semantic leases stay byte-exact.
+        """
+        alignments = journal.get('indexAlignments')
+        existing = alignments.get(kind) if isinstance(alignments, dict) else None
+        if (
+            not isinstance(existing, dict)
+            or existing.get('desiredSha256') == sha
+            or not self._journal_has_semantic_leases(journal)
+        ):
+            return payload, sha, False
+        recorded = existing.get('desiredSha256')
+        if not isinstance(recorded, str) or not self.provider.HEX_64.fullmatch(recorded):
+            return payload, sha, False
+        filename = f'{request.operation_id}-{kind}-{recorded}.index'
+        if existing != {
+            'schemaVersion': 1, 'kind': kind, 'commitSha': commit,
+            'expectedSha256': expected_sha, 'desiredSha256': recorded,
+            'backingFile': filename,
+        }:
+            return payload, sha, False
+        object_format = self._index_object_format(repo_root)
+        fresh = IndexObservation(payload, object_format)
+        if fresh.semantic is None:
+            return payload, sha, False
+        stage = f'{kind} alignment replay'
+        backing = self._index_alignment_directory(request) / filename
+        if not os.path.lexists(backing):
+            # backing already removed, so the old record owns no payload and no index.lock
+            self._record_semantic_index_match(request, stage, recorded, sha, fresh.semantic)
+            return payload, sha, True
+        journaled_payload, _ = self._read_regular_file(
+            backing, 'journaled index-alignment backing file'
+        )
+        journaled = IndexObservation(journaled_payload, object_format)
+        if journaled.sha256 != recorded or self._matching_index_lease(
+            request, fresh, [(stage, IndexLease(recorded, journaled.semantic))]
+        ) is None:
+            self._fail('journaled index-alignment backing payload is not deterministic')
+        return journaled_payload, recorded, False
 
     def _prepare_index_backing(self, request, record, desired_payload, mode):
         directory = self._ensure_index_alignment_directory(request)
@@ -30292,6 +30344,10 @@ class SyncwheelRevisionBackend:
                 else ()
             ),
         )
+        desired_payload, desired_sha, replace_record = self._resumed_index_alignment(
+            request, repo_root, journal, kind, commit, expected_sha,
+            desired_payload, desired_sha,
+        )
         desired = IndexObservation(desired_payload, self._index_object_format(repo_root))
         self.__dict__.setdefault('_aligned_index_semantics', {})[commit] = desired.semantic
         leased = (f'{kind} alignment', predecessor)
@@ -30322,7 +30378,8 @@ class SyncwheelRevisionBackend:
 
         already_aligned = assert_leased_or_aligned()
         record = self._index_alignment_record(
-            request, journal, kind, commit, expected_sha, desired_sha
+            request, journal, kind, commit, expected_sha, desired_sha,
+            replace=replace_record,
         )
         backing = self._prepare_index_backing(
             request, record, desired_payload, mode
