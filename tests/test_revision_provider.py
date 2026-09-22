@@ -2998,6 +2998,119 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         finally:
             fixture.close()
 
+    def declare_stack_x(self, fixture, *create_args):
+        fixture.git('switch', '-q', '-c', 'scratch/x', 'main')
+        (fixture.repo / 'x.txt').write_text('x\n')
+        fixture.git('add', 'x.txt')
+        fixture.git('commit', '-q', '-m', 'test: pending stack x')
+        source = fixture.git('rev-parse', 'HEAD')
+        fixture.git('switch', '-q', 'main-integration')
+        fixture.cli(
+            'stack', 'create', 'x', source, *create_args,
+            extra_env={'SYNCWHEEL_LANE_OWNER': 'agent-a'},
+        )
+        return source
+
+    def check_error(self, fixture, operation_id):
+        request = fixture.request('preflight', operation_id=operation_id)
+        rejected, _ = fixture.protocol_request(fixture.check_request(request), expected=2)
+        return rejected['error']
+
+    def test_active_active_refusals_name_the_pending_stack_owner_and_remedy(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            source = self.declare_stack_x(fixture)
+
+            missing = self.check_error(fixture, 'pending-declaration')
+            self.assertIn(
+                'declared stack(s) are missing from integration: '
+                f'x (local proposal, missing {source}; '
+                'owner: last local stack_create by agent-a',
+                missing,
+            )
+            self.assertTrue(missing.endswith(
+                'The owner of each listed stack must publish or reset it; '
+                'run syncwheel handoff for details'
+            ))
+
+            fixture.cli('int', 'rebuild', '--reason', 'project pending stack x')
+            unaligned = self.check_error(fixture, 'pending-rebuilt-declaration')
+            self.assertIn(
+                'not aligned with fresh coordination state: unpublished local proposal: '
+                'x (added; owner: last local stack_create by agent-a',
+                unaligned,
+            )
+            self.assertIn('run syncwheel handoff for details', unaligned)
+            self.assertNotIn('syncwheel publish', unaligned)
+        finally:
+            fixture.close()
+
+    def test_long_pending_stack_refusal_keeps_its_remedy(self):
+        missing = {
+            f'stack-{index:02d}': [f'{index:02d}' * 20] * 7 for index in range(40)
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            message = SYNCWHEEL.missing_declared_stacks_message(
+                Path(tmp), Path(tmp) / 'manifest.json', {'version': 2}, missing
+            )
+
+        full = 'integration declared stack(s) are missing from integration: ' + message
+        self.assertLess(len(full), protocol.ERROR_UTF16_LIMIT)
+        self.assertIn(f"{'00' * 20} and 2 more; owner unknown)", message)
+        self.assertRegex(
+            message,
+            r'; and \d+ more stack\(s\)\. The owner of each listed stack must publish or '
+            r'reset it; run syncwheel handoff for details$',
+        )
+
+    def test_long_handoff_refusal_stays_within_the_wire_limit(self):
+        published = {
+            'integration': {'branch': 'main-integration', 'stacks': []},
+            'stacks': [
+                {'id': f'stack-{index:03d}', 'branch': f'pr/stack-{index:03d}', 'commits': ['a' * 40]}
+                for index in range(120)
+            ],
+        }
+        local = copy.deepcopy(published)
+        for stack in local['stacks']:
+            stack['commits'] = [*stack['commits'], 'b' * 40]
+        config = {'mode': 'active-active', 'id': 'test', 'remote': 'origin'}
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(
+                SYNCWHEEL, 'coordination_manifest_snapshot', return_value=local
+            ), mock.patch.object(SYNCWHEEL, 'commit_exists', return_value=True):
+                detail = SYNCWHEEL.handoff_misalignment_detail(
+                    Path(tmp), Path(tmp) / 'manifest.json', {'version': 2}, config,
+                    {'tip': 'c' * 40, 'state': {'manifest': published}},
+                )
+
+        full = 'active-active handoff manifest is not aligned with fresh coordination state' + detail
+        self.assertLess(len(full), protocol.ERROR_UTF16_LIMIT)
+        self.assertRegex(detail, r'; and \d+ more stack\(s\)')
+        self.assertIn('syncwheel stack set stack-000 --published', detail)
+        self.assertIn('run syncwheel handoff for details', detail)
+
+    def test_active_active_handoff_names_an_unpublished_integration(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        try:
+            self.declare_stack_x(fixture, '--draft')
+            self.assertIn('x (published, missing', self.check_error(fixture, 'draft-declared'))
+            fixture.cli('int', 'rebuild', '--reason', 'project draft stack x')
+
+            unpublished = self.check_error(fixture, 'draft-rebuilt')
+
+            self.assertIn(
+                'the local integration control manifest is not published; '
+                'run syncwheel int rebuild, then syncwheel int push',
+                unpublished,
+            )
+            fixture.cli('int', 'push')
+            request = fixture.request('preflight', operation_id='draft-published')
+            ready, _ = fixture.protocol_request(fixture.check_request(request))
+            self.assertEqual(ready['status'], 'ready')
+        finally:
+            fixture.close()
+
     def test_untrailed_lock_commit_stays_unmapped(self):
         self.fixture.enable_derived_paths('locks/', on_base=True)
         path = 'locks/codex.lock'
