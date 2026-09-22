@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/syncwheel/draft/recover-semantic-lease": "26b7a2d7c1ef5ade435f8851f5428df57be75e68"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -28,7 +26,7 @@
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
-    "refs/heads/pr/read-only-git-auth": "2d5d139470a832088eccadbe2ad8539043e53b60",
+    "refs/heads/pr/read-only-git-auth": "8214480681f3a822f5d3c158defbeba29a5ad631",
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
@@ -62,7 +60,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-22T11:28:59+00:00",
+  "created_at": "2026-09-22T13:40:26+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -175,7 +173,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "read-only-git-auth",
         "recover-semantic-lease"
       ],
       "strategy": "cherry-pick"
@@ -186,20 +183,6 @@
       "strategy": "merge"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/read-only-git-auth",
-        "commits": [
-          "65af6d45c5905d751419258dff0f080962a4ae3c"
-        ],
-        "id": "read-only-git-auth",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -217,11 +200,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "2cd6f400-7fbb-4c93-b6bd-a8f73539508e",
-  "parent_state": "be3d39dc5d91edb2761046b22b102211cde952cd",
+  "operation_token": "41719e53-9a02-405a-b454-9b5dd499d2c0",
+  "parent_state": "ee69566aa3781d3a4d30a15e30522ed865ab442b",
   "projection_status": "partial",
-  "publication_id": "874ccc85-69ab-48db-8622-1c9136d3a792",
-  "publication_scope": "create:recover-semantic-lease",
+  "publication_id": "8fdc5125-dc99-4857-a695-9ed5c66445f8",
+  "publication_scope": "close:read-only-git-auth",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -855,6 +838,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/read-only-git-auth",
       "remote_tip": "dffccd1eab3b9e248dbdcb3057011f21ef3941ac",
+      "stack": "read-only-git-auth"
+    },
+    {
+      "branch": "pr/read-only-git-auth",
+      "closed_at": "2026-09-22T13:40:22+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/read-only-git-auth",
+      "remote_tip": null,
       "stack": "read-only-git-auth"
     }
   ]
