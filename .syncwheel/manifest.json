@@ -46,7 +46,9 @@
     {
       "base": "origin/main",
       "branch": "syncwheel/draft/read-only-git-auth",
-      "commits": [],
+      "commits": [
+        "65af6d45c5905d751419258dff0f080962a4ae3c"
+      ],
       "id": "read-only-git-auth",
       "integration_branch": "main-integration",
       "meta": {
