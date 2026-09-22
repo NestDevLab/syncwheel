@@ -1,11 +1,9 @@
 {
-  "changed_refs": {
-    "refs/heads/syncwheel/draft/read-only-git-auth": "aa613669e1487cc2b67589b3ef31172797fc0108"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
-    "refs/heads/pr/balance-test-shards": "d37a93033c87f7b98b579a653582a91aabcfdd06",
+    "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
@@ -60,7 +58,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-21T21:14:18+00:00",
+  "created_at": "2026-09-22T10:38:54+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -171,7 +169,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "test-fixture-cache",
         "read-only-git-auth"
       ],
       "strategy": "cherry-pick"
@@ -182,21 +179,6 @@
       "strategy": "merge"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/balance-test-shards",
-        "commits": [
-          "deb7259055a01f6510eb561ade85429bb3a5e3b9",
-          "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78"
-        ],
-        "id": "test-fixture-cache",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -214,11 +196,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "9b32e108-e284-47dd-8784-8c8633586e7a",
-  "parent_state": "eaa057f0b6f87dc17cd77f83df52e7665ed5e39f",
+  "operation_token": "4f3d1831-3d24-4a5e-b84c-e2ab167bc0f2",
+  "parent_state": "b6565bb0d2b4a142aef4cad22a2bf9d2ad7284ee",
   "projection_status": "partial",
-  "publication_id": "fdc838bb-a1db-4549-a10a-60dade960bf4",
-  "publication_scope": "create:read-only-git-auth",
+  "publication_id": "e968229e-3cd2-48ed-b585-bce6f0a99edd",
+  "publication_scope": "close:test-fixture-cache",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -836,6 +818,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/test-fixture-cache",
       "remote_tip": "aa613669e1487cc2b67589b3ef31172797fc0108",
+      "stack": "test-fixture-cache"
+    },
+    {
+      "branch": "pr/balance-test-shards",
+      "closed_at": "2026-09-22T10:38:50+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/balance-test-shards",
+      "remote_tip": null,
       "stack": "test-fixture-cache"
     }
   ]
