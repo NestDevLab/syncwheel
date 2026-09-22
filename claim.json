@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/recover-semantic-lease"
+  ],
+  "claimed_at": "2026-09-22T13:49:55+00:00",
+  "coordination_id": "default",
+  "operation_token": "52694833-d7fb-4a53-9409-7ed611317f52",
+  "publication_scope": "promote:recover-semantic-lease",
+  "source_ref": "refs/heads/pr/recover-semantic-lease",
+  "syncwheel_version": "0.43.31"
+}
