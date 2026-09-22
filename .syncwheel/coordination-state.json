@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/half-state-coordination": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f"
+    "refs/heads/pr/half-state-coordination": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -11,6 +11,7 @@
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
+    "refs/heads/pr/half-state-coordination": "b7e4a34ec56fbabcb714accf333b5d9c61ce16cf",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
@@ -36,7 +37,7 @@
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/close-published-recovery": "910530df66c2e9913de1427e074df6f862224b68",
-    "refs/heads/syncwheel/draft/half-state-coordination": "d36eb762839a178ce70689b951191172413064f6",
+    "refs/heads/syncwheel/draft/half-state-coordination": "95e67f801cf5cf523fe1b3b2f7c9db4d7b95b94d",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip": "1c2b87ec8c59c85c99e4b56fe56a4c29692a01ff",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2": "d0afe6dc241d570e03d76df331b342fc65e1d9c9",
     "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
@@ -64,7 +65,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-22T19:42:10+00:00",
+  "created_at": "2026-09-22T19:42:26+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -85,6 +86,7 @@
     "refs/heads/pr/fixture-cli-tests": "45095862a6316f4733bbbc5b4fcb0a01c2406fa3",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
+    "refs/heads/pr/half-state-coordination": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f",
     "refs/heads/pr/historical-closed-missing-tip-v2": "e515208d404b7d504a5bb734053c91aa66557d49",
     "refs/heads/pr/historical-coordination-digest-04313": "b6d8d2fed2527936aa40ab13246873955b57bd9f",
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
@@ -195,24 +197,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/half-state-coordination",
+        "branch": "pr/half-state-coordination",
         "commits": [
           "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f"
         ],
         "id": "half-state-coordination",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "d7aea4c6-754f-4343-81ec-3426f2e223e4",
-  "parent_state": "81c067b069ae60ebba8e618727154bd57247b626",
+  "operation_token": "3758f4af-0d94-48ed-9617-4343979f6125",
+  "parent_state": "542e54d9eacb6a64df44056c2c22855bcf912781",
   "projection_status": "partial",
-  "publication_id": "740fa0ab-d73f-4c3c-80ae-0379cbf6496d",
-  "publication_scope": "stack:half-state-coordination",
+  "publication_id": "3081cfc0-89c7-4333-ab1d-cb226ad9a0c9",
+  "publication_scope": "promote:half-state-coordination",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -871,6 +872,14 @@
       "ref": "refs/heads/pr/recover-semantic-lease",
       "remote_tip": null,
       "stack": "recover-semantic-lease"
+    },
+    {
+      "branch": "syncwheel/draft/half-state-coordination",
+      "closed_at": "2026-09-22T19:42:20+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/half-state-coordination",
+      "remote_tip": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f",
+      "stack": "half-state-coordination"
     }
   ]
 }
