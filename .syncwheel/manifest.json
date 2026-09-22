@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "half-state-coordination"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,24 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "half-state-coordination",
+      "branch": "syncwheel/draft/half-state-coordination",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Scope coordinated stack close and name pending stacks in refusals (MGT-0333)"
+      }
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
