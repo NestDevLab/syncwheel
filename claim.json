@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/recover-semantic-lease"
   ],
-  "claimed_at": "2026-09-22T11:28:59+00:00",
+  "claimed_at": "2026-09-22T13:49:30+00:00",
   "coordination_id": "default",
-  "operation_token": "2cd6f400-7fbb-4c93-b6bd-a8f73539508e",
-  "publication_scope": "create:recover-semantic-lease",
+  "operation_token": "4cbafad5-9508-4960-8548-06c798af7880",
+  "publication_scope": "stack:recover-semantic-lease",
   "source_ref": "refs/heads/syncwheel/draft/recover-semantic-lease",
   "syncwheel_version": "0.43.31"
 }
