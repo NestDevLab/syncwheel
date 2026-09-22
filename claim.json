@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/half-state-coordination"
+  ],
+  "claimed_at": "2026-09-22T19:41:18+00:00",
+  "coordination_id": "default",
+  "operation_token": "4aae2f6d-be06-47e5-ba50-b964e0724836",
+  "publication_scope": "create:half-state-coordination",
+  "source_ref": "refs/heads/syncwheel/draft/half-state-coordination",
+  "syncwheel_version": "0.43.31"
+}
