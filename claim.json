@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/read-only-git-auth"
+  ],
+  "claimed_at": "2026-09-22T11:28:01+00:00",
+  "coordination_id": "default",
+  "operation_token": "1bbb40fd-4859-4642-baef-7cc9ed41cc2b",
+  "publication_scope": "promote:read-only-git-auth",
+  "source_ref": "refs/heads/pr/read-only-git-auth",
+  "syncwheel_version": "0.43.31"
+}
