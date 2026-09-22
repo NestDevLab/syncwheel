@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "test-fixture-cache",
       "read-only-git-auth"
     ],
     "strategy": "cherry-pick"
@@ -44,25 +43,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/balance-test-shards",
-      "commits": [
-        "deb7259055a01f6510eb561ade85429bb3a5e3b9",
-        "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78"
-      ],
-      "id": "test-fixture-cache",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Speed up test fixtures without changing behaviour"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "base": "origin/main",
       "branch": "syncwheel/draft/read-only-git-auth",
