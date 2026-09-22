@@ -36,6 +36,10 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    ```bash
    syncwheel hooks remove --disable --reason "<why>" --apply
    ```
+   Export `SYNCWHEEL_LANE_OWNER=<agent-name>` for the session. It owns your lanes and is
+   the `actor` of your stack lifecycle ledger events, so refusals caused by your
+   unpublished stack name you as its owner. A lane with a named owner is reaped only
+   after its lease expires.
 
 2. **Never resolve a replay conflict with raw git.** A plumbing replay never descends
    silently into a conflict; it names the exact retry:

@@ -25,7 +25,14 @@ help as authoritative for flags and defaults; do not infer them from memory.
 After delivery, close by proof: use `stack close <id> --reason merged` only
 when the declared commits are ancestors of the target; use `--reason absorbed`
 for squash/rebase delivery. The latter fetches the delivery tip and verifies
-the final content, so normal squash cleanup does not need `--force`.
+the final content, so normal squash cleanup does not need `--force`. Under
+active-active coordination a close publishes only the removal of that stack from
+the published state; another stack's unpublished local change neither blocks it
+nor gets published by it. When a projection replay stops, the error names the
+stack and commit. It suggests `stack close <id> --reason absorbed` only when the
+whole stack is proven to be in the base (for example after a squash merge);
+otherwise it names the conflicting paths, the other stack involved, or Git's own
+first error line, with the desk rebuild command.
 
 For an active-active version 2 or 3 manifest, run `python3 scripts/syncwheel.py
 handoff` before planning a handoff or publication. The diagnostic is read-only;

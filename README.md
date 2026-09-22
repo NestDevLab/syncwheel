@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.43.34`
+Current version: `0.43.35`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -461,7 +461,24 @@ manifest, including during recovery. If a later create has advanced the claim,
 the old close is terminalized as `close_superseded` and cannot close the new
 generation. A close whose tombstone already landed completes from its intent
 even when unrelated publications have advanced the state, instead of publishing
-a second tombstone. Choose the close proof from the delivery method:
+a second tombstone.
+
+A coordinated close, of a draft or of a published stack, publishes the
+published coordination state minus the closed stack. Unpublished local changes
+to other stacks stay local and no longer block the close, and a stack that
+another clone published but this manifest lacks stays published. The saved
+local manifest is the local manifest minus the closed stack. A retried published
+close looks for its token in the state history and in the closed ref's claim
+history before any delivery or ancestry proof. A close that already landed
+completes locally without publishing again, whatever changed locally or on the
+delivery branch since, and refuses only a different `--reason`. When this clone declared
+the same stack id again after that close, or its published entry matches the
+local one, the old intent is recorded as recovered and the command closes the
+stack as a new operation. A close that never landed is
+abandoned and the retry writes a new intent against the current state, unless
+the stack's published entry changed in between: then the retry stops with
+`close_superseded` and the next run starts fresh. Choose the close proof from
+the delivery method:
 
 ```bash
 syncwheel stack close feature-a --reason merged    # normal merge or fast-forward
@@ -958,6 +975,15 @@ python3 scripts/syncwheel.py stack add feature-a HEAD
 Use `stack sync` when the branch already represents the intended PR stack. Use
 `stack set` or `stack add` when you want to declare an explicit revision range
 or append a new commit.
+
+Under active-active coordination, `stack set <id> --published` drops an
+unpublished local change to a published stack: it resets the stack's commits to
+its entry in the published coordination state, records the previous commits and
+the actor in the ledger, and prints the exact `stack set <id> <commits...>`
+command that restores them. It refuses for a stack that is not published and for
+a local entry that differs in anything other than its commits. Published commits
+missing locally are fetched once from the coordination remote; if they are still
+missing, it refuses and names the owner.
 
 ### 3. Absorb integration-first work into stacks
 

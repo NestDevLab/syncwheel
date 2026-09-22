@@ -140,6 +140,31 @@ elif checkpoint.startswith('ledger_event:'):
             os.kill(os.getpid(), signal.SIGKILL)
         return result
     module.append_ledger_event = killed
+elif checkpoint == 'legacy_authorized_push':
+    original_event = module.append_ledger_event
+    def legacy(repo_root, event_type, payload, manifest_path=None, **kwargs):
+        if event_type == 'stack_close_intent':
+            payload = {key: value for key, value in payload.items() if key != 'actor'}
+            payload['expected_coordination_state_tip'] = None
+        return original_event(repo_root, event_type, payload, manifest_path, **kwargs)
+    module.append_ledger_event = legacy
+    original = module.run_authorized_push
+    def killed(repo_root, command, remote, refs, check=True):
+        result = original(repo_root, command, remote, refs, check=check)
+        if result.returncode == 0 and any('/syncwheel/state/' in ref for ref in refs):
+            os.kill(os.getpid(), signal.SIGKILL)
+        return result
+    module.run_authorized_push = killed
+elif checkpoint == 'legacy_close_intent':
+    original = module.append_ledger_event
+    def killed(repo_root, event_type, payload, manifest_path=None, **kwargs):
+        if event_type != 'stack_close_intent':
+            return original(repo_root, event_type, payload, manifest_path, **kwargs)
+        legacy = {key: value for key, value in payload.items() if key != 'actor'}
+        legacy['expected_coordination_state_tip'] = None
+        original(repo_root, event_type, legacy, manifest_path, **kwargs)
+        os.kill(os.getpid(), signal.SIGKILL)
+    module.append_ledger_event = killed
 elif checkpoint == 'save_manifest':
     original = module.save_manifest
     def killed(manifest_path, manifest):
@@ -4548,25 +4573,22 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertIn(command, failure.stderr)
         self.assertIn('publish or close second first', failure.stderr)
 
-    def test_close_error_names_real_compose_remedy_for_another_unpublished_addition(self):
+    def test_close_leaves_another_unpublished_addition_local(self):
         origin = self.create_remote('close-compose-remedy')
         repo = self.clone(origin, 'close-compose-remedy')
         self.init_coordinated(repo)
         self.run_cli(repo, 'int', 'push')
         first_sha = self.commit_on_branch(repo, 'scratch/first', 'first.txt')
         self.run_cli(repo, 'stack', 'create', 'first', first_sha, '--draft')
-        known_tip, known_state = self.remote_state(origin)
         second_sha = self.commit_on_branch(repo, 'scratch/second', 'second.txt')
         self.add_legacy_unpublished_draft(repo, 'second', second_sha)
 
-        failure = self.run_cli(repo, 'stack', 'close', 'first', '--force', expected=2)
-        command = (
-            'syncwheel coordination compose --stack first '
-            f'--known-base-state {known_tip} '
-            f"--known-base-snapshot-digest {known_state['manifest_digest']}"
-        )
-        self.assertIn(command, failure.stderr)
-        self.assertIn('publish or close second first', failure.stderr)
+        self.run_cli(repo, 'stack', 'close', 'first', '--force')
+
+        _, state = self.remote_state(origin)
+        self.assertEqual(state['manifest']['stacks'], [])
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual([stack['id'] for stack in manifest['stacks']], ['second'])
 
     def test_partial_publish_can_adopt_new_stack_without_rebuilding_integration(self):
         origin = self.create_remote()
@@ -7095,9 +7117,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(repo, 'stack', 'create', 'close-later', later,
                      '--branch', 'pr/close-later')
 
-        failed = self.run_cli(repo, 'stack', 'close', 'close-first',
-                              '--reason', 'absorbed', expected=2)
-        self.assertIn('Remote-first close did not save the manifest', failed.stderr)
+        self.run_cli_sigkill_after(
+            repo, 'ledger_event:stack_close_intent',
+            'stack', 'close', 'close-first', '--reason', 'absorbed',
+        )
         module = self.load_module()
         old = module.pending_stack_close_operation(repo, repo / '.syncwheel' / 'manifest.json', 'close-first')
         self.assertEqual(old['reason'], 'absorbed')
@@ -7590,6 +7613,891 @@ with module.coordination_publication_lock(Path(repo_path)):
             if event['type'] == 'stack_close_abandoned'
             and event['payload'].get('stack') == 'close-quiet'
         ])
+
+    def absorbed_stack_with_local_proposal(self, name, conflict=False):
+        """Stack x lands upstream as a squash while y carries an unpublished local commit."""
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        x1 = self.commit_on_branch(repo, 'scratch/x', 'x.txt')
+        self.run_cli(repo, 'stack', 'create', 'x', x1, '--draft')
+        self.run_cli(repo, 'stack', 'promote', 'x')
+        self.run_cli(repo, 'publish')
+        self.run_cli(repo, 'stack', 'create', 'y', '--draft')
+        self.run_cli(repo, 'publish')
+        publisher = self.clone(origin, f'{name}-publisher')
+        (publisher / 'x.txt').write_text('conflicting x\n' if conflict else 'scratch/x\n')
+        self.git(publisher, 'add', 'x.txt')
+        self.git(publisher, 'commit', '-qm', 'feat: squash of x')
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        y1 = self.commit_on_branch(repo, 'scratch/y', 'y.txt')
+        self.run_cli(
+            repo, 'stack', 'add', 'y', y1, extra_env={'SYNCWHEEL_LANE_OWNER': 'agent-b'}
+        )
+        return origin, repo, x1, y1
+
+    def assert_published_branch_carries(self, origin, state, stack_id, path, content):
+        stack = {item['id']: item for item in state['manifest']['stacks']}[stack_id]
+        tip = state['managed_refs'][f"refs/heads/{stack['branch']}"]
+        shown = subprocess.run(
+            ['git', '--git-dir', str(origin), 'show', f'{tip}:{path}'],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(shown.stdout, content, shown.stderr)
+
+    def publishing_peer(self, origin, source, name, branches):
+        """A second clone that adopts the published manifest and can publish."""
+        peer = self.mirror_coordinated_clone(origin, source, name, list(branches))
+        self.adopt_published_manifest(origin, peer)
+        return peer
+
+    def adopt_published_manifest(self, origin, repo):
+        module = self.load_module()
+        _, published = self.remote_state(origin)
+        manifest, manifest_path = module.load_manifest(repo)
+        module.save_manifest(
+            manifest_path, module.apply_coordination_snapshot(manifest, published['manifest'])
+        )
+
+    def run_cli_publishing_after_close_intent(self, repo, peer, commands, *args):
+        """Run a command while ``peer`` publishes right after the close intent is journaled."""
+        child = r'''
+import importlib.util
+import json
+import subprocess
+import sys
+
+cli, peer, commands, encoded_args = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('syncwheel_race_under_test', cli)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original = module.append_ledger_event
+def racing(repo_root, event_type, payload, manifest_path=None, **kwargs):
+    result = original(repo_root, event_type, payload, manifest_path, **kwargs)
+    if event_type == 'stack_close_intent':
+        for command in json.loads(commands):
+            subprocess.run(['python3', '-m', 'syncwheel', *command], cwd=peer, check=True,
+                           capture_output=True)
+    return result
+module.append_ledger_event = racing
+sys.argv = [cli, *json.loads(encoded_args)]
+sys.exit(module.main())
+'''
+        env = dict(os.environ)
+        env.update(self.environment)
+        return subprocess.run(
+            ['python3', '-c', child, str(CLI), str(peer), json.dumps(commands),
+             json.dumps(list(args))],
+            cwd=repo, text=True, capture_output=True, env=env,
+        )
+
+    def test_absorbed_close_is_not_blocked_by_a_local_proposal_on_another_stack(self):
+        origin, repo, _x1, y1 = self.absorbed_stack_with_local_proposal('scoped-close')
+
+        self.run_cli(repo, 'stack', 'close', 'x', '--reason', 'absorbed')
+
+        _, state = self.remote_state(origin)
+        self.assertEqual(
+            [(stack['id'], stack['commits']) for stack in state['manifest']['stacks']],
+            [('y', [])],
+        )
+        self.assertEqual(state['manifest']['integration']['stacks'], ['y'])
+        local = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual(
+            [(stack['id'], stack['commits']) for stack in local['stacks']], [('y', [y1])]
+        )
+        self.run_cli(repo, 'stack', 'rebuild', 'y')
+        self.run_cli(repo, 'stack', 'push', 'y')
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'publish y after closing x')
+        self.run_cli(repo, 'int', 'push')
+        _, state = self.remote_state(origin)
+        self.assertEqual(
+            [(stack['id'], stack['commits']) for stack in state['manifest']['stacks']],
+            [('y', [y1])],
+        )
+        self.assert_published_branch_carries(origin, state, 'y', 'y.txt', 'scratch/y\n')
+
+    def test_projection_failure_names_the_absorbed_stack_and_its_close(self):
+        _origin, repo, x1, _y1 = self.absorbed_stack_with_local_proposal('projection-absorbed')
+        self.git(repo, 'fetch', '-q', 'origin')
+
+        failure = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        short = self.git(repo, 'rev-parse', '--short', x1).stdout.strip()
+        self.assertIn(
+            'integration projection: stack x is already contained in origin/main '
+            f'(stopped at commit {short}); close it with syncwheel stack close x '
+            '--reason absorbed, then retry',
+            failure.stderr,
+        )
+        self.run_cli(repo, 'stack', 'close', 'x', '--reason', 'absorbed')
+        self.run_cli(repo, 'stack', 'push', 'y')
+
+    def test_projection_conflict_names_the_stack_and_the_desk_rebuild(self):
+        _origin, repo, x1, _y1 = self.absorbed_stack_with_local_proposal(
+            'projection-conflict', conflict=True
+        )
+        self.git(repo, 'fetch', '-q', 'origin')
+
+        failure = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        short = self.git(repo, 'rev-parse', '--short', x1).stdout.strip()
+        self.assertIn(
+            f'integration projection: stack x commit {short} does not replay onto '
+            'origin/main (conflict in x.txt)',
+            failure.stderr,
+        )
+        self.assertIn('syncwheel int rebuild --replay-mode desk', failure.stderr)
+        self.assertNotIn('already contained', failure.stderr)
+
+    def test_stack_set_published_resets_a_local_proposal_and_prints_its_restore(self):
+        origin, repo, _x1, y1 = self.absorbed_stack_with_local_proposal('set-published')
+        blocked = self.run_cli(repo, 'stack', 'push', 'x', expected=2)
+        self.assertIn(
+            'y: local manifest differs from published state without publishing its '
+            'managed branch (owner: last local stack_add by agent-b',
+            blocked.stderr,
+        )
+        self.assertRegex(blocked.stderr, r'; last published create:y at \S+ from installation \S+\)')
+        self.assertIn(
+            'drop the local change with syncwheel stack set y --published', blocked.stderr
+        )
+        self.assertNotIn('stack rebuild y', blocked.stderr)
+        self.assertNotIn('Retry:', blocked.stderr)
+        handoff = json.loads(self.run_cli(repo, 'handoff', '--json').stdout)
+        self.assertEqual(
+            handoff['coordination']['local_proposal']['changed'], {'y': ['commits']}
+        )
+        self.assertIn(
+            'changed stack: y (commits)', self.run_cli(repo, 'handoff').stdout
+        )
+
+        reset = self.run_cli(
+            repo, 'stack', 'set', 'y', '--published', '--repo', str(repo),
+            extra_env={'SYNCWHEEL_LANE_OWNER': 'agent-a'},
+        )
+
+        self.assertIn(f'syncwheel stack set y {y1} --repo {repo}', reset.stdout)
+        local = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual(local['stacks'][-1]['commits'], [])
+        module = self.load_module()
+        event = [
+            item['payload'] for item in module.load_ledger_events(repo)
+            if item['type'] == 'manifest_saved'
+            and item['payload']['reason'] == 'stack_set'
+        ][-1]
+        self.assertEqual(event['context']['previous_commits'], [y1])
+        self.assertEqual(event['context']['actor'], 'agent-a')
+        self.assertEqual(event['context']['published_state'], self.remote_state(origin)[0])
+        handoff = json.loads(self.run_cli(repo, 'handoff', '--json').stdout)
+        self.assertEqual(handoff['coordination']['manifest_relation'], 'aligned')
+        self.run_cli(repo, 'stack', 'set', 'y', y1)
+        local = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual(local['stacks'][-1]['commits'], [y1])
+
+        z1 = self.commit_on_branch(repo, 'scratch/z', 'z.txt')
+        self.run_cli(repo, 'stack', 'create', 'z', z1, '--branch', 'pr/z')
+        refused = self.run_cli(repo, 'stack', 'set', 'z', '--published', expected=2)
+        self.assertIn(
+            'z: stack is not published, so there is no published entry to reset to',
+            refused.stderr,
+        )
+        with_spec = self.run_cli(repo, 'stack', 'set', 'y', '--published', y1, expected=2)
+        self.assertIn('stack set --published takes no commit specs', with_spec.stderr)
+        without_spec = self.run_cli(repo, 'stack', 'set', 'y', expected=2)
+        self.assertIn('stack set requires commit specs, or --published', without_spec.stderr)
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        {item['id']: item for item in manifest['stacks']}['y']['target_branch'] = 'release'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        other_field = self.run_cli(repo, 'stack', 'set', 'y', '--published', expected=2)
+        self.assertIn(
+            'y: local entry differs from the published one in target_branch; '
+            'stack set --published only resets commits',
+            other_field.stderr,
+        )
+
+    def test_published_close_retry_after_an_unrelated_publication_does_not_republish(self):
+        origin = self.create_remote('published-close-unrelated')
+        closer = self.clone(origin, 'published-close-unrelated-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'pr/close-quiet', 'close-quiet.txt')
+        self.run_cli(
+            closer, 'stack', 'create', 'close-quiet', source, '--branch', 'pr/close-quiet'
+        )
+        self.run_cli(closer, 'stack', 'push', 'close-quiet')
+        self.run_cli_sigkill_after(
+            closer, 'authorized_push', 'stack', 'close', 'close-quiet', '--force'
+        )
+        module = self.load_module()
+        claim_ref = module.coordination_claim_ref('refs/heads/pr/close-quiet')
+        claim_before = self.git(closer, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        _, published = self.remote_state(origin)
+        other = self.mirror_coordinated_clone(
+            origin, closer, 'published-close-unrelated-other', ['integration/shared'],
+        )
+        other_manifest, other_path = module.load_manifest(other)
+        module.save_manifest(
+            other_path,
+            module.apply_coordination_snapshot(other_manifest, published['manifest']),
+        )
+        unrelated = self.commit_on_branch(other, 'scratch/unrelated', 'unrelated.txt')
+        self.run_cli(other, 'stack', 'create', 'unrelated', unrelated, '--draft')
+        tip_before_retry, _ = self.remote_state(origin)
+
+        self.run_cli(closer, 'stack', 'close', 'close-quiet', '--force')
+
+        tip_after_retry, state = self.remote_state(origin)
+        self.assertEqual(tip_after_retry, tip_before_retry)
+        self.assertEqual(
+            self.git(closer, 'ls-remote', 'origin', claim_ref).stdout.split()[0], claim_before
+        )
+        self.assertEqual([stack['id'] for stack in state['manifest']['stacks']], ['unrelated'])
+        saved = json.loads((closer / '.syncwheel' / 'manifest.json').read_text())
+        self.assertNotIn('close-quiet', [item['id'] for item in saved['stacks']])
+        self.assertFalse([
+            event for event in module.load_ledger_events(closer)
+            if event['type'] == 'stack_close_abandoned'
+        ])
+
+    def close_around_a_peer_publication(self, origin, closer, peer):
+        """Close `killed` after a crash and `raced` inside a live race; both must finish.
+
+        `keeper` gets a local commit between the attempts, which must stay local.
+        """
+        module = self.load_module()
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        self.run_cli_sigkill_after(
+            closer, 'ledger_event:stack_close_intent', 'stack', 'close', 'killed', '--force'
+        )
+        killed = module.pending_stack_close_operation(closer, manifest_path, 'killed')
+        _, published = self.remote_state(origin)
+        keeper = {item['id']: item for item in published['manifest']['stacks']}['keeper']
+        local_commit = self.commit_on_branch(closer, 'scratch/keeper-2', 'keeper-2.txt')
+        self.run_cli(closer, 'stack', 'add', 'keeper', local_commit)
+        first = self.commit_on_branch(peer, 'scratch/peer-first', 'peer-first.txt')
+        self.run_cli(peer, 'stack', 'create', 'peer-first', first, '--draft')
+        self.run_cli(peer, 'stack', 'close', 'peer-first', '--force')
+
+        self.run_cli(closer, 'stack', 'close', 'killed', '--force')
+
+        self.adopt_published_manifest(origin, peer)
+        second = self.commit_on_branch(peer, 'scratch/peer-second', 'peer-second.txt')
+        raced = self.run_cli_publishing_after_close_intent(
+            closer, peer,
+            [['stack', 'create', 'peer-second', second, '--draft'],
+             ['stack', 'close', 'peer-second', '--force']],
+            'stack', 'close', 'raced', '--force',
+        )
+        self.assertEqual(raced.returncode, 2, raced.stderr)
+        self.assertIn('remote state changed after the reviewed plan', raced.stderr)
+        self.assertEqual(raced.stderr.count('Retry:'), 1, raced.stderr)
+        self.assertIn('syncwheel stack close raced --force', raced.stderr)
+        raced_intent = module.pending_stack_close_operation(closer, manifest_path, 'raced')
+
+        self.run_cli(closer, 'stack', 'close', 'raced', '--force')
+
+        _, state = self.remote_state(origin)
+        self.assertEqual(state['manifest']['stacks'], [keeper])
+        saved = json.loads(manifest_path.read_text())['stacks']
+        self.assertEqual([item['id'] for item in saved], ['keeper'])
+        self.assertEqual(saved[0]['commits'], [*keeper['commits'], local_commit])
+        events = module.load_ledger_events(closer)
+        abandoned = {
+            event['payload']['operation_token'] for event in events
+            if event['type'] == 'stack_close_abandoned'
+        }
+        self.assertEqual(
+            abandoned, {killed['operation_token'], raced_intent['operation_token']}
+        )
+        self.assertFalse(abandoned & {
+            event['payload']['operation_token'] for event in events
+            if event['type'] == 'stack_closed'
+        })
+
+    def test_unlanded_close_of_a_never_published_stack_retries_with_a_new_intent(self):
+        origin = self.create_remote('unlanded-unpublished')
+        closer = self.clone(origin, 'unlanded-unpublished-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        keeper = self.commit_on_branch(closer, 'pr/keeper', 'keeper.txt')
+        self.run_cli(closer, 'stack', 'create', 'keeper', keeper, '--branch', 'pr/keeper')
+        self.run_cli(closer, 'stack', 'push', 'keeper')
+        for stack_id in ('killed', 'raced'):
+            source = self.commit_on_branch(closer, f'pr/{stack_id}', f'{stack_id}.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, source, '--branch', f'pr/{stack_id}'
+            )
+        peer = self.publishing_peer(
+            origin, closer, 'unlanded-unpublished-peer',
+            ['integration/shared', 'pr/keeper', 'pr/killed', 'pr/raced'],
+        )
+
+        self.close_around_a_peer_publication(origin, closer, peer)
+
+    def test_unlanded_close_of_a_stack_with_a_local_commit_retries_with_a_new_intent(self):
+        origin = self.create_remote('unlanded-local-commit')
+        closer = self.clone(origin, 'unlanded-local-commit-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        for stack_id in ('keeper', 'killed', 'raced'):
+            source = self.commit_on_branch(closer, f'pr/{stack_id}', f'{stack_id}.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, source, '--branch', f'pr/{stack_id}'
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+        peer = self.publishing_peer(
+            origin, closer, 'unlanded-local-commit-peer',
+            ['integration/shared', 'pr/keeper', 'pr/killed', 'pr/raced'],
+        )
+        for stack_id in ('killed', 'raced'):
+            extra = self.commit_on_branch(closer, f'scratch/{stack_id}-2', f'{stack_id}-2.txt')
+            self.run_cli(closer, 'stack', 'add', stack_id, extra)
+
+        self.close_around_a_peer_publication(origin, closer, peer)
+
+    def test_close_intents_from_0_43_34_complete_despite_local_changes(self):
+        origin = self.create_remote('legacy-close-intent')
+        closer = self.clone(origin, 'legacy-close-intent-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        for stack_id in ('landed', 'unlanded', 'other'):
+            source = self.commit_on_branch(closer, f'pr/{stack_id}', f'{stack_id}.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, source, '--branch', f'pr/{stack_id}'
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+        never = self.commit_on_branch(closer, 'pr/never', 'never.txt')
+        self.run_cli(closer, 'stack', 'create', 'never', never, '--branch', 'pr/never')
+        module = self.load_module()
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        self.run_cli_sigkill_after(
+            closer, 'legacy_authorized_push', 'stack', 'close', 'landed', '--force'
+        )
+        for stack_id in ('unlanded', 'never'):
+            self.run_cli_sigkill_after(
+                closer, 'legacy_close_intent', 'stack', 'close', stack_id, '--force'
+            )
+        intents = {
+            stack_id: module.pending_stack_close_operation(closer, manifest_path, stack_id)
+            for stack_id in ('landed', 'unlanded', 'never')
+        }
+        self.assertEqual(
+            {intent['expected_coordination_state_tip'] for intent in intents.values()}, {None}
+        )
+        extra = self.commit_on_branch(closer, 'scratch/other-2', 'other-2.txt')
+        self.run_cli(closer, 'stack', 'add', 'other', extra)
+        landed_tip, _ = self.remote_state(origin)
+
+        self.run_cli(closer, 'stack', 'close', 'landed', '--force')
+
+        self.assertEqual(self.remote_state(origin)[0], landed_tip)
+        for stack_id in ('unlanded', 'never'):
+            self.run_cli(closer, 'stack', 'close', stack_id, '--force')
+        _, state = self.remote_state(origin)
+        self.assertEqual([stack['id'] for stack in state['manifest']['stacks']], ['other'])
+        events = module.load_ledger_events(closer)
+        closed = {
+            event['payload']['stack']: event['payload']['operation_token']
+            for event in events if event['type'] == 'stack_closed'
+        }
+        self.assertEqual(closed['landed'], intents['landed']['operation_token'])
+        abandoned = {
+            event['payload']['operation_token'] for event in events
+            if event['type'] == 'stack_close_abandoned'
+        }
+        self.assertEqual(
+            abandoned,
+            {intents['unlanded']['operation_token'], intents['never']['operation_token']},
+        )
+
+    def test_landed_close_completes_after_a_local_edit(self):
+        origin = self.create_remote('landed-close-local-edit')
+        closer = self.clone(origin, 'landed-close-local-edit-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        for stack_id in ('closing', 'other'):
+            source = self.commit_on_branch(closer, f'pr/{stack_id}', f'{stack_id}.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, source, '--branch', f'pr/{stack_id}'
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+        self.run_cli_sigkill_after(
+            closer, 'authorized_push', 'stack', 'close', 'closing', '--force'
+        )
+        extra = self.commit_on_branch(closer, 'scratch/other-2', 'other-2.txt')
+        self.run_cli(closer, 'stack', 'add', 'other', extra)
+        landed_tip, _ = self.remote_state(origin)
+
+        self.run_cli(closer, 'stack', 'close', 'closing', '--force')
+
+        self.assertEqual(self.remote_state(origin)[0], landed_tip)
+        saved = json.loads((closer / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual([item['id'] for item in saved['stacks']], ['other'])
+        self.assertIn(extra, saved['stacks'][0]['commits'])
+
+    def test_landed_close_completes_after_the_delivery_moved(self):
+        origin = self.create_remote('landed-close-delivery-moved')
+        closer = self.clone(origin, 'landed-close-delivery-moved-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        sources = {}
+        for stack_id in ('edited', 'reverted'):
+            sources[stack_id] = self.commit_on_branch(
+                closer, f'pr/{stack_id}', f'{stack_id}.txt'
+            )
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, sources[stack_id],
+                '--branch', f'pr/{stack_id}',
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+            self.git(closer, 'push', '-q', 'origin', f'{sources[stack_id]}:main')
+        for stack_id in ('edited', 'reverted'):
+            self.run_cli_sigkill_after(
+                closer, 'authorized_push', 'stack', 'close', stack_id, '--reason', 'absorbed'
+            )
+        landed_tip, _ = self.remote_state(origin)
+        extra = self.commit_on_branch(closer, 'scratch/edited-2', 'edited-2.txt')
+        self.run_cli(closer, 'stack', 'add', 'edited', extra)
+        publisher = self.clone(origin, 'landed-close-delivery-moved-publisher')
+        self.git(publisher, 'revert', '--no-edit', sources['reverted'])
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+
+        self.run_cli(closer, 'stack', 'close', 'edited', '--reason', 'absorbed')
+        self.run_cli(closer, 'stack', 'close', 'reverted', '--reason', 'absorbed')
+
+        self.assertEqual(self.remote_state(origin)[0], landed_tip)
+        self.assertEqual(json.loads((closer / '.syncwheel' / 'manifest.json').read_text())['stacks'], [])
+        module = self.load_module()
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        for stack_id in ('edited', 'reverted'):
+            self.assertIsNone(
+                module.pending_stack_close_operation(closer, manifest_path, stack_id)
+            )
+
+    def test_stale_landed_intent_never_closes_a_recreated_stack(self):
+        origin = self.create_remote('stale-landed-intent')
+        closer = self.clone(origin, 'stale-landed-intent-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        module = self.load_module()
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        for stack_id, rebranch in (('moved', 'pr/moved-again'), ('same', 'pr/same')):
+            source = self.commit_on_branch(closer, f'pr/{stack_id}', f'{stack_id}.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, source, '--branch', f'pr/{stack_id}'
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+            self.run_cli_sigkill_after(
+                closer, 'save_manifest', 'stack', 'close', stack_id, '--force'
+            )
+            stale = module.pending_stack_close_operation(closer, manifest_path, stack_id)
+            if rebranch == f'pr/{stack_id}':
+                self.git(closer, 'branch', '-D', rebranch)
+            recreated = self.commit_on_branch(closer, rebranch, f'{stack_id}-again.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, recreated, '--branch', rebranch
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+            published, state = self.remote_state(origin)
+            self.assertIn(stack_id, [item['id'] for item in state['manifest']['stacks']])
+
+            self.run_cli(closer, 'stack', 'close', stack_id, '--force')
+
+            after_tip, after = self.remote_state(origin)
+            self.assertNotEqual(after_tip, published)
+            self.assertNotIn(stack_id, [item['id'] for item in after['manifest']['stacks']])
+            closed = [
+                event['payload'] for event in module.load_ledger_events(closer)
+                if event['type'] == 'stack_closed' and event['payload']['stack'] == stack_id
+            ]
+            self.assertEqual(
+                [item['operation_token'] == stale['operation_token'] for item in closed],
+                [True, False],
+            )
+            self.assertTrue(closed[0]['recovered'])
+
+    def test_landed_close_terminalizes_after_the_manifest_moved(self):
+        origin = self.create_remote('landed-close-manifest-moved')
+        closer = self.clone(origin, 'landed-close-manifest-moved-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        for stack_id in ('closing', 'other'):
+            source = self.commit_on_branch(closer, f'pr/{stack_id}', f'{stack_id}.txt')
+            self.run_cli(
+                closer, 'stack', 'create', stack_id, source, '--branch', f'pr/{stack_id}'
+            )
+            self.run_cli(closer, 'stack', 'push', stack_id)
+        self.run_cli_sigkill_after(
+            closer, 'save_manifest', 'stack', 'close', 'closing', '--force'
+        )
+        module = self.load_module()
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        pending = module.pending_stack_close_operation(closer, manifest_path, 'closing')
+        extra = self.commit_on_branch(closer, 'scratch/other-2', 'other-2.txt')
+        self.run_cli(closer, 'stack', 'add', 'other', extra)
+        landed_tip, _ = self.remote_state(origin)
+
+        recovered = self.run_cli(closer, 'stack', 'close', 'closing', '--force')
+
+        self.assertIn('recovered interrupted stack close', recovered.stdout)
+        self.assertEqual(self.remote_state(origin)[0], landed_tip)
+        self.assertIsNone(
+            module.pending_stack_close_operation(closer, manifest_path, 'closing')
+        )
+        closed = [
+            event['payload'] for event in module.load_ledger_events(closer)
+            if event['type'] == 'stack_closed'
+        ]
+        self.assertEqual(closed[-1]['operation_token'], pending['operation_token'])
+
+    def test_close_reason_survives_a_crash_between_abandon_and_the_new_intent(self):
+        origin = self.create_remote('close-reason-survives')
+        closer = self.clone(origin, 'close-reason-survives-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'pr/absorbing', 'absorbing.txt')
+        self.run_cli(closer, 'stack', 'create', 'absorbing', source, '--branch', 'pr/absorbing')
+        self.run_cli(closer, 'stack', 'push', 'absorbing')
+        self.git(closer, 'push', '-q', 'origin', f'{source}:main')
+        peer = self.publishing_peer(
+            origin, closer, 'close-reason-survives-peer', ['integration/shared', 'pr/absorbing']
+        )
+        self.run_cli_sigkill_after(
+            closer, 'ledger_event:stack_close_intent',
+            'stack', 'close', 'absorbing', '--reason', 'absorbed',
+        )
+        neutral = self.commit_on_branch(peer, 'scratch/neutral', 'neutral.txt')
+        self.run_cli(peer, 'stack', 'create', 'neutral', neutral, '--draft')
+        self.run_cli(peer, 'stack', 'close', 'neutral', '--force')
+        self.run_cli_sigkill_after(
+            closer, 'ledger_event:stack_close_abandoned', 'stack', 'close', 'absorbing'
+        )
+
+        self.run_cli(closer, 'stack', 'close', 'absorbing')
+
+        module = self.load_module()
+        closed = [
+            event['payload'] for event in module.load_ledger_events(closer)
+            if event['type'] == 'stack_closed'
+        ]
+        self.assertEqual(closed[-1]['reason'], 'absorbed')
+        self.assertEqual(self.remote_state(origin)[1]['manifest']['stacks'], [])
+
+    def test_unlanded_close_stops_when_a_peer_changed_the_stack(self):
+        origin = self.create_remote('unlanded-close-peer-change')
+        closer = self.clone(origin, 'unlanded-close-peer-change-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'pr/shared', 'shared.txt')
+        self.run_cli(closer, 'stack', 'create', 'shared', source, '--branch', 'pr/shared')
+        self.run_cli(closer, 'stack', 'push', 'shared')
+        peer = self.publishing_peer(
+            origin, closer, 'unlanded-close-peer-change-peer',
+            ['integration/shared', 'pr/shared'],
+        )
+        self.run_cli_sigkill_after(
+            closer, 'ledger_event:stack_close_intent', 'stack', 'close', 'shared', '--force'
+        )
+        module = self.load_module()
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        interrupted = module.pending_stack_close_operation(closer, manifest_path, 'shared')
+        added = self.commit_files(peer, 'pr/shared', {'shared-2.txt': 'more\n'}, 'feat: more')
+        self.run_cli(peer, 'stack', 'add', 'shared', added)
+        self.run_cli(peer, 'stack', 'push', 'shared')
+        peer_tip, _ = self.remote_state(origin)
+
+        stopped = self.run_cli(closer, 'stack', 'close', 'shared', '--force', expected=2)
+
+        self.assertIn('shared: close_superseded; its published entry changed', stopped.stderr)
+        self.assertEqual(self.remote_state(origin)[0], peer_tip)
+        self.assertIsNone(module.pending_stack_close_operation(closer, manifest_path, 'shared'))
+        self.assertIn(interrupted['operation_token'], {
+            event['payload']['operation_token'] for event in module.load_ledger_events(closer)
+            if event['type'] == 'stack_close_abandoned'
+        })
+        self.run_cli(closer, 'stack', 'close', 'shared', '--force')
+        self.assertEqual(self.remote_state(origin)[1]['manifest']['stacks'], [])
+
+    def test_published_close_reports_a_state_error_that_is_not_a_transport_failure(self):
+        origin = self.create_remote('published-close-state-error')
+        closer = self.clone(origin, 'published-close-state-error-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'pr/far', 'far.txt')
+        self.run_cli(closer, 'stack', 'create', 'far', source, '--branch', 'pr/far')
+        self.run_cli(closer, 'stack', 'push', 'far')
+        peer = self.publishing_peer(
+            origin, closer, 'published-close-state-error-peer', ['integration/shared', 'pr/far']
+        )
+        manifest_path = peer / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest.setdefault('channels', [])
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.run_cli(peer, 'int', 'push')
+
+        failure = self.run_cli(closer, 'stack', 'close', 'far', '--force', expected=2)
+
+        self.assertIn('migrate explicitly', failure.stderr)
+        self.assertNotIn('Restore remote access', failure.stderr)
+
+    def test_publication_refusal_offers_only_commands_that_fit_the_change(self):
+        repo, x_shas, _y1 = self.projection_after_upstream(
+            'refusal-advice-fit', [{'a.txt': 'a\n'}, {'b.txt': 'b\n'}]
+        )
+        self.run_cli(repo, 'stack', 'set', 'y', '--published')
+        self.run_cli(repo, 'stack', 'set', 'x', x_shas[1])
+
+        dropped = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        self.assertIn(
+            'x: local manifest differs from published state without publishing its '
+            'managed branch (owner: ',
+            dropped.stderr,
+        )
+        self.assertIn('drop the local change with syncwheel stack set x --published', dropped.stderr)
+        self.assertNotIn('stack rebuild x', dropped.stderr)
+        self.run_cli(repo, 'stack', 'set', 'x', '--published')
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        {item['id']: item for item in manifest['stacks']}['x']['target_branch'] = 'release'
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        retargeted = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        self.assertIn(
+            'the owner must publish or reset it; run syncwheel handoff for details',
+            retargeted.stderr,
+        )
+        self.assertNotIn('syncwheel stack set x', retargeted.stderr)
+
+    def test_close_refuses_while_a_published_stack_depends_on_it(self):
+        origin = self.create_remote('close-published-dependent')
+        closer = self.clone(origin, 'close-published-dependent-closer')
+        self.init_coordinated(closer)
+        manifest_path = closer / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['version'] = 3
+        manifest.setdefault('channels', [])
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'pr/needed', 'needed.txt')
+        self.run_cli(closer, 'stack', 'create', 'needed', source, '--branch', 'pr/needed')
+        self.run_cli(closer, 'stack', 'push', 'needed')
+        peer = self.publishing_peer(
+            origin, closer, 'close-published-dependent-peer',
+            ['integration/shared', 'pr/needed'],
+        )
+        dependent = self.commit_on_branch(peer, 'scratch/dependent', 'dependent.txt')
+        self.run_cli(
+            peer, 'stack', 'create', 'dependent', dependent, '--draft', '--depends-on', 'needed'
+        )
+        before, _ = self.remote_state(origin)
+
+        refused = self.run_cli(closer, 'stack', 'close', 'needed', '--force', expected=2)
+
+        self.assertIn(
+            'stack needed is still used by published channel(s) or stack(s): dependent',
+            refused.stderr,
+        )
+        self.assertEqual(self.remote_state(origin)[0], before)
+        module = self.load_module()
+        self.assertIsNone(module.pending_stack_close_operation(
+            closer, closer / '.syncwheel' / 'manifest.json', 'needed'
+        ))
+
+    def test_published_close_names_a_retry_when_the_remote_is_unreachable(self):
+        origin = self.create_remote('published-close-unreachable')
+        repo = self.clone(origin, 'published-close-unreachable')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'pr/far', 'far.txt')
+        self.run_cli(repo, 'stack', 'create', 'far', source, '--branch', 'pr/far')
+        self.run_cli(repo, 'stack', 'push', 'far')
+        self.git(repo, 'remote', 'set-url', 'origin', str(self.tmp / 'missing-remote.git'))
+
+        failure = self.run_cli(repo, 'stack', 'close', 'far', '--force', expected=2)
+
+        self.assertIn(
+            'far: published close could not inspect the coordination remote: ', failure.stderr
+        )
+        self.assertIn('Could not read from remote repository', failure.stderr)
+        self.assertIn(
+            'Restore remote access, then retry:\n  syncwheel stack close far --force',
+            failure.stderr,
+        )
+        saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertIn('far', [item['id'] for item in saved['stacks']])
+        self.assertIsNone(self.load_module().pending_stack_close_operation(
+            repo, repo / '.syncwheel' / 'manifest.json', 'far'
+        ))
+
+    def test_stack_set_published_fetches_once_and_names_the_owner_of_unreachable_commits(self):
+        origin = self.create_remote('set-published-fetch')
+        repo = self.clone(origin, 'set-published-fetch')
+        self.init_coordinated(repo, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        self.run_cli(repo, 'stack', 'create', 'y', '--draft')
+        self.run_cli(repo, 'stack', 'create', 'z', '--draft')
+        peer = self.publishing_peer(
+            origin, repo, 'set-published-fetch-peer',
+            ['integration/shared', 'syncwheel/draft/y', 'syncwheel/draft/z'],
+        )
+        reachable = self.commit_on_branch(peer, 'scratch/reachable', 'reachable.txt')
+        self.git(peer, 'switch', '-q', '-c', 'scratch/side', 'origin/main')
+        (peer / 'side.txt').write_text('side\n')
+        self.git(peer, 'add', 'side.txt')
+        self.git(peer, 'commit', '-q', '-m', 'test: side base')
+        (peer / 'unreachable.txt').write_text('unreachable\n')
+        self.git(peer, 'add', 'unreachable.txt')
+        self.git(peer, 'commit', '-q', '-m', 'test: rebuilt onto another base')
+        unreachable = self.git(peer, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(peer, 'switch', '-q', 'main')
+        for stack_id, commit in (('y', reachable), ('z', unreachable)):
+            self.run_cli(peer, 'stack', 'add', stack_id, commit)
+            self.run_cli(peer, 'stack', 'rebuild', stack_id)
+            self.run_cli(peer, 'stack', 'push', stack_id)
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+
+        self.run_cli(repo, 'stack', 'set', 'y', '--published')
+        before = manifest_path.read_bytes()
+        refused = self.run_cli(repo, 'stack', 'set', 'z', '--published', expected=2)
+
+        saved = {item['id']: item for item in json.loads(before)['stacks']}
+        self.assertEqual(saved['y']['commits'], [reachable])
+        self.assertIn(
+            f'z: published commit(s) {unreachable} are not reachable from origin; '
+            'the owner must publish them (owner: ',
+            refused.stderr,
+        )
+        self.assertIn('last published stack:z', refused.stderr)
+        self.assertEqual(manifest_path.read_bytes(), before)
+
+    def commit_files(self, repo, branch, files, message):
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        exists = subprocess.run(
+            ['git', 'rev-parse', '--verify', '-q', f'refs/heads/{branch}'],
+            cwd=repo, capture_output=True,
+        ).returncode == 0
+        self.git(repo, 'switch', '-q', *([branch] if exists else ['-c', branch, 'origin/main']))
+        for path, content in files.items():
+            (repo / path).write_text(content)
+            self.git(repo, 'add', path)
+        self.git(repo, 'commit', '-q', '-m', message)
+        sha = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', previous)
+        return sha
+
+    def projection_after_upstream(self, name, x_commits, upstream=None, y_files=None):
+        """Stack x is published, then `upstream` lands on main and y gets a local commit."""
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        x_shas = [
+            self.commit_files(repo, 'scratch/x', files, f'feat: x{index}')
+            for index, files in enumerate(x_commits)
+        ]
+        self.run_cli(repo, 'stack', 'create', 'x', *x_shas, '--draft')
+        self.run_cli(repo, 'stack', 'promote', 'x')
+        self.run_cli(repo, 'publish')
+        self.run_cli(repo, 'stack', 'create', 'y', '--draft')
+        self.run_cli(repo, 'publish')
+        if upstream:
+            publisher = self.clone(origin, f'{name}-publisher')
+            for path, content in upstream.items():
+                (publisher / path).write_text(content)
+                self.git(publisher, 'add', path)
+            self.git(publisher, 'commit', '-qm', 'feat: upstream squash')
+            self.git(publisher, 'push', '-q', 'origin', 'main')
+        y1 = self.commit_files(repo, 'scratch/y', y_files or {'y.txt': 'y\n'}, 'feat: y')
+        self.run_cli(repo, 'stack', 'add', 'y', y1)
+        self.git(repo, 'fetch', '-q', 'origin')
+        return repo, x_shas, y1
+
+    def test_projection_failure_calls_a_squashed_multi_commit_stack_absorbed(self):
+        repo, x_shas, _y1 = self.projection_after_upstream(
+            'projection-squashed-stack',
+            [{'f.txt': 'v1\n'}, {'f.txt': 'v2\n'}],
+            upstream={'f.txt': 'v2\n'},
+        )
+        self.git(repo, 'branch', '-D', 'pr/x')
+
+        failure = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        self.assertIn(
+            'stack x is already contained in origin/main (stopped at commit '
+            f"{self.git(repo, 'rev-parse', '--short', x_shas[0]).stdout.strip()}); "
+            'close it with syncwheel stack close x --reason absorbed, then retry',
+            failure.stderr,
+        )
+        self.run_cli(repo, 'stack', 'close', 'x', '--reason', 'absorbed')
+        self.run_cli(repo, 'stack', 'push', 'y')
+
+    def test_projection_failure_of_a_partly_absorbed_stack_gets_no_absorbed_advice(self):
+        repo, x_shas, _y1 = self.projection_after_upstream(
+            'projection-partly-absorbed',
+            [{'a.txt': 'a\n'}, {'b.txt': 'b\n'}],
+            upstream={'a.txt': 'a\n'},
+        )
+
+        failure = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        short = self.git(repo, 'rev-parse', '--short', x_shas[0]).stdout.strip()
+        self.assertIn(
+            f'stack x commit {short} does not replay onto origin/main', failure.stderr
+        )
+        self.assertIn('syncwheel int rebuild --replay-mode desk', failure.stderr)
+        self.assertNotIn('--reason absorbed', failure.stderr)
+        self.assertNotIn('stack set', failure.stderr)
+        self.assertNotIn('contained', failure.stderr)
+
+    def test_projection_conflict_with_another_stack_names_that_stack(self):
+        repo, _x_shas, y1 = self.projection_after_upstream(
+            'projection-stack-conflict', [{'f.txt': 'x\n'}], y_files={'f.txt': 'y\n'},
+        )
+
+        failure = self.run_cli(repo, 'stack', 'push', 'y', expected=2)
+
+        short = self.git(repo, 'rev-parse', '--short', y1).stdout.strip()
+        self.assertIn(
+            f'stack y commit {short} does not replay onto origin/main '
+            '(stack(s) x already changed f.txt)',
+            failure.stderr,
+        )
+        self.assertIn('syncwheel int rebuild --replay-mode desk', failure.stderr)
+
+    def test_close_keeps_a_published_stack_the_local_manifest_lags(self):
+        origin = self.create_remote('close-lagging-manifest')
+        closer = self.clone(origin, 'close-lagging-manifest-closer')
+        self.init_coordinated(closer)
+        self.run_cli(closer, 'int', 'push')
+        source = self.commit_on_branch(closer, 'pr/closing', 'closing.txt')
+        self.run_cli(closer, 'stack', 'create', 'closing', source, '--branch', 'pr/closing')
+        self.run_cli(closer, 'stack', 'push', 'closing')
+        module = self.load_module()
+        _, published = self.remote_state(origin)
+        other = self.mirror_coordinated_clone(
+            origin, closer, 'close-lagging-manifest-other',
+            ['integration/shared', 'pr/closing'],
+        )
+        other_manifest, other_path = module.load_manifest(other)
+        module.save_manifest(
+            other_path,
+            module.apply_coordination_snapshot(other_manifest, published['manifest']),
+        )
+        kept = self.commit_on_branch(other, 'scratch/kept', 'kept.txt')
+        self.run_cli(other, 'stack', 'create', 'kept', kept, '--draft')
+
+        self.run_cli(closer, 'stack', 'close', 'closing', '--force')
+
+        _, state = self.remote_state(origin)
+        self.assertEqual([stack['id'] for stack in state['manifest']['stacks']], ['kept'])
+        saved = json.loads((closer / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual(saved['stacks'], [])
 
     def test_stack_push_remote_failure_names_a_retry_command(self):
         origin = self.create_remote('round7-push-unreachable')

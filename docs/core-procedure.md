@@ -75,6 +75,10 @@ Use the normal full lifecycle to publish a convergent integration projection:
 python3 scripts/syncwheel.py publish
 ```
 
+`handoff` lists the local proposal against the published state: added,
+changed (with field names), and removed stacks and changed integration fields,
+under `coordination.local_proposal` in `--json`.
+
 Syncwheel atomically publishes changed managed refs together with an append-only
 state commit and exact leases. Do not replace it with a raw `git push`. If a
 lease reports disjoint stack changes as mergeable, review `handoff` and run
