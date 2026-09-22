@@ -48,7 +48,7 @@
       "base": "origin/main",
       "branch": "pr/read-only-git-auth",
       "commits": [
-        "65af6d45c5905d751419258dff0f080962a4ae3c"
+        "dffccd1eab3b9e248dbdcb3057011f21ef3941ac"
       ],
       "id": "read-only-git-auth",
       "integration_branch": "main-integration",
