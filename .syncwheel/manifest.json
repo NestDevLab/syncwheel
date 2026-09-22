@@ -46,7 +46,9 @@
     {
       "base": "origin/main",
       "branch": "syncwheel/draft/recover-semantic-lease",
-      "commits": [],
+      "commits": [
+        "71feda858090b3ed9e9aa5e4827d7885011f7e08"
+      ],
       "id": "recover-semantic-lease",
       "integration_branch": "main-integration",
       "meta": {
