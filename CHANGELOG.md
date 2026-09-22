@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.43.33 - 2026-09-21
+
+- Stop minting a ref-move authorization for Git children that can never move a ref (`rev-parse`, `cat-file`, `ls-files`, `log`, `config --get` and similar read-only commands). Each authorization cost a synced file write plus a `rev-parse --git-common-dir`, so an `int rebuild` on a small repository spent most of its time on them: 5.6 s before, 1.9 s after. Every command that can commit or move a ref still gets its authorization exactly as before.
+
 ## 0.43.32 - 2026-09-21
 
 - Run coordination test CLI subprocesses through the module loader to reuse cached Python bytecode and shorten the test cycle. Runtime CLI behavior is unchanged.

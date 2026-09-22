@@ -90,7 +90,9 @@ or switch anything automatically. The `pre-commit` guard blocks both a mismatch
 and a manual commit while the primary is correctly on integration. Syncwheel's own
 control and in-place rebuild commits pass through a short-lived, single-use nonce
 used for managed ref moves. The nonce binds the PID and its process-start identity,
-so a recycled PID cannot inherit the capability. Cleanup removes only nonces owned
+so a recycled PID cannot inherit the capability. Read-only Git children such as
+`rev-parse`, `cat-file`, or `config --get` receive no nonce, since they cannot reach
+either hook. Cleanup removes only nonces owned
 by the current process, a process that is no longer alive, or a provably recycled
 PID, so concurrent Syncwheel processes keep their capabilities. A malformed or
 unreadable nonce is retained for the TTL to avoid racing a writer, then removed only
