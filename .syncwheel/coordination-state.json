@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/recover-semantic-lease": "71feda858090b3ed9e9aa5e4827d7885011f7e08"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -29,7 +27,7 @@
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
     "refs/heads/pr/read-only-git-auth": "8214480681f3a822f5d3c158defbeba29a5ad631",
-    "refs/heads/pr/recover-semantic-lease": "7dc472615d4ba71b1ca31ab1e3af15603a9596cf",
+    "refs/heads/pr/recover-semantic-lease": "6c91ea1a41630a2452c364fa4377fc41d3c6ac1b",
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
@@ -63,7 +61,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-22T13:49:55+00:00",
+  "created_at": "2026-09-22T14:00:19+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -176,9 +174,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "recover-semantic-lease"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -186,30 +182,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/recover-semantic-lease",
-        "commits": [
-          "71feda858090b3ed9e9aa5e4827d7885011f7e08"
-        ],
-        "id": "recover-semantic-lease",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "52694833-d7fb-4a53-9409-7ed611317f52",
-  "parent_state": "d26c2a7cca806562c9c3bafbe58e83022a136737",
+  "operation_token": "13334ba9-075c-47c6-be76-2e5e2b8b8c8a",
+  "parent_state": "502edcc58cf8e6f82fc29eccbc2b2c30902d3e4d",
   "projection_status": "partial",
-  "publication_id": "fb4355c5-52c5-4e5e-a7cb-78900342d061",
-  "publication_scope": "promote:recover-semantic-lease",
+  "publication_id": "b8bb3bae-ae10-433d-8fa5-887485790e4f",
+  "publication_scope": "close:recover-semantic-lease",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -859,6 +840,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/recover-semantic-lease",
       "remote_tip": "71feda858090b3ed9e9aa5e4827d7885011f7e08",
+      "stack": "recover-semantic-lease"
+    },
+    {
+      "branch": "pr/recover-semantic-lease",
+      "closed_at": "2026-09-22T14:00:15+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/recover-semantic-lease",
+      "remote_tip": null,
       "stack": "recover-semantic-lease"
     }
   ]
