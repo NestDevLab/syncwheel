@@ -76,6 +76,46 @@ local:
 - your PRs stay clean — only the real change is proposed, with no tooling noise
 - coordination and recovery happen via the canonical remote plus `resume`
 
+**The manifest never enters the integration tree.** A `local-only` repository
+without active-active coordination gets no `chore: restore Syncwheel control
+manifest` commit after an integration rebuild; the rebuilt replay tip is the
+integration tip, and the ledger receipt names that tip as the control commit. An integration tree without the manifest
+is the convergent state, so reconcile plans neither a rebuild nor a push to
+reach control-manifest parity with a remote.
+
+A control commit left by an earlier release is dropped the next time the
+integration branch is rebuilt. Before the reset, Syncwheel records the bytes of
+every manifest source the reset can reach and untracks `.syncwheel/manifest.json`
+in the checkout that holds the integration branch; afterwards it restores only
+the sources the reset removed. The file therefore survives byte for byte for a
+default, `--manifest` or `--personal` path, and no deletion is staged in a
+checkout that is on another branch. The previous tip stays reachable through the
+automatic `backup/<branch>-before-syncwheel-<timestamp>` ref. A control commit
+that was already pushed is never removed automatically: republishing the
+rebuilt branch needs a reviewed
+`syncwheel int push --remote <remote> --force-with-lease`, because a plain
+push is not a fast-forward.
+
+**Where the manifest may be pushed.** Every Syncwheel push checks each ref it
+updates before anything is sent. A commit whose tree carries
+`.syncwheel/manifest.json` may only go to the integration branch, never when
+that branch is `defaults.base_branch` on the canonical remote, or to a Syncwheel
+coordination state or claim ref. Stack, pull-request, channel and landing
+branches are refused, whichever command builds the push. The canonical remote is
+matched by its push URL, not its name. A manifest the integration base already
+carries unchanged is a product file and is not restricted.
+
+**Active-active coordination keeps the control commit.** Its state commit binds
+the manifest by reading it from the published integration tip, so a coordinated
+repository still gets one and publishes it on its integration branch, whatever
+the tracking policy says. The push rule above applies to it unchanged.
+
+**A manifest the base tracks is not a control commit.** When the projection
+itself carries `.syncwheel/manifest.json` — an upstream that versions its own
+manifest — that file is a product file. The integration branch stays convergent
+and still publishes; settle the tracking policy with `syncwheel repo tracking
+status` if that is not what you want.
+
 `local-only` is deliberately not auto-enrolled in active-active coordination.
 It can opt in only with an explicit remote and apply step:
 
@@ -84,6 +124,9 @@ syncwheel coordination init --remote origin --apply
 ```
 
 This keeps an untracked manifest from unexpectedly creating shared remote state.
+When that remote is also `defaults.canonical_remote`, `validate` warns and names
+the state branch, because the coordination state is then published on a remote
+the repository does not own.
 
 ## Migration
 

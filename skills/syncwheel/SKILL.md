@@ -616,8 +616,9 @@ Benefits:
 - your PRs stay clean — only the real change is proposed
 - coordination/recovery happens via the canonical remote + `resume`
 
-`local-only` does not automatically create shared coordination state. It may
-opt in only with the explicit `coordination init --remote ... --apply` command.
+`local-only` without active-active coordination keeps the manifest out of the
+integration tree. Either way, no Syncwheel push carries the manifest to a stack,
+pull-request or delivery branch.
 
 Use `syncwheel repo tracking set ... --apply` to migrate between modes. The CLI
 edits only Syncwheel-managed ignore blocks; if manual `.gitignore` entries would
