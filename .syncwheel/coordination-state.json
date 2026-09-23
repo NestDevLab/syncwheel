@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19"
+    "refs/heads/pr/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -18,6 +18,7 @@
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
+    "refs/heads/pr/local-only-control-manifest": "39ac5c06002a44c4de1c90af191136e28cb07ed0",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
     "refs/heads/pr/mgt-0287-squash-absorbed": "e7b56d0339fcdd05283fb17feff92549bee2723f",
@@ -47,7 +48,7 @@
     "refs/heads/syncwheel/draft/historical-pr83": "cfd6560a4f44c15e264908daf9a756ed28d76213",
     "refs/heads/syncwheel/draft/historical-pr85": "19f53fe4952b2a44821f1a959199a7cc15989f32",
     "refs/heads/syncwheel/draft/independent-worktree-open": "5833214723e4ece154a70ffa5d83ae665e22aa29",
-    "refs/heads/syncwheel/draft/local-only-control-manifest": "ca47b4c4261838931c5c7ee9026f98002565ab2e",
+    "refs/heads/syncwheel/draft/local-only-control-manifest": "0cf7c011fcea34dfa83560bca79cad581fe8504d",
     "refs/heads/syncwheel/draft/merge-tip-push-projection": "8e276d79a751dc48719f9ea63cbe4176b68accaa",
     "refs/heads/syncwheel/draft/mgt-0287-squash-absorbed": "8e6c0c70780907858c4cdae6dd175e0a6f095844",
     "refs/heads/syncwheel/draft/missing-historical-integration-tip": "8eb98c69217f368d77d8ce6fca60d3b89c68d8e6",
@@ -66,7 +67,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-23T16:39:02+00:00",
+  "created_at": "2026-09-23T16:39:18+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -95,6 +96,7 @@
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
+    "refs/heads/pr/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/merge-tip-push-projection": "b23621248f37612c2a75b1aa92672eea1b61d4da",
     "refs/heads/pr/mgt-0287-ci-sharding": "bbec5e736a31d8a55280ac8699e4b82b65174626",
@@ -199,24 +201,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/local-only-control-manifest",
+        "branch": "pr/local-only-control-manifest",
         "commits": [
           "0e52207481088edea2441320881f0e59fa236c19"
         ],
         "id": "local-only-control-manifest",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "cbfae970-63c0-4ff7-b185-126b8fb475c0",
-  "parent_state": "ddc46049518ef6820d4f0214b347a4b99573a79c",
+  "operation_token": "c003f3e1-2e08-48b8-872c-4f85b986f14a",
+  "parent_state": "53e25054376b8f35ba66ea8348edfdf27773ead8",
   "projection_status": "partial",
-  "publication_id": "6fd09022-31ea-4981-b376-b9ef118b325e",
-  "publication_scope": "stack:local-only-control-manifest",
+  "publication_id": "294ea588-32e2-4eef-b581-32ef20b01441",
+  "publication_scope": "promote:local-only-control-manifest",
   "schema_version": 2,
   "syncwheel_version": "0.43.31",
   "tombstones": [
@@ -891,6 +892,14 @@
       "ref": "refs/heads/pr/half-state-coordination",
       "remote_tip": null,
       "stack": "half-state-coordination"
+    },
+    {
+      "branch": "syncwheel/draft/local-only-control-manifest",
+      "closed_at": "2026-09-23T16:39:13+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/local-only-control-manifest",
+      "remote_tip": "0e52207481088edea2441320881f0e59fa236c19",
+      "stack": "local-only-control-manifest"
     }
   ]
 }
