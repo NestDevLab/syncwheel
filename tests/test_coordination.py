@@ -125,8 +125,8 @@ spec.loader.exec_module(module)
 
 if checkpoint == 'authorized_push':
     original = module.run_authorized_push
-    def killed(repo_root, command, remote, refs, check=True):
-        result = original(repo_root, command, remote, refs, check=check)
+    def killed(repo_root, command, remote, refs, check=True, **kwargs):
+        result = original(repo_root, command, remote, refs, check=check, **kwargs)
         if result.returncode == 0 and any('/syncwheel/state/' in ref for ref in refs):
             os.kill(os.getpid(), signal.SIGKILL)
         return result
@@ -149,8 +149,8 @@ elif checkpoint == 'legacy_authorized_push':
         return original_event(repo_root, event_type, payload, manifest_path, **kwargs)
     module.append_ledger_event = legacy
     original = module.run_authorized_push
-    def killed(repo_root, command, remote, refs, check=True):
-        result = original(repo_root, command, remote, refs, check=check)
+    def killed(repo_root, command, remote, refs, check=True, **kwargs):
+        result = original(repo_root, command, remote, refs, check=check, **kwargs)
         if result.returncode == 0 and any('/syncwheel/state/' in ref for ref in refs):
             os.kill(os.getpid(), signal.SIGKILL)
         return result
@@ -1817,9 +1817,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         pushes = []
         original_push = module.run_authorized_push
 
-        def capture_push(repo_root, command, remote, refs, check=True):
+        def capture_push(repo_root, command, remote, refs, check=True, **kwargs):
             pushes.append({'command': command, 'refs': refs})
-            return original_push(repo_root, command, remote, refs, check=check)
+            return original_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
             result = module.apply_coordination_repair_plan(repo, manifest, plan)
@@ -5413,9 +5413,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         pushes = []
         original_push = module.run_authorized_push
 
-        def capture_push(repo_root, command, remote, refs, check=True):
+        def capture_push(repo_root, command, remote, refs, check=True, **kwargs):
             pushes.append({'command': command, 'remote': remote, 'refs': refs})
-            return original_push(repo_root, command, remote, refs, check=check)
+            return original_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
             result = module.apply_coordination_repair_plan(repo, manifest, plan)
@@ -5570,9 +5570,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         pushes = []
         original_push = module.run_authorized_push
 
-        def capture_push(repo_root, command, remote, refs, check=True):
+        def capture_push(repo_root, command, remote, refs, check=True, **kwargs):
             pushes.append({'command': command, 'remote': remote, 'refs': refs})
-            return original_push(repo_root, command, remote, refs, check=check)
+            return original_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
             result = module.apply_coordination_repair_plan(
@@ -5664,9 +5664,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         pushes = []
         original_push = module.run_authorized_push
 
-        def capture_push(repo_root, command, remote, refs, check=True):
+        def capture_push(repo_root, command, remote, refs, check=True, **kwargs):
             pushes.append({'command': command, 'remote': remote, 'refs': refs})
-            return original_push(repo_root, command, remote, refs, check=check)
+            return original_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
             result = module.apply_coordination_repair_plan(
@@ -6159,9 +6159,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         pushes = []
         original_push = module.run_authorized_push
 
-        def capture_push(repo_root, command, remote, refs, check=True):
+        def capture_push(repo_root, command, remote, refs, check=True, **kwargs):
             pushes.append({'command': command, 'refs': refs})
-            return original_push(repo_root, command, remote, refs, check=check)
+            return original_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
             result = module.apply_coordination_compose_stack_plan(
@@ -6874,12 +6874,12 @@ with module.coordination_publication_lock(Path(repo_path)):
         real_push = module.run_authorized_push
         injected = False
 
-        def publish_foreign_claim_after_checks(repo_root, command, remote, refs, check=True):
+        def publish_foreign_claim_after_checks(repo_root, command, remote, refs, check=True, **kwargs):
             nonlocal injected
             if not injected and claim_ref in refs:
                 injected = True
                 self.git(repo, 'push', '-q', 'origin', f'{foreign_claim}:{claim_ref}')
-            return real_push(repo_root, command, remote, refs, check=check)
+            return real_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(
             module, 'run_authorized_push', side_effect=publish_foreign_claim_after_checks
@@ -7064,12 +7064,12 @@ with module.coordination_publication_lock(Path(repo_path)):
         real_push = module.run_authorized_push
         injected = False
 
-        def publish_tombstone_after_checks(repo_root, command, remote, refs, check=True):
+        def publish_tombstone_after_checks(repo_root, command, remote, refs, check=True, **kwargs):
             nonlocal injected
             if not injected and claim_ref in refs:
                 injected = True
                 self.git(publisher, 'push', '-q', 'origin', f'{tombstone}:{claim_ref}')
-            return real_push(repo_root, command, remote, refs, check=check)
+            return real_push(repo_root, command, remote, refs, check=check, **kwargs)
 
         with mock.patch.object(
             module, 'run_authorized_push', side_effect=publish_tombstone_after_checks
