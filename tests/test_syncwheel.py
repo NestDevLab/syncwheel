@@ -4637,7 +4637,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         original_push = module.run_authorized_push
         push_observations = []
 
-        def advance_then_push(repo_root, command, remote, refs, check=True):
+        def advance_then_push(repo_root, command, remote, refs, check=True, **kwargs):
             self.assertEqual(module.ref_tip(repo_root, branch), frozen_tip)
             module.git(
                 repo_root, 'update-ref', integration_ref,
@@ -4649,7 +4649,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 'refs': list(refs),
             })
             return original_push(
-                repo_root, command, remote, refs, check=check
+                repo_root, command, remote, refs, check=check, **kwargs
             )
 
         parser = module.build_parser()
@@ -4775,7 +4775,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         original_push = module.run_authorized_push
         push_observations = []
 
-        def advance_then_push(repo_root, command, remote, refs, check=True):
+        def advance_then_push(repo_root, command, remote, refs, check=True, **kwargs):
             self.assertEqual(module.ref_tip(repo_root, branch), frozen_tip)
             module.git(
                 repo_root, 'update-ref', integration_ref,
@@ -4787,7 +4787,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 'refs': list(refs),
             })
             return original_push(
-                repo_root, command, remote, refs, check=check
+                repo_root, command, remote, refs, check=check, **kwargs
             )
 
         parser = module.build_parser()
@@ -6852,6 +6852,847 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertEqual(module.manifest_digest(control), module.manifest_digest(reordered))
         self.assertEqual(first, second)
+
+    def test_control_manifest_commit_uses_the_fixed_identity_and_parent_time(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        parent = self.git('rev-parse', 'HEAD')
+        parent_time = self.git('show', '-s', '--format=%ct', parent)
+
+        commit = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        self.assertEqual(
+            self.git('show', '-s', '--format=%an%x00%ae%x00%cn%x00%ce', commit).split('\x00'),
+            [
+                'Syncwheel Control', 'control@syncwheel.invalid',
+                'Syncwheel Control', 'control@syncwheel.invalid',
+            ],
+        )
+        self.assertEqual(
+            self.git('show', '-s', '--format=%ad%x00%cd', '--date=raw', commit).split('\x00'),
+            [f'{parent_time} +0000', f'{parent_time} +0000'],
+        )
+
+    def test_control_manifest_commit_ignores_the_local_commit_encoding(self):
+        module = self.load_syncwheel_module()
+        control, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        parent = self.git('rev-parse', 'HEAD')
+
+        first = module.materialize_control_manifest_commit(self.repo, control, parent)
+        self.git('config', 'i18n.commitEncoding', 'ISO-8859-1')
+        second = module.materialize_control_manifest_commit(self.repo, control, parent)
+        with mock.patch.dict(
+            os.environ,
+            {'GIT_CONFIG_PARAMETERS': "'i18n.commitEncoding=ISO-8859-1'"},
+        ):
+            ambient = module.materialize_control_manifest_commit(self.repo, control, parent)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, ambient)
+        self.assertEqual(self.git('show', '-s', '--format=%e', first), '')
+
+    def legacy_identity_control_commit(self, module, manifest, parent):
+        """Rebuild the control object the way releases before 0.44.0 did."""
+        tree = module.materialize_control_manifest_projection_tree(
+            self.repo, manifest, module.ref_tree(self.repo, parent),
+        )
+        return module.git(
+            self.repo, 'commit-tree', tree, '-p', parent,
+            '-m', 'chore: restore Syncwheel control manifest',
+            env=module.replay_commit_env(self.repo, parent),
+        ).stdout.strip()
+
+    def test_pending_legacy_identity_intent_still_recovers(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        legacy = self.legacy_identity_control_commit(module, desired, parent)
+        intent = module.control_manifest_intent_payload(
+            self.repo, desired, module.manifest_digest(desired), parent, legacy,
+            'plumbing', 'legacy control manifest intent', 'syncwheel int rebuild',
+            'operation-legacy-identity',
+        )
+        intent.pop('control_identity', None)
+
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            module.append_ledger_event(
+                self.repo, 'control_manifest_persistence_intent', intent, manifest_path,
+                idempotency_key=module.control_manifest_intent_idempotency_key(
+                    intent['operation_id']
+                ),
+            )
+            recovered = module.recover_incomplete_control_manifest_persistence(
+                self.repo, manifest_path, desired,
+            )
+
+        self.assertEqual(module.manifest_digest(recovered), module.manifest_digest(desired))
+        self.assertEqual(self.git('rev-parse', 'main'), legacy)
+
+    def test_legacy_identity_control_tip_is_still_recognised(self):
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        desired, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'HEAD')
+        legacy = self.legacy_identity_control_commit(module, desired, parent)
+        self.git('update-ref', 'refs/heads/main', legacy, parent)
+        self.git('read-tree', '--reset', '-u', legacy)
+        stale = json.loads(json.dumps(desired))
+        stale['defaults']['base_branch'] = 'stale-main'
+        manifest_path.write_text(json.dumps(stale, indent=2) + '\n')
+
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'no local persistence intent',
+            ):
+                module.recover_incomplete_control_manifest_persistence(
+                    self.repo, manifest_path, stale,
+                )
+
+    def prepare_local_only_repo(self, integration_branch='main'):
+        """Local-only manifest, no stacks, integration projected from a bare origin."""
+        origin = self.tmp / 'local-only-origin.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', '-q', 'origin', '--prune')
+        data = self.read_manifest()
+        data['syncwheel_tracking'] = 'local-only'
+        data['defaults']['base_ref'] = 'origin/main'
+        data['stacks'] = []
+        data['integration'] = {
+            'branch': integration_branch,
+            'base': 'origin/main',
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+        self.load_syncwheel_module().ensure_syncwheel_metadata_excluded(
+            self.repo, 'local-only',
+        )
+        if integration_branch != 'main':
+            self.git('switch', '-q', '-c', integration_branch, 'main')
+        return origin
+
+    def advance_local_only_origin(self, origin, branch='main'):
+        """Publish one commit to the bare origin from an independent clone."""
+        seed = self.tmp / f"local-only-seed-{branch.replace('/', '-')}"
+        shutil.rmtree(seed, ignore_errors=True)
+        subprocess.run(['git', 'clone', '-q', '-b', branch, str(origin), str(seed)], check=True)
+        subprocess.run(['git', 'config', 'user.name', 'Upstream Author'], cwd=seed, check=True)
+        subprocess.run(
+            ['git', 'config', 'user.email', 'upstream@example.invalid'], cwd=seed, check=True,
+        )
+        (seed / 'upstream.txt').write_text('upstream\n')
+        subprocess.run(['git', 'add', 'upstream.txt'], cwd=seed, check=True)
+        subprocess.run(['git', 'commit', '-q', '-m', 'feat: upstream advance'], cwd=seed, check=True)
+        subprocess.run(['git', 'push', '-q', 'origin', branch], cwd=seed, check=True)
+        self.git('fetch', '-q', 'origin', '--prune')
+        return subprocess.run(
+            ['git', 'rev-parse', 'HEAD'], cwd=seed, text=True, capture_output=True, check=True,
+        ).stdout.strip()
+
+    def remote_ref_revision(self, origin, ref):
+        result = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', '--verify', '--quiet', ref],
+            text=True,
+            capture_output=True,
+        )
+        return result.stdout.strip() or None
+
+    def stage_legacy_local_only_control_commit(self):
+        """Reproduce the tracked control commit releases before 0.44.0 created."""
+        module = self.load_syncwheel_module()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest, _ = module.load_manifest(self.repo, manifest_path)
+        branch = manifest['integration']['branch']
+        parent = self.git('rev-parse', branch)
+        legacy = self.legacy_identity_control_commit(module, manifest, parent)
+        self.git('update-ref', f'refs/heads/{branch}', legacy, parent)
+        self.git('read-tree', '--reset', '-u', legacy)
+        return parent, legacy
+
+    def test_local_only_sync_leaves_the_integration_branch_manifest_free(self):
+        origin = self.prepare_local_only_repo()
+        upstream = self.advance_local_only_origin(origin)
+
+        self.run_cli('sync', expected=0)
+
+        self.assertEqual(self.git('rev-parse', 'main'), upstream)
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+
+    def test_local_only_reconcile_converges_without_a_control_commit(self):
+        self.prepare_local_only_repo()
+
+        report = json.loads(
+            self.run_cli('reconcile', '--no-fetch', '--json', expected=0).stdout
+        )
+
+        self.assertEqual(report['actions'], [])
+
+    def test_local_only_dedicated_integration_branch_has_no_control_manifest(self):
+        origin = self.prepare_local_only_repo('main-integration')
+        upstream = self.advance_local_only_origin(origin)
+
+        self.run_cli('sync', expected=0)
+
+        tip = self.git('rev-parse', 'main-integration')
+        self.assertEqual(tip, upstream)
+        self.assertEqual(self.git('ls-tree', '-r', '--name-only', tip, '.syncwheel/'), '')
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+
+    def test_local_only_rebuild_drops_an_unpushed_control_commit(self):
+        self.prepare_local_only_repo()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        parent, _ = self.stage_legacy_local_only_control_commit()
+        preserved = manifest_path.read_bytes()
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '.syncwheel/manifest.json')
+
+        self.run_cli('sync', expected=0)
+
+        self.assertEqual(self.git('rev-parse', 'main'), parent)
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+        self.assertEqual(manifest_path.read_bytes(), preserved)
+
+    def test_local_only_repeated_rebuild_keeps_one_receipt(self):
+        module = self.load_syncwheel_module()
+        origin = self.prepare_local_only_repo()
+        self.advance_local_only_origin(origin)
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+
+        self.run_cli('sync', expected=0)
+        self.run_cli('int', 'rebuild', '--reason', 'repeat the rebuild', expected=0)
+        self.run_cli('int', 'rebuild', '--reason', 'repeat the rebuild again', expected=0)
+
+        receipts = [
+            event for event in module.load_control_manifest_events(self.repo, manifest_path)
+            if event['type'] == 'manifest_saved'
+        ]
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(
+            receipts[0]['payload']['control_commit'], self.git('rev-parse', 'main'),
+        )
+
+    def test_local_only_pending_control_intent_is_abandoned(self):
+        module = self.load_syncwheel_module()
+        self.prepare_local_only_repo()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'main')
+        legacy = self.legacy_identity_control_commit(module, manifest, parent)
+        intent = module.control_manifest_intent_payload(
+            self.repo, manifest, module.manifest_digest(manifest), parent, legacy,
+            'plumbing', 'legacy control manifest intent', 'syncwheel int rebuild',
+            'operation-local-only-intent',
+        )
+        intent.pop('control_identity', None)
+
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            module.append_ledger_event(
+                self.repo, 'control_manifest_persistence_intent', intent, manifest_path,
+                idempotency_key=module.control_manifest_intent_idempotency_key(
+                    intent['operation_id']
+                ),
+            )
+            module.recover_incomplete_control_manifest_persistence(
+                self.repo, manifest_path, manifest,
+            )
+
+        events = module.load_control_manifest_events(self.repo, manifest_path)
+        self.assertEqual(module.pending_control_manifest_intents(events), [])
+        self.assertEqual(self.git('rev-parse', 'main'), parent)
+
+    def test_local_only_manifest_cannot_reach_the_delivery_branch(self):
+        origin = self.prepare_local_only_repo()
+        self.stage_legacy_local_only_control_commit()
+        published = self.remote_ref_revision(origin, 'refs/heads/main')
+
+        carrying = self.run_cli('int', 'push', '--remote', 'origin', expected=2)
+        self.run_cli_unchecked(
+            'publish', '--remote', 'origin', '--rebuild', 'none', '--no-fetch', cwd=self.repo,
+        )
+
+        self.assertIn('refusing to push refs/heads/main to origin', carrying.stderr)
+        self.assertEqual(self.remote_ref_revision(origin, 'refs/heads/main'), published)
+
+    def test_local_only_integration_without_the_manifest_reaches_the_delivery_branch(self):
+        origin = self.prepare_local_only_repo()
+        self.advance_local_only_origin(origin)
+        self.run_cli('sync', expected=0)
+
+        self.run_cli('int', 'push', '--remote', 'origin', expected=0)
+
+        self.assertEqual(
+            self.remote_ref_revision(origin, 'refs/heads/main'), self.git('rev-parse', 'main'),
+        )
+
+    def publish_tracked_manifest_on_base(self, integration_branch):
+        """Make the upstream base carry .syncwheel/manifest.json as a product file."""
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        preserved = manifest_path.read_bytes()
+        self.git('switch', '-q', 'main')
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_bytes(preserved)
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'chore: track the manifest upstream')
+        self.git('push', '-q', 'origin', 'main')
+        self.git('fetch', '-q', 'origin', '--prune')
+        self.git('switch', '-q', integration_branch)
+        self.git('reset', '-q', '--hard', 'origin/main')
+
+    def test_local_only_guard_keeps_an_external_manifest_rebuild_safe(self):
+        self.prepare_local_only_repo('main-integration')
+        self.stage_legacy_local_only_control_commit()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        external = self.tmp / 'external-local-only.json'
+        external.write_bytes(internal.read_bytes())
+        preserved = internal.read_bytes()
+
+        self.run_cli(
+            'int', 'rebuild', '--manifest', str(external),
+            '--reason', 'external manifest rebuild', expected=0,
+        )
+
+        self.assertEqual(internal.read_bytes(), preserved)
+        self.assertTrue(external.exists())
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+
+    def test_local_only_guard_keeps_a_personal_manifest_rebuild_safe(self):
+        self.prepare_local_only_repo('main-integration')
+        self.stage_legacy_local_only_control_commit()
+        internal = self.repo / '.syncwheel' / 'manifest.json'
+        personal = self.repo / '.syncwheel' / 'manifests' / 'dev.local.json'
+        personal.parent.mkdir(parents=True, exist_ok=True)
+        personal.write_bytes(internal.read_bytes())
+        preserved = internal.read_bytes()
+
+        self.run_cli(
+            'int', 'rebuild', '--personal', 'dev',
+            '--reason', 'personal manifest rebuild', expected=0,
+        )
+
+        self.assertEqual(internal.read_bytes(), preserved)
+        self.assertTrue(personal.exists())
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+
+    def test_local_only_guard_keeps_a_staged_and_modified_manifest(self):
+        self.prepare_local_only_repo('main-integration')
+        self.stage_legacy_local_only_control_commit()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest_path.write_text(manifest_path.read_text() + '\n')
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        modified = manifest_path.read_text() + '\n'
+        manifest_path.write_text(modified)
+
+        self.run_cli('int', 'rebuild', '--reason', 'staged and modified', expected=0)
+
+        self.assertEqual(manifest_path.read_text(), modified)
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+
+    def test_local_only_rebuild_does_not_stage_a_deletion_on_another_branch(self):
+        self.prepare_local_only_repo('main-integration')
+        self.stage_legacy_local_only_control_commit()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        preserved = manifest_path.read_bytes()
+        self.git('switch', '-q', '-c', 'pr/feature-x', 'main')
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_bytes(preserved)
+        self.git('add', '-f', '.syncwheel/manifest.json')
+        self.git('commit', '-q', '-m', 'feat: track the manifest on a feature branch')
+
+        self.run_cli('int', 'rebuild', '--reason', 'rebuild from another branch', expected=0)
+
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), '')
+        self.assertTrue(manifest_path.exists())
+
+    def test_local_only_align_to_remote_keeps_the_manifest_file(self):
+        self.prepare_local_only_repo('main-integration')
+        self.run_cli('int', 'push', '--remote', 'origin', expected=0)
+        self.stage_legacy_local_only_control_commit()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        preserved = manifest_path.read_bytes()
+
+        result = self.run_cli('reconcile', '--apply', '--remote', 'origin', expected=0)
+
+        self.assertIn('align_integration_to_remote', result.stdout)
+        self.assertEqual(manifest_path.read_bytes(), preserved)
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+
+    def test_local_only_base_tracked_manifest_converges_and_publishes(self):
+        origin = self.prepare_local_only_repo('main-integration')
+        self.publish_tracked_manifest_on_base('main-integration')
+
+        report = json.loads(
+            self.run_cli('reconcile', '--no-fetch', '--json', expected=0).stdout
+        )
+        self.run_cli('int', 'push', '--remote', 'origin', expected=0)
+
+        self.assertEqual(report['actions'], [])
+        self.assertEqual(
+            self.remote_ref_revision(origin, 'refs/heads/main-integration'),
+            self.git('rev-parse', 'main-integration'),
+        )
+
+    def test_git_tracked_publication_to_the_delivery_branch_is_allowed(self):
+        origin = self.tmp / 'delivery-origin.git'
+        subprocess.run(['git', 'clone', '--bare', '-q', str(self.repo), str(origin)], check=True)
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', '-q', 'origin', '--prune')
+        data = self.read_manifest()
+        data['syncwheel_tracking'] = 'git-tracked'
+        data['stacks'] = []
+        data['integration'] = {
+            'branch': 'main',
+            'base': 'origin/main',
+            'strategy': 'cherry-pick',
+            'stacks': [],
+        }
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+
+        result = self.run_cli('int', 'push', '--remote', 'origin', expected=0)
+
+        self.assertIn(
+            self.remote_ref_revision(origin, 'refs/heads/main'), result.stdout,
+        )
+
+    def test_int_push_dry_run_refuses_a_local_only_control_tip(self):
+        self.prepare_local_only_repo()
+        self.stage_legacy_local_only_control_commit()
+
+        refusal = self.run_cli(
+            'int', 'push', '--remote', 'origin', '--dry-run', expected=2,
+        )
+
+        self.assertIn('carries the local-only control manifest', refusal.stderr)
+
+    def test_int_push_dry_run_previews_an_unconfigured_remote(self):
+        self.prepare_local_only_repo('main-integration')
+
+        result = self.run_cli(
+            'int', 'push', '--remote', 'unreachable', '--dry-run', expected=0,
+        )
+
+        self.assertIn('git push unreachable main-integration', result.stdout)
+
+    def test_local_only_push_guard_does_not_contact_the_remote(self):
+        module = self.load_syncwheel_module()
+        manifest, _ = module.load_manifest(self.repo)
+        manifest['syncwheel_tracking'] = 'local-only'
+        subcommands = []
+        original = module.git
+
+        def record(repo_root, *args, **kwargs):
+            subcommands.append(args[0] if args else None)
+            return original(repo_root, *args, **kwargs)
+
+        with mock.patch.object(module, 'git', side_effect=record):
+            module.refuse_local_only_manifest_push(
+                self.repo, manifest,
+                ['git', 'push', 'fork', f"{self.git('rev-parse', 'HEAD')}:refs/heads/pr/x"],
+                'fork',
+            )
+
+        self.assertFalse({'ls-remote', 'fetch', 'push'} & set(subcommands))
+
+    def test_local_only_untrack_keeps_the_manifest_file_in_place(self):
+        self.prepare_local_only_repo('main-integration')
+        self.run_cli('int', 'push', '--remote', 'origin', expected=0)
+        self.stage_legacy_local_only_control_commit()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        before = manifest_path.stat()
+
+        self.run_cli('int', 'align-remote', '--remote', 'origin', expected=0)
+
+        after = manifest_path.stat()
+        self.assertEqual(
+            (before.st_ino, before.st_mode), (after.st_ino, after.st_mode),
+        )
+
+    def test_local_only_dry_run_transcript_keeps_the_manifest_file(self):
+        self.prepare_local_only_repo('main-integration')
+        self.run_cli('int', 'push', '--remote', 'origin', expected=0)
+        self.stage_legacy_local_only_control_commit()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        preserved = manifest_path.read_bytes()
+
+        transcript = self.run_cli(
+            'int', 'align-remote', '--remote', 'origin', '--dry-run', expected=0,
+        ).stdout
+        for line in transcript.splitlines():
+            if line.startswith('git '):
+                subprocess.run(
+                    shlex.split(line), cwd=self.repo, check=True, capture_output=True,
+                )
+
+        self.assertEqual(manifest_path.read_bytes(), preserved)
+        self.assertEqual(self.git('ls-files', '.syncwheel'), '')
+
+    def coordinate_local_only_repo(self, remote='origin'):
+        """Turn the local-only fixture into an active-active coordinated manifest."""
+        data = self.read_manifest()
+        data['version'] = 2
+        data['defaults']['publication_remote'] = remote
+        data['coordination'] = {
+            'mode': 'active-active',
+            'id': 'default',
+            'remote': remote,
+            'state_branch': 'syncwheel/state/default',
+            'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+        }
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
+        return data
+
+    def test_coordinated_local_only_keeps_its_control_commit(self):
+        module = self.load_syncwheel_module()
+        self.prepare_local_only_repo('main-integration')
+        self.coordinate_local_only_repo()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'main-integration')
+
+        with module.manifest_write_transaction(self.repo, manifest_path):
+            module.restore_control_manifest_after_integration_rebuild(
+                self.repo, manifest_path, manifest, parent, 'plumbing',
+            )
+
+        tip = self.git('rev-parse', 'main-integration')
+        self.assertNotEqual(tip, parent)
+        self.assertEqual(
+            self.git('ls-tree', '-r', '--name-only', tip, '.syncwheel/'),
+            '.syncwheel/manifest.json',
+        )
+
+    def test_coordinated_local_only_control_tip_is_convergent_and_publishable(self):
+        module = self.load_syncwheel_module()
+        self.prepare_local_only_repo('main-integration')
+        self.coordinate_local_only_repo()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest, _ = module.load_manifest(self.repo, manifest_path)
+        parent = self.git('rev-parse', 'main-integration')
+        control = module.materialize_control_manifest_commit(self.repo, manifest, parent)
+        self.git('update-ref', 'refs/heads/main-integration', control, parent)
+
+        self.assertTrue(
+            module.integration_control_matches_selected(self.repo, manifest, control)
+        )
+        module.require_selected_integration_control(self.repo, manifest, control)
+        module.refuse_local_only_manifest_push(
+            self.repo, manifest,
+            ['git', 'push', 'origin', f'{control}:refs/heads/main-integration'], 'origin',
+        )
+
+    def test_coordinated_local_only_publication_to_the_delivery_branch_is_refused(self):
+        origin = self.prepare_local_only_repo()
+        self.coordinate_local_only_repo()
+        published = self.remote_ref_revision(origin, 'refs/heads/main')
+
+        refusal = self.run_cli('int', 'push', expected=2)
+
+        self.assertIn('refusing to push refs/heads/main to origin', refusal.stderr)
+        self.assertEqual(self.remote_ref_revision(origin, 'refs/heads/main'), published)
+        self.assertIsNone(
+            self.remote_ref_revision(origin, 'refs/heads/syncwheel/state/default')
+        )
+
+    def run_cli_unchecked(self, *args, cwd):
+        env = dict(os.environ, SYNCWHEEL_REPO_REGISTRY=str(self.registry))
+        env['PYTHONPATH'] = os.pathsep.join(filter(None, (
+            str(CLI.parent), env.get('PYTHONPATH', ''),
+        )))
+        return subprocess.run(
+            ['python3', '-m', 'syncwheel', *args],
+            cwd=cwd, text=True, capture_output=True, env=env,
+        )
+
+    def build_route_repo(self, name, *aliases):
+        """A fresh repository with a bare origin, like the push-route reproductions."""
+        root = self.tmp / name
+        origin, repo = root / 'origin.git', root / 'repo'
+        root.mkdir()
+        subprocess.run(['git', 'init', '-q', '--bare', str(origin)], check=True)
+        subprocess.run(['git', 'init', '-q', '-b', 'main', str(repo)], check=True)
+
+        def git(*args):
+            return subprocess.run(
+                ['git', *args], cwd=repo, check=True, text=True, capture_output=True,
+            ).stdout.strip()
+
+        git('config', 'user.name', 'Route Fixture')
+        git('config', 'user.email', 'route@example.invalid')
+        for remote in ('origin', *aliases):
+            git('remote', 'add', remote, str(origin))
+        (repo / 'alpha.txt').write_text('alpha\n')
+        git('add', 'alpha.txt')
+        git('commit', '-q', '-m', 'feat: alpha')
+        git('push', '-q', 'origin', 'main')
+        return repo, origin, git
+
+    def manifest_carrying_commit(self, git, repo, parent='main'):
+        """A commit on top of parent whose only change adds the live manifest."""
+        index = repo / '.git' / 'route-index'
+        env = dict(os.environ, GIT_INDEX_FILE=str(index))
+        subprocess.run(['git', 'read-tree', parent], cwd=repo, check=True, env=env)
+        blob = git('hash-object', '-w', '.syncwheel/manifest.json')
+        subprocess.run(
+            ['git', 'update-index', '--add', '--cacheinfo',
+             f'100644,{blob},.syncwheel/manifest.json'],
+            cwd=repo, check=True, env=env,
+        )
+        tree = subprocess.run(
+            ['git', 'write-tree'], cwd=repo, check=True, env=env, text=True, capture_output=True,
+        ).stdout.strip()
+        index.unlink()
+        return git('commit-tree', tree, '-p', parent, '-m', 'chore: carry the manifest')
+
+    def remote_tree_paths(self, origin, ref):
+        result = subprocess.run(
+            ['git', '--git-dir', str(origin), 'ls-tree', '-r', '--name-only', ref],
+            text=True, capture_output=True,
+        )
+        return result.stdout.split() if result.returncode == 0 else []
+
+    def test_local_only_manifest_is_never_landed_on_the_delivery_branch(self):
+        repo, origin, git = self.build_route_repo('route-land')
+        git('branch', 'pr/feature-a', 'main')
+        (repo / 'a.txt').write_text('a\n')
+        git('switch', '-q', 'pr/feature-a')
+        git('add', 'a.txt')
+        git('commit', '-q', '-m', 'feat: a')
+        feature = git('rev-parse', 'HEAD')
+        git('switch', '-q', 'main')
+        self.run_cli(
+            'init', '-C', 'origin', '-P', 'origin', '-B', 'main', '-I', 'integration',
+            '-T', 'local-only', '--no-coordination', cwd=repo,
+        )
+        self.run_cli(
+            'stack', 'create', 'feature-a', feature, '-b', 'pr/feature-a', '-B', 'main',
+            '-R', 'origin', '-T', 'main', '-I', 'integration', cwd=repo,
+        )
+        self.run_cli(
+            'coordination', 'init', '-R', 'origin', '--coordination-id', 'demo', '--apply',
+            cwd=repo,
+        )
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest_path.read_text())
+        data['repository_mode'] = 'delivery'
+        data['landing'] = {'mode': 'direct', 'strategy': 'merge', 'checks': None}
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+        self.run_cli_unchecked('reconcile', '--apply', '--push', cwd=repo)
+        control = git('rev-list', '-1', '--grep=restore Syncwheel control manifest', 'integration')
+
+        self.run_cli_unchecked('stack', 'capture-integration', 'feature-a', control, cwd=repo)
+        self.run_cli_unchecked('reconcile', '--apply', '--push', cwd=repo)
+        preview = self.run_cli_unchecked('stack', 'land', 'feature-a', '--allow-direct', cwd=repo)
+        if preview.returncode == 0:
+            digest = json.loads(preview.stdout)['planDigest']
+            self.run_cli_unchecked(
+                'stack', 'land', 'feature-a', '--allow-direct', '--apply',
+                '--plan-digest', digest, cwd=repo,
+            )
+
+        self.assertNotIn('.syncwheel/manifest.json', self.remote_tree_paths(origin, 'refs/heads/main'))
+
+    def test_local_only_manifest_guard_compares_remotes_by_push_url(self):
+        repo, origin, git = self.build_route_repo('route-alias', 'publish')
+        git('branch', 'pr/feature-a', 'main')
+        self.run_cli(
+            'init', '-C', 'origin', '-P', 'publish', '-B', 'main', '-I', 'main',
+            '-T', 'local-only', '--no-coordination', cwd=repo,
+        )
+        self.run_cli(
+            'coordination', 'init', '-R', 'publish', '--coordination-id', 'demo', '--apply',
+            cwd=repo,
+        )
+        self.run_cli_unchecked('reconcile', '--apply', cwd=repo)
+
+        refusal = self.run_cli('int', 'push', expected=2, cwd=repo)
+
+        self.assertIn('refusing to push refs/heads/main to publish', refusal.stderr)
+        self.assertNotIn('.syncwheel/manifest.json', self.remote_tree_paths(origin, 'refs/heads/main'))
+
+    def test_local_only_manifest_cannot_ride_a_coordinated_stack_push(self):
+        repo, origin, git = self.build_route_repo('route-coordinated-stack')
+        git('branch', 'pr/feature-a', 'main')
+        self.run_cli(
+            'init', '-C', 'origin', '-P', 'origin', '-B', 'main', '-I', 'main',
+            '-T', 'local-only', '--no-coordination', cwd=repo,
+        )
+        self.run_cli(
+            'stack', 'create', 'feature-a', '-b', 'pr/feature-a', '-B', 'main',
+            '-R', 'origin', '-T', 'main', '-I', 'main', cwd=repo,
+        )
+        self.run_cli_unchecked('reconcile', '--apply', cwd=repo)
+        self.run_cli(
+            'coordination', 'init', '-R', 'origin', '--coordination-id', 'demo', '--apply',
+            cwd=repo,
+        )
+        self.run_cli_unchecked('reconcile', '--apply', cwd=repo)
+        self.run_cli_unchecked('int', 'push', cwd=repo)
+        self.run_cli_unchecked('reconcile', '--apply', '--push', cwd=repo)
+
+        pushed = self.run_cli_unchecked('stack', 'push', 'feature-a', cwd=repo)
+
+        self.assertNotEqual(pushed.returncode, 0)
+        self.assertNotIn(
+            '.syncwheel/manifest.json',
+            self.remote_tree_paths(origin, 'refs/heads/pr/feature-a'),
+        )
+        self.assertNotIn('.syncwheel/manifest.json', self.remote_tree_paths(origin, 'refs/heads/main'))
+
+    def prepare_manifest_carrying_stack(self, name, tracking):
+        repo, origin, git = self.build_route_repo(name)
+        self.run_cli(
+            'init', '-C', 'origin', '-P', 'origin', '-B', 'main', '-I', 'integration',
+            '-T', tracking, '--no-coordination', cwd=repo,
+        )
+        carrying = self.manifest_carrying_commit(git, repo)
+        git('branch', 'pr/feature-a', carrying)
+        self.run_cli(
+            'stack', 'create', 'feature-a', carrying, '-b', 'pr/feature-a', '-B', 'main',
+            '-R', 'origin', '-T', 'main', '-I', 'integration', cwd=repo,
+        )
+        return repo, origin
+
+    def test_local_only_manifest_cannot_ride_a_plain_stack_push(self):
+        repo, origin = self.prepare_manifest_carrying_stack('route-stack-push', 'local-only')
+
+        refusal = self.run_cli(
+            'stack', 'push', 'feature-a', '--remote', 'origin', expected=2, cwd=repo,
+        )
+
+        self.assertIn('refusing to push refs/heads/pr/feature-a to origin', refusal.stderr)
+        self.assertIsNone(self.remote_ref_revision(origin, 'refs/heads/pr/feature-a'))
+
+    def test_local_only_manifest_cannot_ride_a_reconcile_stack_push(self):
+        repo, origin = self.prepare_manifest_carrying_stack('route-reconcile', 'local-only')
+
+        refusal = self.run_cli(
+            'reconcile', '--apply', '--push', '--remote', 'origin', '--skip-integration',
+            expected=2, cwd=repo,
+        )
+
+        self.assertIn('refusing to push refs/heads/pr/feature-a to origin', refusal.stderr)
+        self.assertIsNone(self.remote_ref_revision(origin, 'refs/heads/pr/feature-a'))
+
+    def test_git_tracked_manifest_rides_the_same_push_routes(self):
+        repo, origin = self.prepare_manifest_carrying_stack('route-git-tracked', 'git-tracked')
+
+        self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', cwd=repo)
+        self.run_cli(
+            'reconcile', '--apply', '--push', '--remote', 'origin', '--skip-integration',
+            cwd=repo,
+        )
+
+        self.assertIn(
+            '.syncwheel/manifest.json',
+            self.remote_tree_paths(origin, 'refs/heads/pr/feature-a'),
+        )
+
+    def test_git_tracked_integration_pushes_through_a_second_remote_name(self):
+        repo, origin, git = self.build_route_repo('route-git-tracked-alias', 'publish')
+        self.run_cli(
+            'init', '-C', 'origin', '-P', 'publish', '-B', 'main', '-I', 'main',
+            '-T', 'git-tracked', '--no-coordination', cwd=repo,
+        )
+        carrying = self.manifest_carrying_commit(git, repo)
+        git('update-ref', 'refs/heads/main', carrying)
+
+        self.run_cli('int', 'push', cwd=repo)
+
+        self.assertEqual(self.remote_ref_revision(origin, 'refs/heads/main'), carrying)
+
+    def test_remote_urls_normalize_across_transport_forms(self):
+        module = self.load_syncwheel_module()
+        same = {
+            module.normalized_remote_url(self.repo, url) for url in (
+                'git@example.invalid:team/repo.git',
+                'ssh://git@example.invalid/team/repo',
+                'ssh://git@example.invalid:22/team/repo.git',
+                'https://example.invalid/team/repo.git',
+                'https://user@Example.invalid/team/repo/',
+            )
+        }
+        local = {
+            module.normalized_remote_url(self.repo, url) for url in (
+                str(self.tmp / 'origin.git'), f"file://{self.tmp / 'origin.git'}",
+                str(self.tmp / 'origin'),
+            )
+        }
+
+        self.assertEqual(len(same), 1)
+        self.assertEqual(len(local), 1)
+        self.assertNotIn(
+            module.normalized_remote_url(self.repo, 'git@example.invalid:team/other.git'), same,
+        )
+
+    def test_local_only_manifest_guard_covers_the_coordination_repair_push(self):
+        module = self.load_syncwheel_module()
+        origin = self.prepare_local_only_repo('main-integration')
+        self.coordinate_local_only_repo()
+        manifest, _ = module.load_manifest(self.repo, self.repo / '.syncwheel' / 'manifest.json')
+        carrying = module.materialize_control_manifest_commit(
+            self.repo, manifest, self.git('rev-parse', 'main'),
+        )
+        backend = module.MissingRefCreateCasCoordinationRepairBackend()
+
+        with mock.patch.object(backend, 'preflight'):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, 'refusing to push refs/heads/pr/feature-x',
+            ):
+                backend.apply(
+                    repo_root=self.repo, manifest=manifest, remote='origin',
+                    repaired_ref='refs/heads/pr/feature-x', repaired_tip=carrying,
+                    claim_ref='refs/heads/syncwheel/claim/heads/pr/feature-x',
+                    expected_claim_tip=None, new_claim_tip=carrying,
+                    state_ref='refs/heads/syncwheel/state/default',
+                    expected_state_tip='', new_state_tip=carrying,
+                )
+
+        self.assertIsNone(self.remote_ref_revision(origin, 'refs/heads/pr/feature-x'))
+
+    def test_coordinated_local_only_publishes_its_integration_branch_and_state(self):
+        repo, origin, git = self.build_route_repo('route-coordinated-integration')
+        self.run_cli(
+            'init', '-C', 'origin', '-P', 'origin', '-B', 'main', '-I', 'integration',
+            '-T', 'local-only', '--no-coordination', cwd=repo,
+        )
+        self.run_cli(
+            'coordination', 'init', '-R', 'origin', '--coordination-id', 'demo', '--apply',
+            cwd=repo,
+        )
+
+        self.run_cli('int', 'push', cwd=repo)
+
+        self.assertIn(
+            '.syncwheel/manifest.json',
+            self.remote_tree_paths(origin, 'refs/heads/integration'),
+        )
+        self.assertIsNotNone(self.remote_ref_revision(origin, 'refs/heads/syncwheel/state/demo'))
+
+    def test_validate_warns_about_local_only_coordination_on_the_canonical_remote(self):
+        module = self.load_syncwheel_module()
+        manifest, _ = module.load_manifest(self.repo)
+        manifest['version'] = 2
+        manifest['syncwheel_tracking'] = 'local-only'
+        manifest['defaults']['publication_remote'] = manifest['defaults']['canonical_remote']
+        manifest['coordination'] = {
+            'mode': 'active-active',
+            'id': 'default',
+            'remote': manifest['defaults']['canonical_remote'],
+            'state_branch': 'syncwheel/state/default',
+            'gc': {'worktree_grace_days': 7, 'backup_retention_days': 30, 'backup_keep': 2},
+        }
+
+        validation = module.validate_manifest(self.repo, manifest)
+
+        self.assertTrue(any(
+            'syncwheel/state/default' in warning for warning in validation['warnings']
+        ))
+        self.assertFalse(any(
+            'syncwheel_tracking' in error for error in validation['errors']
+        ))
 
     def test_control_manifest_object_is_verified_before_the_ref_cas(self):
         module = self.load_syncwheel_module()

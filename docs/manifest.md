@@ -9,6 +9,11 @@ with the control manifest it loaded for the command. A mismatch stops before
 any rebuild, reports stack order, base, commits, and configuration differences,
 and prints an executable restore command.
 
+This whole section applies to `syncwheel_tracking: "git-tracked"` and to a
+manifest with no tracking policy. A `local-only` manifest never enters the
+integration tree; see
+[manifest-tracking.md](manifest-tracking.md) for what replaces it.
+
 An integration replay can legitimately replace the checked-out manifest with
 an older copy from its base or a stack. After a successful replay, Syncwheel
 restores the command's final in-memory control manifest on the integration ref,
@@ -16,8 +21,16 @@ including when `--manifest` names an external file. It creates a
 `chore: restore Syncwheel control manifest` commit containing only
 `.syncwheel/manifest.json` with an isolated temporary index and `commit-tree`.
 The object is verified before an exact ref CAS, so hooks and staged files cannot
-alter it. Its identity and dates are inherited deterministically from the replay
-parent; the same parent and manifest produce the same SHA. Before moving the
+alter it. It is authored and committed by the fixed
+`Syncwheel Control <control@syncwheel.invalid>` identity, dated with the replay
+parent's commit time in `+0000` and written with `i18n.commitEncoding=UTF-8`
+and an empty `GIT_CONFIG_PARAMETERS`, which git would otherwise apply last;
+the same parent and manifest therefore produce the same SHA in every clone,
+and the ledger records which actor ran the command. Releases before 0.44.0
+copied the replay parent's author and committer instead. That formula is
+recorded as `control_identity` in the persistence intent, and both formulas are
+still accepted when recovering an interrupted operation or recognizing a control
+tip another clone published. Before moving the
 ref, Syncwheel fsyncs a local ledger intent containing a fresh operation ID,
 the source preimage digest, and the expected control-commit SHA. After the ref
 moves, Syncwheel first aligns the checked-out index and files with `read-tree`

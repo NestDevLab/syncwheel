@@ -137,6 +137,17 @@ COORDINATION_GIT_IDENTITY_ENV = {
     'GIT_COMMITTER_NAME': 'Syncwheel Coordination',
     'GIT_COMMITTER_EMAIL': 'coordination@syncwheel.invalid',
 }
+CONTROL_MANIFEST_GIT_IDENTITY_ENV = {
+    'GIT_AUTHOR_NAME': 'Syncwheel Control',
+    'GIT_AUTHOR_EMAIL': 'control@syncwheel.invalid',
+    'GIT_COMMITTER_NAME': 'Syncwheel Control',
+    'GIT_COMMITTER_EMAIL': 'control@syncwheel.invalid',
+}
+CONTROL_MANIFEST_IDENTITY_VERSION = 2
+CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION = 1
+CONTROL_MANIFEST_IDENTITY_VERSIONS = (
+    CONTROL_MANIFEST_IDENTITY_VERSION, CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
+)
 DEFAULT_COORDINATION_GC = {
     'worktree_grace_days': 7,
     'backup_retention_days': 30,
@@ -489,6 +500,32 @@ def replay_hygiene_env():
 def replay_commit_env(repo_root, commit):
     env = replay_hygiene_env()
     env.update(commit_identity_env(repo_root, commit))
+    return env
+
+
+def control_manifest_commit_env(repo_root, parent, identity_version):
+    """Fixed-identity control-commit environment, dated from its parent.
+
+    Version 1 recomputes the legacy formula that copied the parent's identity.
+    The encoding pin matters: another i18n.commitEncoding adds an encoding
+    header and changes the SHA that every consumer recomputes.
+    """
+    if identity_version == CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION:
+        return replay_commit_env(repo_root, parent)
+    timestamp = git(repo_root, 'show', '-s', '--format=%ct', parent).stdout.strip()
+    env = replay_hygiene_env()
+    env.update({
+        'GIT_CONFIG_COUNT': '3',
+        'GIT_CONFIG_KEY_2': 'i18n.commitEncoding',
+        'GIT_CONFIG_VALUE_2': 'UTF-8',
+        # Git applies this after GIT_CONFIG_*, so an ambient value would win.
+        'GIT_CONFIG_PARAMETERS': '',
+    })
+    env.update(CONTROL_MANIFEST_GIT_IDENTITY_ENV)
+    env.update({
+        'GIT_AUTHOR_DATE': f'{timestamp} +0000',
+        'GIT_COMMITTER_DATE': f'{timestamp} +0000',
+    })
     return env
 
 
@@ -1805,7 +1842,130 @@ def authorize_syncwheel_push(repo_root, remote, refs):
     return path, secret
 
 
-def run_authorized_push(repo_root, command, remote, refs, check=True):
+PUSH_OPTIONS_WITH_VALUES = {'-o', '--push-option', '--receive-pack', '--exec', '--repo'}
+
+
+def push_command_updates(command, remote):
+    """Return (source, destination ref) for every refspec of a git push command."""
+    arguments = list(command[2:])
+    deleting = any(argument in {'-d', '--delete'} for argument in arguments)
+    index = 0
+    while index < len(arguments) and arguments[index].startswith('-'):
+        index += 2 if arguments[index] in PUSH_OPTIONS_WITH_VALUES else 1
+    if index >= len(arguments) or arguments[index] != remote:
+        raise SyncwheelError(f'cannot read the refspecs of this push to {remote}: {quoted(command)}')
+    updates = []
+    for spec in arguments[index + 1:]:
+        source, separator, destination = spec.lstrip('+').partition(':')
+        if not separator:
+            destination = source
+        if not destination.startswith('refs/'):
+            destination = f'refs/heads/{destination}'
+        updates.append((None if deleting or not source else source, destination))
+    return updates
+
+
+def normalized_remote_url(repo_root, url):
+    """Reduce scp-style, ssh://, https:// and path URLs to one comparable form."""
+    value = url.strip().rstrip('/')
+    value = value[:-len('.git')] if value.endswith('.git') else value
+    value = value[len('file://'):] if value.startswith('file://') else value
+    if value.startswith(('/', '.')):
+        return str((Path(repo_root) / value).resolve(strict=False))
+    match = re.match(
+        r'^(?:[a-z][a-z0-9+.-]*://)?(?:[^@/]+@)?([^/:]+)(?::\d+(?=/))?[:/]+(.+)$', value, re.I,
+    )
+    return f'{match.group(1).lower()}/{match.group(2)}' if match else value
+
+
+def push_reaches_canonical_remote(repo_root, manifest, remote):
+    """Decide by push URL, never by name: a second name for the same URL is the same remote."""
+    canonical = manifest['defaults']['canonical_remote']
+    if remote == canonical:
+        return True
+
+    def push_url(name):
+        result = git(repo_root, 'remote', 'get-url', '--push', name, check=False)
+        return result.stdout.strip() if result.returncode == 0 else None
+
+    canonical_url = push_url(canonical)
+    if not canonical_url:
+        # An unresolvable canonical remote cannot be ruled out.
+        return True
+    return normalized_remote_url(repo_root, push_url(remote) or remote) == (
+        normalized_remote_url(repo_root, canonical_url)
+    )
+
+
+def local_only_manifest_destination_allowed(repo_root, manifest, remote, ref):
+    integration = manifest['integration']['branch']
+    if ref == f'refs/heads/{integration}':
+        return not (
+            integration == manifest['defaults']['base_branch']
+            and push_reaches_canonical_remote(repo_root, manifest, remote)
+        )
+    return ref.startswith((
+        f'refs/heads/{COORDINATION_STATE_PREFIX}',
+        f'refs/heads/{COORDINATION_CLAIM_PREFIX}',
+    )) or (
+        coordination_is_active(manifest)
+        and ref == coordination_state_ref(coordination_config(manifest))
+    )
+
+
+def control_manifest_blob_matches_base(repo_root, manifest, entry):
+    """Whether the pushed manifest is exactly the one the integration base already carries.
+
+    Comparing with the base, not the projection, matters: a stack that captured
+    a control commit makes the projection carry the manifest too.
+    """
+    base = manifest['integration'].get('base') or manifest['defaults'].get('base_ref')
+    if not base:
+        return False
+    resolved = git(repo_root, 'rev-parse', '--verify', '--quiet', f'{base}^{{commit}}', check=False)
+    if resolved.returncode != 0:
+        return False
+    return tree_path_entry(
+        repo_root, resolved.stdout.strip(), control_manifest_relative_path(repo_root),
+    ) == entry
+
+
+def refuse_local_only_manifest_push(repo_root, manifest, command, remote):
+    """Keep a local-only manifest off every ref but the integration branch and state refs.
+
+    Every Syncwheel push runs this before anything is sent, so the rule holds
+    for any route that can move a ref, whatever command built the push.
+    """
+    if (
+        not manifest_is_local_only(manifest)
+        or manifest.get('repository_mode') == 'journal'
+    ):
+        return
+    for source, ref in push_command_updates(command, remote):
+        if source is None or local_only_manifest_destination_allowed(
+            repo_root, manifest, remote, ref,
+        ):
+            continue
+        resolved = git(
+            repo_root, 'rev-parse', '--verify', '--quiet', f'{source}^{{commit}}', check=False,
+        )
+        if resolved.returncode != 0:
+            raise SyncwheelError(f'cannot inspect {source} before pushing it to {remote} {ref}')
+        entry = tree_path_entry(
+            repo_root, resolved.stdout.strip(), control_manifest_relative_path(repo_root),
+        )
+        if entry is None or control_manifest_blob_matches_base(repo_root, manifest, entry):
+            continue
+        raise SyncwheelError(
+            f'refusing to push {ref} to {remote}: its tree carries the local-only '
+            'control manifest, which may only reach the integration branch and '
+            'Syncwheel coordination refs. Rebuild the branch without the control '
+            'commit, then push again'
+        )
+
+
+def run_authorized_push(repo_root, command, remote, refs, check=True, *, manifest):
+    refuse_local_only_manifest_push(repo_root, manifest, command, remote)
     path, secret = authorize_syncwheel_push(repo_root, remote, refs)
     env = {MANAGED_PUSH_AUTH_ENV: str(path), MANAGED_PUSH_SECRET_ENV: secret}
     try:
@@ -3494,7 +3654,9 @@ def require_clean_primary_checkout(repo_root, manifest):
     if not lines:
         return
     raise SyncwheelError(
-        lines[0] + format_remedy_suffix(primary_checkout_remedy_commands(manifest))
+        lines[0] + format_remedy_suffix(
+            primary_checkout_remedy_commands(manifest, repo_root=repo_root)
+        )
     )
 
 
@@ -3547,6 +3709,25 @@ def normalize_syncwheel_tracking(value, path='manifest'):
         allowed = ', '.join(sorted(SYNCWHEEL_TRACKING_VALUES))
         raise SyncwheelError(f'{path} syncwheel_tracking must be one of: {allowed}')
     return value
+
+
+def manifest_is_local_only(manifest):
+    """A local-only manifest never becomes a tracked file, in any tree or index.
+
+    A manifest with no tracking policy is not local-only.
+    """
+    return (manifest or {}).get('syncwheel_tracking') == SYNCWHEEL_TRACKING_LOCAL_ONLY
+
+
+def control_manifest_stays_untracked(manifest):
+    """Whether the integration tree of this repository must not carry the manifest.
+
+    Active-active coordination binds the manifest by reading it from the
+    published integration tip, so a coordinated repository keeps its control
+    commit whatever the tracking policy says.
+    """
+    return manifest_is_local_only(manifest) and not coordination_is_active(manifest)
+
 
 
 def default_authority_policy():
@@ -4029,7 +4210,9 @@ def backup_branch_command(repo_root, branch, timestamp):
 def ensure_in_place_target(
     repo_root, target_branch, manifest, stack_id=None, allowed_paths=None,
 ):
-    remedies = primary_checkout_remedy_commands(manifest, stack_id=stack_id)
+    remedies = primary_checkout_remedy_commands(
+        manifest, stack_id=stack_id, repo_root=repo_root,
+    )
     current_branch = get_current_branch(repo_root)
     if current_branch != target_branch:
         raise SyncwheelError(
@@ -5703,10 +5886,12 @@ def manifest_from_tree(repo_root, commit, path):
         raise SyncwheelError(f'integration control manifest is invalid at {commit}:{relative}') from exc
 
 
-def materialize_control_manifest_commit(repo_root, manifest, parent):
+def materialize_control_manifest_commit(
+    repo_root, manifest, parent, identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
+):
     """Build the manifest-only control commit without touching the real index.
 
-    Its identity and timestamps deliberately inherit the deterministic replay
+    Its identity is fixed and its timestamps inherit the deterministic replay
     parent.  Therefore parent + manifest bytes always yields the same object.
     """
     target = integration_manifest_path(repo_root)
@@ -5729,7 +5914,7 @@ def materialize_control_manifest_commit(repo_root, manifest, parent):
         commit = git(
             repo_root, 'commit-tree', tree, '-p', parent,
             '-m', 'chore: restore Syncwheel control manifest',
-            env=replay_commit_env(repo_root, parent),
+            env=control_manifest_commit_env(repo_root, parent, identity_version),
         ).stdout.strip()
     finally:
         index_path.unlink(missing_ok=True)
@@ -5739,6 +5924,16 @@ def materialize_control_manifest_commit(repo_root, manifest, parent):
             'control manifest digest differs in the object prepared for integration publication'
         )
     return commit
+
+
+def control_manifest_commit_identity_version(repo_root, manifest, parent, commit):
+    """Return the identity formula that produced this control object, or None."""
+    for version in CONTROL_MANIFEST_IDENTITY_VERSIONS:
+        if materialize_control_manifest_commit(
+            repo_root, manifest, parent, version,
+        ) == commit:
+            return version
+    return None
 
 
 def control_manifest_actor(repo_root):
@@ -5775,6 +5970,7 @@ def control_manifest_event_payload(
 def control_manifest_intent_payload(
     repo_root, manifest, source_digest, replay_tip, control_commit,
     replay_mode, reason, command, operation_id,
+    identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
 ):
     return {
         'operation_id': operation_id,
@@ -5783,6 +5979,7 @@ def control_manifest_intent_payload(
         'expected_manifest_digest': manifest_digest(manifest),
         'replay_tip': replay_tip,
         'expected_control_commit': control_commit,
+        'control_identity': identity_version,
         'replay_mode': replay_mode,
         'actor': control_manifest_actor(repo_root),
         'reason': reason,
@@ -5959,6 +6156,30 @@ def control_manifest_relative_path(repo_root):
     ).as_posix()
 
 
+def staged_control_manifest_migration(repo_root):
+    """Whether an untracking migration of the control manifest is still staged."""
+    relative = control_manifest_relative_path(repo_root)
+    staged = git(
+        repo_root, 'diff', '--cached', '--name-only', '--diff-filter=D', '--', relative,
+        check=False,
+    )
+    return staged.returncode == 0 and bool(staged.stdout.strip())
+
+
+def control_manifest_owns_the_blocking_dirt(repo_root):
+    """Whether the blocking dirt is Syncwheel's own metadata, not product work."""
+    result = run(['git', '-C', str(repo_root), 'status', '--porcelain'], check=False)
+    if result.returncode != 0:
+        return False
+    relative = control_manifest_relative_path(repo_root)
+    paths = set()
+    for line in result.stdout.splitlines():
+        paths |= status_line_paths(line)
+    return relative in paths and all(
+        path == '.gitignore' or path.startswith('.syncwheel/') for path in paths
+    )
+
+
 def control_manifest_source_allowance(repo_root, manifest_path):
     """The integration control manifest is a rebuild input, never blocking dirt."""
     if manifest_path is None or is_external_manifest_path(repo_root, manifest_path):
@@ -5973,6 +6194,77 @@ def control_manifest_source_allowance(repo_root, manifest_path):
     if actual != relative:
         return set()
     return {relative, Path(relative).parent.as_posix() + '/'}
+
+
+def local_only_control_manifest_untrack_step(repo_root, manifest):
+    """The command that keeps a local-only manifest out of a rebuild's reset."""
+    if not control_manifest_stays_untracked(manifest):
+        return None
+    checkout = find_worktree_for_branch(repo_root, manifest['integration']['branch'])
+    if checkout is None:
+        return None
+    relative = control_manifest_relative_path(repo_root)
+    listed = git(checkout, 'ls-files', '-z', '--', relative, check=False)
+    if listed.returncode != 0 or not listed.stdout.strip('\0'):
+        return None
+    location = [] if Path(checkout) == Path(repo_root) else ['-C', str(checkout)]
+    # --force: the entry may differ from both HEAD and the worktree, which
+    # git rm refuses to discard without it.
+    return ['git', *location, 'rm', '--cached', '--force', '-q', '--', relative]
+
+
+def untrack_local_only_control_manifest(repo_root, manifest):
+    """Drop the control manifest from the integration index, keeping the file."""
+    step = local_only_control_manifest_untrack_step(repo_root, manifest)
+    if step is None:
+        return False
+    removed = run(step, cwd=repo_root, check=False)
+    if removed.returncode != 0:
+        raise SyncwheelError(
+            'cannot untrack the local-only control manifest: '
+            + (removed.stderr.strip() or removed.stdout.strip() or 'git rm failed')
+        )
+    return True
+
+
+def local_only_control_manifest_guard(repo_root, manifest, manifest_path):
+    """Keep a local-only manifest file across the reset a rebuild performs.
+
+    The file is tracked only because an earlier release committed it, so the
+    reset would delete it. Untrack it where the integration branch is checked
+    out, and remember the bytes for every source path the reset can reach.
+    """
+    if not control_manifest_stays_untracked(manifest):
+        return []
+    checkout = find_worktree_for_branch(repo_root, manifest['integration']['branch'])
+    candidates = [integration_manifest_path(repo_root)]
+    if checkout is not None:
+        candidates.append(integration_manifest_path(checkout))
+    if manifest_path is not None:
+        candidates.append(Path(manifest_path))
+    guarded = []
+    seen = set()
+    for path in candidates:
+        # Guard the path the command names, never a symlink's target.
+        key = str(path)
+        if key in seen or path.is_symlink():
+            continue
+        seen.add(key)
+        try:
+            guarded.append((path, path.read_bytes()))
+        except OSError:
+            continue
+    untrack_local_only_control_manifest(repo_root, manifest)
+    return guarded
+
+
+def restore_guarded_control_manifests(guarded):
+    """Put back only the guarded sources the replay removed."""
+    for path, payload in guarded or ():
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
 
 
 def control_manifest_checkout_obstruction(
@@ -6154,13 +6446,81 @@ def capture_checkout_source_lease(repo_root, manifest_path, target):
     target.update(observed)
 
 
+def persist_local_only_control_manifest(
+    repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command,
+    operation_id, persist_source, source_lease_out,
+):
+    """Record the rebuilt integration tip without putting the manifest in it.
+
+    The receipt names the replay tip as the control commit, so every consumer
+    of the ledger sees that this rebuild has no separate control object.
+    """
+    expected_digest = manifest_digest(manifest)
+    try:
+        source_file_manifest = json.loads(Path(manifest_path).read_text())
+    except FileNotFoundError:
+        source_file_manifest = None
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(f'control manifest source is unreadable: {manifest_path}') from exc
+    source_file_digest = (
+        manifest_digest(source_file_manifest) if source_file_manifest is not None else None
+    )
+    saved = persist_source and source_file_digest != expected_digest
+    if saved:
+        require_manifest_transaction_current(manifest_path)
+        save_manifest(manifest_path, manifest)
+    control_manifest_io_checkpoint('manifest_saved')
+    if not saved and any(
+        event.get('type') == 'manifest_saved'
+        and (event.get('payload') or {}).get('control_commit') == replay_tip
+        and ((event.get('payload') or {}).get('context') or {}).get(
+            'control_manifest_digest'
+        ) == expected_digest
+        for event in load_control_manifest_events(repo_root, manifest_path)
+    ):
+        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
+        return False
+    operation_id = operation_id or str(uuid.uuid4())
+    payload = control_manifest_event_payload(
+        repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command,
+        {'replay_tip': replay_tip, 'syncwheel_tracking': SYNCWHEEL_TRACKING_LOCAL_ONLY},
+        operation_id=operation_id,
+    )
+    append_ledger_event(
+        repo_root,
+        'manifest_saved',
+        payload,
+        manifest_path,
+        idempotency_key=control_manifest_event_idempotency_key(
+            manifest, replay_tip, replay_tip, command, operation_id
+        ),
+    )
+    control_manifest_io_checkpoint('ledger_saved')
+    capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
+    return saved
+
+
 def restore_control_manifest_after_integration_rebuild(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
     operation_id=None, persist_source=True, source_lease_out=None,
+    identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
 ):
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
+        if control_manifest_stays_untracked(manifest):
+            return persist_local_only_control_manifest(
+                repo_root,
+                manifest_path,
+                manifest,
+                replay_tip,
+                replay_mode,
+                reason,
+                command,
+                operation_id,
+                persist_source,
+                source_lease_out,
+            )
         return _restore_control_manifest_after_integration_rebuild_locked(
             repo_root,
             manifest_path,
@@ -6172,6 +6532,7 @@ def restore_control_manifest_after_integration_rebuild(
             operation_id=operation_id,
             persist_source=persist_source,
             source_lease_out=source_lease_out,
+            identity_version=identity_version,
         )
 
 
@@ -7392,6 +7753,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     repo_root, manifest_path, manifest, replay_tip, replay_mode,
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
     operation_id=None, persist_source=True, source_lease_out=None,
+    identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
 ):
     """Publish an isolated manifest-only commit above a rebuilt integration tip.
 
@@ -7405,7 +7767,9 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     observed_digest = manifest_digest(observed) if observed is not None else None
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
     current_tip = ref_tip(repo_root, integration_ref)
-    control_commit = materialize_control_manifest_commit(repo_root, manifest, replay_tip)
+    control_commit = materialize_control_manifest_commit(
+        repo_root, manifest, replay_tip, identity_version,
+    )
     # Semantic equality does not make differently formatted Git blobs equal.
     # Canonicalize through the same durable transaction before relying on exact
     # tree equivalence after another publisher wins a coordination race.
@@ -7509,6 +7873,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
             reason,
             command,
             operation_id,
+            identity_version=identity_version,
         )
         append_ledger_event(
             repo_root,
@@ -7767,6 +8132,9 @@ def recover_incomplete_control_manifest_persistence(
                 return committed
             control_commit = intent.get('expected_control_commit')
             replay_tip = intent.get('replay_tip')
+            identity_version = intent.get(
+                'control_identity', CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
+            )
             parents = git(
                 repo_root, 'show', '-s', '--format=%P', control_commit, check=False
             ).stdout.split()
@@ -7780,13 +8148,19 @@ def recover_incomplete_control_manifest_persistence(
                 or (committed.get('integration') or {}).get('branch') != branch
                 or manifest_digest(committed) != intent.get('expected_manifest_digest')
                 or materialize_control_manifest_commit(
-                    repo_root, committed, replay_tip
+                    repo_root, committed, replay_tip, identity_version,
                 ) != control_commit
             ):
                 raise SyncwheelError(
                     f'control manifest intent {intent["operation_id"]} references an '
                     'invalid expected control object; refusing recovery'
                 )
+            if control_manifest_stays_untracked(committed):
+                abandon_control_manifest_intent(
+                    repo_root, manifest_path, intent, ref_tip(repo_root, branch),
+                    'local_only_control_manifest',
+                )
+                return committed
             superseded = resolve_superseded_control_manifest_intent(
                 repo_root, manifest_path, manifest, intent, branch, allow_new_operation,
             )
@@ -7806,6 +8180,7 @@ def recover_incomplete_control_manifest_persistence(
                 reason=intent['reason'],
                 command=intent['command'],
                 operation_id=intent['operation_id'],
+                identity_version=identity_version,
             )
             if recovery_state is not None:
                 recovery_state.update({
@@ -7835,7 +8210,9 @@ def recover_incomplete_control_manifest_persistence(
         )
         if committed is None or (committed.get('integration') or {}).get('branch') != branch:
             return manifest
-        if materialize_control_manifest_commit(repo_root, committed, replay_tip) != control_commit:
+        if control_manifest_commit_identity_version(
+            repo_root, committed, replay_tip, control_commit,
+        ) is None:
             return manifest
         committed_digest = manifest_digest(committed)
 
@@ -7858,9 +8235,14 @@ def recover_incomplete_control_manifest_persistence(
         if manifest is None:
             internal = integration_manifest_path(repo_root).resolve(strict=False)
             if Path(manifest_path).resolve(strict=False) == internal:
-                align_control_manifest_worktree(
-                    repo_root, committed, replay_tip, control_commit, committed_digest
-                )
+                if control_manifest_stays_untracked(committed):
+                    # The same bytes, without letting a checkout alignment put a
+                    # local-only manifest back into the index.
+                    save_manifest(manifest_path, committed)
+                else:
+                    align_control_manifest_worktree(
+                        repo_root, committed, replay_tip, control_commit, committed_digest
+                    )
                 return committed
             return manifest
 
@@ -8425,10 +8807,24 @@ def manifest_remedy_stack_ids(manifest, stack_id=None):
     return list(dict.fromkeys([*ordered, *sorted(stacks)]))
 
 
-def primary_checkout_remedy_commands(manifest, stack_id=None):
+def primary_checkout_remedy_commands(manifest, stack_id=None, repo_root=None):
     """Name capture and queue commands without guessing ownership of primary changes."""
     if manifest.get('repository_mode') == 'journal':
         return ['syncwheel journal snapshot --apply', 'syncwheel journal publish --apply']
+    if (
+        manifest_is_local_only(manifest)
+        and repo_root is not None
+        and control_manifest_owns_the_blocking_dirt(repo_root)
+    ):
+        # Capturing into a stack would publish the manifest this repo keeps local.
+        commands = []
+        if repo_root is not None and staged_control_manifest_migration(repo_root):
+            commands.append(
+                'git commit -m "chore: untrack the Syncwheel manifest" '
+                '-- .syncwheel/manifest.json'
+            )
+        commands.append('syncwheel int rebuild --reason "<why this rebuild>"')
+        return commands
     stack_ids = manifest_remedy_stack_ids(manifest, stack_id)
     if not stack_ids:
         return [
@@ -12158,6 +12554,7 @@ class TreeEquivalentStateCasCoordinationRepairBackend(CoordinationRepairBackend)
             kwargs['remote'],
             [kwargs['state_ref']],
             check=False,
+            manifest=kwargs['manifest'],
         )
         if result.returncode != 0:
             observed = remote_ref_tips(
@@ -12262,6 +12659,7 @@ class MissingRefCreateCasCoordinationRepairBackend(CoordinationRepairBackend):
             kwargs['remote'],
             [repaired_ref, claim_ref, kwargs['state_ref']],
             check=False,
+            manifest=kwargs['manifest'],
         )
         if result.returncode != 0:
             observed = remote_ref_tips(
@@ -12719,6 +13117,7 @@ def apply_coordination_repair_plan(repo_root, manifest, plan, backend=None, mani
     child_tip = create_coordination_state_commit(repo_root, child, previous['tip'])
     result = backend.apply(
         repo_root=repo_root,
+        manifest=manifest,
         coordination=config,
         remote=config['remote'],
         state_ref=plan['stateRef'],
@@ -15538,6 +15937,7 @@ def coordinated_publish_cycle(
         result = run_authorized_push(
             repo_root, command, config['remote'],
             [*changed_refs, *claim_refs.values(), state_ref], check=False,
+            manifest=manifest,
         )
         if result.returncode != 0:
             latest_claims = remote_ref_tips(
@@ -16685,6 +17085,7 @@ def journal_publish(repo_root, manifest, apply=False):
             remote,
             [f'refs/heads/{branch}'],
             check=False,
+            manifest=manifest,
         )
         if pushed.returncode != 0:
             if snapshot['commit']:
@@ -17170,6 +17571,14 @@ def validate_manifest(repo_root, manifest):
                     )
                 if coordination['remote'] != manifest['defaults']['publication_remote']:
                     errors.append('coordination remote must match defaults.publication_remote')
+                if (
+                    manifest_is_local_only(manifest)
+                    and coordination['remote'] == manifest['defaults']['canonical_remote']
+                ):
+                    warnings.append(
+                        'local-only coordination state is published on the canonical '
+                        f"remote {coordination['remote']}: {coordination['state_branch']}"
+                    )
     else:
         details['coordination'] = {'mode': 'legacy'}
     stacks_by_id = stack_map(manifest)
@@ -20060,6 +20469,7 @@ def command_coordination_claims_backfill(args):
         result = run_authorized_push(
             repo_root, command, config['remote'],
             [*(claim_refs[source_ref] for source_ref in create), state_ref], check=False,
+            manifest=manifest,
         )
         if result.returncode != 0:
             raise SyncwheelError(
@@ -22284,7 +22694,7 @@ def command_channel_publish(args):
                 pushed = run_authorized_push(
                     repo_root,
                     ['git', 'push', '--porcelain', lease, channel['remote'], f'{current}:{ref}'],
-                    channel['remote'], [ref], check=False,
+                    channel['remote'], [ref], check=False, manifest=manifest,
                 )
                 if pushed.returncode != 0:
                     detail = pushed.stderr.strip() or pushed.stdout.strip()
@@ -23410,7 +23820,8 @@ def command_stack_land(args):
                 current['delivery']['remote'], f"{candidate_revision}:{current['delivery']['ref']}",
             ]
             result = run_authorized_push(
-                repo_root, command, current['delivery']['remote'], [current['delivery']['ref']], check=False
+                repo_root, command, current['delivery']['remote'], [current['delivery']['ref']],
+                check=False, manifest=manifest,
             )
             observed = remote_ref_tips(repo_root, current['delivery']['remote'], [current['delivery']['ref']])[current['delivery']['ref']]
             if observed == candidate_revision:
@@ -26027,7 +26438,9 @@ def command_stack_push(args):
     if args.dry_run:
         print(quoted(command))
         return 0
-    run_authorized_push(repo_root, command, remote, [f"refs/heads/{stack['branch']}"])
+    run_authorized_push(
+        repo_root, command, remote, [f"refs/heads/{stack['branch']}"], manifest=manifest,
+    )
     print(quoted(command))
     append_ledger_event(
         repo_root,
@@ -26108,14 +26521,31 @@ def integration_control_manifest_from_tree(repo_root, tree):
     return value if isinstance(value, dict) else None
 
 
-def integration_control_matches_selected(repo_root, manifest, tree):
+def local_only_control_manifest_is_inherited(repo_root, manifest, projected_tree=None):
+    """Whether the projection, not a control commit, puts the manifest in a tree."""
+    if projected_tree is None:
+        projected_tree = materialize_integration_projection(repo_root, manifest)
+    return integration_control_manifest_from_tree(repo_root, projected_tree) is not None
+
+
+def integration_control_matches_selected(repo_root, manifest, tree, projected_tree=None):
     committed = integration_control_manifest_from_tree(repo_root, tree)
+    if control_manifest_stays_untracked(manifest):
+        return committed is None or local_only_control_manifest_is_inherited(
+            repo_root, manifest, projected_tree,
+        )
     return committed is not None and manifest_digest(committed) == manifest_digest(manifest)
 
 
 def require_selected_integration_control(repo_root, manifest, tip):
-    if not tip or not integration_control_matches_selected(repo_root, manifest, tip):
-        raise SyncwheelError('integration tip does not contain the selected control manifest; rebuild the reviewed selection')
+    if tip and integration_control_matches_selected(repo_root, manifest, tip):
+        return
+    if control_manifest_stays_untracked(manifest):
+        raise SyncwheelError(
+            'integration tip carries the local-only control manifest; rebuild the '
+            'integration branch so it stays out of the published tree'
+        )
+    raise SyncwheelError('integration tip does not contain the selected control manifest; rebuild the reviewed selection')
 
 
 def integration_tree_matches_product_projection(repo_root, manifest, candidate_tree, product_tree):
@@ -26201,8 +26631,10 @@ def integration_sync_report(repo_root, manifest, remote=None, stack_ref_override
                 product = integration_tree_matches_product_projection(repo_root, manifest, tree, projected_tree)
                 report[f'{side}_matches_product_projection'] = product
                 report[f'{side}_matches_projection'] = product  # Compatibility alias.
-                report[f'{side}_control_manifest_matches_selected'] = integration_control_matches_selected(
-                    repo_root, manifest, tree
+                report[f'{side}_control_manifest_matches_selected'] = (
+                    integration_control_matches_selected(
+                        repo_root, manifest, tree, projected_tree,
+                    )
                 )
     except SyncwheelError as exc:
         report['projection_error'] = str(exc)
@@ -26347,6 +26779,17 @@ def preflight_empty_desk_stack_rebuilds(repo_root, manifest, actions, args, work
 def reconcile_actions(repo_root, manifest, validation, stack_reports, integration_report, args):
     stack_ids = set(args.stack or [stack['id'] for stack in manifest['stacks']])
     actions = []
+    # A local-only control manifest is never published, so control-manifest
+    # parity with the remote can neither justify a push nor excuse a rebuild.
+    local_only_control = control_manifest_stays_untracked(manifest)
+    control_only_ahead = (
+        False if local_only_control
+        else integration_report.get('local_control_only_ahead')
+    )
+    remote_control_drift = (
+        False if local_only_control
+        else integration_report.get('remote_control_manifest_matches_selected') is False
+    )
     validation_action_types = {action['type'] for action in build_plan(repo_root, manifest, validation)}
     stack_rebuild_planned = False
     for stack in manifest['stacks']:
@@ -26447,7 +26890,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
             or not integration_report['local_exists']
             or integration_report.get('local_matches_projection') is False
             or (integration_report.get('local_control_manifest_matches_selected') is False
-                and not integration_report.get('local_control_only_ahead'))
+                and not control_only_ahead)
             or (
                 integration_report.get('local_matches_projection') is not True
                 and (
@@ -26468,7 +26911,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
     integration_align_from_remote = (
         not args.skip_integration
         and args.rebuild != 'all'
-        and not integration_report.get('local_control_only_ahead')
+        and not control_only_ahead
         and not integration_report.get('projection_error')
         and integration_report['remote_exists']
         and integration_report.get('remote_matches_projection') is True
@@ -26496,7 +26939,7 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         and integration_report.get('remote_matches_projection') is True
         and integration_report.get('remote_control_manifest_matches_selected') is True
         and integration_report['relation'] != 'aligned'
-        and not integration_report.get('local_control_only_ahead')
+        and not control_only_ahead
     )
     if integration_normalize_history_from_remote:
         actions.append({
@@ -26516,8 +26959,8 @@ def reconcile_actions(repo_root, manifest, validation, stack_reports, integratio
         integration_rebuild_needed
         or not integration_report['remote_exists']
         or integration_report.get('remote_matches_projection') is False
-        or integration_report.get('remote_control_manifest_matches_selected') is False
-        or integration_report.get('local_control_only_ahead') is True
+        or remote_control_drift
+        or control_only_ahead is True
     ):
         actions.append({
             'type': 'push_integration',
@@ -26914,7 +27357,8 @@ def command_reconcile(args):
             remote = stack_push_remote(manifest, stack, args.remote)
             command = ['git', 'push', *push_args, remote, stack['branch']]
             run_authorized_push(
-                repo_root, command, remote, [f"refs/heads/{stack['branch']}"]
+                repo_root, command, remote, [f"refs/heads/{stack['branch']}"],
+                manifest=manifest,
             )
             print(quoted(command))
             append_ledger_event(
@@ -27010,6 +27454,9 @@ def command_reconcile(args):
                 else None
             )
             replay_mode = 'ephemeral' if published_replay else mode
+            guarded = local_only_control_manifest_guard(
+                repo_root, manifest, manifest_path
+            )
             target = (
                 published_integration_replay_target(
                     manifest, reuse, worktree, reset_destination_lease
@@ -27017,16 +27464,19 @@ def command_reconcile(args):
                 if published_replay
                 else replay_target(integration=integration, worktree=worktree)
             )
-            result = execute_replay(
-                repo_root,
-                replay_plan(
+            try:
+                result = execute_replay(
                     repo_root,
-                    manifest,
-                    target,
-                    replay_mode,
-                ),
-                True,
-            )
+                    replay_plan(
+                        repo_root,
+                        manifest,
+                        target,
+                        replay_mode,
+                    ),
+                    True,
+                )
+            finally:
+                restore_guarded_control_manifests(guarded)
             require_replay_success(result)
             if result['mode'] == 'in-place':
                 acknowledge_in_place_manifest_replay(
@@ -27076,6 +27526,9 @@ def command_reconcile(args):
             else:
                 worktree = reconcile_worktree_path(repo_root, integration['branch'], worktree_root)
                 ensure_non_in_place_target_clean(repo_root, integration['branch'], worktree)
+            guarded = local_only_control_manifest_guard(
+                repo_root, manifest, manifest_path
+            )
             commands = materialize_remote_align_commands(
                 repo_root,
                 integration['branch'],
@@ -27094,7 +27547,10 @@ def command_reconcile(args):
                 raise SyncwheelError('fetched integration does not match the selected product projection')
             commands = [[remote_tip if arg == action['remote_ref'] else arg for arg in command]
                         for command in commands[1:]]
-            run_command_list(commands, repo_root, True)
+            try:
+                run_command_list(commands, repo_root, True)
+            finally:
+                restore_guarded_control_manifests(guarded)
             if use_primary_checkout:
                 acknowledge_in_place_manifest_replay(repo_root, manifest_path, remote_tip)
             append_ledger_event(
@@ -27126,7 +27582,7 @@ def command_reconcile(args):
             require_selected_integration_control(repo_root, manifest, tip)
             command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
             run_authorized_push(
-                repo_root, command, remote, [ref],
+                repo_root, command, remote, [ref], manifest=manifest,
             )
             print(quoted(command))
             append_ledger_event(
@@ -27352,12 +27808,24 @@ def command_int_align_remote(args):
         return 0
     timestamp = syncwheel_timestamp()
     before_tip = ref_tip(repo_root, integration['branch'])
+    if args.dry_run:
+        guarded = []
+        untrack_step = local_only_control_manifest_untrack_step(repo_root, manifest)
+        if untrack_step:
+            print(quoted(untrack_step))
+    else:
+        guarded = local_only_control_manifest_guard(
+            repo_root, manifest, manifest_path
+        )
     commands = []
     backup = backup_branch_command(repo_root, integration['branch'], timestamp)
     if backup:
         commands.append(backup)
     commands.append(['git', 'reset', '--hard', report['remote_oid']])
-    run_command_list(commands, repo_root, not args.dry_run)
+    try:
+        run_command_list(commands, repo_root, not args.dry_run)
+    finally:
+        restore_guarded_control_manifests(guarded)
     if not args.dry_run:
         append_ledger_event(
             repo_root,
@@ -27518,6 +27986,15 @@ def command_int_rebuild(args):
         else None
     )
     replay_mode = 'ephemeral' if published_replay else mode
+    if args.dry_run:
+        guarded = []
+        untrack_step = local_only_control_manifest_untrack_step(repo_root, manifest)
+        if untrack_step:
+            print(quoted(untrack_step))
+    else:
+        guarded = local_only_control_manifest_guard(
+            repo_root, manifest, manifest_path
+        )
     target = (
         published_integration_replay_target(
             manifest, reuse, worktree, reset_destination_lease
@@ -27525,16 +28002,19 @@ def command_int_rebuild(args):
         if published_replay
         else replay_target(integration=integration, worktree=worktree)
     )
-    result = execute_replay(
-        repo_root,
-        replay_plan(
+    try:
+        result = execute_replay(
             repo_root,
-            manifest,
-            target,
-            replay_mode,
-        ),
-        not args.dry_run,
-    )
+            replay_plan(
+                repo_root,
+                manifest,
+                target,
+                replay_mode,
+            ),
+            not args.dry_run,
+        )
+    finally:
+        restore_guarded_control_manifests(guarded)
     require_replay_success(result)
     if not args.dry_run:
         reconciled = []
@@ -27680,15 +28160,15 @@ def command_int_push(args):
     integration = manifest['integration']
     remote = args.remote or manifest['defaults']['publication_remote']
     push_args = push_args_with_options(args)
-    command = ['git', 'push', *push_args, remote, integration['branch']]
-    if args.dry_run:
-        print(quoted(command))
-        return 0
     ref = f"refs/heads/{integration['branch']}"
     tip = ref_tip(repo_root, integration['branch'])
     command = ['git', 'push', *push_args, remote, f'{tip}:{ref}']
+    if args.dry_run:
+        refuse_local_only_manifest_push(repo_root, manifest, command, remote)
+        print(quoted(['git', 'push', *push_args, remote, integration['branch']]))
+        return 0
     run_authorized_push(
-        repo_root, command, remote, [ref]
+        repo_root, command, remote, [ref], manifest=manifest,
     )
     print(quoted(command))
     append_ledger_event(
