@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/local-only-control-manifest"
   ],
-  "claimed_at": "2026-09-23T16:38:17+00:00",
+  "claimed_at": "2026-09-23T16:39:02+00:00",
   "coordination_id": "default",
-  "operation_token": "8dd5527a-3c49-4e5f-a300-37f3d9a6883d",
-  "publication_scope": "create:local-only-control-manifest",
+  "operation_token": "cbfae970-63c0-4ff7-b185-126b8fb475c0",
+  "publication_scope": "stack:local-only-control-manifest",
   "source_ref": "refs/heads/syncwheel/draft/local-only-control-manifest",
   "syncwheel_version": "0.43.31"
 }
