@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/local-only-control-manifest"
+  ],
+  "claimed_at": "2026-09-23T16:39:18+00:00",
+  "coordination_id": "default",
+  "operation_token": "c003f3e1-2e08-48b8-872c-4f85b986f14a",
+  "publication_scope": "promote:local-only-control-manifest",
+  "source_ref": "refs/heads/pr/local-only-control-manifest",
+  "syncwheel_version": "0.43.31"
+}
