@@ -31,9 +31,7 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "lane-capacity-policy"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -42,26 +40,7 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/lane-capacity-policy",
-      "commits": [
-        "f2ab8a762356392c9a5a80dbd7f10aae3501d6af"
-      ],
-      "id": "lane-capacity-policy",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Configurable governed worktree capacity (limit + error/warn enforcement)"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
