@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.44.0`
+Current version: `0.45.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -331,7 +331,10 @@ the explicit, bounded choice when dependency installation, builds, tests, or
 debugging are necessary. It is a lifecycle declaration, not a sandbox: a raw
 shell can still bypass it, so agents must keep that boundary in their procedure.
 
-Each clone permits four active lanes. The local registry records the owner,
+Each clone permits four active lanes by default. A repository can change the limit, or
+make reaching it a warning instead of a refusal, with the manifest block
+`"governed_worktree_capacity": {"limit": 4, "enforcement": "error"}` (`enforcement`:
+`error` or `warn`). The local registry records the owner,
 lease, base, branch, target stack, mode, and any recovery ref in Git's common
 directory, never in the shared manifest. Use `--into <existing-stack>` when the
 destination is already known. Otherwise, after committing, use the existing
