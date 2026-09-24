@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.45.0 - 2026-09-24
+
+- Make the governed worktree capacity configurable per repository with an optional manifest block, `"governed_worktree_capacity": {"limit": 4, "enforcement": "error"}`. `limit` is a positive integer and defaults to 4. `enforcement` is `error` by default, which keeps the current refusal; `warn` opens the lane anyway and reports the capacity message, with its `stack add` queue commands, among the lane warnings. Lanes with an expired lease still count toward the limit, because a lease is set once at `worktree open` and never renewed. An invalid block is rejected when the manifest loads.
+
 ## 0.44.0 - 2026-09-22
 
 - Stop committing `.syncwheel/manifest.json` for local-only manifests without active-active coordination; drop an unpushed legacy control commit while keeping the file. Such a repository now gets no control commit after an integration rebuild, and an integration tree without the manifest is the convergent state, so reconcile stops planning a rebuild or a push to reach control-manifest parity. A control commit left by an earlier release is dropped the next time the branch is rebuilt. Before the rebuild resets the branch, Syncwheel records the bytes of every manifest source the reset can reach and untracks the file in the checkout that holds the integration branch; afterwards it puts back only the sources the reset removed, so the file survives byte for byte for a default, `--manifest` or `--personal` path, and no deletion is staged in a checkout on another branch. The previous tip stays reachable through the automatic backup ref, and a control commit that was already pushed still needs a reviewed force-push.
