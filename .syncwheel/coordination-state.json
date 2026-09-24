@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/lane-capacity-policy": "f2ab8a762356392c9a5a80dbd7f10aae3501d6af"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -16,6 +18,7 @@
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
+    "refs/heads/pr/lane-capacity-policy": "807934118d948d001a319ffe822b259b47f07127",
     "refs/heads/pr/local-only-control-manifest": "fc87f8d59c5c3475cde1b3525997e5ebafb280e1",
     "refs/heads/pr/merge-tip-push-projection": "ea3f37daec4f22767cffde83776a4dd7fb89d224",
     "refs/heads/pr/mgt-0287-ci-sharding": "76b3e92faf1ce38ed95c032d705ff690a9ebf2d9",
@@ -65,7 +68,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-23T17:00:32+00:00",
+  "created_at": "2026-09-24T09:41:59+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -94,6 +97,7 @@
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
+    "refs/heads/pr/lane-capacity-policy": "f2ab8a762356392c9a5a80dbd7f10aae3501d6af",
     "refs/heads/pr/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19",
     "refs/heads/pr/managed-ref-guard": "70ce3ad8de680934bde7bbd1868230c7f15ac5f6",
     "refs/heads/pr/merge-tip-push-projection": "b23621248f37612c2a75b1aa92672eea1b61d4da",
@@ -182,7 +186,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "lane-capacity-policy"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -190,17 +196,32 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/lane-capacity-policy",
+        "commits": [
+          "2f764c77e4aaaf568c365217ed926d54eaaa2b60"
+        ],
+        "id": "lane-capacity-policy",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "460145f5-8ebd-4802-adb2-91718bbd4809",
-  "parent_state": "8a10314300c059b65a026bd1dafe53dd318325b5",
+  "operation_token": "ca19bce2-91a6-4a08-bf48-54ef400a9df9",
+  "parent_state": "f1037569595adefb2b66a331a988bea368d326aa",
   "projection_status": "partial",
-  "publication_id": "7ddff91e-6afd-4c1b-b0df-8fb250e363f9",
-  "publication_scope": "close:local-only-control-manifest",
+  "publication_id": "6ee8c026-e493-4f28-a3ab-19fcc3ba222c",
+  "publication_scope": "stack:lane-capacity-policy",
   "schema_version": 2,
-  "syncwheel_version": "0.43.31",
+  "syncwheel_version": "0.44.0",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
