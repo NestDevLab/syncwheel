@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/lane-capacity-policy"
+  ],
+  "claimed_at": "2026-09-24T09:41:59+00:00",
+  "coordination_id": "default",
+  "operation_token": "ca19bce2-91a6-4a08-bf48-54ef400a9df9",
+  "publication_scope": "stack:lane-capacity-policy",
+  "source_ref": "refs/heads/pr/lane-capacity-policy",
+  "syncwheel_version": "0.44.0"
+}
