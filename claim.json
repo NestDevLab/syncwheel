@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/lane-capacity-policy"
-  ],
-  "claimed_at": "2026-09-24T09:41:59+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-24T09:52:54+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "ca19bce2-91a6-4a08-bf48-54ef400a9df9",
-  "publication_scope": "stack:lane-capacity-policy",
+  "operation_token": "15111c48-02f5-4129-bc70-576068edb473",
+  "publication_scope": "close:lane-capacity-policy",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/lane-capacity-policy",
-  "syncwheel_version": "0.44.0"
+  "syncwheel_version": "0.45.0"
 }
