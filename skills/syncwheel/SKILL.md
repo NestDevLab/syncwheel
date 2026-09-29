@@ -183,7 +183,8 @@ The default light lane is for editing and committing only. It receives no
 dependency provisioning; use `--full` only for an explicitly necessary
 dependency, build, test, or debugging surface. This is not a security sandbox,
 so do not defeat the light-lane boundary with raw install/test commands. The
-lane is clone-local and bounded to four active entries. After its commits are
+lane is clone-local and bounded to four active entries unless the manifest's
+`governed_worktree_capacity` sets another `limit` or `enforcement: "warn"`. After its commits are
 owned through the existing `stack create`, `stack add`, or
 `stack capture-integration` flow, Syncwheel stores a local recovery ref and
 reaps only a clean lane. A missing lane with an expired lease or a known-dead

@@ -227,6 +227,7 @@ GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
 GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
 GOVERNED_WORKTREE_REGISTRY_VERSION = 1
 GOVERNED_WORKTREE_DEFAULT_CAPACITY = 4
+GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS = ('error', 'warn')
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
@@ -932,6 +933,59 @@ def guardable_branch_ref(ref):
         ref.startswith(GUARDED_BRANCH_REF_PREFIX)
         and len(ref) > len(GUARDED_BRANCH_REF_PREFIX)
     )
+
+
+def packed_ref_values(repo_root):
+    path = git_common_dir(repo_root) / 'packed-refs'
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (FileNotFoundError, UnicodeDecodeError):
+        return {}
+    values = {}
+    for line in text.splitlines():
+        if not line or line[0] in '#^':
+            continue
+        parts = line.split(' ', 1)
+        if len(parts) == 2:
+            values[parts[1]] = parts[0]
+    return values
+
+
+def value_preserving_ref_updates(repo_root, updates):
+    """Updates that leave each ref resolving to the value it has now.
+
+    git pack-refs moves a loose ref in two transactions: `0 -> current` into
+    packed-refs, then `current -> 0` to prune the loose copy. A real delete of
+    a packed ref also carries a `0 -> 0` line for the packed store, and a
+    loose-only ref has no packed value left behind, so neither qualifies.
+    """
+    refs = sorted({ref for _, _, ref in updates})
+    listed = git(
+        repo_root, 'for-each-ref', '--format=%(objectname) %(refname)', *refs,
+        check=False,
+    )
+    current = {}
+    if listed.returncode == 0:
+        for line in listed.stdout.splitlines():
+            oid, _, name = line.partition(' ')
+            current[name] = oid
+    packed = None
+    preserved = set()
+    for old, new, ref in updates:
+        value = current.get(ref)
+        if not value:
+            continue
+        if new.strip('0'):
+            if new == value:
+                preserved.add((old, new, ref))
+            continue
+        if old != value:
+            continue
+        if packed is None:
+            packed = packed_ref_values(repo_root)
+        if packed.get(ref) == value:
+            preserved.add((old, new, ref))
+    return preserved
 
 
 def primary_guard_repair_remedy(error):
@@ -3794,6 +3848,30 @@ def normalize_syncwheel_worktree_root(value, path='manifest'):
     return value.strip()
 
 
+def normalize_governed_worktree_capacity(value, path='manifest'):
+    key = f'{path} governed_worktree_capacity'
+    if value is None:
+        value = {}
+    if not isinstance(value, dict):
+        raise SyncwheelError(f'{key} must be an object')
+    unknown = sorted(set(value) - {'limit', 'enforcement'})
+    if unknown:
+        raise SyncwheelError(f"{key} has unknown field(s): {', '.join(unknown)}")
+    limit = value.get('limit', GOVERNED_WORKTREE_DEFAULT_CAPACITY)
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        raise SyncwheelError(f'{key}.limit must be a positive integer')
+    enforcement = value.get('enforcement', 'error')
+    if enforcement not in GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS:
+        raise SyncwheelError(
+            f"{key}.enforcement must be one of: {', '.join(GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS)}"
+        )
+    return {'limit': limit, 'enforcement': enforcement}
+
+
+def governed_worktree_capacity(manifest):
+    return normalize_governed_worktree_capacity((manifest or {}).get('governed_worktree_capacity'))
+
+
 def normalize_coordination_gc(value, path='coordination.gc'):
     if value is None:
         value = {}
@@ -4710,6 +4788,10 @@ def load_manifest(repo_root, manifest_path=None):
     data['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(
         data.get('syncwheel_worktree_root')
     )
+    if 'governed_worktree_capacity' in data:
+        data['governed_worktree_capacity'] = normalize_governed_worktree_capacity(
+            data['governed_worktree_capacity']
+        )
 
     defaults = data.setdefault('defaults', {})
     canonical_remote = defaults.setdefault('canonical_remote', 'origin')
@@ -20631,12 +20713,16 @@ def command_worktree_open(args):
             item for item in registry['lanes']
             if item['state'] in {'active', 'captured_pending_cleanup'}
         ]
-        if len(active) >= GOVERNED_WORKTREE_DEFAULT_CAPACITY:
-            raise SyncwheelError(
-                f'governed worktree capacity reached ({GOVERNED_WORKTREE_DEFAULT_CAPACITY}); '
+        capacity = governed_worktree_capacity(manifest)
+        if len(active) >= capacity['limit']:
+            message = (
+                f"governed worktree capacity reached ({capacity['limit']}); "
                 'capture or queue an existing lane before opening another'
                 + format_remedy_suffix(governed_lane_queue_commands(manifest, active))
             )
+            if capacity['enforcement'] == 'error':
+                raise SyncwheelError(message)
+            warnings.append(message)
         if any(item['id'] == lane_id for item in registry['lanes']):
             raise SyncwheelError(
                 f'governed worktree lane id was already used: {lane_id}; choose a new lane id'
@@ -33192,6 +33278,16 @@ def command_hooks_ref_guard(args):
         protected = [
             (ref, old, new) for old, new, ref in candidates if ref == integration_ref
         ]
+    if not protected:
+        return 0
+    # before the authorization check, so a no-op like pack-refs doesn't spend it
+    preserved = value_preserving_ref_updates(
+        repo_root, [(old, new, ref) for ref, old, new in protected]
+    )
+    protected = [
+        (ref, old, new) for ref, old, new in protected
+        if (old, new, ref) not in preserved
+    ]
     if not protected:
         return 0
     if ref_move_authorized(repo_root, 'reference-transaction'):

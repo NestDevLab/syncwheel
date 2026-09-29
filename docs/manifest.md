@@ -396,6 +396,10 @@ python3 scripts/syncwheel.py manifest require-integration --apply
   `human-gated`. Set it with `syncwheel repo authority set`; it is never
   enabled automatically and is not part of coordination state
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
+- `governed_worktree_capacity` is optional: `limit` (positive integer, default
+  `4`) caps active governed lanes per clone, and `enforcement` (`error` by
+  default, or `warn`) chooses whether reaching it refuses `worktree open` or
+  only adds the capacity message to the lane warnings. Expired lanes still count
 - new manifests set `defaults.integration_membership` to `required`; legacy
   manifests without it remain compatible until explicitly migrated
 - required membership means every declared stack id must appear in

@@ -1108,6 +1108,45 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'syncwheel-lane-lane-4').exists())
 
+    def set_governed_worktree_capacity(self, capacity):
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        data = json.loads(manifest_path.read_text())
+        data['governed_worktree_capacity'] = capacity
+        manifest_path.write_text(json.dumps(data, indent=2) + '\n')
+
+    def test_worktree_open_honors_configured_capacity_limit(self):
+        self.set_governed_worktree_capacity({'limit': 2})
+        self.run_cli('worktree', 'open', 'lane-0', '--json')
+        self.run_cli('worktree', 'open', 'lane-1', '--json')
+
+        result = self.run_cli('worktree', 'open', 'lane-2', '--json', expected=2)
+
+        self.assertIn('capacity reached (2)', result.stderr)
+        self.assertFalse((self.repo / '.syncwheel' / 'wt' / 'syncwheel-lane-lane-2').exists())
+
+    def test_worktree_open_warns_over_capacity_when_enforcement_is_warn(self):
+        self.set_governed_worktree_capacity({'limit': 1, 'enforcement': 'warn'})
+        self.run_cli('worktree', 'open', 'lane-0', '--json')
+
+        opened = json.loads(self.run_cli('worktree', 'open', 'lane-1', '--json').stdout)
+
+        self.assertEqual(opened['lane']['id'], 'lane-1')
+        self.assertTrue(any('capacity reached (1)' in line for line in opened['warnings']))
+        text_result = self.run_cli('worktree', 'open', 'lane-2')
+        self.assertIn('warning: governed worktree capacity reached (1)', text_result.stdout)
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 3)
+
+    def test_worktree_open_rejects_invalid_capacity_policy(self):
+        for capacity, message in (
+            ({'limit': 0}, 'limit must be a positive integer'),
+            ({'enforcement': 'off'}, 'enforcement must be one of: error, warn'),
+            ({'max': 3}, 'unknown field(s): max'),
+        ):
+            self.set_governed_worktree_capacity(capacity)
+            result = self.run_cli('worktree', 'open', 'lane-x', '--json', expected=2)
+            self.assertIn(message, result.stderr)
+
     def test_worktree_open_warns_and_preserves_unrelated_pending_dirty_lane(self):
         dirty = json.loads(self.run_cli('worktree', 'open', 'dirty-owner', '--json').stdout)['lane']
         dirty_path = Path(dirty['path'])
