@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/pack-refs-guard"
-  ],
-  "claimed_at": "2026-09-29T07:46:03+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-09-29T15:46:34+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "d81631bc-1f5e-4609-a4a2-e3fa4d3ce081",
-  "publication_scope": "stack:pack-refs-guard",
+  "operation_token": "15519779-e366-482b-96c9-6df14e9b6daa",
+  "publication_scope": "close:pack-refs-guard",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/pack-refs-guard",
   "syncwheel_version": "0.45.0"
 }
