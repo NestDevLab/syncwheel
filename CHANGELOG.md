@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.45.1 - 2026-09-29
+
+- Let `git pack-refs`, and so `git gc --auto` after an ordinary commit in any worktree, through the primary integration ref guard. Packing moves a loose ref into `packed-refs` as `0 -> current`, then prunes the loose copy as `current -> 0`; the guard read both as a move of the integration branch and failed maintenance with `refusing unauthorized primary integration ref move(s)`. A transaction line now passes when the ref still resolves to the same commit afterwards: a new value equal to the current one, or a prune whose old value is the current one and is already in `packed-refs`. Every real move or delete of the integration ref is still refused, including a delete of a packed ref, which always carries a `0 -> 0` line for the packed store. A degraded guard lets packing through for every branch the same way. The check runs before the ref-move authorization, so a Syncwheel command's own `gc --auto` no longer spends its single-use authorization on a no-op.
+
 ## 0.45.0 - 2026-09-24
 
 - Make the governed worktree capacity configurable per repository with an optional manifest block, `"governed_worktree_capacity": {"limit": 4, "enforcement": "error"}`. `limit` is a positive integer and defaults to 4. `enforcement` is `error` by default, which keeps the current refusal; `warn` opens the lane anyway and reports the capacity message, with its `stack add` queue commands, among the lane warnings. Lanes with an expired lease still count toward the limit, because a lease is set once at `worktree open` and never renewed. An invalid block is rejected when the manifest loads.

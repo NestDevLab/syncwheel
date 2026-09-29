@@ -935,6 +935,59 @@ def guardable_branch_ref(ref):
     )
 
 
+def packed_ref_values(repo_root):
+    path = git_common_dir(repo_root) / 'packed-refs'
+    try:
+        text = path.read_text(encoding='utf-8')
+    except (FileNotFoundError, UnicodeDecodeError):
+        return {}
+    values = {}
+    for line in text.splitlines():
+        if not line or line[0] in '#^':
+            continue
+        parts = line.split(' ', 1)
+        if len(parts) == 2:
+            values[parts[1]] = parts[0]
+    return values
+
+
+def value_preserving_ref_updates(repo_root, updates):
+    """Updates that leave each ref resolving to the value it has now.
+
+    git pack-refs moves a loose ref in two transactions: `0 -> current` into
+    packed-refs, then `current -> 0` to prune the loose copy. A real delete of
+    a packed ref also carries a `0 -> 0` line for the packed store, and a
+    loose-only ref has no packed value left behind, so neither qualifies.
+    """
+    refs = sorted({ref for _, _, ref in updates})
+    listed = git(
+        repo_root, 'for-each-ref', '--format=%(objectname) %(refname)', *refs,
+        check=False,
+    )
+    current = {}
+    if listed.returncode == 0:
+        for line in listed.stdout.splitlines():
+            oid, _, name = line.partition(' ')
+            current[name] = oid
+    packed = None
+    preserved = set()
+    for old, new, ref in updates:
+        value = current.get(ref)
+        if not value:
+            continue
+        if new.strip('0'):
+            if new == value:
+                preserved.add((old, new, ref))
+            continue
+        if old != value:
+            continue
+        if packed is None:
+            packed = packed_ref_values(repo_root)
+        if packed.get(ref) == value:
+            preserved.add((old, new, ref))
+    return preserved
+
+
 def primary_guard_repair_remedy(error):
     return (
         f'{error}; run syncwheel hooks install --apply with the intended '
@@ -33225,6 +33278,16 @@ def command_hooks_ref_guard(args):
         protected = [
             (ref, old, new) for old, new, ref in candidates if ref == integration_ref
         ]
+    if not protected:
+        return 0
+    # before the authorization check, so a no-op like pack-refs doesn't spend it
+    preserved = value_preserving_ref_updates(
+        repo_root, [(old, new, ref) for ref, old, new in protected]
+    )
+    protected = [
+        (ref, old, new) for ref, old, new in protected
+        if (old, new, ref) not in preserved
+    ]
     if not protected:
         return 0
     if ref_move_authorized(repo_root, 'reference-transaction'):

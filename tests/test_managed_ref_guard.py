@@ -458,6 +458,91 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0)
         self.assertIn('refusing unauthorized primary integration ref move', refused.stderr)
 
+    def _rev(self, ref):
+        return subprocess.check_output(
+            ['git', 'rev-parse', ref], cwd=self.repo, text=True
+        ).strip()
+
+    def _assert_pack_refs_passes(self, cwd=None):
+        before = self._rev('main-integration')
+        loose = self.repo / '.git' / 'refs' / 'heads' / 'main-integration'
+        self.assertTrue(loose.exists())
+
+        packed = self._run_git('pack-refs', '--all', cwd=cwd)
+
+        self.assertEqual(packed.returncode, 0, packed.stderr)
+        self.assertNotIn('refusing', packed.stderr)
+        self.assertFalse(loose.exists())
+        self.assertIn(
+            f'{before} refs/heads/main-integration',
+            (self.repo / '.git' / 'packed-refs').read_text(),
+        )
+        self.assertEqual(self._rev('main-integration'), before)
+
+    def _assert_packed_integration_ref_still_refused(self):
+        before = self._rev('main-integration')
+        old, new = self.descendant_commit('refused once packed')
+        self.assertEqual(old, before)
+        for args in (
+            ('update-ref', 'refs/heads/main-integration', new, old),
+            ('update-ref', 'refs/heads/main-integration', new),
+            ('update-ref', '-d', 'refs/heads/main-integration', old),
+            ('update-ref', '-d', 'refs/heads/main-integration'),
+        ):
+            result = self._run_git(*args)
+            self.assertNotEqual(result.returncode, 0, args)
+            self.assertIn('refs/heads/main-integration', result.stderr)
+            self.assertEqual(self._rev('main-integration'), before, args)
+
+    def test_armed_guard_lets_pack_refs_through(self):
+        # gc --auto runs pack-refs after ordinary commits in any worktree; it
+        # rewrites the integration ref to the value it already has.
+        self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+
+        self._assert_pack_refs_passes()
+        self._assert_packed_integration_ref_still_refused()
+
+    def test_armed_guard_lets_pack_refs_through_from_a_linked_worktree(self):
+        self._install_and_branch('main-integration')
+        added = self._run_git('worktree', 'add', '-q', '-b', 'lane', 'var/worktrees/lane')
+        self.assertEqual(added.returncode, 0, added.stderr)
+
+        self._assert_pack_refs_passes(cwd=self.repo / 'var' / 'worktrees' / 'lane')
+        self._assert_packed_integration_ref_still_refused()
+
+    def test_degraded_guard_lets_pack_refs_through(self):
+        self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'scratch'], cwd=self.repo, check=True)
+        syncwheel.primary_guard_path(self.repo).unlink()
+
+        self._assert_pack_refs_passes()
+        moved = self._run_git('branch', '-f', 'scratch', 'HEAD~1')
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertIn('configuration is missing', moved.stderr)
+
+    def test_ref_guard_refuses_a_prune_shaped_delete_without_a_packed_value(self):
+        self._install_and_branch('main-integration')
+        tip = self._rev('main-integration')
+        for payload in (
+            f'{tip} {"0" * 40} refs/heads/main-integration\n',
+            f'{"0" * 40} {"0" * 40} refs/heads/main-integration\n',
+        ):
+            with mock.patch('sys.stdin', io.StringIO(payload)):
+                with self.assertRaisesRegex(
+                    syncwheel.SyncwheelError, 'unauthorized primary integration ref move'
+                ):
+                    syncwheel.command_hooks_ref_guard(
+                        types.SimpleNamespace(repo=self.repo, phase='prepared')
+                    )
+        with mock.patch('sys.stdin', io.StringIO(f'{"0" * 40} {tip} refs/heads/main-integration\n')):
+            self.assertEqual(
+                syncwheel.command_hooks_ref_guard(
+                    types.SimpleNamespace(repo=self.repo, phase='prepared')
+                ),
+                0,
+            )
+
     def test_degraded_guard_refuses_other_branches_and_names_the_repair(self):
         # Nothing left distinguishes the integration ref from any other branch,
         # so every branch ref is refused; the refusal has to say how to fix it.
