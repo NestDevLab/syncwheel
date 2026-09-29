@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/pack-refs-guard": "f1c908590b18920f51b92badb971f3aefbc233b5"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -28,7 +26,7 @@
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
     "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
-    "refs/heads/pr/pack-refs-guard": "68d0b5ad662390776dd7918884710d34ed17c056",
+    "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
@@ -69,7 +67,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-09-29T07:46:03+00:00",
+  "created_at": "2026-09-29T15:46:34+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -188,9 +186,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "pack-refs-guard"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -198,30 +194,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/pack-refs-guard",
-        "commits": [
-          "f1c908590b18920f51b92badb971f3aefbc233b5"
-        ],
-        "id": "pack-refs-guard",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "d81631bc-1f5e-4609-a4a2-e3fa4d3ce081",
-  "parent_state": "b4d4ae33643019f7865676b1a7da7a9e28ae3a0f",
+  "operation_token": "15519779-e366-482b-96c9-6df14e9b6daa",
+  "parent_state": "9ac2b71013bfd7cc9cd941007fba918acb68e98d",
   "projection_status": "partial",
-  "publication_id": "5d3e7f04-dbe7-48e7-8f8c-657f55fe10ab",
-  "publication_scope": "stack:pack-refs-guard",
+  "publication_id": "139c2cfd-ada0-4f7d-919d-8b15901cf489",
+  "publication_scope": "close:pack-refs-guard",
   "schema_version": 2,
   "syncwheel_version": "0.45.0",
   "tombstones": [
@@ -920,6 +901,14 @@
       "ref": "refs/heads/pr/lane-capacity-policy",
       "remote_tip": null,
       "stack": "lane-capacity-policy"
+    },
+    {
+      "branch": "pr/pack-refs-guard",
+      "closed_at": "2026-09-29T15:46:30+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/pack-refs-guard",
+      "remote_tip": null,
+      "stack": "pack-refs-guard"
     }
   ]
 }
