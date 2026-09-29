@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/pack-refs-guard"
+  ],
+  "claimed_at": "2026-09-29T07:46:03+00:00",
+  "coordination_id": "default",
+  "operation_token": "d81631bc-1f5e-4609-a4a2-e3fa4d3ce081",
+  "publication_scope": "stack:pack-refs-guard",
+  "source_ref": "refs/heads/pr/pack-refs-guard",
+  "syncwheel_version": "0.45.0"
+}
