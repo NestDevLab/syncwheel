@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/o3-history-proof"
+  ],
+  "claimed_at": "2026-10-08T19:40:15+00:00",
+  "coordination_id": "default",
+  "operation_token": "881b11b9-1f00-4283-9d75-f785e9d48d32",
+  "publication_scope": "create:o3-history-proof",
+  "source_ref": "refs/heads/syncwheel/draft/o3-history-proof",
+  "syncwheel_version": "0.45.1"
+}
