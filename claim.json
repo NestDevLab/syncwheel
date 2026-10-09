@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/journal-publish-compact"
-  ],
-  "claimed_at": "2026-10-09T06:54:18+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-09T07:13:35+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "89ca76db-6472-4bf9-8161-d1bcbe3b99b4",
-  "publication_scope": "stack:journal-publish-compact",
+  "operation_token": "2c373b38-7c1b-4852-a757-45fe7b534a66",
+  "publication_scope": "close:journal-publish-compact",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/journal-publish-compact",
   "syncwheel_version": "0.45.2"
 }
