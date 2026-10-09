@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/journal-publish-compact": "ecb827e1631de3e45395c55b2b8defe5797c4ea3"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -17,7 +15,7 @@
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
-    "refs/heads/pr/journal-publish-compact": "337e3022b9368fcaee31e3adf47ce505dfd37f34",
+    "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/lane-capacity-policy": "ebf6cbce4a4faf7fbedd98fbed65deb6346f26f5",
     "refs/heads/pr/local-only-control-manifest": "fc87f8d59c5c3475cde1b3525997e5ebafb280e1",
@@ -72,7 +70,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-09T06:54:18+00:00",
+  "created_at": "2026-10-09T07:13:35+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -194,9 +192,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "journal-publish-compact"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -204,30 +200,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/journal-publish-compact",
-        "commits": [
-          "ecb827e1631de3e45395c55b2b8defe5797c4ea3"
-        ],
-        "id": "journal-publish-compact",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "89ca76db-6472-4bf9-8161-d1bcbe3b99b4",
-  "parent_state": "6c1702c68eb5b770d78bab17591f3cc463318c26",
+  "operation_token": "2c373b38-7c1b-4852-a757-45fe7b534a66",
+  "parent_state": "bcd8d631bb2e50ba8ca344fe5890e98d31c32f20",
   "projection_status": "partial",
-  "publication_id": "94f9797f-e42b-4928-b4fa-73db1a944489",
-  "publication_scope": "stack:journal-publish-compact",
+  "publication_id": "54726eda-7a4c-401e-b6e8-3b5b1e7bb7f6",
+  "publication_scope": "close:journal-publish-compact",
   "schema_version": 2,
   "syncwheel_version": "0.45.2",
   "tombstones": [
@@ -950,6 +931,14 @@
       "ref": "refs/heads/pr/o3-history-proof",
       "remote_tip": null,
       "stack": "o3-history-proof"
+    },
+    {
+      "branch": "pr/journal-publish-compact",
+      "closed_at": "2026-10-09T07:13:32+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/journal-publish-compact",
+      "remote_tip": null,
+      "stack": "journal-publish-compact"
     }
   ]
 }
