@@ -6641,6 +6641,41 @@ def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip
     ).stdout.strip()
 
 
+def integration_reconciliation_preserves_product(
+    repo_root, manifest, old_tip, projected_tree, delivery_tip
+):
+    """Refuse to discard unique product bytes from the old integration tip.
+
+    An old byte may change only because the delivery base advanced from the
+    merge base, or because Agentwheel must regenerate a declared derived path.
+    Control files are rebuilt separately by Syncwheel.
+    """
+    ancestor = git(repo_root, 'merge-base', old_tip, delivery_tip).stdout.strip()
+    if not ancestor:
+        raise SyncwheelError('integration reconciliation has no delivery merge base')
+    control = {'.syncwheel/manifest.json', '.gitignore'}
+    derived = manifest['integration'].get('derived_paths') or []
+    lost = []
+    for path in integration_tree_changed_paths(repo_root, old_tip, projected_tree):
+        if path in control or any(path.startswith(prefix) for prefix in derived):
+            continue
+        old_entry = tree_path_entry(repo_root, old_tip, path)
+        if old_entry is None:
+            continue  # A newly selected stack adds product; nothing was lost.
+        if (
+            old_entry == tree_path_entry(repo_root, ancestor, path)
+            and tree_path_entry(repo_root, projected_tree, path)
+            == tree_path_entry(repo_root, delivery_tip, path)
+        ):
+            continue
+        lost.append(path)
+    if lost:
+        raise SyncwheelError(
+            'integration reconciliation would discard unique product paths: '
+            + ', '.join(lost)
+        )
+
+
 def integration_reconciliation_inputs(repo_root, manifest, inputs):
     expected = [('base', 'integration', manifest['integration']['base'])]
     stacks = stack_map(manifest)
@@ -6788,6 +6823,9 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         or integration_reconciliation_object(repo_root, control, *parents, tree, inputs) != commit
     ):
         return None
+    integration_reconciliation_preserves_product(
+        repo_root, control, parents[0], tree, inputs['refs'][0]['tip']
+    )
     events = load_control_manifest_events(repo_root, manifest_path)
     intents, receipts = control_manifest_operation_records(events, commit)
     local = any(
@@ -7090,7 +7128,7 @@ def historically_closed_integration_commits(
             tombstones = [
                 item for item in state.get('tombstones') or []
                 if item.get('stack') == stack_id
-                and item.get('reason') in {'absorbed', 'merged', 'abandoned'}
+                and item.get('reason') in {'absorbed', 'merged', 'abandoned', 'superseded'}
                 and coordination_tombstone_ref(item) not in parent_tombstones
             ]
             parent_stacks = [
@@ -7148,8 +7186,8 @@ def historically_closed_integration_commits(
                         commit_full_sha(repo_root, commit)
                         for commit in declared if commit_exists(repo_root, commit)
                     ]
-                    if reason == 'abandoned':
-                        # Abandonment does not prove delivery.  It only explains
+                    if reason in {'abandoned', 'superseded'}:
+                        # Neither close reason proves delivery. It only explains
                         # the exact historical commits once every path they
                         # changed is now supplied by the live delivery base in
                         # both integration trees.  Never admit patch-equivalent
@@ -7432,6 +7470,37 @@ def historically_abandoned_unmapped_commits(repo_root, manifest, commits):
     )
 
 
+def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
+    """Recognize old-parent history carried by an exact reconciliation proof.
+
+    A reconciliation keeps the old integration as its first parent while its
+    verified second parent supplies the product tree.  Only commits exclusive
+    to that old parent can be explained by this proof; later foreign commits
+    and commits in an unproved merge remain unmapped.
+    """
+    if not commits:
+        return set()
+    observation = observe_published_integration_tip(repo_root, manifest)
+    if not observation or observation.get('status') != 'current':
+        return set()
+    tip = ref_tip(repo_root, manifest['integration']['branch'])
+    wanted = set(commits)
+    carried = set()
+    manifest_path = integration_manifest_path(repo_root)
+    base = manifest['integration']['base']
+    for merge in git(repo_root, 'rev-list', '--merges', f'{base}..{tip}').stdout.splitlines():
+        proof = integration_reconciliation_proof(
+            repo_root, merge, manifest_path, observation
+        )
+        if not proof:
+            continue
+        old, replay = proof['parents']
+        carried.update(wanted.intersection(rev_list(repo_root, f'{replay}..{old}')))
+        if carried == wanted:
+            break
+    return carried
+
+
 def integration_control_only_transition(repo_root, commit, parent):
     """Prove that a commit changes only valid Syncwheel control projection."""
     changed = {
@@ -7525,6 +7594,11 @@ def integration_reconciliation_history(
     proofs = {commit: proof for commit in history
               if commit_parent_count(repo_root, commit) > 1
               and (proof := integration_reconciliation_proof(repo_root, commit, manifest_path, observation))}
+    carried_history = {
+        old_commit
+        for proof in proofs.values()
+        for old_commit in rev_list(repo_root, f"{proof['parents'][1]}..{proof['parents'][0]}")
+    }
     replay_ranges = [(base, tip)] if detached_replay else []
     replay_ranges.extend((proof['inputs']['refs'][0]['tip'], proof['parents'][1]) for proof in proofs.values())
     replay_merges = set()
@@ -7532,12 +7606,25 @@ def integration_reconciliation_history(
         replay_merges.update(git(repo_root, 'rev-list', '--first-parent', '--merges',
                                  f'{replay_base}..{replay_tip}').stdout.split())
     for commit in history:
-        if commit in declared or commit in closed_commits:
+        if commit in declared or commit in closed_commits or commit in carried_history:
             continue
         if commit_parent_count(repo_root, commit) != 1:
             if commit in proofs or commit in replay_merges:
                 continue
             parents = merge_parents[commit]
+            if len(parents) == 2 and (
+                parents[1] in declared
+                or commit_patch_id(repo_root, parents[1]) in patches
+            ):
+                # An exact auto-merge of a declared or already delivered
+                # source commit retains its ownership even if the historical
+                # merge itself was not recorded in the current manifest.
+                merge = git(
+                    repo_root, 'merge-tree', '--write-tree',
+                    parents[0], parents[1], check=False,
+                )
+                if merge.returncode == 0 and merge.stdout.strip() == ref_tree(repo_root, commit):
+                    continue
             if (
                 len(parents) == 2
                 and (
@@ -7771,6 +7858,9 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         tree = materialize_control_manifest_projection_tree(
             repo_root, manifest, ref_tree(repo_root, replay_tip),
             gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
+        )
+        integration_reconciliation_preserves_product(
+            repo_root, manifest, local_tip, tree, inputs['refs'][0]['tip']
         )
         integration_reconciliation_history(
             repo_root, manifest, local_tip, provenance, manifest_path, observed,
@@ -29627,6 +29717,7 @@ class SyncwheelRevisionBackend:
             'projectionBaseKind': 'projectionBaseKind',
             'integrationCompositionDigest': 'integrationCompositionDigest',
             'baselineUnownedDirty': 'unownedDirty',
+            'baselineStalePaths': 'stalePaths',
             'unmappedIntegrationCommits': 'unmappedIntegrationCommits',
             'coordination': 'coordination',
         }
@@ -29879,13 +29970,13 @@ class SyncwheelRevisionBackend:
             ) or []
         }
         declared_paths = {item.path for item in request.paths}
-        repairs_all_stale_paths = bool(stale_paths) and (
-            request.action == 'check' or stale_paths <= declared_paths
+        repairs_stale_paths = bool(stale_paths) and (
+            request.action == 'check' or bool(stale_paths & declared_paths)
         )
         blocking_errors = [
             error for error in validation['errors']
             if not (
-                repairs_all_stale_paths
+                repairs_stale_paths
                 and error.startswith('derived-projection-stale:')
             )
         ]
@@ -29909,7 +30000,13 @@ class SyncwheelRevisionBackend:
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
             abandoned = historically_abandoned_unmapped_commits(repo_root, manifest, unmapped)
-            unmapped = [commit for commit in unmapped if commit not in abandoned]
+            reconciled = historically_reconciled_unmapped_commits(
+                repo_root, manifest, unmapped
+            )
+            unmapped = [
+                commit for commit in unmapped
+                if commit not in abandoned and commit not in reconciled
+            ]
             if unmapped:
                 self._fail(
                     'integration already contains unmapped commits: ' + ', '.join(unmapped)
@@ -29964,6 +30061,7 @@ class SyncwheelRevisionBackend:
             'indexSha256': index.sha256,
             'indexSemantic': index.semantic,
             'unmappedIntegrationCommits': unmapped,
+            'stalePaths': sorted(stale_paths),
             'coordination': coordination,
         }
 
@@ -31842,12 +31940,34 @@ class SyncwheelRevisionBackend:
                 'manifest digest changed before terminal verification',
             )
         validation = validate_manifest(repo_root, manifest)
-        if validation['errors']:
-            self._fail('post-operation Syncwheel validation failed: ' + '; '.join(validation['errors']))
+        stale_after = {
+            item['path'] for item in validation['details']['integration'].get(
+                'derived_projection_stale'
+            ) or []
+        }
+        stale_before = set(journal.get('baselineStalePaths') or [])
+        repaired = stale_before - stale_after
+        scoped_repair = bool(repaired) and repaired <= {
+            item.path for item in request.paths
+        } and stale_after < stale_before
+        blocking_errors = [
+            error for error in validation['errors']
+            if not (
+                scoped_repair and error.startswith('derived-projection-stale:')
+            )
+        ]
+        if blocking_errors:
+            self._fail('post-operation Syncwheel validation failed: ' + '; '.join(blocking_errors))
         unmapped = list(validation['details']['integration'].get('unmapped_commits') or [])
         if unmapped:
             abandoned = historically_abandoned_unmapped_commits(repo_root, manifest, unmapped)
-            unmapped = [commit for commit in unmapped if commit not in abandoned]
+            reconciled = historically_reconciled_unmapped_commits(
+                repo_root, manifest, unmapped
+            )
+            unmapped = [
+                commit for commit in unmapped
+                if commit not in abandoned and commit not in reconciled
+            ]
             if unmapped:
                 self._fail('operation left unmapped integration commits: ' + ', '.join(unmapped))
         if self._worktrees(repo_root) != journal['baselineWorktrees']:
