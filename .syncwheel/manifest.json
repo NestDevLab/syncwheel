@@ -47,7 +47,8 @@
       "base": "origin/main",
       "branch": "pr/o3-history-proof",
       "commits": [
-        "ffd983633994877a5fbcbc3670c3ce7f4823da52"
+        "ffd983633994877a5fbcbc3670c3ce7f4823da52",
+        "a9a528049bc211dcc134c8e547e85ffbc8770fc1"
       ],
       "id": "o3-history-proof",
       "integration_branch": "main-integration",
