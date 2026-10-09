@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/o3-history-proof": "c2d98634abc3644096ec1b02c418971297df8e28"
+    "refs/heads/pr/o3-history-proof": "c2d98634abc3644096ec1b02c418971297df8e28"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -28,6 +28,7 @@
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
     "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
+    "refs/heads/pr/o3-history-proof": "d057b88ffedc187e569262f32b44b86d713bcafb",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
@@ -57,7 +58,7 @@
     "refs/heads/syncwheel/draft/missing-managed-ref-repair": "22a43e04737321f10db1bd4549a9fe58fb5191fb",
     "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "b380fe48a47cc32e90d009d5ca86a18f1b9b3e25",
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
-    "refs/heads/syncwheel/draft/o3-history-proof": "30fc6a1b35b73bdf4a324a04d8b46a02871a9dd9",
+    "refs/heads/syncwheel/draft/o3-history-proof": "b62d96f3c05e90775581ec1f281c7517a9cc976b",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
     "refs/heads/syncwheel/draft/read-only-git-auth": "4e2c48d32e0c997bfa17d6f5ef0d88b9894f5dcb",
@@ -70,7 +71,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-09T05:24:28+00:00",
+  "created_at": "2026-10-09T05:24:44+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -110,6 +111,7 @@
     "refs/heads/pr/missing-historical-integration-tip": "8a6ec195c47d279d15e5394898db4796c54e60cb",
     "refs/heads/pr/missing-managed-ref-repair": "7733738406a41ac5db22fc089b04079616e63c08",
     "refs/heads/pr/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
+    "refs/heads/pr/o3-history-proof": "c2d98634abc3644096ec1b02c418971297df8e28",
     "refs/heads/pr/pack-refs-guard": "f1c908590b18920f51b92badb971f3aefbc233b5",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
@@ -207,24 +209,23 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/o3-history-proof",
+        "branch": "pr/o3-history-proof",
         "commits": [
           "ffd983633994877a5fbcbc3670c3ce7f4823da52"
         ],
         "id": "o3-history-proof",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "5980fc31-5786-4821-8acb-1c831e4e5178",
-  "parent_state": "e61ce44bee386c66dc97e32b1fa665277f986300",
+  "operation_token": "eefca13f-c56a-4c77-8c62-e9341aaca2bc",
+  "parent_state": "d0d6a92c4e07db80d5f0a3a20d7a4f8fbec94000",
   "projection_status": "partial",
-  "publication_id": "d0117748-a273-4d24-aeb9-bb39b74cb291",
-  "publication_scope": "stack:o3-history-proof",
+  "publication_id": "6b6758ca-402c-4e7a-a317-1bdea5375c37",
+  "publication_scope": "promote:o3-history-proof",
   "schema_version": 2,
   "syncwheel_version": "0.45.1",
   "tombstones": [
@@ -931,6 +932,14 @@
       "ref": "refs/heads/pr/pack-refs-guard",
       "remote_tip": null,
       "stack": "pack-refs-guard"
+    },
+    {
+      "branch": "syncwheel/draft/o3-history-proof",
+      "closed_at": "2026-10-09T05:24:40+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/o3-history-proof",
+      "remote_tip": "c2d98634abc3644096ec1b02c418971297df8e28",
+      "stack": "o3-history-proof"
     }
   ]
 }
