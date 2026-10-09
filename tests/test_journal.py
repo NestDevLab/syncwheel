@@ -118,6 +118,28 @@ class JournalModeTest(unittest.TestCase):
         self.assertIn('excluded/', self.git('status', '--porcelain'))
         self.assertTrue(before_tree)
 
+    def test_publish_plan_compacts_excluded_and_status_keeps_paths(self):
+        (self.repo / 'notes.txt').write_text('two\n')
+        (self.repo / 'excluded').mkdir()
+        (self.repo / 'excluded' / 'first.txt').write_text('first\n')
+        (self.repo / 'excluded' / 'second.txt').write_text('second\n')
+
+        planned = json.loads(self.cli('journal', 'publish').stdout)
+        self.assertEqual(planned['excluded_count'], 2)
+        self.assertNotIn('excluded', planned)
+        self.assertEqual(planned['pull']['kept_local_count'], 0)
+        self.assertNotIn('kept_local', planned['pull'])
+        self.assertEqual([item['path'] for item in planned['admitted']], ['notes.txt'])
+        self.assertIn('rejected', planned)
+        self.assertIn('identical_dirty', planned['pull'])
+        self.assertIn('conflicts', planned['pull'])
+
+        status = json.loads(self.cli('journal', 'status', '--json').stdout)
+        self.assertEqual(
+            [item['path'] for item in status['excluded']],
+            ['excluded/first.txt', 'excluded/second.txt'],
+        )
+
     def test_rejects_oversize_secret_sensitive_and_dirty_index(self):
         (self.repo / 'large.txt').write_text('x' * 33)
         result = self.cli('journal', 'snapshot', expected=2)
@@ -230,9 +252,14 @@ class JournalModeTest(unittest.TestCase):
         subprocess.run(['git', 'commit', '-q', '-m', 'ahead'], cwd=other, check=True)
         subprocess.run(['git', 'push', '-q', 'origin', 'journal'], cwd=other, check=True)
         (self.repo / 'local.txt').write_text('local\n')
+        (self.repo / 'excluded').mkdir()
+        (self.repo / 'excluded' / 'keep.txt').write_text('excluded\n')
         caught_up = json.loads(self.cli('journal', 'publish', '--apply').stdout)
         self.assertEqual(caught_up['pull']['relation'], 'behind')
-        self.assertEqual(caught_up['pull']['kept_local'], ['local.txt'])
+        self.assertEqual(caught_up['pull']['kept_local_count'], 2)
+        self.assertNotIn('kept_local', caught_up['pull'])
+        self.assertEqual(caught_up['excluded_count'], 1)
+        self.assertNotIn('excluded', caught_up)
         self.assertEqual(self.git('ls-remote', 'origin', 'refs/heads/journal').split()[0], caught_up['published_tip'])
         self.assertTrue((self.repo / 'ahead.txt').exists())
         self.assertEqual(self.git('show', 'HEAD:local.txt'), 'local')
