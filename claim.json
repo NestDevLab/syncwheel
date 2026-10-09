@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/journal-publish-compact"
+  ],
+  "claimed_at": "2026-10-09T06:54:18+00:00",
+  "coordination_id": "default",
+  "operation_token": "89ca76db-6472-4bf9-8161-d1bcbe3b99b4",
+  "publication_scope": "stack:journal-publish-compact",
+  "source_ref": "refs/heads/pr/journal-publish-compact",
+  "syncwheel_version": "0.45.2"
+}
