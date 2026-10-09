@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/o3-history-proof"
-  ],
-  "claimed_at": "2026-10-09T05:49:51+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-09T06:03:39+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "e5a7deab-cf00-4d15-a10a-08210289cc1e",
-  "publication_scope": "stack:o3-history-proof",
+  "operation_token": "57c0c348-d963-464a-b8ce-0fb1fb927600",
+  "publication_scope": "close:o3-history-proof",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/o3-history-proof",
-  "syncwheel_version": "0.45.1"
+  "syncwheel_version": "0.45.2"
 }
