@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.45.2 - 2026-10-09
+
+- Preserve every selected source commit during integration ancestry reconciliation. Recognize old-parent-only commits carried by a verified two-parent replay, including a 46-commit, ten-stack regression, without assigning ownership to unrelated history. An unselected stack cannot justify dropping its unique product bytes.
+- Recognize exact, already delivered superseded stack history and exact auto-merges of declared source commits. Keep unrelated or unproved commits blocked.
+- Let Agentwheel repair stale derived graph-lock provenance one declared path at a time. A provider operation succeeds only when the stale set shrinks within its requested paths; other validation errors still block.
+
 ## 0.45.1 - 2026-09-29
 
 - Let `git pack-refs`, and so `git gc --auto` after an ordinary commit in any worktree, through the primary integration ref guard. Packing moves a loose ref into `packed-refs` as `0 -> current`, then prunes the loose copy as `current -> 0`; the guard read both as a move of the integration branch and failed maintenance with `refusing unauthorized primary integration ref move(s)`. A transaction line now passes when the ref still resolves to the same commit afterwards: a new value equal to the current one, or a prune whose old value is the current one and is already in `packed-refs`. Every real move or delete of the integration ref is still refused, including a delete of a packed ref, which always carries a `0 -> 0` line for the packed store. A degraded guard lets packing through for every branch the same way. The check runs before the ref-move authorization, so a Syncwheel command's own `gc --auto` no longer spends its single-use authorization on a no-op.

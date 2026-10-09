@@ -3455,6 +3455,44 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.tree_path_entry(repo, other, 'other.txt'),
         )
 
+    def test_superseded_history_uses_exact_delivery_path_proof(self):
+        origin = self.create_remote('superseded-history')
+        repo = self.clone(origin, 'superseded-history')
+        self.init_coordinated(repo, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        old = self.commit_on_branch(repo, 'scratch/superseded', 'old.txt')
+        self.run_cli(repo, 'stack', 'create', 'old', old, '--branch', 'pr/old')
+        self.run_cli(repo, 'stack', 'rebuild', 'old')
+        self.run_cli(repo, 'stack', 'push', 'old')
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'project old stack')
+        self.run_cli(repo, 'int', 'push')
+
+        publisher = self.clone(origin, 'superseded-history-publisher')
+        self.git(publisher, 'cherry-pick', old)
+        self.git(publisher, 'push', '-q', 'origin', 'main')
+        self.git(repo, 'fetch', '-q', 'origin', '+refs/heads/main:refs/remotes/origin/main')
+        self.run_cli(repo, 'stack', 'close', 'old', '--reason', 'superseded', '--force')
+        self.run_cli(repo, 'int', 'push')
+
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        tip = module.ref_tip(repo, manifest['integration']['branch'])
+        delivery = module.integration_projection_ref_observation(
+            repo, 'base', 'integration', manifest['integration']['base']
+        )
+        self.assertIn(old, module.historically_closed_integration_commits(
+            repo, tip, observation, candidates=[old], delivery_tip=delivery['tip'],
+            delivery_observation=delivery,
+        ))
+        (repo / 'old.txt').write_text('undelivered change\n')
+        self.git(repo, 'add', 'old.txt')
+        self.git(repo, 'commit', '-qm', 'test: undelivered change')
+        self.assertNotIn(old, module.historically_closed_integration_commits(
+            repo, module.ref_tip(repo, 'HEAD'), observation, candidates=[old],
+            delivery_tip=delivery['tip'], delivery_observation=delivery,
+        ))
+
     def test_abandoned_path_proof_checks_user_ignore_and_every_commit_parent(self):
         origin = self.create_remote('abandoned-paths')
         repo = self.clone(origin, 'abandoned-paths')
@@ -3825,6 +3863,110 @@ with module.coordination_publication_lock(Path(repo_path)):
         ):
             module.integration_reconciliation_history(
                 repo, manifest, unsafe_merge, {}, delivery_tip=delivery_tip,
+            )
+
+    def test_declared_source_auto_merge_requires_exact_tree(self):
+        origin = self.create_remote('declared-merge-history')
+        repo = self.clone(origin, 'declared-merge-history')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'origin/main')
+        source = self.commit_on_branch(repo, 'scratch/declared', 'declared.txt')
+        self.git(repo, 'switch', '-q', '-c', 'integration/declared', base)
+        self.git(repo, 'merge', '-q', '--no-ff', source, '-m', 'merge declared source')
+        merged = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'integration': {'base': base},
+            'stacks': [{'commits': [source]}],
+        }
+        module.integration_reconciliation_history(repo, manifest, merged, {})
+
+        wrong_tree = module.ref_tree(repo, base)
+        unsafe = self.git(
+            repo, 'commit-tree', wrong_tree, '-p', base, '-p', source,
+            '-m', 'merge declared source with rollback',
+        ).stdout.strip()
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'integration reconciliation has unclassified merge',
+        ):
+            module.integration_reconciliation_history(repo, manifest, unsafe, {})
+
+    def test_replay_keeps_all_46_declared_commits_from_ten_stacks(self):
+        origin = self.create_remote('ten-stack-replay-46')
+        repo = self.clone(origin, 'ten-stack-replay-46')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'origin/main')
+        integration_branch = 'integration/shared'
+        stacks = []
+        for stack_number in range(10):
+            branch = f'scratch/source-{stack_number}'
+            self.git(repo, 'switch', '-q', '-c', branch, base)
+            commits = []
+            for number in range(5 if stack_number < 6 else 4):
+                path = repo / f'stack-{stack_number}.txt'
+                with path.open('a') as handle:
+                    handle.write(f'change {number}\n')
+                self.git(repo, 'add', path.name)
+                self.git(repo, 'commit', '-qm',
+                         f'test: stack {stack_number} commit {number}')
+                commits.append(module.ref_tip(repo, 'HEAD'))
+            self.git(repo, 'switch', '-q', 'main')
+            stack_id = f'source-{stack_number}'
+            self.run_cli(repo, 'stack', 'create', stack_id, *commits, '--draft')
+            stacks.append((stack_id, commits))
+        self.git(repo, 'switch', '-q', integration_branch)
+        for stack_number in range(10):
+            self.git(repo, 'merge', '-q', '--no-ff',
+                     f'scratch/source-{stack_number}',
+                     '-m', f'test: retain source {stack_number} ancestry')
+        old = module.ref_tip(repo, integration_branch)
+        self.git(repo, 'switch', '-q', 'main')
+        manifest, manifest_path = module.load_manifest(repo)
+        manifest['integration']['stacks'] = [stack_id for stack_id, _ in stacks]
+        manifest_path.write_text(module.canonical_manifest_file_text(manifest))
+        declared = {commit for _, commits in stacks for commit in commits}
+        self.assertEqual(len(declared), 46)
+        self.assertTrue(module.reconcile_integration_ancestry(
+            repo, manifest_path, manifest, 'test', 'replay ten declared stacks'
+        ))
+        final = module.ref_tip(repo, integration_branch)
+        parents = self.git(repo, 'show', '-s', '--format=%P', final).stdout.split()
+        self.assertEqual(parents[0], old)
+        self.assertEqual(len(parents), 2)
+        for commit in declared:
+            self.git(repo, 'merge-base', '--is-ancestor', commit, final)
+        for stack_number in range(10):
+            self.assertEqual(
+                self.git(repo, 'show', f'{final}:stack-{stack_number}.txt').stdout,
+                ''.join(f'change {number}\n' for number in range(
+                    5 if stack_number < 6 else 4
+                )),
+            )
+        self.assertTrue(module.integration_reconciliation_proof(
+            repo, final, manifest_path,
+            module.observe_published_integration_tip(repo, manifest),
+        ))
+
+    def test_unselected_declared_stack_cannot_explain_lost_product(self):
+        origin = self.create_remote('unselected-declared-product')
+        repo = self.clone(origin, 'unselected-declared-product')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', '-c', 'main-integration')
+        (repo / 'unique.txt').write_text('unique old product\n')
+        self.git(repo, 'add', 'unique.txt')
+        self.git(repo, 'commit', '-qm', 'test: old unselected product')
+        old = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'integration': {'base': base, 'branch': 'main-integration', 'stacks': []},
+            'stacks': [{'id': 'old', 'commits': [old]}],
+        }
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'unexplained product paths: unique.txt'
+        ):
+            module.integration_reconciliation_history(
+                repo, manifest, old, {}
             )
 
     def test_historical_merged_close_requires_exact_squash_tree(self):

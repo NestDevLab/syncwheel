@@ -4261,17 +4261,21 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             [],
         )
 
-    def test_provider_requires_one_update_to_cover_every_stale_derived_path(self):
+    def test_provider_repairs_stale_derived_paths_incrementally(self):
         self.fixture.enable_derived_paths('locks/')
         base = self.fixture.git('rev-parse', 'HEAD')
         (self.fixture.repo / 'locks').mkdir()
         (self.fixture.repo / 'locks' / 'a.lock').write_text('a\n')
+        self.fixture.git('add', 'locks/a.lock')
+        self.fixture.commit_derived_projection(
+            'orphaned-a', ['locks/a.lock'],
+            subject='test: orphaned a projection',
+        )
         (self.fixture.repo / 'locks' / 'b.lock').write_text('b\n')
-        self.fixture.git('add', 'locks/a.lock', 'locks/b.lock')
-        derived = self.fixture.commit_derived_projection(
-            'orphaned-multi-path',
-            ['locks/a.lock', 'locks/b.lock'],
-            subject='test: orphaned multi-path projection',
+        self.fixture.git('add', 'locks/b.lock')
+        self.fixture.commit_derived_projection(
+            'orphaned-b', ['locks/b.lock'],
+            subject='test: orphaned b projection',
         )
         self.fixture.git('reset', '--hard', base)
         request = self.fixture.request(
@@ -4285,11 +4289,14 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         self.fixture.protocol_request(self.fixture.check_request(request))
         (self.fixture.repo / 'locks').mkdir()
         (self.fixture.repo / 'locks' / 'a.lock').write_text('a\n')
-        rejected, _ = self.fixture.protocol_request(request, expected=2)
-
-        self.assertIn('derived-projection-stale', rejected['error'])
-        self.assertIn('locks/a.lock', rejected['error'])
-        self.assertIn('locks/b.lock', rejected['error'])
+        prepared, _ = self.fixture.protocol_request(request)
+        self.assertEqual(prepared['status'], 'prepared')
+        finalized, _ = self.fixture.protocol_request({**request, 'action': 'finalize'})
+        self.assertEqual(finalized['status'], 'verified')
+        remaining = SYNCWHEEL.stale_derived_projection_records(
+            self.fixture.repo, self.fixture.read_manifest(), 'main-integration'
+        )
+        self.assertEqual([item['path'] for item in remaining], ['locks/b.lock'])
 
 
 class RevisionProviderRecoveryTest(unittest.TestCase):
