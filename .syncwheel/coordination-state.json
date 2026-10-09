@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/o3-history-proof": "164d711c7fa5e3f39585c1b6d17aa1eca6252e8e"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -28,7 +26,7 @@
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
     "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
-    "refs/heads/pr/o3-history-proof": "0928d0221980b4a52dbf771b0c36bc6ebf0c4f77",
+    "refs/heads/pr/o3-history-proof": "36bf233506fca6e5b3ca62ef1c5943fa0cd1ef0e",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
@@ -71,7 +69,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-09T05:49:51+00:00",
+  "created_at": "2026-10-09T06:03:39+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -192,9 +190,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "o3-history-proof"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -202,35 +198,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/o3-history-proof",
-        "commits": [
-          "ffd983633994877a5fbcbc3670c3ce7f4823da52",
-          "a9a528049bc211dcc134c8e547e85ffbc8770fc1",
-          "1219341d08801c4edd079583c888e0658263a2a4",
-          "164d711c7fa5e3f39585c1b6d17aa1eca6252e8e"
-        ],
-        "id": "o3-history-proof",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "e5a7deab-cf00-4d15-a10a-08210289cc1e",
-  "parent_state": "cea6e07e3d659a9cd98d7a92c8d65fb459d7dcb0",
+  "operation_token": "57c0c348-d963-464a-b8ce-0fb1fb927600",
+  "parent_state": "34abf853d287b568eac8a312d1c9ccd4920dc2d8",
   "projection_status": "partial",
-  "publication_id": "13bc43c7-8490-4cff-ae83-e0526df2b786",
-  "publication_scope": "stack:o3-history-proof",
+  "publication_id": "c8bedf19-33e0-4248-a58e-a64594f790ff",
+  "publication_scope": "close:o3-history-proof",
   "schema_version": 2,
-  "syncwheel_version": "0.45.1",
+  "syncwheel_version": "0.45.2",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -942,6 +920,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/o3-history-proof",
       "remote_tip": "c2d98634abc3644096ec1b02c418971297df8e28",
+      "stack": "o3-history-proof"
+    },
+    {
+      "branch": "pr/o3-history-proof",
+      "closed_at": "2026-10-09T06:03:36+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/o3-history-proof",
+      "remote_tip": null,
       "stack": "o3-history-proof"
     }
   ]
