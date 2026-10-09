@@ -7526,11 +7526,12 @@ def integration_reconciliation_history(
         history_base = historically_delivered_integration_boundary(
             repo_root, manifest, tip, observation, delivery_tip,
         ) or base
-    selected = set(manifest['integration']['stacks'])
+    selected_ids = manifest['integration'].get('stacks')
+    selected = set(selected_ids) if selected_ids is not None else None
     declared = {
         commit_full_sha(repo_root, commit)
         for stack in manifest['stacks']
-        if stack['id'] in selected
+        if selected is None or stack.get('id') in selected
         for commit in stack_integration_commits(stack)
     }
     patches = {commit_patch_id(repo_root, commit) for commit in declared}
