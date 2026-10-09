@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.45.2`
+Current version: `0.45.3`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1314,6 +1314,11 @@ syncwheel journal pull --apply --park-conflicts   # save, fast-forward, three-wa
 syncwheel journal schedule install    # plan a Linux systemd user timer
 syncwheel journal schedule install --apply
 ```
+
+`journal publish` prints `excluded_count` and `pull.kept_local_count` in both
+plan and apply results. Its other result fields remain available. Use
+`journal status --json` to inspect the full `excluded` path list; `journal snapshot`
+and `journal pull` retain their full diagnostic lists.
 
 Journal snapshots refuse a dirty real index, sensitive paths, oversized files,
 and high-confidence secrets. Publication never merges, resets, rebases, or

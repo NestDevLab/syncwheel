@@ -17177,7 +17177,11 @@ def command_journal_snapshot(args):
 def command_journal_publish(args):
     repo_root, manifest, _ = require_journal_manifest(args)
     payload = journal_publish(repo_root, manifest, apply=args.apply)
-    print(json.dumps(payload, indent=2))
+    output = dict(payload)
+    output['excluded_count'] = len(output.pop('excluded'))
+    output['pull'] = dict(output['pull'])
+    output['pull']['kept_local_count'] = len(output['pull'].pop('kept_local'))
+    print(json.dumps(output, indent=2))
     return 0
 
 

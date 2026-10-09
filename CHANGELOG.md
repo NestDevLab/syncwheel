@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.45.3 - 2026-10-09
+
+- Compact `journal publish` plan and apply output by replacing the `excluded` path list with `excluded_count` and nested `pull.kept_local` with `pull.kept_local_count`. `journal status --json`, `journal snapshot`, and `journal pull` retain their full diagnostic lists.
+
 ## 0.45.2 - 2026-10-09
 
 - Preserve every selected source commit during integration ancestry reconciliation. Recognize old-parent-only commits carried by a verified two-parent replay, including a 46-commit, ten-stack regression, without assigning ownership to unrelated history. An unselected stack cannot justify dropping its unique product bytes.
