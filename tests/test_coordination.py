@@ -3948,6 +3948,27 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.observe_published_integration_tip(repo, manifest),
         ))
 
+    def test_unselected_declared_stack_cannot_explain_lost_product(self):
+        origin = self.create_remote('unselected-declared-product')
+        repo = self.clone(origin, 'unselected-declared-product')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', '-c', 'main-integration')
+        (repo / 'unique.txt').write_text('unique old product\n')
+        self.git(repo, 'add', 'unique.txt')
+        self.git(repo, 'commit', '-qm', 'test: old unselected product')
+        old = module.ref_tip(repo, 'HEAD')
+        manifest = {
+            'integration': {'base': base, 'branch': 'main-integration', 'stacks': []},
+            'stacks': [{'id': 'old', 'commits': [old]}],
+        }
+        with self.assertRaisesRegex(
+            module.SyncwheelError, 'unexplained product paths: unique.txt'
+        ):
+            module.integration_reconciliation_history(
+                repo, manifest, old, {}
+            )
+
     def test_historical_merged_close_requires_exact_squash_tree(self):
         origin = self.create_remote('historical-squash-proof')
         repo = self.clone(origin, 'historical-squash-proof')
