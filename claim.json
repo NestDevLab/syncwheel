@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/o3-history-proof"
   ],
-  "claimed_at": "2026-10-09T05:35:32+00:00",
+  "claimed_at": "2026-10-09T05:41:03+00:00",
   "coordination_id": "default",
-  "operation_token": "65c13e93-06d2-4f97-b383-9211db761021",
+  "operation_token": "c54ef587-caa8-4665-a40c-f2b652e60aa7",
   "publication_scope": "stack:o3-history-proof",
   "source_ref": "refs/heads/pr/o3-history-proof",
   "syncwheel_version": "0.45.1"
