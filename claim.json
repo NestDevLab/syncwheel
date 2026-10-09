@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/o3-history-proof"
+    "refs/heads/pr/o3-history-proof"
   ],
-  "claimed_at": "2026-10-09T05:24:28+00:00",
+  "claimed_at": "2026-10-09T05:24:44+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "5980fc31-5786-4821-8acb-1c831e4e5178",
-  "publication_scope": "stack:o3-history-proof",
+  "operation_token": "eefca13f-c56a-4c77-8c62-e9341aaca2bc",
+  "publication_scope": "promote:o3-history-proof",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/o3-history-proof",
   "syncwheel_version": "0.45.1"
 }
