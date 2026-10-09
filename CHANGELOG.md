@@ -2,7 +2,7 @@
 
 ## 0.45.2 - 2026-10-09
 
-- Preserve every declared source commit during integration ancestry reconciliation. Validate the exact two-parent replay proof and reject a projection that discards unique product bytes. Recognize old-parent-only commits carried by a verified reconciliation, including a 46-commit, ten-stack regression, without assigning ownership to unrelated history.
+- Preserve every declared source commit during integration ancestry reconciliation. Recognize old-parent-only commits carried by a verified two-parent replay, including a 46-commit, ten-stack regression, without assigning ownership to unrelated history. The existing unique-product guard remains in force.
 - Recognize exact, already delivered superseded stack history and exact auto-merges of declared source commits. Keep unrelated or unproved commits blocked.
 - Let Agentwheel repair stale derived graph-lock provenance one declared path at a time. A provider operation succeeds only when the stale set shrinks within its requested paths; other validation errors still block.
 

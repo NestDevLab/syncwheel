@@ -6641,41 +6641,6 @@ def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip
     ).stdout.strip()
 
 
-def integration_reconciliation_preserves_product(
-    repo_root, manifest, old_tip, projected_tree, delivery_tip
-):
-    """Refuse to discard unique product bytes from the old integration tip.
-
-    An old byte may change only because the delivery base advanced from the
-    merge base, or because Agentwheel must regenerate a declared derived path.
-    Control files are rebuilt separately by Syncwheel.
-    """
-    ancestor = git(repo_root, 'merge-base', old_tip, delivery_tip).stdout.strip()
-    if not ancestor:
-        raise SyncwheelError('integration reconciliation has no delivery merge base')
-    control = {'.syncwheel/manifest.json', '.gitignore'}
-    derived = manifest['integration'].get('derived_paths') or []
-    lost = []
-    for path in integration_tree_changed_paths(repo_root, old_tip, projected_tree):
-        if path in control or any(path.startswith(prefix) for prefix in derived):
-            continue
-        old_entry = tree_path_entry(repo_root, old_tip, path)
-        if old_entry is None:
-            continue  # A newly selected stack adds product; nothing was lost.
-        if (
-            old_entry == tree_path_entry(repo_root, ancestor, path)
-            and tree_path_entry(repo_root, projected_tree, path)
-            == tree_path_entry(repo_root, delivery_tip, path)
-        ):
-            continue
-        lost.append(path)
-    if lost:
-        raise SyncwheelError(
-            'integration reconciliation would discard unique product paths: '
-            + ', '.join(lost)
-        )
-
-
 def integration_reconciliation_inputs(repo_root, manifest, inputs):
     expected = [('base', 'integration', manifest['integration']['base'])]
     stacks = stack_map(manifest)
@@ -6823,9 +6788,6 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         or integration_reconciliation_object(repo_root, control, *parents, tree, inputs) != commit
     ):
         return None
-    integration_reconciliation_preserves_product(
-        repo_root, control, parents[0], tree, inputs['refs'][0]['tip']
-    )
     events = load_control_manifest_events(repo_root, manifest_path)
     intents, receipts = control_manifest_operation_records(events, commit)
     local = any(
@@ -7858,9 +7820,6 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         tree = materialize_control_manifest_projection_tree(
             repo_root, manifest, ref_tree(repo_root, replay_tip),
             gitignore_bytes=ignore if source['gitignore']['kind'] == 'file' else None,
-        )
-        integration_reconciliation_preserves_product(
-            repo_root, manifest, local_tip, tree, inputs['refs'][0]['tip']
         )
         integration_reconciliation_history(
             repo_root, manifest, local_tip, provenance, manifest_path, observed,

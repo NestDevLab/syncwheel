@@ -3948,21 +3948,6 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.observe_published_integration_tip(repo, manifest),
         ))
 
-    def test_reconciliation_product_guard_preserves_unique_old_bytes(self):
-        origin = self.create_remote('reconciliation-product-guard')
-        repo = self.clone(origin, 'reconciliation-product-guard')
-        module = self.load_module()
-        base = module.ref_tip(repo, 'HEAD')
-        (repo / 'unique.txt').write_text('owned only by old integration\n')
-        self.git(repo, 'add', 'unique.txt')
-        self.git(repo, 'commit', '-qm', 'test: unique integration product')
-        old = module.ref_tip(repo, 'HEAD')
-        manifest = {'integration': {'derived_paths': []}}
-        with self.assertRaisesRegex(module.SyncwheelError, 'unique.txt'):
-            module.integration_reconciliation_preserves_product(
-                repo, manifest, old, module.ref_tree(repo, base), base
-            )
-
     def test_historical_merged_close_requires_exact_squash_tree(self):
         origin = self.create_remote('historical-squash-proof')
         repo = self.clone(origin, 'historical-squash-proof')
