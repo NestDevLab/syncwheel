@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/o3-history-proof": "ddc5b3b51907ed9b21d3d167888924cc0eb5d5ee"
+    "refs/heads/syncwheel/draft/o3-history-proof": "c2d98634abc3644096ec1b02c418971297df8e28"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -57,7 +57,7 @@
     "refs/heads/syncwheel/draft/missing-managed-ref-repair": "22a43e04737321f10db1bd4549a9fe58fb5191fb",
     "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "b380fe48a47cc32e90d009d5ca86a18f1b9b3e25",
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
-    "refs/heads/syncwheel/draft/o3-history-proof": "4ca3967b0d0fbc305c15fd17001acf9446132945",
+    "refs/heads/syncwheel/draft/o3-history-proof": "30fc6a1b35b73bdf4a324a04d8b46a02871a9dd9",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
     "refs/heads/syncwheel/draft/read-only-git-auth": "4e2c48d32e0c997bfa17d6f5ef0d88b9894f5dcb",
@@ -70,7 +70,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-08T19:40:15+00:00",
+  "created_at": "2026-10-09T05:24:28+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -151,7 +151,7 @@
     "refs/heads/syncwheel/draft/missing-managed-ref-repair": "b0ad1b8c765c2e4ae048cf387edc43759649fd8f",
     "refs/heads/syncwheel/draft/missing-managed-ref-repair-v2": "2804f0e56098dc41a55cca0183c671dcda3f7f77",
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
-    "refs/heads/syncwheel/draft/o3-history-proof": "ddc5b3b51907ed9b21d3d167888924cc0eb5d5ee",
+    "refs/heads/syncwheel/draft/o3-history-proof": "c2d98634abc3644096ec1b02c418971297df8e28",
     "refs/heads/syncwheel/draft/pr-checks-none": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "47576d23feeaaa056886dc9367ae80a4528e5a9a",
     "refs/heads/syncwheel/draft/read-only-git-auth": "dffccd1eab3b9e248dbdcb3057011f21ef3941ac",
@@ -208,7 +208,9 @@
           "role": "canonical"
         },
         "branch": "syncwheel/draft/o3-history-proof",
-        "commits": [],
+        "commits": [
+          "ffd983633994877a5fbcbc3670c3ce7f4823da52"
+        ],
         "id": "o3-history-proof",
         "integration_branch": "main-integration",
         "state": "draft",
@@ -218,11 +220,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "881b11b9-1f00-4283-9d75-f785e9d48d32",
-  "parent_state": "a78825ebb69deb97ae32810626a9eb847520c40b",
+  "operation_token": "5980fc31-5786-4821-8acb-1c831e4e5178",
+  "parent_state": "e61ce44bee386c66dc97e32b1fa665277f986300",
   "projection_status": "partial",
-  "publication_id": "271982d2-0c44-4269-9afd-769fa8a8291d",
-  "publication_scope": "create:o3-history-proof",
+  "publication_id": "d0117748-a273-4d24-aeb9-bb39b74cb291",
+  "publication_scope": "stack:o3-history-proof",
   "schema_version": 2,
   "syncwheel_version": "0.45.1",
   "tombstones": [
