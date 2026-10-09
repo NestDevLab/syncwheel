@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/journal-publish-compact": "ecb827e1631de3e45395c55b2b8defe5797c4ea3"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -15,6 +17,7 @@
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
+    "refs/heads/pr/journal-publish-compact": "337e3022b9368fcaee31e3adf47ce505dfd37f34",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/lane-capacity-policy": "ebf6cbce4a4faf7fbedd98fbed65deb6346f26f5",
     "refs/heads/pr/local-only-control-manifest": "fc87f8d59c5c3475cde1b3525997e5ebafb280e1",
@@ -69,7 +72,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-09T06:03:39+00:00",
+  "created_at": "2026-10-09T06:54:18+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -97,6 +100,7 @@
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
+    "refs/heads/pr/journal-publish-compact": "ecb827e1631de3e45395c55b2b8defe5797c4ea3",
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
     "refs/heads/pr/lane-capacity-policy": "f2ab8a762356392c9a5a80dbd7f10aae3501d6af",
     "refs/heads/pr/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19",
@@ -190,7 +194,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "journal-publish-compact"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -198,15 +204,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/journal-publish-compact",
+        "commits": [
+          "ecb827e1631de3e45395c55b2b8defe5797c4ea3"
+        ],
+        "id": "journal-publish-compact",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "57c0c348-d963-464a-b8ce-0fb1fb927600",
-  "parent_state": "34abf853d287b568eac8a312d1c9ccd4920dc2d8",
+  "operation_token": "89ca76db-6472-4bf9-8161-d1bcbe3b99b4",
+  "parent_state": "6c1702c68eb5b770d78bab17591f3cc463318c26",
   "projection_status": "partial",
-  "publication_id": "c8bedf19-33e0-4248-a58e-a64594f790ff",
-  "publication_scope": "close:o3-history-proof",
+  "publication_id": "94f9797f-e42b-4928-b4fa-73db1a944489",
+  "publication_scope": "stack:journal-publish-compact",
   "schema_version": 2,
   "syncwheel_version": "0.45.2",
   "tombstones": [
