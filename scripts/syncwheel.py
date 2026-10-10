@@ -20466,6 +20466,174 @@ def command_coordination_provenance_reset(args):
     return 0
 
 
+def coordination_provenance_supersede_plan(
+    repo_root, manifest, manifest_path, reconciliation, paths, reason,
+):
+    """Prove that an authenticated integration replay replaced exact derived bytes."""
+    if manifest.get('version') != MANIFEST_VERSION_CHANNELS or not coordination_is_active(manifest):
+        raise SyncwheelError('provenance supersede requires active-active manifest version 3')
+    if not reason or not reason.strip():
+        raise SyncwheelError('provenance supersede requires --reason')
+    if not paths or len(paths) != len(set(paths)):
+        raise SyncwheelError('provenance supersede requires unique --path values')
+    observed = observe_published_integration_tip(repo_root, manifest)
+    if not observed or observed['status'] != 'current':
+        raise SyncwheelError('provenance supersede requires current published coordination state')
+    reconciliation = commit_full_sha(repo_root, reconciliation)
+    proof = integration_reconciliation_proof(
+        repo_root, reconciliation, manifest_path, observed
+    )
+    if not proof:
+        raise SyncwheelError('provenance supersede requires a valid Syncwheel reconciliation proof')
+    integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
+    if not integration_tip or not branch_contains(repo_root, integration_tip, reconciliation):
+        raise SyncwheelError('integration does not contain the proved reconciliation commit')
+    first_parent, replay_parent = proof['parents']
+    records, diverged = derived_provenance_snapshot(
+        repo_root, manifest, observed['state']
+    )
+    if diverged:
+        raise SyncwheelError('clone-local derived provenance diverges from published state')
+    published_records = {
+        tuple(item['paths']): item
+        for item in shared_derived_provenance_records(
+            repo_root, manifest, observed['state']
+        )
+    }
+    selected = []
+    requested = set(paths)
+    for record in records:
+        record_paths = set(record['paths'])
+        if not record_paths & requested:
+            continue
+        if not record_paths <= requested:
+            raise SyncwheelError('provenance supersede must select every path in a record')
+        if published_records.get(tuple(record['paths'])) != record:
+            raise SyncwheelError('selected provenance is not the published record')
+        if not is_provenance_bound_derived_projection_commit(
+            repo_root, record['commit'], [record]
+        ) or not branch_contains(repo_root, first_parent, record['commit']):
+            raise SyncwheelError('selected provenance is not authenticated in the old history')
+        entries = []
+        for path in record['paths']:
+            old = tree_path_entry(repo_root, record['commit'], path)
+            prior = tree_path_entry(repo_root, first_parent, path)
+            replay = tree_path_entry(repo_root, replay_parent, path)
+            merged = tree_path_entry(repo_root, reconciliation, path)
+            current = tree_path_entry(repo_root, integration_tip, path)
+            if old is None or old != prior or replay is None or (
+                replay == old or replay != merged or replay != current
+            ):
+                raise SyncwheelError(
+                    f'provenance supersede lacks exact replay replacement for {path}: '
+                    f'old={old}, prior={prior}, replay={replay}, merged={merged}, current={current}'
+                )
+            entries.append({'path': path, 'old': old, 'replay': replay})
+        selected.append({'record': record, 'entries': entries})
+        requested -= record_paths
+    if requested:
+        raise SyncwheelError(
+            'no current derived provenance for selected path(s): '
+            + ', '.join(sorted(requested))
+        )
+    store = load_derived_provenance_store(repo_root)
+    plan = {
+        'operation': 'coordination-provenance-supersede',
+        'reason': reason.strip(),
+        'manifestDigest': manifest_digest(manifest),
+        'stateTip': observed['state_tip'],
+        'publishedIntegrationTip': observed['published_tip'],
+        'integrationTip': integration_tip,
+        'reconciliation': reconciliation,
+        'parents': [first_parent, replay_parent],
+        'paths': sorted(paths),
+        'records': selected,
+        'localStoreDigest': canonical_json_digest(store),
+        'remoteRefs': observed['remote_refs'],
+    }
+    plan['planDigest'] = canonical_json_digest(plan)
+    return plan
+
+
+def command_coordination_provenance_supersede(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(
+        repo_root, args.repo, args.manifest, args.personal
+    )
+    if not args.apply:
+        if args.plan_file:
+            raise SyncwheelError('--plan-file is only valid with --apply')
+        if not args.reconciliation or not args.path:
+            raise SyncwheelError('planning requires --reconciliation and --path')
+        plan = coordination_provenance_supersede_plan(
+            repo_root, manifest, manifest_path,
+            args.reconciliation, args.path, args.reason,
+        )
+        print(json.dumps(plan, indent=2, sort_keys=True))
+        return 0
+    if not args.plan_file:
+        raise SyncwheelError('provenance supersede --apply requires --plan-file')
+    try:
+        reviewed = json.loads(Path(args.plan_file).read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SyncwheelError(f'cannot read provenance supersede plan: {exc}') from exc
+    if not isinstance(reviewed, dict) or reviewed.get('operation') != (
+        'coordination-provenance-supersede'
+    ):
+        raise SyncwheelError('invalid provenance supersede plan')
+    if args.reconciliation and commit_full_sha(repo_root, args.reconciliation) != reviewed.get('reconciliation'):
+        raise SyncwheelError('--reconciliation differs from reviewed plan')
+    if args.path and sorted(args.path) != reviewed.get('paths'):
+        raise SyncwheelError('--path differs from reviewed plan')
+    if args.reason and args.reason.strip() != reviewed.get('reason'):
+        raise SyncwheelError('--reason differs from reviewed plan')
+    ensure_in_place_target(repo_root, manifest['integration']['branch'], manifest)
+    with coordination_publication_lock(repo_root):
+        with derived_provenance_store_lock(repo_root):
+            current = coordination_provenance_supersede_plan(
+                repo_root, manifest, manifest_path,
+                reviewed['reconciliation'], reviewed['paths'], reviewed['reason'],
+            )
+            if current != reviewed:
+                raise SyncwheelError(
+                    'provenance supersede evidence or exact state/ref lease changed; '
+                    'review a new plan'
+                )
+            shared = shared_derived_provenance_records(
+                repo_root, manifest,
+                read_remote_coordination_state(
+                    repo_root, coordination_config(manifest),
+                    local_manifest_version=manifest['version'],
+                )['state'],
+            )
+            store = load_derived_provenance_store(repo_root)
+            for item in reviewed['records']:
+                record = item['record']
+                store = projected_derived_provenance_store(
+                    store, shared, record['paths'], None,
+                    expected_commit=record['commit'],
+                )
+            # A second state read closes the remote race before the local CAS.
+            state = read_remote_coordination_state(
+                repo_root, coordination_config(manifest),
+                local_manifest_version=manifest['version'],
+            )
+            if state['tip'] != reviewed['stateTip']:
+                raise SyncwheelError('provenance supersede state lease changed before save')
+            save_derived_provenance_store(repo_root, store)
+            append_ledger_event(
+                repo_root, 'derived_provenance_superseded', reviewed, manifest_path,
+            )
+    print(json.dumps({
+        'status': 'local-provenance-superseded',
+        'planDigest': reviewed['planDigest'],
+        'stateTip': reviewed['stateTip'],
+        'paths': reviewed['paths'],
+        'publication': 'pending syncwheel int push',
+    }, indent=2, sort_keys=True))
+    return 0
+
+
 def begin_coordination_claims_backfill(
     repo_root, manifest, manifest_path, state, claimed_refs, expected_state_tip
 ):
@@ -32407,6 +32575,18 @@ def build_parser():
     coordination_provenance_reset_p.set_defaults(
         func=command_coordination_provenance_reset
     )
+    coordination_provenance_supersede_p = coordination_provenance_sub.add_parser(
+        'supersede', parents=[common],
+        help='plan or apply exact replay-backed supersession of stale derived records',
+    )
+    coordination_provenance_supersede_p.add_argument('--reconciliation')
+    coordination_provenance_supersede_p.add_argument('--path', action='append')
+    coordination_provenance_supersede_p.add_argument('--reason')
+    coordination_provenance_supersede_p.add_argument('--plan-file')
+    coordination_provenance_supersede_p.add_argument('-a', '--apply', action='store_true')
+    coordination_provenance_supersede_p.set_defaults(
+        func=command_coordination_provenance_supersede
+    )
 
     coordination_repair_p = coordination_sub.add_parser(
         'repair',
@@ -33514,7 +33694,10 @@ def entrypoint_behavior_table():
         command_worktree_release,
         command_gc,
     ), mutates='apply', manifest_mutates='apply')
-    register((command_coordination_claims_backfill,), mutates='apply', manifest_mutates='apply')
+    register((
+        command_coordination_claims_backfill,
+        command_coordination_provenance_supersede,
+    ), mutates='apply', manifest_mutates='apply')
     register((
         command_journal_snapshot,
         command_journal_publish,

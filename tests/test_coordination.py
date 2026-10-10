@@ -3948,6 +3948,134 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.observe_published_integration_tip(repo, manifest),
         ))
 
+    def test_replay_backed_provenance_supersession_requires_exact_plan(self):
+        origin = self.create_remote('replay-provenance-supersede')
+        repo = self.clone(origin, 'replay-provenance-supersede')
+        self.init_coordinated(repo)
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest.setdefault('channels', [])
+        manifest_path.write_text(module.canonical_manifest_file_text(manifest))
+        self.run_cli(repo, 'int', 'push')
+
+        path = 'locks/agent.graph-lock.json'
+        (repo / 'locks').mkdir()
+        (repo / path).write_text('old provider result\n')
+        old_blob = self.git(repo, 'hash-object', '-w', path).stdout.strip()
+        digest = module.derived_projection_paths_digest({path: old_blob})
+        self.git(repo, 'add', path)
+        self.git(repo, 'commit', '-qm',
+                 'test: old derived graph lock\n\n'
+                 f'{module.DERIVED_PROJECTION_TRAILER}: stale-lock\n'
+                 f'{module.DERIVED_PATHS_TRAILER}: {digest}')
+        old = module.ref_tip(repo, 'HEAD')
+        record = {
+            'operation_id': 'stale-lock', 'commit': old, 'paths': [path],
+            'paths_digest': digest,
+            'composition_digest': module.integration_composition_digest(manifest),
+        }
+        module.record_common_derived_provenance(repo, manifest, record)
+        self.run_cli(repo, 'int', 'push')
+        self.assertEqual(module.validate_manifest(repo, manifest)['errors'], [])
+
+        base = module.ref_tip(repo, 'origin/main')
+        self.git(repo, 'switch', '-q', '-c', 'scratch/replayed-lock', base)
+        (repo / 'locks').mkdir(exist_ok=True)
+        (repo / path).write_text('declared replay result\n')
+        self.git(repo, 'add', path)
+        self.git(repo, 'commit', '-qm', 'test: declared lock source')
+        source = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', '-q', 'integration/shared')
+        self.run_cli(repo, 'stack', 'create', 'replayed-lock', source, '--draft')
+        manifest, manifest_path = module.load_manifest(repo)
+        manifest['integration']['stacks'] = ['replayed-lock']
+        manifest_path.write_text(module.canonical_manifest_file_text(manifest))
+        self.assertTrue(module.reconcile_integration_ancestry(
+            repo, manifest_path, manifest, 'test', 'replace old derived lock with declared replay'
+        ))
+        reconciliation = module.ref_tip(repo, 'integration/shared')
+        self.assertIn(
+            'derived-projection-stale',
+            '\n'.join(module.validate_manifest(repo, manifest)['errors']),
+        )
+        plan = module.coordination_provenance_supersede_plan(
+            repo, manifest, manifest_path, reconciliation, [path], 'test supersession'
+        )
+        self.assertEqual(plan['records'][0]['record'], record)
+        self.assertEqual(plan['records'][0]['entries'][0]['old']['blob'], old_blob)
+        self.assertNotEqual(
+            plan['records'][0]['entries'][0]['replay']['blob'], old_blob
+        )
+        plan_file = repo.parent / 'supersede-plan.json'
+        tampered = json.loads(json.dumps(plan))
+        tampered['records'][0]['entries'][0]['replay']['blob'] = '0' * 40
+        plan_file.write_text(json.dumps(tampered))
+        refused = self.run_cli(
+            repo, 'coordination', 'provenance', 'supersede', '--apply',
+            '--plan-file', str(plan_file), expected=2,
+        )
+        self.assertIn('evidence or exact state/ref lease changed', refused.stderr)
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [record])
+        for key, replacement in (
+            ('stateTip', '0' * 40),
+            ('integrationTip', '0' * 40),
+        ):
+            stale_plan = json.loads(json.dumps(plan))
+            stale_plan[key] = replacement
+            stale_plan.pop('planDigest')
+            stale_plan['planDigest'] = module.canonical_json_digest(stale_plan)
+            plan_file.write_text(json.dumps(stale_plan))
+            refused = self.run_cli(
+                repo, 'coordination', 'provenance', 'supersede', '--apply',
+                '--plan-file', str(plan_file), expected=2,
+            )
+            self.assertIn('evidence or exact state/ref lease changed', refused.stderr)
+            self.assertEqual(module.derived_provenance_records(repo, manifest), [record])
+        (repo / path).write_text('later unrelated lock replacement\n')
+        self.git(repo, 'add', path)
+        self.git(repo, 'commit', '-qm', 'test: later lock replacement')
+        plan_file.write_text(json.dumps(plan))
+        refused = self.run_cli(
+            repo, 'coordination', 'provenance', 'supersede', '--apply',
+            '--plan-file', str(plan_file), expected=2,
+        )
+        self.assertIn('exact replay replacement', refused.stderr)
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [record])
+        self.git(repo, 'reset', '--hard', reconciliation)
+        plan_file.write_text(json.dumps(plan))
+        self.run_cli(
+            repo, 'coordination', 'provenance', 'supersede', '--apply',
+            '--plan-file', str(plan_file),
+        )
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [])
+        self.assertFalse(any(
+            'derived-projection-stale' in error
+            for error in module.validate_manifest(repo, manifest)['errors']
+        ))
+        self.assertTrue(any(
+            event['type'] == 'derived_provenance_superseded'
+            for event in module.load_ledger_events(repo)
+        ))
+        self.run_cli(repo, 'int', 'push')
+        _tip, state = self.remote_state(origin)
+        self.assertEqual(state['manifest']['integration']['derived_provenance'], [])
+
+    def test_provenance_supersession_refuses_unproved_or_changed_replay(self):
+        repo, module, manifest, path = self.prepare_detached_reconciliation(
+            'provenance-unproved-replay'
+        )
+        manifest['version'] = 3
+        manifest['integration']['derived_paths'] = ['locks/']
+        manifest.setdefault('channels', [])
+        path.write_text(module.canonical_manifest_file_text(manifest))
+        with self.assertRaisesRegex(module.SyncwheelError, 'valid Syncwheel reconciliation proof'):
+            module.coordination_provenance_supersede_plan(
+                repo, manifest, path, module.ref_tip(repo, 'HEAD'),
+                ['locks/agent.graph-lock.json'], 'test refusal',
+            )
+
     def test_unselected_declared_stack_cannot_explain_lost_product(self):
         origin = self.create_remote('unselected-declared-product')
         repo = self.clone(origin, 'unselected-declared-product')

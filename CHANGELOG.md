@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.45.4 - 2026-10-10
+
+- Add a reviewed, replay-backed way to retire stale derived graph-lock provenance after an authenticated integration reconciliation replaces the recorded bytes. Require exact reconciliation, path, state, and ref evidence; leave integration publication to the existing coordinated push.
+
 ## 0.45.3 - 2026-10-09
 
 - Compact `journal publish` plan and apply output by replacing the `excluded` path list with `excluded_count` and nested `pull.kept_local` with `pull.kept_local_count`. `journal status --json`, `journal snapshot`, and `journal pull` retain their full diagnostic lists.
