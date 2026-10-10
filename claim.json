@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/graph-lock-provenance-supersede"
-  ],
-  "claimed_at": "2026-10-10T04:03:00+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-10T05:09:17+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "06ee364b-7eec-4818-8068-7ef28b23f2f3",
-  "publication_scope": "stack:graph-lock-provenance-supersede",
+  "operation_token": "ba396931-d097-48f4-b2f6-790b82825972",
+  "publication_scope": "close:graph-lock-provenance-supersede",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/graph-lock-provenance-supersede",
-  "syncwheel_version": "0.45.3"
+  "syncwheel_version": "0.45.4"
 }
