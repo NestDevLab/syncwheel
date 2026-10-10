@@ -3383,17 +3383,31 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'commit', '-qm', 'feat: rebuild profile pin')
         new_source = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
         self.git(repo, 'switch', '-q', 'main')
-        self.git(repo, 'cherry-pick', new_source)
+        (repo / 'profile.txt').write_text('pin=new\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=new base\n')
+        (repo / 'new-base.txt').write_text('included in rebuilt source\n')
+        self.git(repo, 'add', 'profile.txt', 'new-base.txt')
+        self.git(repo, 'commit', '-qm', 'feat: squash rebuilt profile pin')
         delivery_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
         module = self.load_module()
-        old_stack = {'branch': 'pr/profile-pin', 'base': 'origin/main',
-                     'commits': [old_source], 'state': 'published'}
+        old_stack = {
+            'id': 'profile-pin', 'branch': 'pr/profile-pin', 'base': 'origin/main',
+            'target_remote': 'origin', 'target_branch': 'main',
+            'integration_branch': 'integration/shared',
+            'commits': [old_source], 'state': 'published',
+        }
         new_stack = {**old_stack, 'commits': [new_source]}
-        delivery = {'tip': delivery_tip}
+        delivery = {
+            'tip': delivery_tip, 'remote': 'origin',
+            'remoteRef': 'refs/heads/main', 'remoteTip': delivery_tip,
+        }
         self.assertNotEqual(module.commit_patch_id(repo, old_source),
                             module.commit_patch_id(repo, new_source))
         self.assertTrue(module.historical_rebuilt_stack_tip_is_absorbed(
             repo, old_stack, new_stack, old_source, delivery,
+        ))
+        self.assertTrue(module.historical_managed_tip_has_exact_squash_delivery(
+            repo, new_source, new_stack, delivery,
+            {'canonical_remote': 'origin', 'base_branch': 'main'}, 'origin',
         ))
         self.assertFalse(module.historical_rebuilt_stack_tip_is_absorbed(
             repo, old_stack, {**new_stack, 'branch': 'pr/other'}, old_source, delivery,
@@ -3401,6 +3415,61 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertFalse(module.historical_rebuilt_stack_tip_is_absorbed(
             repo, old_stack, new_stack, new_source, delivery,
         ))
+        tree = self.git(repo, 'rev-parse', 'HEAD^{tree}').stdout.strip()
+        root = self.git(repo, 'commit-tree', tree, '-m', 'state root').stdout.strip()
+        old_state = self.git(
+            repo, 'commit-tree', tree, '-p', root, '-m', 'old stack generation'
+        ).stdout.strip()
+        new_state = self.git(
+            repo, 'commit-tree', tree, '-p', old_state, '-m', 'rebuilt stack generation'
+        ).stdout.strip()
+        close_state = self.git(
+            repo, 'commit-tree', tree, '-p', new_state, '-m', 'absorbed close'
+        ).stdout.strip()
+        stack_ref = 'refs/heads/pr/profile-pin'
+        defaults = {'canonical_remote': 'origin', 'base_branch': 'main'}
+        states = {
+            root: {'parent_state': None, 'publication_scope': 'init',
+                   'manifest': {'stacks': [], 'defaults': defaults}},
+            old_state: {'parent_state': root, 'publication_scope': 'stack:profile-pin',
+                        'manifest': {'stacks': [old_stack], 'defaults': defaults},
+                        'managed_refs': {stack_ref: old_source}},
+            new_state: {'parent_state': old_state,
+                        'publication_scope': 'stack:profile-pin',
+                        'manifest': {'stacks': [new_stack], 'defaults': defaults},
+                        'managed_refs': {stack_ref: new_source}},
+            close_state: {'parent_state': new_state,
+                          'publication_scope': 'close:profile-pin',
+                          'manifest': {'stacks': [], 'defaults': defaults},
+                          'tombstones': [{'stack': 'profile-pin', 'reason': 'absorbed',
+                                          'ref': stack_ref, 'remote_tip': new_source}]},
+        }
+        self.git(repo, 'switch', '-q', 'scratch/old-profile')
+        (repo / 'unrelated.txt').write_text('unowned product\n')
+        self.git(repo, 'add', 'unrelated.txt')
+        self.git(repo, 'commit', '-qm', 'feat: unrelated integration content')
+        unrelated = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        observation = {
+            'status': 'current', 'state_tip': close_state,
+            'integration_ref': 'refs/heads/integration/shared',
+            'config': {'id': 'test', 'remote': 'origin'},
+        }
+        with mock.patch.object(
+            module, 'coordination_state_from_commit',
+            side_effect=lambda _repo, commit, _id: states[commit],
+        ), mock.patch.object(
+            module, 'verify_coordination_state_manifest_digest',
+        ), mock.patch.object(
+            module, 'coordination_state_manifest_digest_classification',
+            return_value={'form': module.COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST},
+        ):
+            classified = module.historically_closed_integration_commits(
+                repo, unrelated, observation, candidates=[old_source, unrelated],
+                delivery_tip=delivery_tip, delivery_observation=delivery,
+            )
+        self.assertIn(old_source, classified)
+        self.assertNotIn(unrelated, classified)
+        self.git(repo, 'switch', '-q', 'main')
         (repo / 'profile.txt').write_text('pin=old\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=new base\n')
         self.git(repo, 'commit', '-qam', 'test: revert delivered pin')
         reverted_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
