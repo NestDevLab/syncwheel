@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.45.5 - 2026-10-10
+
+- Preserve ownership of a stack's previous source generation when the same published stack and ref were rebuilt from a newer base before an absorbed close. Require an authenticated state chain, exact successor delivery, and a conflict-free merge proving the old source adds no unique product to the current delivery tree.
+
 ## 0.45.4 - 2026-10-10
 
 - Add a reviewed, replay-backed way to retire stale derived graph-lock provenance after an authenticated integration reconciliation replaces the recorded bytes. Require exact reconciliation, path, state, and ref evidence; leave integration publication to the existing coordinated push.
