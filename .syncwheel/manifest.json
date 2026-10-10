@@ -32,7 +32,8 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "graph-lock-provenance-supersede"
+      "graph-lock-provenance-supersede",
+      "historical-absorbed-rebuild"
     ],
     "strategy": "cherry-pick"
   },
@@ -61,6 +62,22 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "historical-absorbed-rebuild",
+      "branch": "syncwheel/draft/historical-absorbed-rebuild",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Preserve historical ownership after rebuilt absorbed stack"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
