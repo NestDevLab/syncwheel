@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "graph-lock-provenance-supersede"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,26 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "graph-lock-provenance-supersede",
+      "branch": "pr/graph-lock-provenance-supersede",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "1dbe229a4e98aaf28ec90f235b464cbfa43dcb33"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Deliver replay-backed graph lock provenance supersession"
+      }
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
