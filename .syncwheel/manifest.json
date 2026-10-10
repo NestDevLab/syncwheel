@@ -32,8 +32,7 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "historical-absorbed-rebuild",
-      "absorbed-rebuild-history-fix"
+      "historical-absorbed-rebuild"
     ],
     "strategy": "cherry-pick"
   },
@@ -62,22 +61,6 @@
         "enabled": true
       },
       "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "syncwheel/draft/absorbed-rebuild-history-fix",
-      "commits": [],
-      "id": "absorbed-rebuild-history-fix",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Preserve historical ownership after rebuilt absorbed stack"
-      },
-      "publication": {
-        "enabled": false
-      },
-      "state": "draft",
       "target_branch": "main",
       "target_remote": "origin"
     }
