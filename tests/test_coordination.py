@@ -3361,6 +3361,53 @@ with module.coordination_publication_lock(Path(repo_path)):
                 delivery_tip=module.ref_tip(repo, 'origin/main'),
             )
 
+    def test_rebuilt_absorbed_source_requires_no_unique_delivery_product(self):
+        origin = self.create_remote('absorbed-rebuilt-history')
+        repo = self.clone(origin, 'absorbed-rebuilt-history')
+        (repo / 'profile.txt').write_text('pin=old\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=base\n')
+        self.git(repo, 'add', 'profile.txt')
+        self.git(repo, 'commit', '-qm', 'test: initial profile')
+        self.git(repo, 'push', '-q', 'origin', 'main')
+        self.git(repo, 'switch', '-q', '-c', 'scratch/old-profile', 'origin/main')
+        (repo / 'profile.txt').write_text('pin=new\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=base\n')
+        self.git(repo, 'commit', '-qam', 'feat: update profile pin')
+        old_source = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'main')
+        (repo / 'profile.txt').write_text('pin=old\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=new base\n')
+        self.git(repo, 'commit', '-qam', 'feat: advance profile base')
+        self.git(repo, 'push', '-q', 'origin', 'main')
+        self.git(repo, 'switch', '-q', '-c', 'scratch/new-profile', 'origin/main')
+        (repo / 'profile.txt').write_text('pin=new\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=new base\n')
+        (repo / 'new-base.txt').write_text('included in rebuilt source\n')
+        self.git(repo, 'add', 'profile.txt', 'new-base.txt')
+        self.git(repo, 'commit', '-qm', 'feat: rebuild profile pin')
+        new_source = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', 'main')
+        self.git(repo, 'cherry-pick', new_source)
+        delivery_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        module = self.load_module()
+        old_stack = {'branch': 'pr/profile-pin', 'base': 'origin/main',
+                     'commits': [old_source], 'state': 'published'}
+        new_stack = {**old_stack, 'commits': [new_source]}
+        delivery = {'tip': delivery_tip}
+        self.assertNotEqual(module.commit_patch_id(repo, old_source),
+                            module.commit_patch_id(repo, new_source))
+        self.assertTrue(module.historical_rebuilt_stack_tip_is_absorbed(
+            repo, old_stack, new_stack, old_source, delivery,
+        ))
+        self.assertFalse(module.historical_rebuilt_stack_tip_is_absorbed(
+            repo, old_stack, {**new_stack, 'branch': 'pr/other'}, old_source, delivery,
+        ))
+        self.assertFalse(module.historical_rebuilt_stack_tip_is_absorbed(
+            repo, old_stack, new_stack, new_source, delivery,
+        ))
+        (repo / 'profile.txt').write_text('pin=old\nkeep=1\nkeep=2\nkeep=3\nkeep=4\nsetting=new base\n')
+        self.git(repo, 'commit', '-qam', 'test: revert delivered pin')
+        reverted_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.assertFalse(module.historical_rebuilt_stack_tip_is_absorbed(
+            repo, old_stack, new_stack, old_source, {'tip': reverted_tip},
+        ))
+
     def test_abandoned_history_requires_exact_current_delivery_for_its_paths(self):
         origin = self.create_remote('abandoned-history')
         repo = self.clone(origin, 'abandoned-history')
