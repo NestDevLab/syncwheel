@@ -6976,6 +6976,52 @@ def historical_managed_tip_has_exact_squash_delivery(
     )
 
 
+def historical_rebuilt_stack_tip_is_absorbed(
+    repo_root, old_stack, new_stack, old_tip, delivery_observation,
+):
+    """Prove a replaced source generation adds no product to the delivery tree.
+
+    A stack may be rebuilt from a newer main before its absorbed close.  The
+    newer source can be squash-delivered while the old source remains in the
+    published integration history.  The old generation is owned only when the
+    same stack/ref declared its exact tip and merging it into current main is
+    a conflict-free no-op.
+    """
+    old_identity = stack_delivery_identity(old_stack)
+    new_identity = stack_delivery_identity(new_stack)
+    for key in ('commits', 'integration_commits', 'integration_only_commits'):
+        old_identity.pop(key)
+        new_identity.pop(key)
+    old_commits = stack_integration_commits(old_stack)
+    declared = old_stack.get('commits') or []
+    delivery_tip = (delivery_observation or {}).get('tip')
+    if (
+        old_identity != new_identity
+        or not old_commits
+        or old_commits != declared
+        or declared[-1] != old_tip
+        or not delivery_tip
+        or not commit_exists(repo_root, old_tip)
+        or not commit_exists(repo_root, delivery_tip)
+    ):
+        return False
+    first_parent_history = set(git(
+        repo_root, 'rev-list', '--first-parent', old_tip,
+    ).stdout.split())
+    if not set(declared).issubset(first_parent_history):
+        return False
+    old_base = commit_first_parent(repo_root, old_commits[0])
+    if not old_base or not branch_contains(repo_root, delivery_tip, old_base):
+        return False
+    merged = git(
+        repo_root, 'merge-tree', '--write-tree', f'--merge-base={old_base}',
+        delivery_tip, old_tip, check=False,
+    )
+    return merged.returncode == 0 and merged.stdout.split() == [
+        ref_tree(repo_root, delivery_tip)
+    ]
+
+
 def abandoned_stack_paths_match_delivery(repo_root, commits, local_tip, published_tip, delivery_tip):
     """An abandoned source has no unique product path in either integration tree."""
     if (
@@ -7316,6 +7362,29 @@ def historically_closed_integration_commits(
                         pass
                     elif same_delivery:
                         pass
+                    elif (
+                        scope == f'stack:{stack_id}'
+                        and child_ref == parent_ref
+                        and trusted['exact_squash_delivery']
+                        and child_managed_tip == trusted['managed_tip']
+                        and parent_managed_tip
+                        and historical_state_form(current, state)
+                        not in {None, COORDINATION_STATE_DIGEST_FORM_ORPHANED}
+                        and historical_state_form(parent, parent_state)
+                        not in {None, COORDINATION_STATE_DIGEST_FORM_ORPHANED}
+                        and historical_rebuilt_stack_tip_is_absorbed(
+                            repo_root, parent_stacks[0], child_stacks[0],
+                            parent_managed_tip, delivery_observation,
+                        )
+                    ):
+                        closed_sources.update(
+                            commit_full_sha(repo_root, commit)
+                            for commit in [
+                                *stack_integration_commits(parent_stacks[0]),
+                                parent_managed_tip,
+                            ]
+                            if commit_exists(repo_root, commit)
+                        )
                     elif (
                         scope == f'stack:{stack_id}'
                         and child_ref == parent_ref
