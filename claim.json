@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix"
-  ],
-  "claimed_at": "2026-10-10T04:51:58+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-10T05:11:08+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "94b33e98-6680-445f-a132-bc625decc5b0",
-  "publication_scope": "create:absorbed-rebuild-history-fix",
+  "operation_token": "b64d97d1-b8aa-4fe8-b89f-a60eb946bc7d",
+  "publication_scope": "close:absorbed-rebuild-history-fix",
+  "reason": "superseded",
   "source_ref": "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix",
   "syncwheel_version": "0.45.4"
 }
