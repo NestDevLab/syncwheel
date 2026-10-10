@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix"
+  ],
+  "claimed_at": "2026-10-10T04:51:58+00:00",
+  "coordination_id": "default",
+  "operation_token": "94b33e98-6680-445f-a132-bc625decc5b0",
+  "publication_scope": "create:absorbed-rebuild-history-fix",
+  "source_ref": "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix",
+  "syncwheel_version": "0.45.4"
+}
