@@ -352,6 +352,30 @@ while the repository has a single clone.
 An ordinary rebuild still drops derived commits while retaining their
 provenance, so `validate` and `plan` report `derived-projection-stale`, affected
 paths, and the remedy to run a new Agentwheel update. If
+an authenticated `Syncwheel-Reconciliation` merge replaced the lock with exact
+bytes from its declared replay, the old record can instead be retired without
+running Agentwheel again. Review a plan that names the reconciliation commit
+and every path of each selected record:
+
+```bash
+syncwheel coordination provenance supersede \
+  --reconciliation <commit> --path <derived-path> \
+  --reason '<why>' > provenance-plan.json
+syncwheel coordination provenance supersede --apply \
+  --plan-file provenance-plan.json
+```
+
+This requires active-active manifest v3, current coordination state, a valid
+reconciliation witness, old recorded bytes in its first parent, different
+replayed bytes in its second parent, and those replayed bytes at the current
+integration tip. Apply rechecks the complete plan, state/ref leases, and local
+store before writing a clone-local null override and ledger receipt. It does
+not push or update integration; a later governed `int push` publishes the
+provenance change under its usual state CAS. If any evidence changes, review a
+new plan. This command cannot stand in for an Agentwheel update when the lock
+is absent from the authenticated replay or changed after it.
+
+If
 `integration.derived_paths` is narrowed or emptied while retained records still
 cover excluded paths, manifest loading remains usable. `validate`, `status`,
 and `plan` report the named `derived-paths-narrowed` blocker with the exact
