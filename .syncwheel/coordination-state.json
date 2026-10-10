@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "edd143779b716d51b5f8103601beb961d5e3c1c9"
+    "refs/heads/pr/historical-absorbed-rebuild": "edd143779b716d51b5f8103601beb961d5e3c1c9"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -13,6 +13,7 @@
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
     "refs/heads/pr/half-state-coordination": "de07ec9d17938ce45fb423baee976e1e7d918d95",
+    "refs/heads/pr/historical-absorbed-rebuild": "fe37d21af3f2904bbbc6040398956fbe123f4b53",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
@@ -45,7 +46,7 @@
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "7b55c2f9021203c6d9090b4da5998073d2950927",
     "refs/heads/syncwheel/draft/close-published-recovery": "910530df66c2e9913de1427e074df6f862224b68",
     "refs/heads/syncwheel/draft/half-state-coordination": "95e67f801cf5cf523fe1b3b2f7c9db4d7b95b94d",
-    "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "29c33bc2bbe42761931a8816f001d44745bb1a61",
+    "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "5e240179d09f2f5d925ab19eaa8c875608e3427a",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip": "1c2b87ec8c59c85c99e4b56fe56a4c29692a01ff",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip-v2": "d0afe6dc241d570e03d76df331b342fc65e1d9c9",
     "refs/heads/syncwheel/draft/historical-pr78": "47976f23d276518f9b51c65d2c21076cdf7f6de6",
@@ -75,7 +76,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-10T05:09:55+00:00",
+  "created_at": "2026-10-10T05:10:16+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -98,6 +99,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/graph-lock-provenance-supersede": "acdb819d22a912b58bba6182967de7fa46b9b350",
     "refs/heads/pr/half-state-coordination": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f",
+    "refs/heads/pr/historical-absorbed-rebuild": "edd143779b716d51b5f8103601beb961d5e3c1c9",
     "refs/heads/pr/historical-closed-missing-tip-v2": "e515208d404b7d504a5bb734053c91aa66557d49",
     "refs/heads/pr/historical-coordination-digest-04313": "b6d8d2fed2527936aa40ab13246873955b57bd9f",
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
@@ -218,7 +220,7 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/historical-absorbed-rebuild",
+        "branch": "pr/historical-absorbed-rebuild",
         "commits": [
           "9a7b6d3637d3a641206802f7fa8cc36e95f69ab5",
           "22ada6534803c4078ee6be9439b40073dfc88e93",
@@ -227,7 +229,6 @@
         ],
         "id": "historical-absorbed-rebuild",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       },
       {
@@ -247,11 +248,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "5272da62-8c72-46f8-af64-27e8fc91c45b",
-  "parent_state": "0a358cfee1a9ac4ef60485548adeb97137e9d3f5",
+  "operation_token": "ebcfba9c-71d6-4a5f-9ee3-78a136338344",
+  "parent_state": "29d0aee2c716970e0b955ed5c80585c4278ff5ee",
   "projection_status": "partial",
-  "publication_id": "ddf4a728-9e05-4f87-9bc9-3cc912823ccb",
-  "publication_scope": "stack:historical-absorbed-rebuild",
+  "publication_id": "fd863cdd-b951-4715-ae28-2d7021239fc8",
+  "publication_scope": "promote:historical-absorbed-rebuild",
   "schema_version": 2,
   "syncwheel_version": "0.45.4",
   "tombstones": [
@@ -990,6 +991,14 @@
       "ref": "refs/heads/pr/graph-lock-provenance-supersede",
       "remote_tip": null,
       "stack": "graph-lock-provenance-supersede"
+    },
+    {
+      "branch": "syncwheel/draft/historical-absorbed-rebuild",
+      "closed_at": "2026-10-10T05:10:12+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/historical-absorbed-rebuild",
+      "remote_tip": "edd143779b716d51b5f8103601beb961d5e3c1c9",
+      "stack": "historical-absorbed-rebuild"
     }
   ]
 }
