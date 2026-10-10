@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/syncwheel/draft/historical-absorbed-rebuild"
+  ],
+  "claimed_at": "2026-10-10T04:51:38+00:00",
+  "coordination_id": "default",
+  "operation_token": "1236b600-f0ef-49a7-a19d-0373c05cde88",
+  "publication_scope": "create:historical-absorbed-rebuild",
+  "source_ref": "refs/heads/syncwheel/draft/historical-absorbed-rebuild",
+  "syncwheel_version": "0.45.4"
+}
