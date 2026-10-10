@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/graph-lock-provenance-supersede"
   ],
-  "claimed_at": "2026-10-10T04:01:58+00:00",
+  "claimed_at": "2026-10-10T04:03:00+00:00",
   "coordination_id": "default",
-  "operation_token": "694aed51-1530-4fea-b583-c8492357a093",
+  "operation_token": "06ee364b-7eec-4818-8068-7ef28b23f2f3",
   "publication_scope": "stack:graph-lock-provenance-supersede",
   "source_ref": "refs/heads/pr/graph-lock-provenance-supersede",
   "syncwheel_version": "0.45.3"
