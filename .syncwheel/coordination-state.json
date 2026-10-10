@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "ad9429917327a40a7d300593c8116904d2e561a3"
+    "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "ad9429917327a40a7d300593c8116904d2e561a3"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -42,6 +42,7 @@
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
+    "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "7b55c2f9021203c6d9090b4da5998073d2950927",
     "refs/heads/syncwheel/draft/close-published-recovery": "910530df66c2e9913de1427e074df6f862224b68",
     "refs/heads/syncwheel/draft/half-state-coordination": "95e67f801cf5cf523fe1b3b2f7c9db4d7b95b94d",
     "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "bd709e0d74a5521d547e07bc50ab0780dd77b649",
@@ -74,7 +75,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-10T04:51:39+00:00",
+  "created_at": "2026-10-10T04:51:58+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -136,6 +137,7 @@
     "refs/heads/pr/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "3b82631f3e1eb4d1a230168a2d996cdc515c1b49",
+    "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "ad9429917327a40a7d300593c8116904d2e561a3",
     "refs/heads/syncwheel/draft/agentwheel-revision-provider": "e86a3730d8bac786020b1ec07872ff0e67b075cc",
     "refs/heads/syncwheel/draft/auto-hook-bootstrap": "242ce4a13cbbf91418b677da038ada0e673177ac",
     "refs/heads/syncwheel/draft/close-published-recovery": "afcf7aab9211e39c789ec105ad469c0c1319a778",
@@ -200,7 +202,8 @@
       "branch": "main-integration",
       "stacks": [
         "graph-lock-provenance-supersede",
-        "historical-absorbed-rebuild"
+        "historical-absorbed-rebuild",
+        "absorbed-rebuild-history-fix"
       ],
       "strategy": "cherry-pick"
     },
@@ -237,16 +240,29 @@
         "integration_branch": "main-integration",
         "state": "draft",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/absorbed-rebuild-history-fix",
+        "commits": [],
+        "id": "absorbed-rebuild-history-fix",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "1236b600-f0ef-49a7-a19d-0373c05cde88",
-  "parent_state": "03bf116033ebc8d5e89dc9cfd09c19a3d89294a4",
+  "operation_token": "94b33e98-6680-445f-a132-bc625decc5b0",
+  "parent_state": "a4e342d2352d3cfb9fd565a4cba1a0847f9f30a9",
   "projection_status": "partial",
-  "publication_id": "798fdcb6-aaec-4ccd-b341-19e17a3d16c9",
-  "publication_scope": "create:historical-absorbed-rebuild",
+  "publication_id": "21f943fd-019e-4425-af8a-4b6b9e3de7c6",
+  "publication_scope": "create:absorbed-rebuild-history-fix",
   "schema_version": 2,
   "syncwheel_version": "0.45.4",
   "tombstones": [
