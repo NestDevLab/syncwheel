@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "ad9429917327a40a7d300593c8116904d2e561a3"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -11,7 +9,7 @@
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
-    "refs/heads/pr/graph-lock-provenance-supersede": "9bd06245d32da15aa0040f3fb1e8e6b928d99c2c",
+    "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
     "refs/heads/pr/half-state-coordination": "de07ec9d17938ce45fb423baee976e1e7d918d95",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
@@ -75,7 +73,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-10T04:51:58+00:00",
+  "created_at": "2026-10-10T05:09:17+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -201,7 +199,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "graph-lock-provenance-supersede",
         "historical-absorbed-rebuild",
         "absorbed-rebuild-history-fix"
       ],
@@ -213,21 +210,6 @@
       "strategy": "merge"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/graph-lock-provenance-supersede",
-        "commits": [
-          "1dbe229a4e98aaf28ec90f235b464cbfa43dcb33",
-          "acdb819d22a912b58bba6182967de7fa46b9b350"
-        ],
-        "id": "graph-lock-provenance-supersede",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -258,11 +240,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "94b33e98-6680-445f-a132-bc625decc5b0",
-  "parent_state": "a4e342d2352d3cfb9fd565a4cba1a0847f9f30a9",
+  "operation_token": "ba396931-d097-48f4-b2f6-790b82825972",
+  "parent_state": "b257ee4ac1fbd484436bb8438c85f8c89873913a",
   "projection_status": "partial",
-  "publication_id": "21f943fd-019e-4425-af8a-4b6b9e3de7c6",
-  "publication_scope": "create:absorbed-rebuild-history-fix",
+  "publication_id": "102a061b-0da2-4e63-be30-5e297cffc40e",
+  "publication_scope": "close:graph-lock-provenance-supersede",
   "schema_version": 2,
   "syncwheel_version": "0.45.4",
   "tombstones": [
@@ -993,6 +975,14 @@
       "ref": "refs/heads/pr/journal-publish-compact",
       "remote_tip": null,
       "stack": "journal-publish-compact"
+    },
+    {
+      "branch": "pr/graph-lock-provenance-supersede",
+      "closed_at": "2026-10-10T05:09:13+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/graph-lock-provenance-supersede",
+      "remote_tip": null,
+      "stack": "graph-lock-provenance-supersede"
     }
   ]
 }
