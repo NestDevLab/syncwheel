@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/historical-absorbed-rebuild": "794f65f91048117e2d042f83f45823175fe4bf7e"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -11,7 +13,7 @@
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
     "refs/heads/pr/half-state-coordination": "de07ec9d17938ce45fb423baee976e1e7d918d95",
-    "refs/heads/pr/historical-absorbed-rebuild": "fe37d21af3f2904bbbc6040398956fbe123f4b53",
+    "refs/heads/pr/historical-absorbed-rebuild": "138f4f70c01f26ee87ebd7a7757fc96f28275d7f",
     "refs/heads/pr/historical-closed-missing-tip-v2": "54124827b9e44eaad57319bf41adc218e3487729",
     "refs/heads/pr/historical-coordination-digest-04313": "d97c6c6ca63783ab70e9aea9751362c4a638621e",
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
@@ -74,7 +76,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-10T05:11:08+00:00",
+  "created_at": "2026-10-10T05:12:52+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -97,7 +99,7 @@
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
     "refs/heads/pr/graph-lock-provenance-supersede": "acdb819d22a912b58bba6182967de7fa46b9b350",
     "refs/heads/pr/half-state-coordination": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f",
-    "refs/heads/pr/historical-absorbed-rebuild": "edd143779b716d51b5f8103601beb961d5e3c1c9",
+    "refs/heads/pr/historical-absorbed-rebuild": "794f65f91048117e2d042f83f45823175fe4bf7e",
     "refs/heads/pr/historical-closed-missing-tip-v2": "e515208d404b7d504a5bb734053c91aa66557d49",
     "refs/heads/pr/historical-coordination-digest-04313": "b6d8d2fed2527936aa40ab13246873955b57bd9f",
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
@@ -222,7 +224,8 @@
           "9a7b6d3637d3a641206802f7fa8cc36e95f69ab5",
           "22ada6534803c4078ee6be9439b40073dfc88e93",
           "662a36739f38a02ab5445076f4896158847a2091",
-          "edd143779b716d51b5f8103601beb961d5e3c1c9"
+          "edd143779b716d51b5f8103601beb961d5e3c1c9",
+          "794f65f91048117e2d042f83f45823175fe4bf7e"
         ],
         "id": "historical-absorbed-rebuild",
         "integration_branch": "main-integration",
@@ -232,11 +235,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "b64d97d1-b8aa-4fe8-b89f-a60eb946bc7d",
-  "parent_state": "9acc65f8859abab623e4c2a566f84dbf5ba55fab",
+  "operation_token": "9453cd92-2587-4502-93aa-23a7b38484c6",
+  "parent_state": "f4a953d6b87b4dcf2058429715c62d14e01e23bf",
   "projection_status": "partial",
-  "publication_id": "f10deef5-cc56-448e-aed6-9226e785d9e1",
-  "publication_scope": "close:absorbed-rebuild-history-fix",
+  "publication_id": "30364805-8ea6-4902-aad9-4a6ca8ff3c1d",
+  "publication_scope": "stack:historical-absorbed-rebuild",
   "schema_version": 2,
   "syncwheel_version": "0.45.4",
   "tombstones": [
