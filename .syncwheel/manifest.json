@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -32,40 +32,17 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "historical-absorbed-rebuild",
       "implicit-gc-scope"
     ],
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/historical-absorbed-rebuild",
-      "commits": [
-        "9a7b6d3637d3a641206802f7fa8cc36e95f69ab5",
-        "22ada6534803c4078ee6be9439b40073dfc88e93",
-        "662a36739f38a02ab5445076f4896158847a2091",
-        "edd143779b716d51b5f8103601beb961d5e3c1c9",
-        "794f65f91048117e2d042f83f45823175fe4bf7e"
-      ],
-      "id": "historical-absorbed-rebuild",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Preserve historical ownership after rebuilt absorbed stack"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "base": "origin/main",
       "branch": "pr/implicit-gc-scope",
