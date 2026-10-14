@@ -16397,7 +16397,9 @@ def backup_branch_records(repo_root):
     return sorted(records, key=lambda item: item['timestamp'], reverse=True)
 
 
-def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
+def coordination_gc_plan(
+    repo_root, manifest, fetch=True, state_info=None, implicit=False, stack_scope=None,
+):
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         return {'enabled': False, 'candidates': [], 'skipped': ['coordination is not active-active']}
@@ -16439,6 +16441,9 @@ def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
         label = f'{stack_id or branch or "unknown"}'
         if not branch or not ref or not closed_at:
             skipped.append(f'{label}: malformed tombstone')
+            continue
+        if stack_scope is not None and stack_id not in stack_scope:
+            skipped.append(f'{label}: outside the selected stack scope')
             continue
         if ref in active_refs:
             skipped.append(f'{label}: tombstoned ref is active in the current manifest')
@@ -16487,8 +16492,13 @@ def coordination_gc_plan(repo_root, manifest, fetch=True, state_info=None):
             'branch': branch,
         })
 
+    backups = backup_branch_records(repo_root)
+    if implicit:
+        if backups:
+            skipped.append('backup refs: only an explicit syncwheel gc deletes backups')
+        backups = []
     worktree_branches = set(worktrees)
-    for index, backup in enumerate(backup_branch_records(repo_root)):
+    for index, backup in enumerate(backups):
         if lease_active:
             skipped.append(f"{backup['branch']}: a local coordination lease is active")
             continue
@@ -16516,12 +16526,16 @@ def coordination_gc_candidate_key(candidate):
     )
 
 
-def coordination_gc_candidate_is_current(repo_root, manifest, candidate, fetch, state_info):
+def coordination_gc_candidate_is_current(
+    repo_root, manifest, candidate, fetch, state_info, implicit=False, stack_scope=None,
+):
     refreshed = coordination_gc_plan(
         repo_root,
         manifest,
         fetch=fetch,
         state_info=None if fetch else state_info,
+        implicit=implicit,
+        stack_scope=stack_scope,
     )
     target = coordination_gc_candidate_key(candidate)
     return any(
@@ -16535,8 +16549,11 @@ def coordination_gc_note_skip(plan, candidate):
     plan['skipped'].append(f'{label}: no longer eligible immediately before deletion')
 
 
-def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info=None):
-    plan = coordination_gc_plan(repo_root, manifest, fetch=fetch, state_info=state_info)
+def run_coordination_gc(
+    repo_root, manifest, apply=False, fetch=True, state_info=None, implicit=False, stack_scope=None,
+):
+    scope = {'implicit': implicit, 'stack_scope': stack_scope}
+    plan = coordination_gc_plan(repo_root, manifest, fetch=fetch, state_info=state_info, **scope)
     if not apply or not plan['enabled']:
         return plan
     removed_worktrees = set()
@@ -16545,7 +16562,7 @@ def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info
         if candidate['type'] != 'remove_worktree':
             continue
         if not coordination_gc_candidate_is_current(
-            repo_root, manifest, candidate, fetch, state_info
+            repo_root, manifest, candidate, fetch, state_info, **scope
         ):
             coordination_gc_note_skip(plan, candidate)
             continue
@@ -16558,7 +16575,7 @@ def run_coordination_gc(repo_root, manifest, apply=False, fetch=True, state_info
         if candidate['type'] not in {'delete_branch', 'delete_backup'}:
             continue
         if not coordination_gc_candidate_is_current(
-            repo_root, manifest, candidate, fetch, state_info
+            repo_root, manifest, candidate, fetch, state_info, **scope
         ):
             coordination_gc_note_skip(plan, candidate)
             continue
@@ -28105,7 +28122,14 @@ def command_reconcile(args):
         for update in deferred_manifest_updates:
             print(f"{update['stack']}: manifest updated from rebuilt branch")
     if args.apply and getattr(args, 'auto_gc', False) and coordination_is_active(manifest):
-        gc_plan = run_coordination_gc(repo_root, manifest, apply=True, fetch=True)
+        gc_plan = run_coordination_gc(
+            repo_root,
+            manifest,
+            apply=True,
+            fetch=True,
+            implicit=True,
+            stack_scope=set(args.stack) if args.stack else None,
+        )
         if gc_plan.get('applied_candidates'):
             print(f"automatic gc: processed {len(gc_plan['applied_candidates'])} eligible local artifact(s)")
     if publication_operation:

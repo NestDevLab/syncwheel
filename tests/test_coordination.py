@@ -5617,6 +5617,118 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         self.assertEqual(calls, [False])
 
+    def create_old_backup(self, repo, branch, label):
+        """A backup ref whose tip commit is past the backup retention window."""
+        old = '2020-01-01T00:00:00+0000'
+        env = dict(os.environ, GIT_AUTHOR_DATE=old, GIT_COMMITTER_DATE=old)
+        commit = subprocess.run(
+            ['git', 'commit-tree', f'{branch}^{{tree}}', '-p', branch, '-m', f'backup {label}'],
+            cwd=repo, env=env, text=True, capture_output=True, check=True,
+        ).stdout.strip()
+        name = f'backup/{branch}-before-syncwheel-{label}'
+        self.git(repo, 'branch', name, commit)
+        return name, commit
+
+    def test_scoped_publish_keeps_backup_refs_of_every_stack(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'implicit-gc-backups')
+        self.init_coordinated(repo)
+        own_sha = self.commit_on_branch(repo, 'pr/own', 'own.txt')
+        other_sha = self.commit_on_branch(repo, 'pr/other', 'other.txt')
+        self.run_cli(repo, 'stack', 'create', 'own', own_sha, '--branch', 'pr/own')
+        self.run_cli(repo, 'stack', 'create', 'other', other_sha, '--branch', 'pr/other')
+        self.run_cli(repo, 'publish', '--stack', 'other', '--skip-integration')
+        backups = dict(
+            self.create_old_backup(repo, branch, f'2020010{day}T000000000000Z')
+            for branch, day in (
+                ('pr/other', 1), ('pr/other', 2), ('pr/other', 3), ('pr/own', 4), ('pr/own', 5),
+            )
+        )
+        explicit = json.loads(self.run_cli(repo, 'gc', '--json').stdout)
+        doomed = {
+            item['branch'] for item in explicit['candidates'] if item['type'] == 'delete_backup'
+        }
+        self.assertTrue(doomed & {name for name in backups if '/pr/other-' in name})
+
+        self.run_cli(repo, 'publish', '--stack', 'own', '--skip-integration')
+        self.run_cli(repo, 'sync', '--stack', 'own', '--skip-integration')
+
+        for name, commit in backups.items():
+            self.assertEqual(self.git(repo, 'rev-parse', name).stdout.strip(), commit)
+
+        self.run_cli(repo, 'gc', '--apply')
+        for name in doomed:
+            self.git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{name}', expected=1)
+
+    def test_implicit_gc_reaps_only_selected_tombstones_and_never_backups(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'implicit-gc-tombstones')
+        self.init_coordinated(repo)
+        own_sha = self.commit_on_branch(repo, 'pr/own-v1', 'own.txt')
+        foreign_sha = self.commit_on_branch(repo, 'pr/foreign', 'foreign.txt')
+        self.git(repo, 'push', 'origin', 'pr/own-v1', 'pr/foreign')
+        for label in ('20200101T000000000000Z', '20200102T000000000000Z', '20200103T000000000000Z'):
+            self.create_old_backup(repo, 'pr/foreign', label)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        old = '2020-01-01T00:00:00+00:00'
+        state_info = {
+            'tip': 'test-state',
+            'state': {
+                'schema_version': 1,
+                'coordination_id': 'default',
+                'manifest': module.coordination_manifest_snapshot(manifest),
+                'manifest_digest': module.coordination_manifest_digest(manifest),
+                'managed_refs': {},
+                'tombstones': [
+                    {
+                        'stack': stack_id,
+                        'branch': branch,
+                        'ref': f'refs/heads/{branch}',
+                        'closed_at': old,
+                        'remote_tip': sha,
+                    }
+                    for stack_id, branch, sha in (
+                        ('own', 'pr/own-v1', own_sha),
+                        ('foreign', 'pr/foreign', foreign_sha),
+                    )
+                ],
+            },
+        }
+
+        def kinds(plan):
+            return sorted((item['type'], item['branch']) for item in plan['candidates'])
+
+        explicit = module.coordination_gc_plan(repo, manifest, fetch=False, state_info=state_info)
+        self.assertIn('delete_backup', {item['type'] for item in explicit['candidates']})
+        full = module.coordination_gc_plan(
+            repo, manifest, fetch=False, state_info=state_info, implicit=True,
+        )
+        self.assertEqual(
+            kinds(full), [('delete_branch', 'pr/foreign'), ('delete_branch', 'pr/own-v1')]
+        )
+        self.assertTrue(any('explicit syncwheel gc' in item for item in full['skipped']))
+        scoped = module.coordination_gc_plan(
+            repo, manifest, fetch=False, state_info=state_info,
+            implicit=True, stack_scope={'own'},
+        )
+        self.assertEqual(kinds(scoped), [('delete_branch', 'pr/own-v1')])
+        self.assertIn('foreign: outside the selected stack scope', scoped['skipped'])
+
+        applied = module.run_coordination_gc(
+            repo, manifest, apply=True, fetch=False, state_info=state_info,
+            implicit=True, stack_scope={'own'},
+        )
+        self.assertEqual(
+            [(item['type'], item['branch']) for item in applied['applied_candidates']],
+            [('delete_branch', 'pr/own-v1')],
+        )
+        self.git(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/pr/own-v1', expected=1)
+        self.git(repo, 'rev-parse', '--verify', 'refs/heads/pr/foreign')
+        self.assertEqual(
+            len(self.git(repo, 'for-each-ref', 'refs/heads/backup/').stdout.splitlines()), 3
+        )
+
     def test_gc_requires_an_old_tombstone_and_respects_local_locks(self):
         origin = self.create_remote()
         repo = self.clone(origin, 'gc')
