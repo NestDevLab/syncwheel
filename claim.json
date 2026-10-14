@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/implicit-gc-scope"
-  ],
-  "claimed_at": "2026-10-14T06:02:26+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-14T14:11:30+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "ab0f0fc7-f158-46b5-8a03-8f2168e506bc",
-  "publication_scope": "stack:implicit-gc-scope",
+  "operation_token": "a56432b4-524f-4736-bdb9-b353b85874eb",
+  "publication_scope": "close:implicit-gc-scope",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/implicit-gc-scope",
   "syncwheel_version": "0.45.5"
 }
