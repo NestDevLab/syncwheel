@@ -189,10 +189,14 @@ Reusing a closed branch ref makes its old tombstone ineligible immediately. The
 next successful coordinated publication supersedes that tombstone, so GC cannot
 reap a branch that has become active again.
 
-The matching local worktree and stale local branch can then be removed. Backup
-branches keep the two newest backups and retain older backups for 30 days.
-Remote deletion is intentionally out of scope and always requires a future,
-explicit operation.
+The matching local worktree and stale local branch can then be removed. A `sync`
+or `publish` limited with `--stack` reaps only tombstones of the selected stacks.
+Automatic cleanup never deletes `backup/*` refs, whichever stack or lane they
+belong to.
+
+Backup refs are pruned only by an explicit `syncwheel gc --apply`, which keeps
+the two newest backups and retains older backups for 30 days. Remote deletion is
+intentionally out of scope and always requires a future, explicit operation.
 
 Use local locks to retain a worktree during investigation:
 

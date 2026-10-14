@@ -540,6 +540,8 @@ syncwheel gc --apply
 `stack close` never deletes a remote branch. Automatic cleanup after `sync` or
 `publish`, and explicit `gc --apply`, only remove old tombstoned local artifacts
 that are clean, unlocked, non-current, and recoverable from the remote state.
+Automatic cleanup is limited to the stacks selected with `--stack` and never
+deletes `backup/*` refs; only an explicit `gc --apply` prunes old backups.
 
 Retain recovery refs and stashes until every dependent lane is delivered and
 independently verified; only then prune obsolete backups. Never delete unique

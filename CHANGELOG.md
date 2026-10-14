@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.45.6 - 2026-10-14
+
+- Stop the automatic cleanup after `sync` and `publish` from deleting `backup/*` refs. It applied the explicit `gc` backup retention to every backup in the clone, so a `publish --stack <id> --skip-integration` deleted backups that belonged to other stacks and lanes. Only an explicit `syncwheel gc --apply` now prunes backups, with the same keep-two, 30-day policy.
+- Limit that automatic cleanup to the selected stacks. With `--stack`, it reaps only tombstoned artifacts of those stacks; without it, the existing full-scope tombstone cleanup is unchanged.
+
 ## 0.45.5 - 2026-10-10
 
 - Preserve ownership of a stack's previous source generation when the same published stack and ref were rebuilt from a newer base before an absorbed close. Require an authenticated state chain, exact successor delivery, and a conflict-free merge proving the old source adds no unique product to the current delivery tree.
