@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/draft-promotion-fix"
+  ],
+  "claimed_at": "2026-10-18T12:52:01+00:00",
+  "coordination_id": "default",
+  "operation_token": "f4103c2d-db99-4567-a628-817bb64f03c0",
+  "publication_scope": "stack:draft-promotion-fix",
+  "source_ref": "refs/heads/pr/draft-promotion-fix",
+  "syncwheel_version": "0.45.6"
+}
