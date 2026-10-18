@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.45.6`
+Current version: `0.45.7`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -456,6 +456,14 @@ cross-domain ownership at publication, so a concurrently created local ref or co
 preserved and reported instead of replaced. A retry adopts an equivalent completed remote create
 before probing whether a new atomic push is possible. `stack demote` reverses the promotion, and
 refuses when the stack already records an open pull request.
+
+If commits were added after draft creation, rebuild the draft before promoting it.
+Promotion first publishes the updated commit selection on the draft ref, then
+publishes the promotion with the existing ownership and lease checks. An interrupted
+refresh is safe to retry. Other stack-field changes require explicit publication.
+From a governed authoring lane, `stack add` uses the primary control manifest by
+default and resolves revision specs such as `HEAD` in the authoring lane; explicit
+manifest and personal selectors retain their existing behavior.
 
 Closing a never-published draft is remote-first under active coordination. It
 records `stack_close_intent`, atomically publishes a tombstone claim plus state,

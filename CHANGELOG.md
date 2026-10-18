@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.45.7 - 2026-10-18
+
+- Publish pending draft changes before coordinated promotion so commits added after draft creation can be promoted without weakening branch ownership checks.
+- Resolve `stack add` against the primary control manifest from governed authoring lanes, while interpreting revision specs such as `HEAD` in the lane.
+
 ## 0.45.6 - 2026-10-14
 
 - Stop the automatic cleanup after `sync` and `publish` from deleting `backup/*` refs. It applied the explicit `gc` backup retention to every backup in the clone, so a `publish --stack <id> --skip-integration` deleted backups that belonged to other stacks and lanes. Only an explicit `syncwheel gc --apply` now prunes backups, with the same keep-two, 30-day policy.
