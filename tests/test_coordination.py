@@ -9384,6 +9384,162 @@ sys.exit(module.main())
         self.assertEqual(module.ref_tip(peer, selected['integration']['branch']), final)
         self.assertFalse(module.load_control_manifest_events(peer, peer_path))
 
+    def merge_stack_conflict_desk_fixture(self, name):
+        fixture = self.a14_published_tip_reuse_fixture(
+            name, integration_strategy='merge-stacks',
+        )
+        self.a14_checkout_published_integration(fixture)
+        upstream = self.clone(fixture['origin'], name + '-upstream')
+        filename = name + '-s1.txt'
+        (upstream / filename).write_text('upstream version\n')
+        self.git(upstream, 'add', filename)
+        self.git(upstream, 'commit', '-qm', 'advance upstream into source conflict')
+        self.git(upstream, 'push', 'origin', 'main')
+        self.git(fixture['follower'], 'fetch', 'origin')
+        fixture['filename'] = filename
+        fixture['desk'] = self.tmp / (name + '-desk')
+        return fixture
+
+    def test_merge_stack_desk_resolves_published_conflict_without_rewriting_source(self):
+        for resolution in ('upstream version\n', 'reviewed resolution\n'):
+            with self.subTest(resolution=resolution):
+                name = 'desk-empty' if resolution.startswith('upstream') else 'desk-resolved'
+                fixture = self.merge_stack_conflict_desk_fixture(name)
+                repo, desk = fixture['follower'], fixture['desk']
+                module = fixture['module']
+                before = self.a14_source_snapshot(fixture)
+                source = module.ref_tip(repo, fixture['manifest']['stacks'][0]['branch'])
+                failure = self.run_cli(
+                    repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                    '--worktree', str(desk), '--reason', 'review replay conflict', expected=2,
+                )
+                self.assertIn('resolution desk:', failure.stderr)
+                self.assertTrue(desk.is_dir())
+                self.assertEqual(self.a14_source_snapshot(fixture), before)
+                self.assertTrue(self.git(desk, 'diff', '--name-only', '--diff-filter=U').stdout)
+                # Capture must reject an unresolved index, rather than choosing a side.
+                unresolved = self.run_cli(
+                    repo, 'stack', 'resolve-integration', 's1',
+                    '--worktree', str(desk), expected=2,
+                )
+                self.assertIn('unresolved', unresolved.stderr)
+                (desk / fixture['filename']).write_text(resolution)
+                self.git(desk, 'add', fixture['filename'])
+                self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+                self.run_cli(
+                    repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                    '--worktree', str(desk), '--reason', 'apply reviewed resolution',
+                )
+                manifest, path = module.load_manifest(repo)
+                self.assertIn('integration_commits', manifest['stacks'][0])
+                self.assertEqual(module.ref_tip(repo, manifest['stacks'][0]['branch']), source)
+                self.assertTrue(module.branch_contains(repo, manifest['integration']['branch'], before['integration']))
+                self.assertEqual((repo / fixture['filename']).read_text(), resolution)
+                expected_tree = module.materialize_integration_projection(repo, manifest)
+                self.assertTrue(module.integration_tree_matches_product_projection(
+                    repo, manifest, module.ref_tree(repo, manifest['integration']['branch']), expected_tree,
+                ))
+                snapshot = module.coordination_manifest_snapshot(manifest, repo)
+                self.assertEqual(snapshot['integration']['resolutions']['s1']['integration_commits'],
+                                 manifest['stacks'][0]['integration_commits'])
+                self.assertEqual(snapshot['integration']['resolutions']['s1']['integration_resolution'],
+                                 manifest['stacks'][0]['integration_resolution'])
+                self.run_cli(repo, 'validate')
+                self.run_cli(repo, 'reconcile', '--rebuild', 'none', '--json')
+                # A normal rebuild must consume the recorded resolution too.
+                self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'ephemeral', '--reason', 'repeat resolved replay')
+                self.assertEqual((repo / fixture['filename']).read_text(), resolution)
+                self.run_cli(repo, 'int', 'push')
+                _, shared = self.remote_state(fixture['origin'])
+                self.assertEqual(shared['manifest']['integration']['resolutions']['s1']['integration_commits'],
+                                 manifest['stacks'][0]['integration_commits'])
+                restored = module.apply_coordination_snapshot(manifest, shared['manifest'])
+                self.assertEqual(restored['stacks'][0]['integration_resolution'],
+                                 manifest['stacks'][0]['integration_resolution'])
+                forged = json.loads(json.dumps(shared['manifest']))
+                forged['integration']['resolutions']['s1']['branch'] = 'unrelated/source'
+                with self.assertRaisesRegex(module.SyncwheelError, 'unknown stack or fields'):
+                    module.apply_coordination_snapshot(manifest, forged)
+
+    def test_merge_stack_desk_capture_rejects_moving_inputs_and_preserves_work(self):
+        for changed in ('source', 'integration'):
+            with self.subTest(changed=changed):
+                fixture = self.merge_stack_conflict_desk_fixture('desk-stale-' + changed)
+                repo, desk = fixture['follower'], fixture['desk']
+                module = fixture['module']
+                self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                             '--worktree', str(desk), '--reason', 'prepare reviewed conflict', expected=2)
+                (desk / fixture['filename']).write_text('reviewed but not yet captured\n')
+                self.git(desk, 'add', fixture['filename'])
+                manifest, path = module.load_manifest(repo)
+                selected = path.read_bytes()
+                branch = (manifest['stacks'][0]['branch'] if changed == 'source'
+                          else manifest['integration']['branch'])
+                tip = module.ref_tip(repo, branch)
+                # Even an otherwise tree-equivalent unclassified ref move is not
+                # a valid substitute for the exact input the reviewer observed.
+                moved = self.git(repo, 'commit-tree', module.ref_tree(repo, tip),
+                                 '-p', tip, '-m', 'changed input identity').stdout.strip()
+                self.git(repo, 'update-ref', 'refs/heads/' + branch, moved, tip)
+                failure = self.run_cli(repo, 'stack', 'resolve-integration', 's1',
+                                       '--worktree', str(desk), expected=2)
+                self.assertIn('inputs changed', failure.stderr)
+                self.assertEqual(path.read_bytes(), selected)
+                self.assertEqual((desk / fixture['filename']).read_text(), 'reviewed but not yet captured\n')
+
+    def test_merge_stack_desk_refuses_existing_paths_and_unstaged_resolutions(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-preserve')
+        repo, desk = fixture['follower'], fixture['desk']
+        occupied = self.tmp / 'occupied-desk'
+        occupied.mkdir()
+        (occupied / 'keep.txt').write_text('unrelated work\n')
+        failure = self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                               '--worktree', str(occupied), '--reason', 'inspect conflict', expected=2)
+        self.assertIn('refusing to overwrite', failure.stderr)
+        self.assertEqual((occupied / 'keep.txt').read_text(), 'unrelated work\n')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'inspect conflict', expected=2)
+        (desk / fixture['filename']).write_text('reviewed\n')
+        self.git(desk, 'add', fixture['filename'])
+        (desk / 'README.md').write_text('not staged\n')
+        failure = self.run_cli(repo, 'stack', 'resolve-integration', 's1',
+                               '--worktree', str(desk), expected=2)
+        self.assertIn('unstaged', failure.stderr)
+        self.assertEqual((desk / 'README.md').read_text(), 'not staged\n')
+        # Re-entering a pending desk must never reset the reviewed index.
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'inspect preserved desk', expected=2)
+        self.assertEqual((desk / fixture['filename']).read_text(), 'reviewed\n')
+
+    def test_merge_stack_desk_keeps_earlier_steps_of_a_resolved_stack(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-prefix')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-c', 'scratch/first-resolution', fixture['source'] + '^')
+        (repo / 'independent.txt').write_text('scratch/first-resolution\n')
+        self.git(repo, 'add', 'independent.txt')
+        self.git(repo, 'commit', '-qm', 'first independent contribution')
+        first = module.ref_tip(repo, 'HEAD')
+        (repo / fixture['filename']).write_text('conflicting replacement\n')
+        self.git(repo, 'add', fixture['filename'])
+        self.git(repo, 'commit', '-qm', 'second contribution conflicts')
+        second = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['integration_commits'] = [first, second]
+        with module.manifest_write_transaction(repo, path, 'fixture-existing-resolution'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_existing_resolution')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'review replacement conflict', expected=2)
+        self.assertEqual((desk / 'independent.txt').read_text(), 'scratch/first-resolution\n')
+        (desk / fixture['filename']).write_text('upstream version\n')
+        self.git(desk, 'add', fixture['filename'])
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'apply complete replacement')
+        self.assertEqual((repo / 'independent.txt').read_text(), 'scratch/first-resolution\n')
+        self.assertEqual((repo / fixture['filename']).read_text(), 'upstream version\n')
+
     def test_ancestry_reconciliation_preserves_merge_stack_replay(self):
         repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-merge-stacks')
         stack = manifest['stacks'][0]

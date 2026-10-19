@@ -453,6 +453,10 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `integration_commits`, when present, is the resolved projection used only for
   integration. Record it after a conflict creates new integration commits; it
   prevents Syncwheel from treating those commits as source-branch commits.
+- `integration_resolution.source_tip`, when present, binds a desk-captured
+  `integration_commits` replacement to the exact reviewed source branch revision.
+  Moving that source requires a new desk review. Resolution commits and this
+  binding travel in shared coordination state; source `commits` remain unchanged.
 - `integration_only_commits`, when present, contains commits owned by the stack
   only in integration. They are excluded from source-branch rebuilds and are
   replayed after the combined stack projection during integration rebuilds,
@@ -506,6 +510,11 @@ already assigned to another stack, and updates no Git refs or worktrees. Use
 the stack source branch.
 
 ### Resolved integration projections
+
+For `merge-stacks`, use the detached [resolution desk workflow](branch-model.md)
+and `stack resolve-integration <stack> --worktree <desk>` to capture the staged
+result. This works while integration remains checked out in the primary and
+never requires a manual commit there.
 
 When a declared stack commit conflicts during integration, resolve the conflict
 on the integration branch and record the resulting commit separately. This keeps

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.45.8 - 2026-10-19
+
+- Prepare explicit merge-stack integration conflict desks in detached worktrees before automatic ancestry reconciliation, preserving the primary checkout and published refs.
+- Capture staged desk resolutions with `stack resolve-integration --worktree`, bind them to the reviewed source revision, and consume them in ordinary rebuilds and shared coordination state. Reject stale inputs, unresolved indexes, unstaged changes, and occupied desk paths.
+
 ## 0.45.7 - 2026-10-18
 
 - Publish pending draft changes before coordinated promotion so commits added after draft creation can be promoted without weakening branch ownership checks.
