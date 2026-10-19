@@ -45,7 +45,7 @@
   "stacks": [
     {
       "id": "stack-archive-proof",
-      "branch": "syncwheel/draft/stack-archive-proof",
+      "branch": "pr/stack-archive-proof",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -53,9 +53,9 @@
       "commits": [
         "bb60e10555a6abfb16cc5697c66db2f5cade6693"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Proof-bound lossless stack archival lifecycle"
