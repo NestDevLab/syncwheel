@@ -217,6 +217,14 @@ different tip. Planning is read-only and emits a digest-bound JSON document.
 Apply requires that exact reviewed document, repeats ownership and pending-merge
 checks, and stops on any state or managed-ref drift.
 
+Partial publications can record a declared, unpublished managed ref with a null
+tip. Repair preserves such a non-target ref only while it is still absent
+remotely, and includes its null observation in the digest-bound guarded-ref
+snapshot and every apply check. The selected repair target must have an exact
+recorded tip. Every other managed ref must still equal its recorded value:
+unexpected publication, deletion, or movement stops repair rather than adopting
+another ref's drift or expanding the repair scope.
+
 The child state is built directly from the validated parent rather than from the
 local manifest. It preserves the parent manifest and digest, tombstones, and all
 other managed refs, including refs no longer adopted locally. Only publication
