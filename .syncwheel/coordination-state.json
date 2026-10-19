@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/desk-empty-step": "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d"
+    "refs/heads/pr/desk-empty-step": "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -9,6 +9,7 @@
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
+    "refs/heads/pr/desk-empty-step": "0eff834e04c14e50780be3377cfc8c9a3c2fc6cb",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
@@ -50,7 +51,7 @@
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "58b2e3172c7c08ff931be56bcef9937e49281a10",
     "refs/heads/syncwheel/draft/close-published-recovery": "910530df66c2e9913de1427e074df6f862224b68",
-    "refs/heads/syncwheel/draft/desk-empty-step": "d3d21931a8fe075caf6d304eb1ad4009f242913a",
+    "refs/heads/syncwheel/draft/desk-empty-step": "25210c51429015c73c5bb37d9f450b6bd08fd6f9",
     "refs/heads/syncwheel/draft/desk-merge-conflict-fix": "4a6c7dcf86889d25637ca6ed57919467499beaf8",
     "refs/heads/syncwheel/draft/half-state-coordination": "95e67f801cf5cf523fe1b3b2f7c9db4d7b95b94d",
     "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "5e240179d09f2f5d925ab19eaa8c875608e3427a",
@@ -84,7 +85,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T15:48:42+00:00",
+  "created_at": "2026-10-19T15:48:53+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -98,6 +99,7 @@
     "refs/heads/pr/close-published-recovery": "51416e3150206d76eda43ff61809a7301b346883",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
+    "refs/heads/pr/desk-empty-step": "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d",
     "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
@@ -235,7 +237,7 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/desk-empty-step",
+        "branch": "pr/desk-empty-step",
         "commits": [
           "04cb306f9bfda716f8e95e9597b4dbac4c2b279e",
           "163b157e77905b915603c3ac75250d86943043bb",
@@ -243,18 +245,17 @@
         ],
         "id": "desk-empty-step",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "cc3145d0-e79c-4ea1-988b-a115d1c4afe3",
-  "parent_state": "4f1e59bd5bf0c25eeefde32407685d9305b3c302",
+  "operation_token": "668f4185-db47-4c27-b443-1a70a7e78676",
+  "parent_state": "5a618448598b697319105cbba0d5c1683b3a760d",
   "projection_status": "partial",
-  "publication_id": "63da8072-1a60-4e7e-92e1-76ae51d25b8d",
-  "publication_scope": "stack:desk-empty-step",
+  "publication_id": "eff12714-9fb7-4f3f-bcbd-ea0898b3a194",
+  "publication_scope": "promote:desk-empty-step",
   "schema_version": 2,
   "syncwheel_version": "0.46.1",
   "tombstones": [
@@ -1073,6 +1074,14 @@
       "ref": "refs/heads/pr/stack-archive-proof",
       "remote_tip": null,
       "stack": "stack-archive-proof"
+    },
+    {
+      "branch": "syncwheel/draft/desk-empty-step",
+      "closed_at": "2026-10-19T15:48:49+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/desk-empty-step",
+      "remote_tip": "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d",
+      "stack": "desk-empty-step"
     }
   ]
 }
