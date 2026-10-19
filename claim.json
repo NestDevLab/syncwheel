@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/draft-promotion-fix"
-  ],
-  "claimed_at": "2026-10-18T12:52:01+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-19T06:56:06+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "f4103c2d-db99-4567-a628-817bb64f03c0",
-  "publication_scope": "stack:draft-promotion-fix",
+  "operation_token": "ef367128-3a00-467e-990f-4df6089c1ead",
+  "publication_scope": "close:draft-promotion-fix",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/draft-promotion-fix",
-  "syncwheel_version": "0.45.6"
+  "syncwheel_version": "0.45.7"
 }
