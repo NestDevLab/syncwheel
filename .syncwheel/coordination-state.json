@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/revision-ref-guard-batching": "186267b551ce8e16df90aa7b3df01b7417304d29"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -45,6 +47,7 @@
     "refs/heads/pr/recover-semantic-lease": "6c91ea1a41630a2452c364fa4377fc41d3c6ac1b",
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
+    "refs/heads/pr/revision-ref-guard-batching": "c3fbbe95e4fe633d82b1d697e1cab61249c697b2",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
@@ -85,7 +88,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T18:13:10+00:00",
+  "created_at": "2026-10-19T19:54:17+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -150,6 +153,7 @@
     "refs/heads/pr/resume-tracked-manifest-atomic": "3a545e3a855359389e54918d01b6cc7c2fc55bf8",
     "refs/heads/pr/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71",
+    "refs/heads/pr/revision-ref-guard-batching": "186267b551ce8e16df90aa7b3df01b7417304d29",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
@@ -222,7 +226,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "revision-ref-guard-batching"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -230,15 +236,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/revision-ref-guard-batching",
+        "commits": [
+          "186267b551ce8e16df90aa7b3df01b7417304d29"
+        ],
+        "id": "revision-ref-guard-batching",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "8f01b9d9-8c62-44a2-b0df-751c93c5898e",
-  "parent_state": "33f8ff128381fbe95f424ff2b88f283a9a7c799f",
+  "operation_token": "4ee57aa0-5555-4e48-9358-b0203445cbc4",
+  "parent_state": "1dd0fb740ad89e750e027e2196282f3db79f8182",
   "projection_status": "partial",
-  "publication_id": "0b44119d-1b2a-497a-bc41-28f3ee71b1b0",
-  "publication_scope": "close:oikuma-control-divergence",
+  "publication_id": "32c344b9-6470-45c9-be61-a6ebe3310cc0",
+  "publication_scope": "stack:revision-ref-guard-batching",
   "schema_version": 2,
   "syncwheel_version": "0.46.4",
   "tombstones": [
