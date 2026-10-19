@@ -9,7 +9,7 @@
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
-    "refs/heads/pr/desk-empty-step": "0eff834e04c14e50780be3377cfc8c9a3c2fc6cb",
+    "refs/heads/pr/desk-empty-step": "61b9b8d4dc6db7e99495ca3d22a1b79be55f7be4",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
@@ -85,7 +85,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T15:48:53+00:00",
+  "created_at": "2026-10-19T15:49:43+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -251,11 +251,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "668f4185-db47-4c27-b443-1a70a7e78676",
-  "parent_state": "5a618448598b697319105cbba0d5c1683b3a760d",
+  "operation_token": "35445c37-7f3b-43b1-a5fb-868852488106",
+  "parent_state": "d4a539ef7279ee828960459f4991cac002794f26",
   "projection_status": "partial",
-  "publication_id": "eff12714-9fb7-4f3f-bcbd-ea0898b3a194",
-  "publication_scope": "promote:desk-empty-step",
+  "publication_id": "efde6d57-aacd-4fa7-9b49-bafb590bd751",
+  "publication_scope": "stack:desk-empty-step",
   "schema_version": 2,
   "syncwheel_version": "0.46.1",
   "tombstones": [
