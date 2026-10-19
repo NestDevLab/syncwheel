@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/desk-empty-step": "4c372531c85deae453f7a6f8ff53589d1637caad"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -9,7 +7,7 @@
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
-    "refs/heads/pr/desk-empty-step": "70236606907e02190afe0808329da9a58f88b3f1",
+    "refs/heads/pr/desk-empty-step": "2ca9797e4f9b42c4623f0df166ae099ab2af3ff9",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
@@ -85,7 +83,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T16:48:37+00:00",
+  "created_at": "2026-10-19T17:00:49+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -220,9 +218,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "desk-empty-step"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -230,43 +226,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/desk-empty-step",
-        "commits": [
-          "04cb306f9bfda716f8e95e9597b4dbac4c2b279e",
-          "163b157e77905b915603c3ac75250d86943043bb",
-          "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d",
-          "34205a88ca749cf4378ab520a2a9bec525e5728b",
-          "f06b23729c4e36890aa6b960074ba64d2cd49ddd",
-          "afb7a0689e29a9171b42c33b2e1fe817d98102c9",
-          "10cb23a489a322e67e1dfce181bb185afd548992",
-          "9be3c7ce4ad90aa1818103aff0b821ed68aae52f",
-          "87d3524c4d637647cedc8ebb87eac5c82e95cfde",
-          "2cd62ef34e592c706ddf6e4918463b338eec1434",
-          "bc5f65380beaaa394b449c8b1e1cfb443015686d",
-          "56cf727e4c41d195b2fb75dfcedb5dbd713ec82c",
-          "11a3306f078dc97ed94e668be31f941482e5a548",
-          "4c372531c85deae453f7a6f8ff53589d1637caad"
-        ],
-        "id": "desk-empty-step",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "2913092c-c226-4fb8-b052-5b7d9e524dee",
-  "parent_state": "f654c1be2be609513739dbc3dafc52a44d205e27",
+  "operation_token": "52b543e4-6463-48f5-a8c4-c3e99371564c",
+  "parent_state": "a2dcbefac9865a51ad659dd30c2600766d03ea27",
   "projection_status": "partial",
-  "publication_id": "287159e5-f3f3-4203-8ee1-fce911882e4e",
-  "publication_scope": "stack:desk-empty-step",
+  "publication_id": "ba83820c-ab2b-42bd-b089-c446332515a1",
+  "publication_scope": "close:desk-empty-step",
   "schema_version": 2,
   "syncwheel_version": "0.46.1",
   "tombstones": [
@@ -1092,6 +1060,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/desk-empty-step",
       "remote_tip": "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d",
+      "stack": "desk-empty-step"
+    },
+    {
+      "branch": "pr/desk-empty-step",
+      "closed_at": "2026-10-19T17:00:46+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/desk-empty-step",
+      "remote_tip": null,
       "stack": "desk-empty-step"
     }
   ]
