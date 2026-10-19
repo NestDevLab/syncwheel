@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/oikuma-null-peer-repair"
+  ],
+  "claimed_at": "2026-10-19T17:29:40+00:00",
+  "coordination_id": "default",
+  "operation_token": "b51ffbf9-861f-4bce-a79d-b376bcd0e3c5",
+  "publication_scope": "stack:oikuma-null-peer-repair",
+  "source_ref": "refs/heads/pr/oikuma-null-peer-repair",
+  "syncwheel_version": "0.46.2"
+}
