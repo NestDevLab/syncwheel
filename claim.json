@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/stack-archive-proof"
-  ],
-  "claimed_at": "2026-10-19T14:59:25+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-19T15:17:38+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "c8162041-b354-4f83-8405-f8400d67b090",
-  "publication_scope": "stack:stack-archive-proof",
+  "operation_token": "ff2b5ac5-016d-45ff-85e6-9f1ce0266123",
+  "publication_scope": "close:stack-archive-proof",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/stack-archive-proof",
-  "syncwheel_version": "0.46.0"
+  "syncwheel_version": "0.45.8"
 }
