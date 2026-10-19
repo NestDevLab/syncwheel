@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/desk-merge-conflict-fix": "15678756e092550bf6782354a500c1f156908db9"
+    "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -9,7 +9,7 @@
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
-    "refs/heads/pr/desk-merge-conflict-fix": "ddca092c7c6897e106ea54d0bbb444390464caee",
+    "refs/heads/pr/desk-merge-conflict-fix": "bf1723dccf74a59cd2e4338fb7f9dfcda6bd2635",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -80,7 +80,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T11:10:40+00:00",
+  "created_at": "2026-10-19T12:36:22+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -94,7 +94,7 @@
     "refs/heads/pr/close-published-recovery": "51416e3150206d76eda43ff61809a7301b346883",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
-    "refs/heads/pr/desk-merge-conflict-fix": "15678756e092550bf6782354a500c1f156908db9",
+    "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
@@ -233,7 +233,8 @@
           "15258fdeb62b8c022b63c63bb65e207cd334871f",
           "4f5e57a9e4547fe189555a46392f00f811a34c08",
           "f39c49c86b43366ad89f02840e9a1b42f251bb8b",
-          "15678756e092550bf6782354a500c1f156908db9"
+          "15678756e092550bf6782354a500c1f156908db9",
+          "2d66b6365fdeb9b92865ee325863176613c3a482"
         ],
         "id": "desk-merge-conflict-fix",
         "integration_branch": "main-integration",
@@ -243,10 +244,10 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "e8e7ce19-956c-4416-ae68-1db007749671",
-  "parent_state": "56ba3b42d5e024f0ba59f846f94333607a3a81dd",
+  "operation_token": "4f88e8ad-c6d9-4905-aef6-5840b6f230c3",
+  "parent_state": "3c24265609447353af59fbb4a0c8e42a72452b0d",
   "projection_status": "partial",
-  "publication_id": "c0687684-8797-476f-80bd-52b4418d181d",
+  "publication_id": "5b6bf94f-0868-47af-aee6-350329968020",
   "publication_scope": "stack:desk-merge-conflict-fix",
   "schema_version": 2,
   "syncwheel_version": "0.45.7",
