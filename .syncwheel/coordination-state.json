@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -45,7 +43,7 @@
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
-    "refs/heads/pr/stack-archive-proof": "d9fb4693a8ff9441faaf11b7c01795b30fa81433",
+    "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "58b2e3172c7c08ff931be56bcef9937e49281a10",
@@ -83,7 +81,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T14:59:25+00:00",
+  "created_at": "2026-10-19T15:17:38+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -216,9 +214,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "stack-archive-proof"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -226,32 +222,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/stack-archive-proof",
-        "commits": [
-          "bb60e10555a6abfb16cc5697c66db2f5cade6693"
-        ],
-        "id": "stack-archive-proof",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "c8162041-b354-4f83-8405-f8400d67b090",
-  "parent_state": "94eb5e7e2f98088d40d2431d1b006c852755642d",
+  "operation_token": "ff2b5ac5-016d-45ff-85e6-9f1ce0266123",
+  "parent_state": "4ec44cdd096e94cd6c7259952909cfe88d01c453",
   "projection_status": "partial",
-  "publication_id": "c9c637ab-c0e5-4d23-9b18-61d4578832e7",
-  "publication_scope": "stack:stack-archive-proof",
+  "publication_id": "e59d3ba4-f892-4f58-b317-8f5d3a58cf31",
+  "publication_scope": "close:stack-archive-proof",
   "schema_version": 2,
-  "syncwheel_version": "0.46.0",
+  "syncwheel_version": "0.45.8",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1059,6 +1040,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/stack-archive-proof",
       "remote_tip": "acd4c69058b2841fe7aa0b60542e87258821a875",
+      "stack": "stack-archive-proof"
+    },
+    {
+      "branch": "pr/stack-archive-proof",
+      "closed_at": "2026-10-19T15:17:34+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/stack-archive-proof",
+      "remote_tip": null,
       "stack": "stack-archive-proof"
     }
   ]
