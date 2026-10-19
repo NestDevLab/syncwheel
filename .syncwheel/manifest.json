@@ -45,7 +45,7 @@
   "stacks": [
     {
       "id": "desk-empty-step",
-      "branch": "syncwheel/draft/desk-empty-step",
+      "branch": "pr/desk-empty-step",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -55,9 +55,9 @@
         "163b157e77905b915603c3ac75250d86943043bb",
         "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Recover exact empty integration-only replay steps in managed desks"
