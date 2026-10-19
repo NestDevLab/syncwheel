@@ -45,7 +45,7 @@
   "stacks": [
     {
       "id": "desk-merge-conflict-fix",
-      "branch": "syncwheel/draft/desk-merge-conflict-fix",
+      "branch": "pr/desk-merge-conflict-fix",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -56,9 +56,9 @@
         "4f5e57a9e4547fe189555a46392f00f811a34c08",
         "f39c49c86b43366ad89f02840e9a1b42f251bb8b"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Allow governed desk resolution of merge-stack conflicts"
