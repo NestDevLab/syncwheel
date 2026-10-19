@@ -28708,6 +28708,8 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if git(desk, 'diff', '--quiet', check=False).returncode != 0:
             raise SyncwheelError('integration resolution desk has unstaged changes; review and stage the complete resolution')
         operation = receipt['operation']
+        if operation.get('empty') and not integration_desk_has_exact_empty_step(desk, receipt, step):
+            raise SyncwheelError('empty integration-only desk step changed; preserve and review it')
         if ref_tip(desk, operation['ref']) != operation['tip']:
             raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
         tree = git(desk, 'write-tree').stdout.strip()
@@ -28753,6 +28755,19 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         )
         print(f"{stack['id']}: recorded {len(commits)} resolved integration commits from {desk}")
     return 0
+
+
+def integration_desk_has_exact_empty_step(desk, receipt, step):
+    """Recognize only a stopped integration-only pick with no tree change."""
+    argv = step.get('argv') or []
+    return bool(
+        step.get('integration_only') and 'cherry-pick' in argv
+        and ref_tip(desk, 'CHERRY_PICK_HEAD') == argv[-1]
+        and ref_tip(desk, 'HEAD') == receipt['head']
+        and not ref_tip(desk, 'MERGE_HEAD') and not ref_tip(desk, 'REVERT_HEAD')
+        and not git(desk, 'status', '--porcelain', '--untracked-files=all').stdout.strip()
+        and git(desk, 'write-tree').stdout.strip() == ref_tree(desk, receipt['head'])
+    )
 
 
 def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
@@ -28831,16 +28846,22 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
                         cwd=repo_root, env=step['env'])
                 except SyncwheelError:
                     paths = git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.splitlines()
-                    if not paths:
+                    empty = integration_desk_has_exact_empty_step(desk, receipt, step)
+                    if not paths and not empty:
                         raise
+                    # Recheck the full source/ref/manifest lease after Git failed,
+                    # including a legacy ready receipt with CHERRY_PICK_HEAD.
+                    read_integration_desk(repo_root, manifest, manifest_path, desk)
                     operation_ref = 'MERGE_HEAD' if 'merge' in argv else 'CHERRY_PICK_HEAD'
                     receipt.update(status='conflict', operation={
                         'ref': operation_ref, 'tip': ref_tip(desk, operation_ref),
+                        **({'empty': True} if empty else {}),
                     })
                     atomic_write_private_json(receipt_path, receipt, indent=2)
                     raise SyncwheelError(
                         f"resolution desk: {desk}\nstack: {step['stack_id']}\n"
-                        + '\n'.join(paths) + '\nResolve and stage the paths, then run:\n  '
+                        + ('Empty integration-only step; review its unchanged tree.' if empty else '\n'.join(paths))
+                        + '\nResolve and stage the paths, then run:\n  '
                         + quoted(['syncwheel', 'stack', 'resolve-integration', step['stack_id'], '--worktree', str(desk)])
                     )
             receipt.update(head=ref_tip(desk, 'HEAD'), next=receipt['next'] + 1)

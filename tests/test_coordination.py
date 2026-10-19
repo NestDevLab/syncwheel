@@ -9925,6 +9925,75 @@ sys.exit(module.main())
         self.assertEqual((repo / 'only-tail.txt').read_text(), 'integration tail\n')
         self.assertEqual((repo / fixture['filename']).read_text(), 'reviewed integration-only\n')
 
+    def empty_integration_only_desk_fixture(self, name):
+        fixture = self.a14_published_tip_reuse_fixture(name, integration_strategy='merge-stacks')
+        self.a14_checkout_published_integration(fixture)
+        repo, module = fixture['follower'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        branch = manifest['stacks'][0]['branch']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        # The old integration contains a separately owned contribution.
+        (repo / 'duplicate.txt').write_text('shared addition\n')
+        self.git(repo, 'add', 'duplicate.txt')
+        self.git(repo, 'commit', '-qm', 'old integration-only contribution')
+        duplicate = module.ref_tip(repo, 'HEAD')
+        manifest['stacks'][0]['integration_only_commits'] = [duplicate]
+        with module.manifest_write_transaction(repo, path, 'fixture-only-ownership'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_only_ownership')
+        self.run_cli(repo, 'int', 'push')
+        old_integration = module.ref_tip(repo, manifest['integration']['branch'])
+        self.git(repo, 'switch', branch)
+        (repo / 'duplicate.txt').write_text('shared addition\n')
+        (repo / 'combined.txt').write_text('additional source content\n')
+        self.git(repo, 'add', 'duplicate.txt', 'combined.txt')
+        self.git(repo, 'commit', '-qm', 'source now includes old contribution and more')
+        source = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['commits'].append(source)
+        with module.manifest_write_transaction(repo, path, 'fixture-source-advance'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_source_advance')
+        # A following integration-only step must survive empty-step capture.
+        self.git(repo, 'switch', '-c', 'scratch/' + name + '-tail', duplicate)
+        (repo / 'tail.txt').write_text('remaining replay step\n')
+        self.git(repo, 'add', 'tail.txt')
+        self.git(repo, 'commit', '-qm', 'remaining integration-only step')
+        tail = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['integration_only_commits'].append(tail)
+        with module.manifest_write_transaction(repo, path, 'fixture-only-tail'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_only_tail')
+        fixture.update(desk=self.tmp / (name + '-desk'), duplicate=duplicate,
+                       tail=tail, advanced_source=source, old_integration=old_integration)
+        return fixture
+
+    def test_empty_integration_only_desk_records_exact_step_and_replays_tail(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-step')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        before_source = self.a14_source_snapshot(fixture)
+        failure = self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                               '--worktree', str(desk), '--reason', 'review empty step', expected=2)
+        self.assertIn('resolve-integration', failure.stderr)
+        manifest, path = module.load_manifest(repo)
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt['status'], 'conflict')
+        self.assertEqual(receipt['operation']['tip'], fixture['duplicate'])
+        self.assertTrue(receipt['operation']['empty'])
+        self.assertEqual(self.a14_source_snapshot(fixture), before_source)
+        self.assertEqual(self.git(desk, 'status', '--porcelain').stdout, '')
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        manifest, _ = module.load_manifest(repo)
+        self.assertEqual(manifest['stacks'][0]['integration_only_commits'], [fixture['tail']])
+        self.assertEqual(module.ref_tip(repo, manifest['stacks'][0]['branch']), fixture['advanced_source'])
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'finish reviewed empty step')
+        self.assertEqual((repo / 'tail.txt').read_text(), 'remaining replay step\n')
+        self.assertTrue(module.branch_contains(repo, manifest['integration']['branch'], fixture['old_integration']))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'repeat reviewed projection')
+        self.run_cli(repo, 'validate')
+
     def test_merge_stack_desk_dry_run_plans_detached_review_path(self):
         fixture = self.merge_stack_conflict_desk_fixture('desk-dry-run')
         result = self.run_cli(fixture['follower'], 'int', 'rebuild', '--replay-mode', 'desk',
