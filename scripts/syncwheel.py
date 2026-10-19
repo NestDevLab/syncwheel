@@ -4746,6 +4746,11 @@ def load_manifest(repo_root, manifest_path=None):
         data = json.loads(path.read_text())
     except json.JSONDecodeError as exc:
         raise SyncwheelError(f'invalid manifest JSON: {exc}') from exc
+    return normalize_manifest_data(data, path), path
+
+
+def normalize_manifest_data(data, path):
+    """Normalize parsed control data without inspecting moving refs or a checkout."""
     if not isinstance(data, dict):
         raise SyncwheelError('manifest root must be an object')
     version = data.get('version')
@@ -4939,7 +4944,7 @@ def load_manifest(repo_root, manifest_path=None):
                     + ', '.join(mismatched)
                 )
     validate_channel_branch_ownership(data)
-    return data, path
+    return data
 
 
 def save_manifest(path, manifest):
@@ -7926,6 +7931,56 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
     return True
 
 
+def integration_divergence_is_control_only(repo_root, local_tip, published_tip):
+    """Admit only a linear, structurally valid local control history at divergence."""
+    bases = git(repo_root, 'merge-base', '--all', local_tip, published_tip, check=False)
+    if bases.returncode != 0 or len(bases.stdout.split()) != 1:
+        return False
+    previous = bases.stdout.strip()
+    commits = rev_list(repo_root, f'{published_tip}..{local_tip}')
+    if not commits:
+        return False
+    for commit in commits:
+        parents = git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
+        if parents != [previous]:
+            return False
+        try:
+            if not integration_control_only_transition(repo_root, commit, previous):
+                return False
+            control = normalize_manifest_data(
+                integration_control_manifest_from_tree(repo_root, commit),
+                integration_manifest_path(repo_root),
+            )
+            defaults, integration = control['defaults'], control['integration']
+            if (
+                isinstance(control['version'], bool)
+                or any(not isinstance(defaults.get(key), str) or not defaults[key]
+                    for key in ('canonical_remote', 'publication_remote', 'base_branch', 'base_ref'))
+                or not isinstance(integration.get('base'), str) or not integration['base']
+                or integration.get('strategy') not in INTEGRATION_STRATEGIES
+                or not isinstance(integration.get('branch'), str)
+                or not is_valid_coordination_branch_ref(f"refs/heads/{integration['branch']}")
+                or not is_valid_coordination_branch_ref(f"refs/heads/{defaults['base_branch']}")
+                or not isinstance(integration['stacks'], list)
+                or not all(isinstance(key, str) and key in stack_map(control)
+                           for key in integration['stacks'])
+                or len(integration['stacks']) != len(set(integration['stacks']))
+            ):
+                return False
+            for stack in control['stacks']:
+                if (
+                    any(not isinstance(stack.get(key), str) or not stack[key]
+                        for key in ('base', 'target_remote', 'target_branch', 'integration_branch'))
+                    or any(not is_valid_coordination_branch_ref(f'refs/heads/{stack[key]}')
+                           for key in ('branch', 'target_branch', 'integration_branch'))
+                ):
+                    return False
+        except (SyncwheelError, TypeError, ValueError, KeyError, AttributeError):
+            return False
+        previous = commit
+    return previous == local_tip
+
+
 def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, reason):
     """Plan an ordinary detached replay before changing published integration history."""
     if not coordination_is_active(manifest):
@@ -7960,7 +8015,14 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         ):
             raise SyncwheelError(reuse_preflight['reason'])
         local_tip = ref_tip(repo_root, branch)
-        if not local_tip or not branch_contains(repo_root, local_tip, observed['published_tip']):
+        local_successor = bool(local_tip and branch_contains(repo_root, local_tip, observed['published_tip']))
+        control_divergence = bool(
+            local_tip and not local_successor
+            and integration_divergence_is_control_only(
+                repo_root, local_tip, observed['published_tip'],
+            )
+        )
+        if not local_successor and not control_divergence:
             raise SyncwheelError('integration reconciliation requires a local successor of published history')
         source = integration_reconciliation_source(repo_root, manifest_path)
         if source['manifest']['kind'] != 'file' or (
@@ -7979,6 +8041,8 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         provenance, store_after, provenance_after = integration_reconciliation_provenance(manifest, store, shared)
         pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, inputs)
         replay_tip = materialize_integration_replay(repo_root, pinned, overrides)
+        if control_divergence and not branch_contains(repo_root, replay_tip, observed['published_tip']):
+            raise SyncwheelError('integration reconciliation replay does not preserve published history')
         ignore = regular_checkout_path_bytes(repo_root, '.gitignore')
         if ignore is None:
             raise SyncwheelError('integration reconciliation requires regular ignore bytes')
