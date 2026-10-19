@@ -4105,6 +4105,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(publisher, 'push', 'origin', 'main')
         self.git(repo, 'fetch', 'origin')
         self.run_cli(repo, 'stack', 'close', 'retired', '--reason', 'absorbed')
+        self.run_cli(repo, 'int', 'push')
         return {'origin': origin, 'repo': repo, 'module': module, 'source': source,
                 'declared': declared, 'merged': merged}
 
@@ -4114,6 +4115,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         peer = self.clone(fixture['origin'], 'absorbed-source-auto-peer')
         self.git(peer, 'switch', '-c', 'integration/shared', 'origin/integration/shared')
         self.disable_fixture_hooks(peer)
+        self.git(peer, 'branch', 'pr/other', 'origin/pr/other')
         manifest, path = module.load_manifest(peer)
         self.assertNotIn('retired', module.stack_map(manifest))
         self.assertEqual(module.commit_parent_count(peer, fixture['source']), 2)
@@ -4122,6 +4124,68 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue(module.branch_contains(peer, 'integration/shared', fixture['merged']))
         self.assertTrue((peer / 'other-owned.txt').exists())
         self.assertTrue((peer / 'delivered.txt').exists())
+
+    def test_absorbed_source_auto_merge_rejects_unproved_and_abandoned_closes(self):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-proof')
+        repo, module = fixture['repo'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        tip = module.ref_tip(repo, manifest['integration']['branch'])
+        current = module.coordination_state_from_commit(repo, observation['state_tip'], 'default')
+        # Locate the actual native close; later integration publication remains
+        # separate, so the negative states cannot inherit the valid close token.
+        while current.get('publication_scope') != 'close:retired':
+            current = module.coordination_state_from_commit(repo, current['parent_state'], 'default')
+        close = current
+        before = module.coordination_state_from_commit(repo, close['parent_state'], 'default')
+        delivery = module.integration_projection_ref_observation(repo, 'base', 'integration', manifest['integration']['base'])
+        for kind in ('unproved', 'abandoned', 'superseded', 'false-ref', 'false-digest'):
+            with self.subTest(kind=kind):
+                changed = json.loads(json.dumps(before if kind == 'unproved' else close))
+                if kind == 'unproved':
+                    parent = changed.get('parent_state')
+                else:
+                    parent = close['parent_state']
+                    if kind in ('abandoned', 'superseded'):
+                        changed['tombstones'][-1]['reason'] = kind
+                    elif kind == 'false-ref':
+                        changed['tombstones'][-1]['ref'] = 'refs/heads/pr/unrelated'
+                    else:
+                        changed['manifest_digest'] = '0' * 64
+                forged_tip = module.create_coordination_state_commit(repo, changed, parent)
+                observed = dict(observation, state_tip=forged_tip, state=changed)
+                allowed = set()
+                if kind != 'false-digest':
+                    module.historically_closed_integration_commits(
+                        repo, tip, observed, candidates=[fixture['source']],
+                        delivery_tip=delivery['tip'], delivery_observation=delivery,
+                        merge_parent_candidates=[fixture['source']], absorbed_merge_tips=allowed)
+                    self.assertEqual(allowed, set())
+                with self.assertRaises(module.SyncwheelError):
+                    module.integration_reconciliation_history(
+                        repo, manifest, tip, {}, path, observed,
+                        delivery_tip=delivery['tip'], delivery_observation=delivery)
+
+    def test_absorbed_source_auto_merge_rejects_altered_full_product_tree(self):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-tree')
+        repo, module = fixture['repo'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        parent = self.git(repo, 'show', '-s', '--format=%P', fixture['merged']).stdout.split()[0]
+        wrong_tree = module.ref_tree(repo, parent)
+        unsafe = self.git(repo, 'commit-tree', wrong_tree, '-p', parent, '-p', fixture['source'],
+                          '-m', 'historical source auto-merge with product rollback').stdout.strip()
+        delivery = module.integration_projection_ref_observation(repo, 'base', 'integration', manifest['integration']['base'])
+        allowed = set()
+        module.historically_closed_integration_commits(
+            repo, unsafe, observation, candidates=[fixture['source']],
+            delivery_tip=delivery['tip'], delivery_observation=delivery,
+            merge_parent_candidates=[fixture['source']], absorbed_merge_tips=allowed)
+        self.assertEqual(allowed, {fixture['source']})
+        with self.assertRaisesRegex(module.SyncwheelError, 'unclassified merge'):
+            module.integration_reconciliation_history(
+                repo, manifest, unsafe, {}, path, observation,
+                delivery_tip=delivery['tip'], delivery_observation=delivery)
 
     def test_replay_keeps_all_46_declared_commits_from_ten_stacks(self):
         origin = self.create_remote('ten-stack-replay-46')
