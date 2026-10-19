@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/revision-ref-guard-batching"
-  ],
-  "claimed_at": "2026-10-19T19:54:17+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-19T20:10:56+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "4ee57aa0-5555-4e48-9358-b0203445cbc4",
-  "publication_scope": "stack:revision-ref-guard-batching",
+  "operation_token": "905f0bd6-725f-42dc-8508-2d8f9cc30768",
+  "publication_scope": "close:revision-ref-guard-batching",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/revision-ref-guard-batching",
-  "syncwheel_version": "0.46.4"
+  "syncwheel_version": "0.46.5"
 }
