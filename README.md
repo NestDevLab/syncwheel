@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.45.8`
+Current version: `0.46.0`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1314,6 +1314,8 @@ an allowlisted working tree without PR stacks or integration. The manifest's
 syncwheel journal status
 syncwheel journal snapshot            # plan
 syncwheel journal snapshot --apply    # locked temporary-index commit
+syncwheel journal snapshot --path notes.txt --path docs/status.md --apply
+syncwheel journal publish --committed-only --apply  # never snapshot unfinished edits
 syncwheel journal publish             # plan snapshot and exact-lease push
 syncwheel journal publish --apply
 syncwheel journal pull                # fetch and plan a fast-forward to the remote tip
@@ -1321,6 +1323,7 @@ syncwheel journal pull --apply
 syncwheel journal pull --apply --park-conflicts   # save, fast-forward, three-way merge
 syncwheel journal schedule install    # plan a Linux systemd user timer
 syncwheel journal schedule install --apply
+syncwheel journal schedule install --committed-only --apply
 ```
 
 `journal publish` prints `excluded_count` and `pull.kept_local_count` in both
@@ -1328,9 +1331,29 @@ plan and apply results. Its other result fields remain available. Use
 `journal status --json` to inspect the full `excluded` path list; `journal snapshot`
 and `journal pull` retain their full diagnostic lists.
 
-Journal snapshots refuse a dirty real index, sensitive paths, oversized files,
+Whole-tree journal snapshots require a clean real index. Exact `--path` snapshots
+preserve unrelated staged entries and working files; each path is a literal,
+normalized repository-relative file name. All snapshots refuse sensitive paths, oversized files,
 and high-confidence secrets. Publication never merges, resets, rebases, or
 force-updates a remote.
+
+To migrate an already converged delivery repository, preview and then apply:
+
+```bash
+syncwheel repo mode set journal --branch main --remote origin --reason "Use linear operation history"
+syncwheel repo mode set journal --branch main --remote origin --reason "Use linear operation history" --apply
+```
+
+The primary checkout must be clean and the existing target branch must have the
+exact current tree. The command archives the original manifest and stack commits
+locally, drops delivery/coordination declarations, switches branches, and retargets
+the guards. It preserves unknown metadata and never deletes remote refs. Review
+`--include`, `--exclude`, `--interval`, and `--manifest-version` in the plan before
+applying. Commit the resulting manifest with an exact-path journal snapshot.
+
+Journal repositories also support the [revision provider](docs/revision-provider.md#journal-route)
+for local operation commits; use committed-only publication to publish those
+commits without collecting another writer's unfinished files.
 
 Several clones may write to the same journal. `journal pull` fetches the
 journal branch, reports `aligned`, `ahead`, or `behind`, and stops on
@@ -1383,7 +1406,7 @@ Common aliases:
 
 Agents should not infer stack ownership from memory when the repository is meant to be maintained via `syncwheel`.
 
-Four ratified working rules (MGT-0206), in full in
+Four ratified working rules, in full in
 [the skill](skills/syncwheel/SKILL.md#ratified-working-rules-read-this-first) and
 [docs/ai-agents.md](docs/ai-agents.md#ratified-working-rules-read-this-first):
 

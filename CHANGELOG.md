@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.46.0 - 2026-10-19
+
+- Record governed operations directly in journal repositories with exact-path commits, commit hooks, recoverable phase receipts, and local HEAD leases. Optional path-scoped leases accept only disjoint descendant commits under the starting provider policy.
+- Add committed-only journal publication and scheduling, plus repeatable exact-path snapshots that preserve unrelated staged and unstaged work.
+- Add plan-first delivery-to-journal migration with converged branch checks, archived manifests and stack refs, and reasoned guard retargeting.
+
 ## 0.45.8 - 2026-10-19
 
 - Prepare explicit merge-stack integration conflict desks in detached worktrees before automatic ancestry reconciliation, preserving the primary checkout and published refs.
