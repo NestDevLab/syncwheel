@@ -3111,6 +3111,76 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         finally:
             fixture.close()
 
+    def test_superseded_published_derived_history_avoids_reconciliation_replay(self):
+        self.fixture.close()
+        self.fixture = RevisionProviderRepository(coordination_mode='active-active')
+        fixture = self.fixture
+        fixture.enable_derived_paths('locks/', on_base=True)
+        fixture.cli('int', 'push')
+        path = 'locks/codex.lock'
+        (fixture.repo / 'locks').mkdir()
+        (fixture.repo / path).write_text('published derived\n')
+        fixture.git('add', path)
+        historical = fixture.commit_derived_projection(
+            'published-derived', [path], subject='test: published derived lock'
+        )
+        fixture.cli('int', 'push')
+        (fixture.repo / path).write_text('replacement derived\n')
+        fixture.git('add', path)
+        replacement = fixture.commit_derived_projection(
+            'replacement-derived', [path], subject='test: replacement derived lock'
+        )
+        manifest = fixture.read_manifest()
+        records = SYNCWHEEL.derived_provenance_records(fixture.repo, manifest)
+        self.assertFalse(SYNCWHEEL.is_provenance_bound_derived_projection_commit(
+            fixture.repo, historical, records
+        ))
+        self.assertTrue(SYNCWHEEL.is_provenance_bound_derived_projection_commit(
+            fixture.repo, replacement, records
+        ))
+        observation = SYNCWHEEL.observe_published_integration_tip(fixture.repo, manifest)
+        self.assertEqual(observation['status'], 'current')
+        self.assertTrue(SYNCWHEEL.integration_reconciliation_historical_derived(
+            fixture.repo, historical, replacement, observation
+        ))
+        with mock.patch.object(
+            SYNCWHEEL, 'integration_reconciliation_proof',
+            side_effect=AssertionError('published derived history needs no replay'),
+        ):
+            self.assertEqual(
+                SYNCWHEEL.historically_reconciled_unmapped_commits(
+                    fixture.repo, manifest, [historical]
+                ), {historical},
+            )
+
+        # An authentic derived witness never explains unrelated product history.
+        (fixture.repo / 'foreign.txt').write_text('unowned product\n')
+        fixture.git('add', 'foreign.txt')
+        fixture.git('commit', '-qm', 'test: unrelated product')
+        foreign = fixture.git('rev-parse', 'HEAD')
+        with mock.patch.object(SYNCWHEEL, 'git', wraps=SYNCWHEEL.git) as observed_git:
+            self.assertEqual(
+                SYNCWHEEL.historically_reconciled_unmapped_commits(
+                    fixture.repo, manifest, [historical, foreign]
+                ), {historical},
+            )
+        self.assertTrue(any(
+            call.args[1:3] == ('rev-list', '--merges')
+            for call in observed_git.call_args_list
+        ))
+        with mock.patch.object(
+            SYNCWHEEL, 'observe_published_integration_tip',
+            return_value={'status': 'stale'},
+        ), mock.patch.object(
+            SYNCWHEEL, 'integration_reconciliation_historical_derived',
+            side_effect=AssertionError('stale observation cannot authenticate history'),
+        ):
+            self.assertEqual(
+                SYNCWHEEL.historically_reconciled_unmapped_commits(
+                    fixture.repo, manifest, [historical]
+                ), set(),
+            )
+
     def test_untrailed_lock_commit_stays_unmapped(self):
         self.fixture.enable_derived_paths('locks/', on_base=True)
         path = 'locks/codex.lock'
