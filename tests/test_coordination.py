@@ -2913,6 +2913,64 @@ with module.coordination_publication_lock(Path(repo_path)):
             state['managed_refs']['refs/heads/integration/shared'], control_commit
         )
 
+    def test_promote_refreshes_commits_added_after_draft_creation(self):
+        for branch in ('pr/late-add', 'pr/explicit', 'syncwheel/draft/late-add'):
+            with self.subTest(branch=branch):
+                name = branch.replace('/', '-')
+                origin = self.create_remote(f'late-add-{name}')
+                repo = self.clone(origin, f'late-add-{name}')
+                self.init_coordinated(repo)
+                self.run_cli(repo, 'stack', 'create', 'late-add', '--draft',
+                             '--base', 'origin/main')
+                source = self.commit_on_branch(repo, 'scratch/late', 'late.txt')
+                self.run_cli(repo, 'stack', 'add', 'late-add', source)
+                self.run_cli(repo, 'stack', 'rebuild', 'late-add')
+                options = ['--branch', branch] if branch != 'pr/late-add' else []
+                self.run_cli(repo, 'stack', 'promote', 'late-add', *options)
+                _, state = self.remote_state(origin)
+                stack = next(s for s in state['manifest']['stacks'] if s['id'] == 'late-add')
+                self.assertEqual(stack['branch'], branch)
+                self.assertEqual(stack['commits'], [source])
+                self.assertNotIn('state', stack)
+                self.assertEqual(state['managed_refs'][f'refs/heads/{branch}'],
+                                 self.git(repo, 'rev-parse', branch).stdout.strip())
+
+    def test_promote_retries_after_updated_draft_publication_lands(self):
+        origin = self.create_remote('refresh-retry')
+        repo = self.clone(origin, 'refresh-retry')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'stack', 'create', 'refresh', '--draft')
+        source = self.commit_on_branch(repo, 'scratch/refresh', 'refresh.txt')
+        self.run_cli(repo, 'stack', 'add', 'refresh', source)
+        self.run_cli(repo, 'stack', 'rebuild', 'refresh')
+        self.run_cli_sigkill_after(repo, 'authorized_push', 'stack', 'promote', 'refresh')
+        refreshed_tip, refreshed = self.remote_state(origin)
+        self.assertEqual(refreshed['manifest']['stacks'][0]['state'], 'draft')
+        self.assertEqual(refreshed['manifest']['stacks'][0]['commits'], [source])
+        self.run_cli(repo, 'stack', 'promote', 'refresh')
+        _, promoted = self.remote_state(origin)
+        self.assertEqual(promoted['manifest']['stacks'][0]['branch'], 'pr/refresh')
+        self.assertEqual(promoted['parent_state'], refreshed_tip)
+
+    def test_stack_add_from_governed_lane_uses_primary_manifest(self):
+        origin = self.create_remote('lane-add')
+        repo = self.clone(origin, 'lane-add')
+        self.init_coordinated(repo)
+        opened = json.loads(self.run_cli(repo, 'worktree', 'open', 'author', '--json').stdout)
+        lane = Path(opened['lane']['path'])
+        lane_manifest = (lane / '.syncwheel' / 'manifest.json').read_bytes()
+        self.run_cli(repo, 'stack', 'create', 'created-later', '--draft')
+        (lane / 'lane.txt').write_text('lane change\n')
+        self.git(lane, 'add', 'lane.txt')
+        self.git(lane, 'commit', '-qm', 'feat: lane change')
+        source = self.git(lane, 'rev-parse', 'HEAD').stdout.strip()
+        self.run_cli(lane, 'stack', 'add', 'created-later', 'HEAD')
+        self.assertEqual((lane / '.syncwheel' / 'manifest.json').read_bytes(), lane_manifest)
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        self.assertEqual(module.require_stack(manifest, 'created-later')['commits'], [source])
+
     def test_coordinated_promote_transfers_draft_branch_ownership_with_a_tombstone(self):
         origin = self.create_remote()
         first = self.clone(origin, 'promote-first')

@@ -25844,6 +25844,41 @@ def resolve_pending_promote_intents(
         )
 
 
+def publish_updated_draft_before_promotion(repo_root, manifest, manifest_path, stack):
+    """Publish pending draft edits without widening the rename permission."""
+    if not coordination_is_active(manifest):
+        return
+    config = coordination_config(manifest)
+    observed = read_remote_coordination_state(
+        repo_root, config, fetch=True, local_manifest_version=manifest['version']
+    )
+    state = observed.get('state') or {}
+    remote_stack = stack_snapshot_map(state.get('manifest') or {}).get(stack['id'])
+    local_stack = stack_snapshot_map(coordination_manifest_snapshot(manifest, repo_root))[stack['id']]
+    if remote_stack == local_stack:
+        return
+    # Only an existing draft on the same ref may take this preliminary step.
+    # Foreign promotions and ownership changes remain the rename guard's job.
+    if not remote_stack or remote_stack.get('state') != 'draft' or remote_stack['branch'] != stack['branch']:
+        return
+    # Refresh only appended/replaced commit selections here. Other semantic
+    # edits still require explicit publication before requesting promotion.
+    if ({key: value for key, value in remote_stack.items() if key != 'commits'}
+            != {key: value for key, value in local_stack.items() if key != 'commits'}):
+        return
+    changed_refs = {f"refs/heads/{stack['branch']}": ref_tip(repo_root, stack['branch'])}
+    operation = begin_coordination_publication(
+        repo_root, manifest, manifest_path, changed_refs, f"stack:{stack['id']}", 'partial',
+    )
+    result = coordinated_publish(
+        repo_root, manifest, manifest_path, operation['changed_refs'],
+        f"stack:{stack['id']}", 'partial',
+        expected_coordination_state_tip=operation['expected_coordination_state_tip'],
+        operation_token=operation['operation_token'],
+    )
+    complete_coordination_publication(repo_root, manifest_path, operation, result)
+
+
 def command_stack_promote(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -25919,13 +25954,14 @@ def command_stack_promote(args):
         safe = from_branch.replace('/', '-').replace('\\', '-')
         previous_worktree_path = resolve_worktree_root_path(repo_root, worktree_root) / safe
 
-    stack['branch'] = to_branch
-    stack['state'] = 'published'
-    stack['publication'] = {'enabled': True}
     renamed = False
     coordination_result = None
     publication_operation = None
     try:
+        publish_updated_draft_before_promotion(repo_root, manifest, manifest_path, stack)
+        stack['branch'] = to_branch
+        stack['state'] = 'published'
+        stack['publication'] = {'enabled': True}
         require_manifest_transaction_current(manifest_path)
         if to_branch != from_branch:
             run(['git', 'branch', '-m', from_branch, to_branch], cwd=repo_root)
@@ -34306,6 +34342,25 @@ def execute_parsed_command(args):
     return args.func(args)
 
 
+def route_stack_add_from_governed_lane(args):
+    """Use shared control state while resolving revision specs in the author lane."""
+    if args.func != command_stack_add or args.manifest or args.personal:
+        return
+    repo_root = resolve_repo_root(args.repo)
+    worktrees = get_worktrees(repo_root)
+    if not worktrees or Path(worktrees[0]['path']).resolve() == repo_root.resolve():
+        return
+    registry, _ = load_governed_worktree_registry(repo_root)
+    if not any(Path(lane['path']).resolve() == repo_root.resolve() for lane in registry['lanes']):
+        return
+    # Explicit selectors and personal profiles keep their existing semantics.
+    primary_root = Path(worktrees[0]['path']).resolve()
+    if resolve_personal(repo_root) or resolve_personal(primary_root):
+        return
+    args.specs = [commit for spec in args.specs for commit in commit_list_for_spec(repo_root, spec)]
+    args.repo = str(primary_root)
+
+
 def main():
     parser = build_parser()
     raw_args = sys.argv[1:]
@@ -34336,6 +34391,7 @@ def main():
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
+        route_stack_add_from_governed_lane(args)
         # A guard callback runs inside a Git process that is mid-operation, so it
         # stays a decision about the incoming refs and skips the workspace-wide
         # preflights: those inspect other worktrees and must not run there.
