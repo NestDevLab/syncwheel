@@ -4118,6 +4118,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             with module.manifest_write_transaction(repo, path, 'historical-close-fixture'):
                 module.coordinated_publish(
                     repo, manifest, path, {}, 'close:retired', 'partial',
+                    operation_token='historical-close-fixture',
                     tombstone={'stack': 'retired', 'branch': 'pr/retired',
                                'ref': 'refs/heads/pr/retired', 'reason': 'absorbed',
                                'closed_at': module.iso_utc_now(), 'remote_tip': source})
