@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -37,31 +37,31 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "desk-empty-step",
-      "branch": "pr/desk-empty-step",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/desk-empty-step",
       "commits": [
         "04cb306f9bfda716f8e95e9597b4dbac4c2b279e",
         "163b157e77905b915603c3ac75250d86943043bb",
         "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d"
       ],
-      "state": "published",
+      "id": "desk-empty-step",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Recover exact empty integration-only replay steps in managed desks"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Recover exact empty integration-only replay steps in managed desks"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
