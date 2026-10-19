@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -9,7 +7,7 @@
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
-    "refs/heads/pr/desk-merge-conflict-fix": "bf1723dccf74a59cd2e4338fb7f9dfcda6bd2635",
+    "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -80,7 +78,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T12:36:22+00:00",
+  "created_at": "2026-10-19T13:27:50+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -210,9 +208,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "desk-merge-conflict-fix"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -220,37 +216,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/desk-merge-conflict-fix",
-        "commits": [
-          "8715dc6ed31828cc70dc379842210f954fb43686",
-          "15258fdeb62b8c022b63c63bb65e207cd334871f",
-          "4f5e57a9e4547fe189555a46392f00f811a34c08",
-          "f39c49c86b43366ad89f02840e9a1b42f251bb8b",
-          "15678756e092550bf6782354a500c1f156908db9",
-          "2d66b6365fdeb9b92865ee325863176613c3a482"
-        ],
-        "id": "desk-merge-conflict-fix",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "4f88e8ad-c6d9-4905-aef6-5840b6f230c3",
-  "parent_state": "3c24265609447353af59fbb4a0c8e42a72452b0d",
+  "operation_token": "0273a1ed-a68f-4387-9f7a-47e836706a75",
+  "parent_state": "fbdcc91f98c6b59b8f9b83820c6d6f9f817b8885",
   "projection_status": "partial",
-  "publication_id": "5b6bf94f-0868-47af-aee6-350329968020",
-  "publication_scope": "stack:desk-merge-conflict-fix",
+  "publication_id": "e6c67390-b0a4-4dfd-a38a-61fd8cf802a8",
+  "publication_scope": "close:desk-merge-conflict-fix",
   "schema_version": 2,
-  "syncwheel_version": "0.45.7",
+  "syncwheel_version": "0.45.8",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1034,6 +1010,14 @@
       "reason": "promoted",
       "ref": "refs/heads/syncwheel/draft/desk-merge-conflict-fix",
       "remote_tip": "59f350296e89f5f12d1178d48877053719ec0f07",
+      "stack": "desk-merge-conflict-fix"
+    },
+    {
+      "branch": "pr/desk-merge-conflict-fix",
+      "closed_at": "2026-10-19T13:27:47+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/desk-merge-conflict-fix",
+      "remote_tip": null,
       "stack": "desk-merge-conflict-fix"
     }
   ]
