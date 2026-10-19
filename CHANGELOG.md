@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.6 - 2026-10-19
+
+- Bind an explicitly reviewed, exact-path draft resolution to an unresolved prepared revision-provider operation. Digest-bound plans preserve all pending leases; ordinary same-operation recovery retains hooks and atomic publication checks. Resolution itself never publishes or finalizes.
+
 ## 0.46.5 - 2026-10-19
 
 - Reuse authenticated published derived provenance after a newer record supersedes it during revision-provider history validation. Skip reconciliation replay only when every requested commit is already proved; retain current coordination checks and the existing fallback for unexplained history.

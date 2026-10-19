@@ -753,7 +753,7 @@ def _advance(
             candidate = journal["candidateProductCommitSha"]
             backend.save_journal(request, journal)
             backend.checkpoint("route_decided")
-        elif journal.get("projectionRoute") == "manifest-base":
+        elif journal.get("projectionRoute") in {"manifest-base", "resolved-manifest-base"}:
             if not journal.get("candidateDraftCommitSha"):
                 raise RevisionProviderError(
                     "journaled manifest-base route is missing its immutable draft candidate"
