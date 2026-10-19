@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/desk-empty-step"
   ],
-  "claimed_at": "2026-10-19T15:39:42+00:00",
+  "claimed_at": "2026-10-19T15:48:42+00:00",
   "coordination_id": "default",
-  "operation_token": "1d8f3cb3-48ea-4c3c-9d21-4048c38d4952",
-  "publication_scope": "create:desk-empty-step",
+  "operation_token": "cc3145d0-e79c-4ea1-988b-a115d1c4afe3",
+  "publication_scope": "stack:desk-empty-step",
   "source_ref": "refs/heads/syncwheel/draft/desk-empty-step",
   "syncwheel_version": "0.46.1"
 }
