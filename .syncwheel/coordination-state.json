@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/journal-operations": "df881e8d83fa074d7589ee7137e7130143e2e108"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -20,6 +22,7 @@
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
+    "refs/heads/pr/journal-operations": "0a42d958ed26ebdfb2a0d5d3a654c8a7aeb99fe9",
     "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/lane-capacity-policy": "ebf6cbce4a4faf7fbedd98fbed65deb6346f26f5",
@@ -78,7 +81,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T13:27:50+00:00",
+  "created_at": "2026-10-19T13:28:09+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -111,6 +114,7 @@
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
+    "refs/heads/pr/journal-operations": "df881e8d83fa074d7589ee7137e7130143e2e108",
     "refs/heads/pr/journal-publish-compact": "ecb827e1631de3e45395c55b2b8defe5797c4ea3",
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
     "refs/heads/pr/lane-capacity-policy": "f2ab8a762356392c9a5a80dbd7f10aae3501d6af",
@@ -208,7 +212,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "journal-operations"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -216,15 +222,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/journal-operations",
+        "commits": [
+          "df881e8d83fa074d7589ee7137e7130143e2e108"
+        ],
+        "id": "journal-operations",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "0273a1ed-a68f-4387-9f7a-47e836706a75",
-  "parent_state": "fbdcc91f98c6b59b8f9b83820c6d6f9f817b8885",
+  "operation_token": "a5d5076e-8d0e-487c-88fd-1e1e5b02ba97",
+  "parent_state": "887c8033a6b133bf76fc2ff1bf95541aa65c7435",
   "projection_status": "partial",
-  "publication_id": "e6c67390-b0a4-4dfd-a38a-61fd8cf802a8",
-  "publication_scope": "close:desk-merge-conflict-fix",
+  "publication_id": "eb04d657-d371-4a87-81a2-56f236a95069",
+  "publication_scope": "stack:journal-operations",
   "schema_version": 2,
   "syncwheel_version": "0.45.8",
   "tombstones": [
