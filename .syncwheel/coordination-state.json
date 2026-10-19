@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/oikuma-control-divergence": "3e6492e2ecedc6ae4a748ddd2c3238af8d13368c"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -37,7 +35,7 @@
     "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/o3-history-proof": "36bf233506fca6e5b3ca62ef1c5943fa0cd1ef0e",
-    "refs/heads/pr/oikuma-control-divergence": "164986d18ce8dd8ebe93b50611d6449067c6bcdd",
+    "refs/heads/pr/oikuma-control-divergence": "4f02732949e05ce756e36d9c1e5cbaa8ac68c234",
     "refs/heads/pr/oikuma-null-peer-repair": "35e4034cf121fcbfc7c1e028fda401b944b0effa",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
@@ -87,7 +85,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T18:02:00+00:00",
+  "created_at": "2026-10-19T18:13:10+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -224,9 +222,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "oikuma-control-divergence"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -234,32 +230,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/oikuma-control-divergence",
-        "commits": [
-          "3e6492e2ecedc6ae4a748ddd2c3238af8d13368c"
-        ],
-        "id": "oikuma-control-divergence",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "8c462a62-880d-4651-8b9b-af521a8d400e",
-  "parent_state": "1f2a1eff29be53479cf8ebd049cef8d14abbaa04",
+  "operation_token": "8f01b9d9-8c62-44a2-b0df-751c93c5898e",
+  "parent_state": "33f8ff128381fbe95f424ff2b88f283a9a7c799f",
   "projection_status": "partial",
-  "publication_id": "ab918f6d-a180-472a-80a7-11b6976b58c2",
-  "publication_scope": "stack:oikuma-control-divergence",
+  "publication_id": "0b44119d-1b2a-497a-bc41-28f3ee71b1b0",
+  "publication_scope": "close:oikuma-control-divergence",
   "schema_version": 2,
-  "syncwheel_version": "0.46.3",
+  "syncwheel_version": "0.46.4",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1100,6 +1081,14 @@
       "ref": "refs/heads/pr/oikuma-null-peer-repair",
       "remote_tip": null,
       "stack": "oikuma-null-peer-repair"
+    },
+    {
+      "branch": "pr/oikuma-control-divergence",
+      "closed_at": "2026-10-19T18:13:07+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/oikuma-control-divergence",
+      "remote_tip": null,
+      "stack": "oikuma-control-divergence"
     }
   ]
 }
