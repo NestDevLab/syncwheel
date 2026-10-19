@@ -4074,6 +4074,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         manifest['integration']['strategy'] = 'merge-stacks'
         with module.manifest_write_transaction(repo, path, 'fixture-merge-strategy'):
             module.save_manifest_with_ledger(repo, path, manifest, 'fixture_merge_strategy')
+        self.run_cli(repo, 'int', 'push')
         other = self.commit_on_branch(repo, 'scratch/' + name + '-other', 'other-owned.txt')
         declared = self.commit_on_branch(repo, 'scratch/' + name + '-source', 'delivered.txt')
         self.run_cli(repo, 'stack', 'create', 'other', other, '--branch', 'pr/other')
