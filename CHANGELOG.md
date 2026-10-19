@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.46.0 - 2026-10-19
+
+- Record governed operations directly in journal repositories with exact-path commits, commit hooks, recoverable phase receipts, and local HEAD leases. Optional path-scoped leases accept only disjoint descendant commits under the starting provider policy.
+- Add committed-only journal publication and scheduling, plus repeatable exact-path snapshots that preserve unrelated staged and unstaged work.
+- Add plan-first delivery-to-journal migration with converged branch checks, archived manifests and stack refs, and reasoned guard retargeting.
+
+## 0.45.8 - 2026-10-19
+
+- Prepare explicit merge-stack integration conflict desks in detached worktrees before automatic ancestry reconciliation, preserving the primary checkout and published refs.
+- Capture staged desk resolutions with `stack resolve-integration --worktree`, bind them to the reviewed source revision, and consume them in ordinary rebuilds and shared coordination state. Reject stale inputs, unresolved indexes, unstaged changes, and occupied desk paths.
+- Preserve legacy unbound merge-stack metadata and pending replay steps; publish bound resolutions with a newer coordination schema, use the resolver identity, and preview the detached desk in dry-run.
+
 ## 0.45.7 - 2026-10-18
 
 - Publish pending draft changes before coordinated promotion so commits added after draft creation can be promoted without weakening branch ownership checks.

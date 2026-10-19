@@ -611,3 +611,211 @@ class JournalModeTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class JournalScopedOperationsTest(unittest.TestCase):
+    setUp = JournalModeTest.setUp
+    tearDown = JournalModeTest.tearDown
+    git = JournalModeTest.git
+    cli = JournalModeTest.cli
+    load_module = JournalModeTest.load_module
+    def test_committed_only_publish_leaves_dirty_files_uncommitted(self):
+        (self.repo / 'notes.txt').write_text('committed\n')
+        self.git('add', 'notes.txt')
+        self.git('commit', '-qm', 'Record completed operation')
+        tip = self.git('rev-parse', 'HEAD')
+        (self.repo / 'notes.txt').write_text('unfinished\n')
+        (self.repo / 'secret.env').write_text('PRIVATE_KEY=unfinished\n')
+        planned = json.loads(self.cli('journal', 'publish', '--committed-only').stdout)
+        self.assertEqual(planned['admitted'], [])
+        result = json.loads(self.cli('journal', 'publish', '--committed-only', '--apply').stdout)
+        self.assertEqual(result['published_tip'], tip)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'unfinished\n')
+        self.assertEqual(self.git('ls-remote', '--heads', 'origin', 'journal').split()[0], tip)
+
+    def test_exact_snapshot_preserves_unrelated_staged_and_dirty(self):
+        (self.repo / 'notes.txt').write_text('selected\n')
+        (self.repo / 'staged.txt').write_text('staged\n')
+        self.git('add', 'staged.txt')
+        (self.repo / 'staged.txt').write_text('new unstaged bytes\n')
+        (self.repo / 'other.env').write_text('unfinished secret\n')
+        staged_before = self.git('ls-files', '--stage', '--', 'staged.txt')
+        result = json.loads(self.cli('journal', 'snapshot', '--path', 'notes.txt', '--apply').stdout)
+        self.assertTrue(result['changed'])
+        self.assertEqual(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), 'notes.txt')
+        self.assertEqual(self.git('ls-files', '--stage', '--', 'staged.txt'), staged_before)
+        self.assertEqual((self.repo / 'staged.txt').read_text(), 'new unstaged bytes\n')
+        self.assertEqual(self.git('diff', '--cached', '--name-only'), 'staged.txt')
+        again = json.loads(self.cli('journal', 'snapshot', '--path', 'notes.txt', '--apply').stdout)
+        self.assertFalse(again['changed'])
+
+    def test_exact_snapshot_rejects_traversal(self):
+        result = self.cli('journal', 'snapshot', '--path', '../escape', expected=2)
+        self.assertIn('exact repo-relative', result.stderr)
+
+    def test_schedule_committed_only_uses_requested_command(self):
+        module = self.load_module()
+        manifest, _ = module.load_manifest(self.repo)
+        service, _ = module.journal_unit_contents(self.repo, manifest, committed_only=True)
+        self.assertIn('--committed-only --apply', service)
+
+    def configure_delivery(self):
+        path = self.repo / '.syncwheel/manifest.json'
+        path.write_text(json.dumps({
+            'version': 3, 'repository_mode': 'delivery',
+            'syncwheel_tracking': 'git-tracked',
+            'defaults': {'canonical_remote': 'origin', 'publication_remote': 'origin',
+                         'base_ref': 'origin/journal'},
+            'integration': {'branch': 'journal', 'base': 'origin/journal', 'stacks': []},
+            'stacks': [], 'channels': [], 'coordination': {'mode': 'disabled', 'id': 'mode-test', 'remote': 'origin',
+                             'state_branch': 'syncwheel/state/mode-test'},
+            'customMetadata': {'preserve': True},
+        }))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-qm', 'Configure delivery fixture')
+        self.git('branch', 'main')
+        return path
+
+    def test_mode_migration_plan_apply_preserves_manifest_and_archives(self):
+        path = self.configure_delivery()
+        original = path.read_bytes()
+        args = ('repo', 'mode', 'set', 'journal', '--branch', 'main', '--reason', 'Converged linear history')
+        planned = json.loads(self.cli(*args).stdout)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(planned['manifest']['version'], 1)
+        self.assertNotIn('coordination', planned['manifest'])
+        applied = json.loads(self.cli(*args, '--apply').stdout)
+        manifest = json.loads(path.read_text())
+        self.assertEqual(self.git('branch', '--show-current'), 'main')
+        self.assertEqual(manifest['customMetadata'], {'preserve': True})
+        self.assertNotIn('integration', manifest)
+        self.assertEqual((Path(applied['archive']) / 'manifest.json').read_bytes(), original)
+        self.assertTrue(applied['archive_refs'])
+
+    def test_mode_migration_refuses_unconverged_target(self):
+        self.configure_delivery()
+        self.git('branch', '-f', 'main', 'HEAD^')
+        result = self.cli('repo', 'mode', 'set', 'journal', '--reason', 'Migration', expected=2)
+        self.assertIn('converge first', result.stderr)
+
+    def test_committed_only_timer_upgrades_owned_service_and_removes_safely(self):
+        systemctl = self.root / 'systemctl'
+        systemctl.write_text('#!/bin/sh\nexit 0\n')
+        systemctl.chmod(0o755)
+        env = {'SYNCWHEEL_SYSTEMCTL': str(systemctl),
+               'SYNCWHEEL_SYSTEMD_USER_DIR': str(self.root / 'units')}
+        planned = json.loads(self.cli('journal', 'schedule', 'install', env=env).stdout)
+        self.cli('journal', 'schedule', 'install', '--apply', env=env)
+        self.cli('journal', 'schedule', 'install', '--committed-only', '--apply', env=env)
+        service = Path(planned['service_path'])
+        self.assertIn('--committed-only --apply', service.read_text())
+        self.cli('journal', 'schedule', 'remove', '--apply', env=env)
+        self.assertFalse(service.exists())
+
+    def test_snapshot_repeated_paths_including_deletion(self):
+        (self.repo / 'new.txt').write_text('new\n')
+        (self.repo / 'notes.txt').unlink()
+        (self.repo / 'unselected.txt').write_text('unfinished\n')
+        result = json.loads(self.cli('journal', 'snapshot', '--path', 'new.txt',
+                                    '--path', 'notes.txt', '--apply').stdout)
+        self.assertTrue(result['changed'])
+        self.assertEqual(set(self.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD').splitlines()),
+                         {'new.txt', 'notes.txt'})
+        self.assertEqual((self.repo / 'unselected.txt').read_text(), 'unfinished\n')
+
+    def test_mode_missing_stable_cli_refuses_before_branch_or_manifest_mutation(self):
+        path = self.configure_delivery()
+        original = path.read_bytes()
+        module = self.load_module()
+        args = module.build_parser().parse_args([
+            'repo', 'mode', 'set', 'journal', '--repo', str(self.repo),
+            '--reason', 'Converged journal migration', '--apply',
+        ])
+        with mock.patch.object(module, 'managed_hook_syncwheel_command', return_value=None):
+            with self.assertRaisesRegex(module.SyncwheelError, 'stable resolvable'):
+                module.command_repo_mode_set(args)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.git('branch', '--show-current'), 'journal')
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_mode_failures_restore_original_branch_manifest_and_guard(self):
+        path = self.configure_delivery()
+        original = path.read_bytes()
+        module = self.load_module()
+        args = module.build_parser().parse_args([
+            'repo', 'mode', 'set', 'journal', '--repo', str(self.repo),
+            '--reason', 'Converged journal migration', '--apply',
+        ])
+        environment = {'PATH': str(self.stable_cli_dir) + os.pathsep + os.environ['PATH']}
+        for function in ('save_manifest', 'install_managed_push_hook', 'append_ledger_event'):
+            with self.subTest(function=function), mock.patch.dict(os.environ, environment):
+                real = getattr(module, function)
+                injected = []
+                guard, _ = module.inspect_primary_guard(self.repo)
+                def fail_after(*positional, **keywords):
+                    value = real(*positional, **keywords)
+                    is_apply = function != 'install_managed_push_hook' or keywords.get('apply')
+                    if is_apply and not injected:
+                        injected.append(True)
+                        raise RuntimeError('injected migration interruption')
+                    return value
+                with mock.patch.object(module, function, side_effect=fail_after):
+                    with self.assertRaisesRegex(RuntimeError, 'injected migration'):
+                        module.command_repo_mode_set(args)
+                self.assertEqual(path.read_bytes(), original)
+                self.assertEqual(self.git('branch', '--show-current'), 'journal')
+                self.assertEqual(self.git('status', '--porcelain'), '')
+                self.assertEqual(module.inspect_primary_guard(self.repo)[0], guard)
+                self.assertFalse((self.repo / '.git/syncwheel/mode-migration-pending.json').exists())
+        with mock.patch.dict(os.environ, environment):
+            module.command_repo_mode_set(args)
+        self.assertEqual(json.loads(path.read_text())['repository_mode'], 'journal')
+
+    def test_mode_rollback_preserves_concurrent_guard_change_and_pending_receipt(self):
+        self.configure_delivery()
+        module = self.load_module()
+        args = module.build_parser().parse_args([
+            'repo', 'mode', 'set', 'journal', '--repo', str(self.repo),
+            '--reason', 'Converged journal migration', '--apply',
+        ])
+        real = module.install_managed_push_hook
+        concurrent_guard = None
+        def change_guard_then_fail(*positional, **keywords):
+            nonlocal concurrent_guard
+            result = real(*positional, **keywords)
+            if keywords.get('apply'):
+                manifest, _ = module.load_manifest(self.repo)
+                module.save_primary_guard(self.repo, manifest, enabled=False,
+                                          reason='Concurrent owner decision')
+                concurrent_guard = module.inspect_primary_guard(self.repo)[0]
+                raise RuntimeError('concurrent guard writer')
+            return result
+        with mock.patch.dict(os.environ, {'PATH': str(self.stable_cli_dir) + os.pathsep + os.environ['PATH']}):
+            with mock.patch.object(module, 'install_managed_push_hook', side_effect=change_guard_then_fail):
+                with self.assertRaisesRegex(module.SyncwheelError, 'guard lease lost'):
+                    module.command_repo_mode_set(args)
+        self.assertEqual(module.inspect_primary_guard(self.repo)[0], concurrent_guard)
+        self.assertTrue((self.repo / '.git/syncwheel/mode-migration-pending.json').exists())
+
+    def test_mode_interrupted_pending_receipt_can_be_retried_natively(self):
+        self.configure_delivery()
+        module = self.load_module()
+        args = module.build_parser().parse_args([
+            'repo', 'mode', 'set', 'journal', '--repo', str(self.repo),
+            '--reason', 'Converged journal migration', '--apply',
+        ])
+        real = module.save_manifest
+        def interrupt_after_save(*positional, **keywords):
+            real(*positional, **keywords)
+            raise RuntimeError('simulated abrupt interruption')
+        with mock.patch.dict(os.environ, {'PATH': str(self.stable_cli_dir) + os.pathsep + os.environ['PATH']}):
+            with mock.patch.object(module, 'save_manifest', side_effect=interrupt_after_save), mock.patch.object(
+                module, 'restore_pending_mode_migration', side_effect=RuntimeError('process stopped')
+            ):
+                with self.assertRaisesRegex(module.SyncwheelError, 'pending recovery retained'):
+                    module.command_repo_mode_set(args)
+            self.assertTrue((self.repo / '.git/syncwheel/mode-migration-pending.json').exists())
+            module.command_repo_mode_set(args)
+        self.assertFalse((self.repo / '.git/syncwheel/mode-migration-pending.json').exists())
+        self.assertEqual(self.git('branch', '--show-current'), 'main')

@@ -92,6 +92,7 @@ MANIFEST_VERSION_CHANNELS = 3
 COORDINATION_MODES = {'active-active', 'disabled'}
 COORDINATION_STATE_SCHEMA_VERSION = 2
 COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
+COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS = 4
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_STATE_PREFIX = 'syncwheel/state/'
 COORDINATION_CLAIM_FILE = 'claim.json'
@@ -4861,6 +4862,14 @@ def load_manifest(repo_root, manifest_path=None):
             raise SyncwheelError(
                 f'stack {stack_id} integration_commits must be a string array when present'
             )
+        resolution = stack.get('integration_resolution')
+        if resolution is not None and (
+            not isinstance(resolution, dict) or set(resolution) != {'source_tip'}
+            or not isinstance(resolution.get('source_tip'), str)
+            or not re.fullmatch(r'[0-9a-f]{40,64}', resolution['source_tip'])
+            or integration_commits is None
+        ):
+            raise SyncwheelError(f'stack {stack_id} has an invalid integration_resolution binding')
         integration_only_commits = stack.get('integration_only_commits')
         if integration_only_commits is not None and (
             not isinstance(integration_only_commits, list)
@@ -4993,6 +5002,25 @@ def stack_integration_base_commits(stack):
     commits.
     """
     return list(stack.get('integration_commits', stack['commits']))
+
+
+def bound_merge_stack_resolution_commits(stack):
+    """Only input-bound replacements participate in merge-stack replay."""
+    return stack_integration_base_commits(stack) if stack.get('integration_resolution') else None
+
+
+def merge_stack_resolution_commits(repo_root, stack, stack_ref):
+    """A reviewed integration replacement never rewrites the source branch."""
+    resolved = bound_merge_stack_resolution_commits(stack)
+    if resolved is None:
+        return None
+    binding = stack['integration_resolution']
+    if binding and binding.get('source_tip') != commit_full_sha(repo_root, stack_ref):
+        raise SyncwheelError(
+            f"stack {stack['id']} integration resolution is stale; "
+            'run syncwheel int rebuild --replay-mode desk --reason "review changed source"'
+        )
+    return resolved
 
 
 def stack_integration_only_commits(stack):
@@ -6649,6 +6677,8 @@ def integration_reconciliation_inputs(repo_root, manifest, inputs):
         stack = stacks[stack_id]
         if manifest['integration'].get('strategy', 'cherry-pick') == 'merge-stacks':
             expected.append(('merge-stack', stack_id, stack['branch']))
+            commits.extend(commit_full_sha(repo_root, value) for value in
+                           (bound_merge_stack_resolution_commits(stack) or []))
         else:
             commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_base_commits(stack))
         commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_only_commits(stack))
@@ -7601,7 +7631,8 @@ def integration_reconciliation_history(
         commit_full_sha(repo_root, commit)
         for stack in manifest['stacks']
         if selected is None or stack.get('id') in selected
-        for commit in stack_integration_commits(stack)
+        for commit in [*stack_integration_commits(stack),
+                       *(stack['commits'] if stack.get('integration_resolution') else [])]
     }
     patches = {commit_patch_id(repo_root, commit) for commit in declared}
     patches.discard(None)
@@ -11663,6 +11694,13 @@ def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=
             snapshot_stack['state'] = stack['state']
         if stack.get('depends_on'):
             snapshot_stack['depends_on'] = list(stack['depends_on'])
+        resolution = {key: copy.deepcopy(stack[key])
+                      for key in ('integration_commits', 'integration_only_commits', 'integration_resolution')
+                      if key in stack}
+        if stack.get('integration_resolution'):
+            # Resolution is integration-owned state, not a source-branch edit.
+            # int push carries both the replay objects and these bindings atomically.
+            snapshot['integration'].setdefault('resolutions', {})[stack['id']] = resolution
         snapshot['stacks'].append(snapshot_stack)
     if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
         snapshot['channels'] = []
@@ -11909,6 +11947,36 @@ def remote_ref_tips(repo_root, remote, refs):
     return output
 
 
+def coordination_integration_resolutions(snapshot):
+    """Validate integration-owned replacements without permitting source edits."""
+    resolutions = snapshot.get('integration', {}).get('resolutions', {})
+    ids = {item.get('id') for item in snapshot.get('stacks', []) if isinstance(item, dict)}
+    allowed = {'integration_commits', 'integration_only_commits', 'integration_resolution'}
+    if not isinstance(resolutions, dict):
+        raise SyncwheelError('coordination integration resolutions must be an object')
+    for stack_id, resolution in resolutions.items():
+        if stack_id not in ids or not isinstance(resolution, dict) or not set(resolution).issubset(allowed):
+            raise SyncwheelError('coordination integration resolution has unknown stack or fields')
+        for field in ('integration_commits', 'integration_only_commits'):
+            if field in resolution and (
+                not isinstance(resolution[field], list)
+                or not all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40,64}', value)
+                           for value in resolution[field])
+            ):
+                raise SyncwheelError('coordination integration resolution commits must be object IDs')
+        binding = resolution.get('integration_resolution')
+        if binding is None:
+            raise SyncwheelError('coordination integration resolution requires a source binding')
+        if binding is not None and (
+            not isinstance(binding, dict) or set(binding) != {'source_tip'}
+            or not isinstance(binding['source_tip'], str)
+            or not re.fullmatch(r'[0-9a-f]{40,64}', binding['source_tip'])
+            or 'integration_commits' not in resolution
+        ):
+            raise SyncwheelError('coordination integration resolution binding is invalid')
+    return resolutions
+
+
 def validate_coordination_snapshot_refs(snapshot):
     if not isinstance(snapshot, dict):
         raise SyncwheelError('coordination state manifest must be an object')
@@ -11951,6 +12019,7 @@ def validate_coordination_snapshot_refs(snapshot):
         raise SyncwheelError('coordination state manifest stacks must be an array')
     if not isinstance(channels, list):
         raise SyncwheelError('coordination state manifest channels must be an array')
+    coordination_integration_resolutions(snapshot)
     if 'landing' in snapshot:
         normalize_landing_policy(snapshot['landing'])
     coordination_public_remote_ref_parts(
@@ -12019,12 +12088,23 @@ def validate_coordination_snapshot_refs(snapshot):
             normalize_channel_timestamp(expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt')
 
 
+def coordination_snapshot_schema(snapshot):
+    # Older peers must reject bound resolutions rather than silently erase them.
+    integration = snapshot.get('integration')
+    if isinstance(integration, dict) and integration.get('resolutions'):
+        return COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS
+    return (COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
+            if snapshot.get('version') == MANIFEST_VERSION_CHANNELS
+            else COORDINATION_STATE_SCHEMA_VERSION)
+
+
 def validate_coordination_state(state, expected_id=None, claims_mode='advisory'):
     if not isinstance(state, dict):
         raise SyncwheelError('coordination state must be an object')
     if state.get('schema_version') not in {
         COORDINATION_STATE_SCHEMA_VERSION,
         COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
+        COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS,
     }:
         raise SyncwheelError(
             f"unsupported coordination state schema: {state.get('schema_version')!r}"
@@ -12039,11 +12119,7 @@ def validate_coordination_state(state, expected_id=None, claims_mode='advisory')
     if not isinstance(state.get('manifest'), dict):
         raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
     manifest_version = state['manifest'].get('version')
-    expected_schema = (
-        COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-        if manifest_version == MANIFEST_VERSION_CHANNELS
-        else COORDINATION_STATE_SCHEMA_VERSION
-    )
+    expected_schema = coordination_snapshot_schema(state['manifest'])
     if state['schema_version'] != expected_schema:
         raise SyncwheelError(
             f'coordination state schema {state["schema_version"]} is incompatible with '
@@ -12287,11 +12363,7 @@ def build_coordination_state(
     else:
         published_manifest_digest = previous_state['manifest_digest']
     return {
-        'schema_version': (
-            COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-            if manifest.get('version') == MANIFEST_VERSION_CHANNELS
-            else COORDINATION_STATE_SCHEMA_VERSION
-        ),
+        'schema_version': coordination_snapshot_schema(snapshot),
         'coordination_id': config['id'],
         'publication_id': str(uuid.uuid4()),
         'parent_state': previous.get('tip') if previous else None,
@@ -14421,6 +14493,8 @@ def apply_coordination_snapshot(manifest, snapshot):
     )
     updated['defaults'] = defaults
     integration = dict(snapshot['integration'])
+    resolutions = coordination_integration_resolutions(snapshot)
+    integration.pop('resolutions', None)
     integration['base'] = local_coordination_ref(
         snapshot['integration']['base'],
         defaults,
@@ -14434,6 +14508,7 @@ def apply_coordination_snapshot(manifest, snapshot):
         restored['target_remote'] = local_stack.get(
             'target_remote', defaults['canonical_remote']
         )
+        restored.update(copy.deepcopy(resolutions.get(stack['id'], {})))
         restored['state'] = stack.get('state', 'published')
         restored['publication'] = {'enabled': restored['state'] != 'draft'}
         restored['meta'] = (
@@ -17054,7 +17129,7 @@ def journal_read_admitted_file(path, max_file_bytes):
     return content, fingerprint, mode
 
 
-def journal_admission(repo_root, journal):
+def journal_admission(repo_root, journal, paths=None):
     admitted = []
     excluded = []
     rejected = []
@@ -17062,6 +17137,8 @@ def journal_admission(repo_root, journal):
     blobs = {}
     for entry in journal_status_entries(repo_root):
         path = entry['path']
+        if paths is not None and path not in paths:
+            continue
         if not journal_path_matches(path, journal['include']) or journal_path_matches(path, journal['exclude']):
             excluded.append(entry)
             continue
@@ -17125,15 +17202,23 @@ def journal_index_lock(repo_root):
         lock_path.unlink(missing_ok=True)
 
 
-def journal_snapshot(repo_root, manifest, apply=False):
+def journal_snapshot(repo_root, manifest, apply=False, paths=None):
     journal = manifest['journal']
     branch = journal['branch']
     if get_current_branch(repo_root) != branch:
         raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}')
-    if not journal_real_index_clean(repo_root):
+    if paths is not None:
+        for path in paths:
+            if not isinstance(path, str) or path.startswith('/') or '\\' in path or any(
+                part in {'', '.', '..'} for part in path.split('/')
+            ) or path.split('/')[0] == '.git':
+                raise SyncwheelError('snapshot --path requires an exact repo-relative file path')
+        if git(repo_root, 'ls-files', '-u').stdout.strip():
+            raise SyncwheelError('journal snapshot requires a conflict-free index')
+    elif not journal_real_index_clean(repo_root):
         raise SyncwheelError('journal snapshot requires a clean real index')
     parent = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
-    admitted, excluded, rejected, fingerprints, blobs = journal_admission(repo_root, journal)
+    admitted, excluded, rejected, fingerprints, blobs = journal_admission(repo_root, journal, paths=paths)
     result = {
         'mode': 'apply' if apply else 'plan',
         'branch': branch,
@@ -17152,7 +17237,7 @@ def journal_snapshot(repo_root, manifest, apply=False):
     with journal_lock(repo_root), journal_index_lock(repo_root) as (real_index_path, real_index_lock):
         if git(repo_root, 'rev-parse', 'HEAD').stdout.strip() != parent:
             raise SyncwheelError('journal HEAD changed during snapshot; retry')
-        if not journal_real_index_clean(repo_root):
+        if paths is None and not journal_real_index_clean(repo_root):
             raise SyncwheelError('journal real index changed during snapshot; retry')
         with tempfile.NamedTemporaryFile(prefix='syncwheel-journal-index-', delete=False) as handle:
             index_path = Path(handle.name)
@@ -17204,7 +17289,20 @@ def journal_snapshot(repo_root, manifest, apply=False):
             if update.returncode != 0:
                 raise SyncwheelError('journal HEAD changed before commit publication; retry')
             try:
-                git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(real_index_lock)})
+                if paths is None:
+                    git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(real_index_lock)})
+                else:
+                    for entry in admitted:
+                        relative = entry['path']
+                        value = blobs.get(relative)
+                        if value is None:
+                            git(repo_root, 'update-index', '--force-remove', '--', relative,
+                                env={'GIT_INDEX_FILE': str(real_index_lock)})
+                        else:
+                            object_id = git(repo_root, 'rev-parse', f'{commit}:{relative}').stdout.strip()
+                            git(repo_root, 'update-index', '--add', '--cacheinfo',
+                                f"{value['mode']},{object_id},{relative}",
+                                env={'GIT_INDEX_FILE': str(real_index_lock)})
                 os.replace(real_index_lock, real_index_path)
             except Exception as exc:
                 rollback = git(
@@ -17255,14 +17353,14 @@ def command_journal_status(args):
 
 def command_journal_snapshot(args):
     repo_root, manifest, _ = require_journal_manifest(args)
-    payload = journal_snapshot(repo_root, manifest, apply=args.apply)
+    payload = journal_snapshot(repo_root, manifest, apply=args.apply, paths=args.paths)
     print(json.dumps(payload, indent=2))
     return 0
 
 
 def command_journal_publish(args):
     repo_root, manifest, _ = require_journal_manifest(args)
-    payload = journal_publish(repo_root, manifest, apply=args.apply)
+    payload = journal_publish(repo_root, manifest, apply=args.apply, committed_only=args.committed_only is True)
     output = dict(payload)
     output['excluded_count'] = len(output.pop('excluded'))
     output['pull'] = dict(output['pull'])
@@ -17282,15 +17380,18 @@ def journal_unroll_snapshot(repo_root, branch, commit, parent):
         git(repo_root, 'read-tree', parent)
 
 
-def journal_publish(repo_root, manifest, apply=False):
+def journal_publish(repo_root, manifest, apply=False, committed_only=False):
     journal = manifest['journal']
     branch, remote = journal['branch'], journal['remote']
     # Another clone may have published since the last run; catching up first
     # keeps two writers from wedging each other on remote-ahead.
     pull = journal_pull(repo_root, manifest, apply=apply)
     expected_parent = pull['remote_tip']
+    empty_snapshot = {'mode': 'apply' if apply else 'plan', 'branch': branch,
+                      'parent': ref_tip(repo_root, 'HEAD'), 'admitted': [],
+                      'excluded': [], 'rejected': [], 'commit': None, 'changed': False}
     if not apply:
-        payload = journal_snapshot(repo_root, manifest, apply=False)
+        payload = empty_snapshot if committed_only else journal_snapshot(repo_root, manifest, apply=False)
         payload.update({'remote': remote, 'expected_remote_tip': expected_parent, 'pull': pull})
         return payload
     local_head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
@@ -17298,7 +17399,7 @@ def journal_publish(repo_root, manifest, apply=False):
         repo_root, 'merge-base', '--is-ancestor', expected_parent, local_head, check=False
     ).returncode != 0:
         raise SyncwheelError('journal local branch diverged from the expected remote parent; STOP')
-    snapshot = journal_snapshot(repo_root, manifest, apply=True)
+    snapshot = empty_snapshot if committed_only else journal_snapshot(repo_root, manifest, apply=True)
     tip = snapshot['commit'] or local_head
     if tip != expected_parent:
         refspec = f'{tip}:refs/heads/{branch}'
@@ -17635,17 +17736,18 @@ def journal_systemctl(*args, check=True):
     return run([executable, '--user', *args], check=check)
 
 
-def journal_unit_contents(repo_root, manifest):
+def journal_unit_contents(repo_root, manifest, committed_only=False):
     executable = journal_executable()
     repo = str(repo_root.resolve())
     interval = manifest['journal']['interval']
     def systemd_quote(value):
         return '"' + value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"') + '"'
 
+    publish_option = ' --committed-only' if committed_only else ''
     service = '\n'.join([
         '[Unit]', 'Description=Syncwheel journal snapshot and publish', '',
         '[Service]', 'Type=oneshot',
-        f'ExecStart={systemd_quote(executable)} journal publish --repo {systemd_quote(repo)} --apply', '',
+        f'ExecStart={systemd_quote(executable)} journal publish --repo {systemd_quote(repo)}{publish_option} --apply', '',
     ])
     timer = '\n'.join([
         '[Unit]', 'Description=Run Syncwheel journal periodically', '',
@@ -17664,7 +17766,7 @@ def command_journal_schedule(args):
     require_linux_scheduler()
     repo_root, manifest, _ = require_journal_manifest(args)
     unit_id, service_path, timer_path = journal_systemd_paths(repo_root)
-    service, timer = journal_unit_contents(repo_root, manifest)
+    service, timer = journal_unit_contents(repo_root, manifest, committed_only=args.committed_only is True)
     # The previous managed timer had no initial trigger. Accept only that exact
     # template as an upgrade/removal candidate, never an arbitrary unit file.
     old_timer = timer.replace(f'OnActiveSec={manifest["journal"]["interval"]}\n', '').replace(
@@ -17672,6 +17774,14 @@ def command_journal_schedule(args):
         'OnUnitInactiveSec=' + manifest['journal']['interval'] + '\nPersistent=true\n',
     )
     managed_files = ((service_path, service), (timer_path, timer))
+    alternate_service, _ = journal_unit_contents(
+        repo_root, manifest, committed_only=not (args.committed_only is True)
+    )
+
+    def is_owned_variant(path, content):
+        return (path == timer_path and content == old_timer) or (
+            path == service_path and content == alternate_service
+        )
     payload = {
         'mode': 'apply' if args.apply else 'plan', 'unit_id': unit_id,
         'service_path': str(service_path), 'timer_path': str(timer_path),
@@ -17697,7 +17807,7 @@ def command_journal_schedule(args):
     elif args.schedule_command == 'install' and args.apply:
         upgrading_legacy = timer_path.exists() and timer_path.read_text() == old_timer
         conflicts = [str(path) for path, content in managed_files if path.exists()
-                     and path.read_text() != content and not (path == timer_path and path.read_text() == old_timer)]
+                     and path.read_text() != content and not is_owned_variant(path, path.read_text())]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing overwrite: ' + ', '.join(conflicts))
         payload['managed_ref_guard'] = install_managed_push_hook(repo_root, apply=True)
@@ -17710,7 +17820,7 @@ def command_journal_schedule(args):
             journal_systemctl('restart', f'{unit_id}.timer')
     elif args.schedule_command == 'remove' and args.apply:
         conflicts = [str(path) for path, content in managed_files if path.exists()
-                     and path.read_text() != content and not (path == timer_path and path.read_text() == old_timer)]
+                     and path.read_text() != content and not is_owned_variant(path, path.read_text())]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing removal: ' + ', '.join(conflicts))
         if not service_path.exists() and not timer_path.exists():
@@ -19010,6 +19120,14 @@ def replay_plan(repo_root, manifest, target, mode):
         for stack_id in integration['stacks']:
             stack = stacks_by_id[stack_id]
             stack_ref = stack_ref_overrides.get(stack_id, stack['branch'])
+            resolved = merge_stack_resolution_commits(repo_root, stack, stack_ref)
+            if resolved is not None:
+                for commit in resolved:
+                    steps.append(replay_exec_step(
+                        [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
+                        replay_commit_env(repo_root, commit), stack_id=stack_id,
+                    ))
+                continue
             steps.append(replay_exec_step(
                 [
                     *prefix,
@@ -19024,11 +19142,12 @@ def replay_plan(repo_root, manifest, target, mode):
             ))
         for stack_id in integration['stacks']:
             for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
-                steps.append(replay_exec_step(
+                step = replay_exec_step(
                     [*prefix, 'cherry-pick', commit],
-                    replay_commit_env(repo_root, commit),
-                    stack_id=stack_id,
-                ))
+                    replay_commit_env(repo_root, commit), stack_id=stack_id,
+                )
+                step['integration_only'] = True
+                steps.append(step)
     else:
         raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
 
@@ -19749,6 +19868,10 @@ def integration_projection_input_snapshot(repo_root, manifest):
             refs.append(integration_projection_ref_observation(
                 repo_root, 'merge-stack', stack_id, stack['branch']
             ))
+            immutable_commits.extend(
+                commit_full_sha(repo_root, value) for value in
+                (bound_merge_stack_resolution_commits(stack) or [])
+            )
         else:
             immutable_commits.extend(
                 commit_full_sha(repo_root, commit)
@@ -26375,6 +26498,8 @@ def command_stack_resolve_integration(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
+    if getattr(args, 'worktree', None):
+        return capture_integration_desk(repo_root, manifest, manifest_path, stack, args)
     integration_branch = manifest['integration']['branch']
     if args.empty and args.specs:
         raise SyncwheelError('use either --empty or resolved integration commit specs, not both')
@@ -26390,6 +26515,7 @@ def command_stack_resolve_integration(args):
                 f"resolved integration commit is not on {integration_branch}: {commit}"
             )
     stack['integration_commits'] = commits
+    stack.pop('integration_resolution', None)
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
@@ -28280,6 +28406,250 @@ def command_int_align_remote(args):
     return 0
 
 
+def integration_desk_receipt_path(repo_root, manifest_path):
+    key = hashlib.sha256(str(Path(manifest_path).resolve()).encode()).hexdigest()[:20]
+    return git_common_dir(repo_root) / 'syncwheel' / 'integration-desks' / (key + '.json')
+
+
+def integration_desk_inputs(repo_root, manifest, manifest_path):
+    return {
+        'manifest': manifest_digest(manifest),
+        'replay': integration_projection_input_snapshot(repo_root, manifest),
+        'integration_tip': ref_tip(repo_root, manifest['integration']['branch']),
+    }
+
+
+def normalized_integration_desk_inputs(repo_root, inputs, previous_tip):
+    observed = copy.deepcopy(inputs)
+    current_tip = observed['integration_tip']
+    if previous_tip != current_tip and branch_contains(repo_root, current_tip, previous_tip):
+        transitions = rev_list(repo_root, f'{previous_tip}..{current_tip}')
+        if all(
+            len(git(repo_root, 'rev-list', '--parents', '-n', '1', value).stdout.split()) == 2
+            and integration_control_only_transition(repo_root, value, value + '^')
+            for value in transitions
+        ):
+            # Normal command completion may commit the selected control manifest.
+            # Accept only proven control-only successors, never a product edit.
+            observed['integration_tip'] = previous_tip
+    return observed
+
+
+def read_integration_desk(repo_root, manifest, manifest_path, worktree):
+    receipt_path = integration_desk_receipt_path(repo_root, manifest_path)
+    if not receipt_path.exists():
+        raise SyncwheelError('no managed integration resolution desk; run int rebuild --replay-mode desk first')
+    receipt = json.loads(receipt_path.read_text())
+    desk = Path(worktree).resolve()
+    if str(desk) != receipt['worktree'] or git_common_dir(desk) != git_common_dir(repo_root):
+        raise SyncwheelError('integration resolution desk does not match its receipt')
+    if git(desk, 'symbolic-ref', '-q', 'HEAD', check=False).returncode == 0:
+        raise SyncwheelError('integration resolution desk must remain detached')
+    observed = normalized_integration_desk_inputs(
+        repo_root, integration_desk_inputs(repo_root, manifest, manifest_path),
+        receipt['inputs']['integration_tip'],
+    )
+    capture = receipt.get('capture')
+    saved_capture = capture and observed == normalized_integration_desk_inputs(
+        repo_root, capture['inputs'], receipt['inputs']['integration_tip'],
+    )
+    if receipt['inputs'] != observed and not saved_capture:
+        changed = ', '.join(key for key in observed if observed[key] != receipt['inputs'].get(key))
+        raise SyncwheelError('integration resolution desk inputs changed (' + changed + '); preserve it and use int rebuild --replay-mode desk --worktree <new-path> --reason "review changed inputs"')
+    allowed_heads = {receipt['head']}
+    if saved_capture:
+        allowed_heads.add(capture['commit'])
+    if ref_tip(desk, 'HEAD') not in allowed_heads:
+        raise SyncwheelError('integration resolution desk HEAD changed; refusing to capture unrelated work')
+    return receipt_path, receipt, desk
+
+
+def finish_integration_desk_capture(repo_root, manifest, manifest_path, receipt_path, receipt, desk):
+    capture = receipt['capture']
+    if (git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.strip()
+            or git(desk, 'diff', '--quiet', check=False).returncode != 0
+            or git(desk, 'write-tree').stdout.strip() != capture['tree']):
+        raise SyncwheelError('saved integration capture has changed desk content; preserve and review it')
+    # A write-ahead receipt binds the saved manifest, reviewed tree and exact object.
+    # Retry completes the same capture even after reset cleared MERGE_HEAD.
+    git(desk, 'reset', '--hard', capture['commit'])
+    receipt.update(head=capture['commit'], status='ready', next=receipt['next'] + 1)
+    receipt.pop('operation', None)
+    receipt.pop('capture')
+    receipt['inputs'] = integration_desk_inputs(repo_root, manifest, manifest_path)
+    atomic_write_private_json(receipt_path, receipt, indent=2)
+
+
+def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
+    if args.specs or args.empty:
+        raise SyncwheelError('--worktree cannot be combined with commit specs or --empty')
+    with control_manifest_branch_lock(repo_root, manifest['integration']['branch']):
+        receipt_path, receipt, desk = read_integration_desk(
+            repo_root, manifest, manifest_path, args.worktree,
+        )
+        step = receipt['steps'][receipt['next']] if receipt['next'] < len(receipt['steps']) else {}
+        if receipt.get('status') != 'conflict' or step.get('stack_id') != stack['id']:
+            raise SyncwheelError('this stack has no pending conflict in the integration resolution desk')
+        capture = receipt.get('capture')
+        if capture and manifest_digest(manifest) == capture['inputs']['manifest']:
+            finish_integration_desk_capture(
+                repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+            )
+            print(f"{stack['id']}: completed previously saved integration capture from {desk}")
+            return 0
+        if git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.strip():
+            raise SyncwheelError('integration resolution desk still has unresolved paths; resolve and stage them first')
+        if git(desk, 'diff', '--quiet', check=False).returncode != 0:
+            raise SyncwheelError('integration resolution desk has unstaged changes; review and stage the complete resolution')
+        operation = receipt['operation']
+        if ref_tip(desk, operation['ref']) != operation['tip']:
+            raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
+        tree = git(desk, 'write-tree').stdout.strip()
+        parent = (receipt['head'] if step.get('integration_only')
+                  else receipt['stack_bases'][stack['id']])
+        commit = parent
+        commits = []
+        if tree != ref_tree(repo_root, commit):
+            commit = git(
+                repo_root, 'commit-tree', tree, '-p', commit,
+                '-m', f"Resolve stack '{stack['id']}' on integration",
+                env=replay_hygiene_env(),
+            ).stdout.strip()
+            commits = [commit]
+        # The merge result is one reviewed replacement of this stack's contribution.
+        # Source commits and the source branch remain untouched.
+        read_integration_desk(repo_root, manifest, manifest_path, args.worktree)
+        source_tip = next(item['tip'] for item in receipt['inputs']['replay']['refs']
+                          if item['kind'] == 'merge-stack' and item['id'] == stack['id'])
+        if step.get('integration_only'):
+            previous = stack_integration_only_commits(stack)
+            offset = previous.index(step['argv'][-1])
+            stack['integration_only_commits'] = previous[:offset] + commits + previous[offset + 1:]
+        else:
+            pending = [item['argv'][-1] for item in receipt['steps'][receipt['next'] + 1:]
+                       if item.get('stack_id') == stack['id']
+                       and not item.get('integration_only')]
+            stack['integration_commits'] = commits + pending
+            stack['integration_resolution'] = {'source_tip': source_tip}
+        receipt['capture'] = {
+            'commit': commit, 'tree': tree,
+            'inputs': integration_desk_inputs(repo_root, manifest, manifest_path),
+        }
+        atomic_write_private_json(receipt_path, receipt, indent=2)
+        require_manifest_transaction_current(manifest_path)
+        save_manifest_with_ledger(
+            repo_root, manifest_path, manifest, 'stack_resolve_integration',
+            {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
+             'source_tip': source_tip},
+        )
+        finish_integration_desk_capture(
+            repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+        )
+        print(f"{stack['id']}: recorded {len(commits)} resolved integration commits from {desk}")
+    return 0
+
+
+def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
+    """Prepare/reuse an isolated conflict desk before any shared-ref replay.
+
+    Ordinary rebuild remains responsible for publication ancestry, checkout leases
+    and the final integration update after the reviewed resolutions are recorded.
+    """
+    receipt_path = integration_desk_receipt_path(repo_root, manifest_path)
+    git(repo_root, 'fetch', '--all', '--prune')
+    with control_manifest_branch_lock(repo_root, manifest['integration']['branch']):
+        saved = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
+        reuse = saved is not None and (not args.worktree or str(Path(args.worktree).resolve()) == saved['worktree'])
+        if reuse:
+            chosen = args.worktree or saved['worktree']
+            receipt_path, receipt, desk = read_integration_desk(
+                repo_root, manifest, manifest_path, chosen,
+            )
+        else:
+            desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
+                repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
+            ).resolve()
+            if desk.exists():
+                raise SyncwheelError(f'refusing to overwrite an existing resolution desk path: {desk}')
+            # A detached desk never moves integration, even when it is checked out
+            # in the primary. Its frozen source/ref inputs are checked on capture.
+            inputs = integration_desk_inputs(repo_root, manifest, manifest_path)
+            review_manifest = copy.deepcopy(manifest)
+            for stack in review_manifest['stacks']:
+                binding = stack.get('integration_resolution')
+                if binding and binding['source_tip'] != commit_full_sha(repo_root, stack['branch']):
+                    stack.pop('integration_commits', None)
+                    stack.pop('integration_resolution', None)
+            plan = replay_plan(
+                repo_root, review_manifest,
+                replay_target(integration=review_manifest['integration'], worktree=desk,
+                              return_tree=True, skip_contained=True), 'desk',
+            )
+            if inputs != integration_desk_inputs(repo_root, manifest, manifest_path):
+                raise SyncwheelError('integration inputs changed while planning the resolution desk; retry')
+            # Execute the observed objects, never a moving source branch name.
+            source_tips = {item['id']: item['tip'] for item in inputs['replay']['refs']
+                           if item['kind'] == 'merge-stack'}
+            for step in plan['steps'][1:]:
+                if 'merge' in step['argv']:
+                    step['argv'][step['argv'].index('merge') + 2] = source_tips[step['stack_id']]
+            desk.parent.mkdir(parents=True, exist_ok=True)
+            git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(desk), inputs['replay']['refs'][0]['tip'])
+            receipt = {
+                'worktree': str(desk), 'inputs': inputs,
+                'head': ref_tip(desk, 'HEAD'), 'next': 0, 'status': 'ready',
+                'steps': plan['steps'][1:], 'stack_bases': {},
+            }
+            if saved is not None:
+                archive = receipt_path.with_name(receipt_path.stem + '-' + uuid.uuid4().hex + '.json')
+                atomic_write_private_json(archive, saved, indent=2)
+            atomic_write_private_json(receipt_path, receipt, indent=2)
+        if receipt['status'] == 'conflict':
+            stack_id = receipt['steps'][receipt['next']]['stack_id']
+            raise SyncwheelError(
+                f"resolution desk: {desk}\nResolve and stage the paths, then run:\n  "
+                + quoted(['syncwheel', 'stack', 'resolve-integration', stack_id, '--worktree', str(desk)])
+            )
+        if git(desk, 'status', '--porcelain').stdout.strip():
+            raise SyncwheelError('integration resolution desk has unrecorded work; refusing to replay over it')
+        while receipt['next'] < len(receipt['steps']):
+            step = receipt['steps'][receipt['next']]
+            argv = step['argv']
+            if not step.get('integration_only'):
+                receipt['stack_bases'].setdefault(step['stack_id'], receipt['head'])
+            atomic_write_private_json(receipt_path, receipt, indent=2)
+            skip = 'cherry-pick' in argv and branch_contains(desk, 'HEAD', argv[-1])
+            if not skip:
+                try:
+                    run(argv if step['env'] is not None else with_git_identity(repo_root, argv),
+                        cwd=repo_root, env=step['env'])
+                except SyncwheelError:
+                    paths = git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.splitlines()
+                    if not paths:
+                        raise
+                    operation_ref = 'MERGE_HEAD' if 'merge' in argv else 'CHERRY_PICK_HEAD'
+                    receipt.update(status='conflict', operation={
+                        'ref': operation_ref, 'tip': ref_tip(desk, operation_ref),
+                    })
+                    atomic_write_private_json(receipt_path, receipt, indent=2)
+                    raise SyncwheelError(
+                        f"resolution desk: {desk}\nstack: {step['stack_id']}\n"
+                        + '\n'.join(paths) + '\nResolve and stage the paths, then run:\n  '
+                        + quoted(['syncwheel', 'stack', 'resolve-integration', step['stack_id'], '--worktree', str(desk)])
+                    )
+            receipt.update(head=ref_tip(desk, 'HEAD'), next=receipt['next'] + 1)
+            atomic_write_private_json(receipt_path, receipt, indent=2)
+        # Release the branch lock before the normal guarded ancestry transaction.
+    normal = copy.copy(args)
+    normal.replay_mode, normal.worktree, normal.in_place = 'ephemeral', None, False
+    result = command_int_rebuild(normal)
+    # Keep the desk and its receipt for audit/retry. Never delete operator files.
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    receipt['inputs'] = integration_desk_inputs(repo_root, manifest, manifest_path)
+    atomic_write_private_json(receipt_path, receipt, indent=2)
+    return result
+
+
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -28300,6 +28670,27 @@ def command_int_rebuild(args):
             allow_new_operation=bool(args.reason),
         )
     preflight_control_manifest_digest(repo_root, manifest_path, manifest)
+    if (getattr(args, 'replay_mode', None) == 'desk'
+            and manifest['integration'].get('strategy') == 'merge-stacks'):
+        if args.dry_run:
+            desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
+                repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
+            ).resolve()
+            print(f'resolution desk: {desk}')
+            review_manifest = copy.deepcopy(manifest)
+            for stack in review_manifest['stacks']:
+                binding = stack.get('integration_resolution')
+                if binding and binding['source_tip'] != commit_full_sha(repo_root, stack['branch']):
+                    stack.pop('integration_commits', None)
+                    stack.pop('integration_resolution', None)
+            plan = replay_plan(repo_root, review_manifest, replay_target(
+                integration=review_manifest['integration'], worktree=desk,
+                return_tree=True, skip_contained=True), 'desk')
+            for step in plan['steps']:
+                print(replay_step_render(step))
+            print('would replay frozen stack inputs; conflicts remain in the desk for reviewed capture')
+            return 0
+        return rebuild_integration_desk(repo_root, manifest, manifest_path, args)
     integration = manifest['integration']
     validation = validate_manifest(repo_root, manifest)
     narrowed = validation['details']['integration'].get(
@@ -28954,6 +29345,201 @@ def command_repo_authority_set(args):
         print(json.dumps(report, indent=2))
     else:
         print_authority_report(report)
+    return 0
+
+
+def restore_pending_mode_migration(root, path, pending_path):
+    pending = json.loads(pending_path.read_text())
+    original = Path(pending['archive']) / 'manifest.json'
+    original_data = json.loads(original.read_text())
+    dirty = {entry['path'] for entry in journal_status_entries(root)}
+    if dirty - {'.syncwheel/manifest.json', '.gitignore'}:
+        raise SyncwheelError('mode migration recovery refuses unrelated working changes: ' + ', '.join(sorted(dirty)))
+    observed, _ = load_manifest(root, path)
+    if manifest_digest(observed) not in {pending['beforeDigest'], pending['afterDigest']}:
+        raise SyncwheelError('mode migration recovery manifest lease lost')
+    if get_current_branch(root) not in {pending['branch'], pending['targetBranch']}:
+        raise SyncwheelError('mode migration recovery branch lease lost')
+    for branch, tip in pending['branchTips'].items():
+        if ref_tip(root, f'refs/heads/{branch}') != tip:
+            raise SyncwheelError('mode migration recovery HEAD lease lost')
+    guard = pending['guard']
+    observed_guard, guard_error = inspect_primary_guard(root)
+    if (guard_error and primary_guard_path(root).exists()) or observed_guard not in (guard, pending['targetGuard']):
+        raise SyncwheelError('mode migration recovery guard lease lost; pending recovery retained')
+    for item in pending['metadataFiles']:
+        metadata_path = Path(item['path'])
+        if metadata_path.is_symlink() or read_text_if_exists(metadata_path) not in (item['before'], item['after']):
+            raise SyncwheelError('mode migration recovery metadata lease lost: ' + str(metadata_path))
+    # Retarget first so post-checkout also recognizes the restored branch.
+    if guard is None:
+        primary_guard_path(root).unlink(missing_ok=True)
+    else:
+        atomic_write_private_json(primary_guard_path(root), guard)
+    with ref_move_authorization(root) as authorization:
+        git(root, 'switch', pending['branch'],
+            env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
+    # Restore through the canonical transaction writer, then retain the exact
+    # committed bytes from the initially clean checkout.
+    save_manifest(path, original_data)
+    with ref_move_authorization(root) as authorization:
+        git(root, '--literal-pathspecs', 'restore', '--source=' + pending['originalHead'],
+            '--worktree', '--', '.syncwheel/manifest.json',
+            env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
+    for item in pending['metadataFiles']:
+        metadata_path = Path(item['path'])
+        if item['existed']:
+            metadata_path.write_text(item['before'])
+        else:
+            metadata_path.unlink(missing_ok=True)
+    # Keep append-only migration audit evidence local even when restoring a
+    # pre-migration checkout that lacked the managed ignore block.
+    exclude = git_info_exclude_path(root)
+    if exclude and (root / '.syncwheel/ledger').exists():
+        text = read_text_if_exists(exclude)
+        if '.syncwheel/ledger/' not in text.splitlines():
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(text + ('\n' if text and not text.endswith('\n') else '')
+                               + '.syncwheel/ledger/\n')
+    atomic_write_private_json(Path(pending['archive']) / 'rollback.json', {
+        'restoredBranch': pending['branch'], 'restoredHead': pending['originalHead'],
+        'manifestDigest': pending['beforeDigest'],
+    })
+    pending_path.unlink()
+
+
+def command_repo_mode_set(args):
+    root = resolve_repo_root(args.repo)
+    if args.personal or (args.manifest and Path(args.manifest).resolve() != (root / '.syncwheel/manifest.json').resolve()):
+        raise SyncwheelError('mode migration requires the shared default manifest')
+    path = root / '.syncwheel/manifest.json'
+    pending_path = git_common_dir(root) / 'syncwheel' / 'mode-migration-pending.json'
+    if pending_path.exists():
+        if not args.apply:
+            print(json.dumps({'mode': 'plan', 'recovery_required': True,
+                              'remedy': 'repeat repo mode set journal with --apply to restore the interrupted migration'}))
+            return 0
+        restore_pending_mode_migration(root, path, pending_path)
+    manifest, path = require_manifest(root, args.repo, args.manifest, args.personal)
+    if args.personal or path.resolve() != (root / '.syncwheel/manifest.json').resolve():
+        raise SyncwheelError('mode migration requires the shared default manifest')
+    worktrees = get_worktrees(root)
+    if worktrees and Path(worktrees[0]['path']).resolve() != root.resolve():
+        raise SyncwheelError('mode migration requires the clean primary checkout')
+    if git(root, 'status', '--porcelain', '--untracked-files=all').stdout.strip():
+        raise SyncwheelError('mode migration requires a clean primary checkout')
+    if not args.reason.strip():
+        raise SyncwheelError('mode migration requires a non-empty --reason')
+    if manifest.get('repository_mode') == 'journal':
+        raise SyncwheelError('repository is already in journal mode')
+    if manifest.get('channels'):
+        raise SyncwheelError('close or archive deployment channels before mode migration')
+    branch = args.branch
+    if run(['git', 'check-ref-format', '--branch', branch], check=False).returncode:
+        raise SyncwheelError('invalid journal branch')
+    target = ref_tip(root, f'refs/heads/{branch}')
+    if target is None or ref_tree(root, target) != ref_tree(root, 'HEAD'):
+        raise SyncwheelError('journal target branch must exist with the exact current tree; converge first')
+    if not remote_is_configured(root, args.remote):
+        raise SyncwheelError('journal remote must be configured')
+    occupied = [item for item in worktrees if item.get('branch') == branch
+                and Path(item['path']).resolve() != root.resolve()]
+    if occupied:
+        raise SyncwheelError('journal target branch is checked out in another worktree')
+    old = json.loads(path.read_text())
+    updated = dict(old)
+    dropped = ['integration', 'stacks', 'coordination', 'channels', 'landing']
+    for field in dropped:
+        updated.pop(field, None)
+    updated.update(version=args.manifest_version, repository_mode='journal', journal={
+        'branch': branch, 'remote': args.remote, 'include': args.include or ['**'],
+        'exclude': args.exclude or ['var/**', '.syncwheel/ledger/**', '.syncwheel/*.local.json'],
+        'max_file_bytes': args.max_file_bytes, 'interval': args.interval,
+    })
+    # Validate the candidate through the canonical loader before touching state.
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as candidate:
+        json.dump(updated, candidate)
+        candidate.flush()
+        normalized, _ = load_manifest(root, candidate.name)
+    archive_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    archive = git_common_dir(root) / 'syncwheel' / 'mode-migrations' / archive_id
+    refs = {f'refs/archive/syncwheel-mode/{archive_id}/head': ref_tip(root, 'HEAD')}
+    for stack in manifest.get('stacks', []):
+        for index, commit in enumerate(stack.get('commits') or []):
+            refs[f'refs/archive/syncwheel-mode/{archive_id}/stacks/{stack["id"]}/{index}'] = commit_full_sha(root, commit)
+        tip = ref_tip(root, stack['branch'])
+        if tip:
+            refs[f'refs/archive/syncwheel-mode/{archive_id}/branches/{stack["id"]}'] = tip
+    for ref, tip in refs.items():
+        existing = ref_tip(root, ref)
+        if existing and existing != tip:
+            raise SyncwheelError('migration archive ref collision: ' + ref)
+    metadata_files = []
+    worktree_root = syncwheel_worktree_root(manifest)
+    for metadata_path, marker, end, patterns in (
+        (root / '.gitignore', SYNCWHEEL_GITIGNORE_MARKER, SYNCWHEEL_GITIGNORE_END_MARKER,
+         syncwheel_gitignore_patterns(worktree_root)),
+        (git_info_exclude_path(root), SYNCWHEEL_LOCAL_EXCLUDE_MARKER, SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER, []),
+    ):
+        if metadata_path is None:
+            continue
+        if metadata_path.is_symlink():
+            raise SyncwheelError('mode migration refuses symlink metadata: ' + str(metadata_path))
+        before = read_text_if_exists(metadata_path)
+        after, _ = replace_managed_block(before, marker, end, patterns,
+                                         all_syncwheel_managed_patterns(worktree_root))
+        metadata_files.append({'path': str(metadata_path), 'before': before,
+                               'after': after, 'existed': metadata_path.exists()})
+    guard, guard_error = inspect_primary_guard(root)
+    if guard_error and primary_guard_path(root).exists():
+        raise SyncwheelError('repair the existing primary guard before mode migration')
+    payload = {'mode': 'apply' if args.apply else 'plan', 'manifest': updated,
+               'dropped_fields': [field for field in dropped if field in old],
+               'archive': str(archive), 'archive_refs': refs, 'reason': args.reason,
+               'managed_ref_guard': install_managed_push_hook(
+                   root, manifest=normalized, manifest_path=path, reason=args.reason)}
+    if args.apply:
+        if managed_hook_syncwheel_command(root) is None:
+            raise SyncwheelError('mode migration requires a stable resolvable syncwheel CLI before changing state')
+        archive.mkdir(parents=True, exist_ok=True)
+        original = path.read_bytes()
+        archived = archive / 'manifest.json'
+        if archived.exists() and archived.read_bytes() != original:
+            raise SyncwheelError('migration manifest archive collision')
+        archived.write_bytes(original)
+        for ref, tip in refs.items():
+            if not ref_tip(root, ref):
+                git(root, 'update-ref', ref, tip, '0' * 40)
+        original_branch = get_current_branch(root)
+        atomic_write_private_json(pending_path, {
+            'archive': str(archive), 'branch': original_branch, 'targetBranch': branch,
+            'originalHead': ref_tip(root, 'HEAD'), 'guard': guard,
+            'targetGuard': primary_guard_payload(normalized), 'metadataFiles': metadata_files,
+            'beforeDigest': manifest_digest(manifest), 'afterDigest': manifest_digest(normalized),
+            'branchTips': {original_branch: ref_tip(root, 'HEAD'), branch: target},
+        })
+        try:
+            payload['managed_ref_guard'] = install_managed_push_hook(
+                root, apply=True, manifest=normalized, manifest_path=path, reason=args.reason
+            )
+            with ref_move_authorization(root) as authorization:
+                git(root, 'switch', branch, env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
+            save_manifest(path, updated)
+            append_ledger_event(root, 'repository_mode_migrated', {
+                'from': 'delivery', 'to': 'journal', 'reason': args.reason,
+                'archive': str(archive), 'archive_refs': refs,
+            }, path)
+            pending_path.unlink()
+        except BaseException as exc:
+            try:
+                restore_pending_mode_migration(root, path, pending_path)
+            except Exception as recovery_error:
+                raise SyncwheelError(
+                    'mode migration interrupted; pending recovery retained. Retry repo mode set journal --apply: '
+                    + str(recovery_error)
+                ) from exc
+            raise
+    print(json.dumps(payload, indent=2))
     return 0
 
 
@@ -30175,6 +30761,13 @@ class SyncwheelRevisionBackend:
             }
         except SyncwheelError as exc:
             self._fail(f'active-active handoff gate failed: {exc}')
+
+    def for_request(self, request):
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        if manifest.get('repository_mode') == 'journal':
+            return JournalRevisionBackend(self.provider)
+        return self
 
     def _validate_repository(self, repo_root, request, *, require_clean):
         manifest, manifest_path = self._manifest(repo_root)
@@ -32340,6 +32933,228 @@ class SyncwheelRevisionBackend:
         return None
 
 
+class JournalRevisionBackend(SyncwheelRevisionBackend):
+    """Local exact-path revisioning; publication is a separate journal operation."""
+
+    def _head_policy(self, repo_root, request, head):
+        config_path = '.agentwheel/config.json'
+        # Read policy from the operation's trusted starting revision. A dirty
+        # config or a later policy change cannot silently widen the lease.
+        raw = git(repo_root, 'show', f'{request.expected_head}:{config_path}', check=False)
+        policy = 'exact'
+        if raw.returncode == 0:
+            try:
+                config = json.loads(raw.stdout)
+                policy = config.get('mutationPolicy', {}).get('revisioning', {}).get('provider', {}).get('headLease', 'exact')
+            except (ValueError, AttributeError):
+                self._fail('invalid revision-provider HEAD lease configuration')
+        if policy not in {'exact', 'path-scoped'}:
+            self._fail('invalid revision-provider headLease')
+        if head == request.expected_head:
+            return policy
+        if policy != 'path-scoped' or not request.paths or request.no_commit or git(
+            repo_root, 'merge-base', '--is-ancestor', request.expected_head, head,
+            check=False,
+        ).returncode != 0:
+            self._fail('journal HEAD changed outside the allowed HEAD lease')
+        protected = {item.path for item in request.paths} | {
+            config_path, self.MANIFEST_PRODUCT_PATH,
+        }
+        for commit in rev_list(repo_root, f'{request.expected_head}..{head}'):
+            changed = set(git(repo_root, 'diff-tree', '--root', '-m',
+                              '--no-commit-id', '--name-only', '-r', '-z', commit).stdout.split('\0'))
+            if changed & protected:
+                self._fail('journal HEAD lease overlaps operation or provider configuration paths')
+        return policy
+
+    def _observe_journal(self, request, *, before=False):
+        root = self._repo_root(request)
+        manifest, path = self._manifest(root)
+        if manifest.get('repository_mode') != 'journal':
+            self._fail('journal repository mode changed')
+        if manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED:
+            self._fail('revision provider requires git-tracked metadata')
+        if git(root, 'ls-files', '--error-unmatch', '--', self.MANIFEST_PRODUCT_PATH,
+               check=False).returncode:
+            self._fail('revision provider requires a tracked manifest')
+        branch = manifest['journal']['branch']
+        if get_current_branch(root) != branch:
+            self._fail('revision provider requires the journal branch checkout')
+        hooks = managed_push_guard_policy(root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail('managed repository guards are not ready')
+        if self._index_conflicts(root) or not self._index_is_clean(root):
+            self._fail('journal provider requires a clean, conflict-free index')
+        head = ref_tip(root, 'HEAD')
+        self._head_policy(root, request, head)
+        digest = manifest_digest(manifest)
+        if request.expected_manifest_digest and digest != request.expected_manifest_digest:
+            self._fail('manifest digest changed')
+        if self.MANIFEST_PRODUCT_PATH in self._dirty_paths(root, request):
+            self._fail('journal manifest has uncommitted changes')
+        if before:
+            self._validate_hashes(root, request, 'before')
+        else:
+            self._validate_before_hashes_at_head(root, request)
+            self._validate_hashes(root, request, 'after')
+        index = self._index_observation(root)
+        return {'baselineIndexSha256': index.sha256, 'baselineIndexSemantic': index.semantic,
+                'indexAlignments': {}, 'repositoryMode': 'journal', 'manifestDigest': digest,
+                'observedManifestDigest': digest, 'integrationBranch': branch,
+                'operationParentHead': head, 'resultingHead': head,
+                'unmappedIntegrationCommits': []}
+
+    def check(self, request):
+        return self._observe_journal(request, before=True)
+
+    def _admit_paths(self, root, manifest, request):
+        paths = {item.path for item in request.paths}
+        journal = manifest['journal']
+        for path in paths:
+            if (not journal_path_matches(path, journal['include'])
+                    or journal_path_matches(path, journal['exclude'])
+                    or journal_path_sensitive(path)):
+                self._fail('journal admission refuses operation path: ' + path)
+        for path in paths:
+            # A declared file is an input even when Git ignores it or hides it
+            # from status. Read it through the provider's no-follow path reader.
+            value = self._read_product_path(root, path)
+            if value is None:
+                continue
+            if git(root, 'check-ignore', '-q', '--', path, check=False).returncode == 0:
+                self._fail('journal admission refuses ignored operation path: ' + path)
+            if len(value['bytes']) > journal['max_file_bytes']:
+                self._fail('journal admission rejected oversized content: ' + path)
+            secret = journal_secret_reason(value['bytes'])
+            if secret:
+                self._fail('journal admission rejected high-confidence secret: ' + path)
+        self._validate_hashes(root, request, 'after')
+
+    def preflight(self, request):
+        observation = self._observe_journal(request)
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        self._admit_paths(root, manifest, request)
+        return observation
+
+    def verify_recovery_gate(self, request, journal):
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        if manifest.get('repository_mode') != 'journal' or manifest_digest(manifest) != journal['observedManifestDigest']:
+            self._fail('journal manifest changed after preflight')
+        if get_current_branch(root) != journal['integrationBranch']:
+            self._fail('journal branch changed after preflight')
+        current = ref_tip(root, 'HEAD')
+        allowed = {journal['operationParentHead'], journal.get('candidateProductCommitSha')}
+        if current not in allowed:
+            # Before object preparation a disjoint writer may advance HEAD.
+            if journal['phase'] != 'prepared' or journal.get('candidateProductCommitSha'):
+                self._fail('journal HEAD changed after commit preparation')
+            self._head_policy(root, request, current)
+            if not self._index_is_clean(root):
+                self._fail('journal HEAD advancement requires a clean index')
+            journal['operationParentHead'] = current
+            index = self._index_observation(root)
+            journal.update(baselineIndexSha256=index.sha256, baselineIndexSemantic=index.semantic)
+            self.save_journal(request, journal)
+        hooks = managed_push_guard_policy(root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail('managed repository guards are not ready')
+        self._assert_no_ref_transaction_locks(root, {
+            f"refs/heads/{journal['integrationBranch']}": None,
+        })
+
+    def verify_after_paths(self, request):
+        self._observe_journal(request)
+
+    def prepare_product_commit(self, request, message):
+        root = self._repo_root(request)
+        journal = self.load_journal(request)
+        manifest, _ = self._manifest(root)
+        self._admit_paths(root, manifest, request)
+        objects = self._capture_path_objects(root, request)
+        prepared = self._prepare_exact_commit(root, journal['operationParentHead'], objects, message)
+        if prepared is None:
+            return None
+        return {'candidateProductCommitSha': prepared['commit'],
+                'candidateProductTreeSha': prepared['tree'], 'productPathObjects': objects}
+
+    def validate_prepared_commit(self, request, journal, kind):
+        root = self._repo_root(request)
+        self.verify_recovery_gate(request, journal)
+        self._verify_candidate_object(root, journal['candidateProductCommitSha'],
+                                      journal['candidateProductTreeSha'],
+                                      journal['operationParentHead'], journal['productPathObjects'])
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        before = self._hook_repository_snapshot(root, journal['productPathObjects'])
+        self._run_commit_validation_hooks(root, journal['candidateProductCommitSha'])
+        after = self._hook_repository_snapshot(root, journal['productPathObjects'])
+        before_index = before.pop('index')
+        after_index = after.pop('index')
+        if before != after or before_index.semantic != after_index.semantic:
+            self._fail('commit hook changed repository state')
+
+    def publish_prepared_commit(self, request, commit, expected_parent):
+        root = self._repo_root(request)
+        journal = self.load_journal(request)
+        self.verify_recovery_gate(request, journal)
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        current = ref_tip(root, 'HEAD')
+        if current == commit:
+            return commit
+        if current != expected_parent or not self._index_is_clean(root):
+            self._fail('journal publication HEAD or index lease lost')
+        self._assert_index_lease(root, request, journal, 'baseline', 'journal publication')
+        ref = f"refs/heads/{journal['integrationBranch']}"
+        self._cas_ref_with_leases(root, ref, commit,
+                                 {ref: self._direct_ref_observation(ref, expected_parent)})
+        self.checkpoint('integration_product_cas')
+        return commit
+
+    def _deterministic_index(self, repo_root, commit, *, allowed_worktree_paths=()):
+        request = self._journal_alignment_request
+        journal = self.load_journal(request)
+        observed = self._index_observation(repo_root)
+        # Preserve the real index's unrelated entries and extensions; only
+        # operation entries are replaced. The inherited writer supplies durable
+        # backing files, semantic leases, CAS, and proven owned-lock recovery.
+        with self._private_index_copy(self._index_path(repo_root), observed.payload) as env:
+            for path, entry in sorted(journal['productPathObjects'].items()):
+                if entry['blob'] is None:
+                    git(repo_root, 'update-index', '--force-remove', '--', path, env=env)
+                else:
+                    git(repo_root, 'update-index', '--add', '--cacheinfo',
+                        f"{entry['mode']},{entry['blob']},{path}", env=env)
+            payload = Path(env['GIT_INDEX_FILE']).read_bytes()
+            if git(repo_root, 'write-tree', env=env).stdout.strip() != ref_tree(repo_root, commit):
+                self._fail('journal replacement index does not match its exact-path commit')
+            return payload, hashlib.sha256(payload).hexdigest()
+
+    def align_index(self, request, commit):
+        self._journal_alignment_request = request
+        try:
+            result = super().align_index(request, commit)
+        finally:
+            del self._journal_alignment_request
+        self.checkpoint('integration_product_committed')
+        return result
+
+    def verify_journal_final(self, request, journal):
+        self.verify_recovery_gate(request, journal)
+        root = self._repo_root(request)
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        if not self._index_is_clean(root):
+            self._fail('journal final index is not aligned')
+
+    def verify_release(self, request, journal):
+        self.verify_recovery_gate(request, journal)
+        if journal.get('candidateProductCommitSha') and ref_tip(
+            self._repo_root(request), 'HEAD'
+        ) == journal['candidateProductCommitSha']:
+            self._fail('cannot release a published product commit; recover it instead')
+        self._observe_journal(request)
+
+
 def command_revision_provider(args):
     try:
         import syncwheel_revision_provider as provider_module
@@ -32502,6 +33317,21 @@ def build_parser():
     repo_ls_p = repo_sub.add_parser('ls', help='list repo aliases')
     repo_ls_p.add_argument('-j', '--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
+
+    repo_mode_p = repo_sub.add_parser('mode', help='migrate the repository delivery model')
+    repo_mode_sub = repo_mode_p.add_subparsers(dest='mode_command', required=True)
+    repo_mode_set_p = repo_mode_sub.add_parser('set', parents=[common])
+    repo_mode_set_p.add_argument('repository_mode', choices=['journal'])
+    repo_mode_set_p.add_argument('--branch', default='main')
+    repo_mode_set_p.add_argument('--remote', default='origin')
+    repo_mode_set_p.add_argument('--include', action='append')
+    repo_mode_set_p.add_argument('--exclude', action='append')
+    repo_mode_set_p.add_argument('--interval', default='30m')
+    repo_mode_set_p.add_argument('--max-file-bytes', type=int, default=10485760)
+    repo_mode_set_p.add_argument('--manifest-version', type=int, choices=[1, 2], default=1)
+    repo_mode_set_p.add_argument('--reason', required=True)
+    repo_mode_set_p.add_argument('-a', '--apply', action='store_true')
+    repo_mode_set_p.set_defaults(func=command_repo_mode_set)
 
     repo_tracking_p = repo_sub.add_parser('tracking', help='inspect or set repo-local syncwheel tracking policy')
     repo_tracking_sub = repo_tracking_p.add_subparsers(dest='tracking_command', required=True)
@@ -33073,9 +33903,11 @@ def build_parser():
     journal_status_p.add_argument('-j', '--json', action='store_true')
     journal_status_p.set_defaults(func=command_journal_status)
     journal_snapshot_p = journal_sub.add_parser('snapshot', parents=[common])
+    journal_snapshot_p.add_argument('--path', dest='paths', action='append', help='snapshot only this exact path; repeatable')
     journal_snapshot_p.add_argument('-a', '--apply', action='store_true')
     journal_snapshot_p.set_defaults(func=command_journal_snapshot)
     journal_publish_p = journal_sub.add_parser('publish', parents=[common])
+    journal_publish_p.add_argument('--committed-only', action='store_true', help='publish existing commits without snapshotting working files')
     journal_publish_p.add_argument('-a', '--apply', action='store_true')
     journal_publish_p.set_defaults(func=command_journal_publish)
     journal_pull_p = journal_sub.add_parser(
@@ -33091,6 +33923,7 @@ def build_parser():
     journal_pull_p.set_defaults(func=command_journal_pull)
     journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
     journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))
+    journal_schedule_p.add_argument('--committed-only', action='store_true', help='schedule publication without working-tree snapshots')
     journal_schedule_p.add_argument('-a', '--apply', action='store_true')
     journal_schedule_p.set_defaults(func=command_journal_schedule)
 
@@ -33191,6 +34024,7 @@ def build_parser():
         action='store_true',
         help='record that this stack was absorbed by the integration base or another resolved stack',
     )
+    stack_resolve_p.add_argument('--worktree', help='capture the staged resolution from a managed integration desk')
     stack_resolve_p.set_defaults(func=command_stack_resolve_integration)
 
     stack_classify_p = stack_sub.add_parser(
@@ -33832,6 +34666,7 @@ def entrypoint_behavior_table():
         command_journal_publish,
         command_journal_pull,
     ), mutates='apply')
+    register((command_repo_mode_set,), mutates='apply', manifest_mutates='apply')
     # digest-heal is the one repair class that appends a local ledger event
     # alongside the remote state CAS.
     register((command_coordination_repair,), mutates='apply', manifest_mutates='apply')

@@ -453,6 +453,10 @@ python3 scripts/syncwheel.py manifest require-integration --apply
 - `integration_commits`, when present, is the resolved projection used only for
   integration. Record it after a conflict creates new integration commits; it
   prevents Syncwheel from treating those commits as source-branch commits.
+- `integration_resolution.source_tip`, when present, binds a desk-captured
+  `integration_commits` replacement to the exact reviewed source branch revision.
+  Moving that source requires a new desk review. Resolution commits and this
+  binding travel in shared coordination state; source `commits` remain unchanged.
 - `integration_only_commits`, when present, contains commits owned by the stack
   only in integration. They are excluded from source-branch rebuilds and are
   replayed after the combined stack projection during integration rebuilds,
@@ -507,6 +511,11 @@ the stack source branch.
 
 ### Resolved integration projections
 
+For `merge-stacks`, use the detached [resolution desk workflow](branch-model.md)
+and `stack resolve-integration <stack> --worktree <desk>` to capture the staged
+result. This works while integration remains checked out in the primary and
+never requires a manual commit there.
+
 When a declared stack commit conflicts during integration, resolve the conflict
 on the integration branch and record the resulting commit separately. This keeps
 the source branch immutable while allowing deterministic validation and rebuilds
@@ -521,3 +530,16 @@ branch. It updates `integration_commits` without changing `commits`; stack
 rebuilds still use the latter, while integration rebuilds use the former.
 When an obsolete source commit is already absorbed by the integration base or
 another resolved stack, use `--empty` explicitly rather than inventing a commit.
+
+Bound integration resolutions publish coordination state schema 4. Older clients reject
+this schema and must upgrade before publishing; they cannot silently discard the
+resolution. Unbound legacy `integration_commits` keep their previous merge-stack
+semantics and do not add `integration.resolutions` to shared snapshots. Desk capture
+replaces only the contribution through the conflicting step, retaining pending steps.
+The resolution commit uses the resolving operator's configured Git identity.
+
+Roll out schema 4 support to every peer, including readers, before publishing the first
+bound resolution. Verify all peers have upgraded, then enable capture and publish
+the resolution. Older peers deliberately refuse schema 4 and cannot participate
+until upgraded. A saved desk capture can be retried after an interruption without
+creating another resolution commit; changed inputs or desk content still refuse.

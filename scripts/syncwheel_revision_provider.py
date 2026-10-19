@@ -198,6 +198,10 @@ class RevisionBackend(Protocol):
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
 
+    def verify_journal_final(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> None: ...
+
     def verify_derived_final(
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> dict[str, Any]: ...
@@ -528,6 +532,11 @@ def _error_response(
 
 
 def _new_journal(request: RevisionRequest, observation: dict[str, Any]) -> dict[str, Any]:
+    if observation.get("repositoryMode") == "journal":
+        return {"schemaVersion": 1, "providerId": PROVIDER_ID,
+                "planDigest": request.plan_digest, "phase": "prepared",
+                "expectedHead": request.expected_head, "operationId": request.operation_id,
+                "request": request.intent_json(), **observation}
     return {
         "schemaVersion": 1,
         "providerId": PROVIDER_ID,
@@ -633,11 +642,50 @@ def _persist_phase(
     backend.checkpoint(phase)
 
 
+def _advance_journal(backend, request, journal):
+    backend.verify_recovery_gate(request, journal)
+    backend.recover_owned_index_lock(request, journal)
+    if journal["phase"] == "verified":
+        if journal.get("productCommitSha"):
+            backend.verify_journal_final(request, journal)
+        return _mutation_response(request, journal, status=journal["terminalStatus"])
+    if journal["phase"] == "prepared":
+        if not journal.get("candidateProductCommitSha"):
+            backend.verify_after_paths(request)
+            prepared = None if request.no_commit else backend.prepare_product_commit(
+                request, product_commit_message(request)
+            )
+            if prepared is None:
+                journal.update(terminalStatus="revisioning-skipped" if request.no_commit
+                               else "no-repository-delta", resultingHead=backend.current_head(request))
+                _persist_phase(backend, request, journal, "verified")
+                return _mutation_response(request, journal, status=journal["terminalStatus"])
+            journal.update(prepared)
+            backend.save_journal(request, journal)
+            backend.checkpoint("product_objects_prepared")
+        if not journal.get("productHooksValidated"):
+            backend.validate_prepared_commit(request, journal, "product")
+            journal["productHooksValidated"] = True
+            backend.save_journal(request, journal)
+            backend.checkpoint("product_hooks_validated")
+        candidate = journal["candidateProductCommitSha"]
+        backend.publish_prepared_commit(request, candidate, journal["operationParentHead"])
+        backend.align_index(request, candidate)
+        journal.update(productCommitSha=candidate, resultingHead=candidate)
+        _persist_phase(backend, request, journal, "product_committed")
+    backend.verify_journal_final(request, journal)
+    journal.update(terminalStatus="verified", publicationState="journal-unpublished")
+    _persist_phase(backend, request, journal, "verified")
+    return _mutation_response(request, journal, status="verified")
+
+
 def _advance(
     backend: RevisionBackend,
     request: RevisionRequest,
     journal: dict[str, Any],
 ) -> dict[str, Any]:
+    if journal.get("repositoryMode") == "journal":
+        return _advance_journal(backend, request, journal)
     backend.verify_recovery_gate(request, journal)
     if journal["phase"] == "expired":
         backend.expire_manifest_invalidated(
@@ -874,6 +922,8 @@ def run_provider_stream(
         except json.JSONDecodeError as exc:
             raise RevisionProviderError(f"invalid request JSON: {exc.msg}") from exc
         request = parse_request(raw)
+        if hasattr(backend, "for_request"):
+            backend = backend.for_request(request)
         try:
             response = handle_request(backend, request)
         except Exception:
