@@ -1,11 +1,13 @@
 {
   "changed_refs": [
-    "refs/heads/syncwheel/draft/desk-empty-step"
+    "refs/heads/pr/desk-empty-step"
   ],
-  "claimed_at": "2026-10-19T15:48:42+00:00",
+  "claimed_at": "2026-10-19T15:48:53+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "cc3145d0-e79c-4ea1-988b-a115d1c4afe3",
-  "publication_scope": "stack:desk-empty-step",
+  "operation_token": "668f4185-db47-4c27-b443-1a70a7e78676",
+  "publication_scope": "promote:desk-empty-step",
+  "reason": "promoted",
   "source_ref": "refs/heads/syncwheel/draft/desk-empty-step",
   "syncwheel_version": "0.46.1"
 }
