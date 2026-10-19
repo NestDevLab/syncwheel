@@ -306,6 +306,35 @@ discrepancy. Its child keeps the parent's snapshot, managed refs, and
 tombstones byte-for-byte, leaves `changed_refs` empty, and carries the recorded
 digest in `repair_evidence`.
 
+## Reconciling local control-only divergence
+
+An external canonical delivery can advance the published integration ref while
+the local integration contains only newer tracked control metadata. Ordinary
+`int rebuild --reason "reconcile delivered history and selected control"` and
+`reconcile --apply --rebuild needed` reconcile this divergence locally without
+publishing. No force or manual integration merge is required.
+
+This exception requires exactly one merge base and a nonempty linear local-only
+history. Every exclusive commit must have exactly one parent and change only
+valid control metadata. The control JSON must pass the same ref-independent
+normalization as ordinary manifest loading, including its historical version,
+coordination keys, dependencies, channels and authority policy; integration
+strategy, selected stack IDs and branch/target field syntax are checked too.
+Historical ref existence is not required. Recognized managed ignore-block
+changes may preserve existing unmanaged bytes; foreign ignore edits refuse.
+An unexplained product addition followed by a revert, malformed intermediate
+control, merge, root or ambiguous ancestry cannot pass a final-tree shortcut.
+
+The pinned detached replay must contain the exact current published tip. Its
+product tree and selected control source form the existing reconciliation
+object with parents `[original local tip, detached replay tip]`, preserving
+both histories. Ordinary source-stack rebuilding by `reconcile` may record
+equivalent replayed source commits; it does not change the selected stack IDs.
+The existing current-state/digest checks, history classification, source and
+provenance leases, durable intent, destination checks, exact ref CAS and retry
+receipts remain mandatory. Repeating a completed reconciliation is idempotent;
+later publication is a separate explicit command.
+
 ## Composing additive stack proposals
 
 `coordination compose` is separate from repair. It handles a known common state

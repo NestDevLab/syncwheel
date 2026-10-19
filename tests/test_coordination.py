@@ -13854,6 +13854,254 @@ sys.exit(module.main())
             'A14_UNMAPPED_PRODUCT_REFUSAL',
         )
 
+    def prepare_canonical_control_divergence(self, label):
+        origin = self.create_remote(label)
+        repo = self.clone(origin, label)
+        self.run_cli(
+            repo, 'init', '--syncwheel-tracking', 'git-tracked',
+            '--publication-remote', 'origin', '--integration-branch', 'main',
+        )
+        self.disable_fixture_hooks(repo)
+        self.run_cli(repo, 'int', 'push')
+        baseline = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        source = self.commit_on_branch(repo, 'pr/local-design', 'local-design.txt')
+        self.run_cli(
+            repo, 'stack', 'create', 'local-design', source, '--branch', 'pr/local-design',
+        )
+        module = self.load_module()
+        manifest, manifest_path = module.load_manifest(repo)
+        for revision in range(1, 5):
+            # Historical loading remains compatible with every supported
+            # manifest version; the final selected manifest is still v2.
+            manifest['version'] = (1, 2, 3, 2)[revision - 1]
+            manifest['stacks'][0]['meta']['fixture_revision'] = revision
+            module.save_manifest(manifest_path, manifest)
+            self.git(repo, 'add', '.syncwheel/manifest.json')
+            self.git(repo, 'commit', '-qm', f'test: local control revision {revision}')
+        local = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        publisher = self.clone(origin, f'{label}-publisher')
+        (publisher / 'delivered.txt').write_text('canonical delivered product\n')
+        self.git(publisher, 'add', 'delivered.txt')
+        self.git(publisher, 'commit', '-qm', 'test: externally delivered canonical product')
+        self.git(publisher, 'push', '--no-verify', 'origin', 'main')
+        published = self.git(publisher, 'rev-parse', 'main').stdout.strip()
+        plan, _ = module.coordination_repair_plan(
+            repo, manifest, 'refs/heads/main', module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+        )
+        module.apply_coordination_repair_plan(repo, manifest, plan)
+        self.git(repo, 'fetch', '-q', 'origin')
+        self.assertEqual(self.git(repo, 'merge-base', local, published).stdout.strip(), baseline)
+        self.assertNotEqual(local, baseline)
+        self.assertEqual(len(module.rev_list(repo, f'{published}..{local}')), 5)
+        self.git(repo, 'merge-base', '--is-ancestor', published, local, expected=1)
+        return {
+            'origin': origin, 'repo': repo, 'module': module, 'manifest': manifest,
+            'manifest_path': manifest_path, 'local': local, 'published': published,
+            'baseline': baseline,
+        }
+
+    def test_canonical_control_divergence_rebuild_and_reconcile_preserve_both_histories(self):
+        for command in ('rebuild', 'reconcile'):
+            with self.subTest(command=command):
+                fixture = self.prepare_canonical_control_divergence(f'control-divergence-{command}')
+                repo, module = fixture['repo'], fixture['module']
+                remote_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+                arguments = (
+                    ('int', 'rebuild', '--reason', 'reconcile canonical control divergence')
+                    if command == 'rebuild' else ('reconcile', '--apply', '--rebuild', 'needed')
+                )
+                self.run_cli(repo, *arguments)
+                final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+                self.assertNotEqual(final, fixture['local'])
+                self.git(repo, 'merge-base', '--is-ancestor', fixture['local'], final)
+                self.git(repo, 'merge-base', '--is-ancestor', fixture['published'], final)
+                parents = self.git(repo, 'show', '-s', '--format=%P', final).stdout.split()
+                self.assertEqual(len(parents), 2)
+                self.assertEqual(parents[0], fixture['local'])
+                self.git(repo, 'merge-base', '--is-ancestor', fixture['published'], parents[1])
+                self.assertEqual((repo / 'delivered.txt').read_text(), 'canonical delivered product\n')
+                self.assertTrue((repo / 'local-design.txt').exists())
+                selected, _ = module.load_manifest(repo)
+                expected = json.loads(json.dumps(fixture['manifest']))
+                if command == 'reconcile':
+                    # Normal reconcile rebuilds the selected source branch onto
+                    # its new base and records that equivalent commit revision.
+                    before = expected['stacks'][0]['commits']
+                    after = selected['stacks'][0]['commits']
+                    self.assertEqual(len(after), len(before))
+                    self.assertEqual(
+                        [module.commit_patch_id(repo, tip) for tip in before],
+                        [module.commit_patch_id(repo, tip) for tip in after],
+                    )
+                    expected['stacks'][0]['commits'] = after
+                self.assertEqual(module.manifest_digest(selected), module.manifest_digest(expected))
+                self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+                self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, remote_before)
+                self.run_cli(repo, *arguments)
+                self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), final)
+                self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, remote_before)
+
+    def test_canonical_control_divergence_rejects_every_unqualified_local_transition(self):
+        for mutation in ('product-revert', 'merge', 'root', 'invalid-json', 'invalid-object', 'invalid-version',
+                         'unknown-coordination-key', 'invalid-strategy', 'invalid-stack-branch',
+                         'unmanaged-ignore', 'old-replay-base'):
+            with self.subTest(mutation=mutation):
+                fixture = self.prepare_canonical_control_divergence(f'control-refuse-{mutation}')
+                repo, module = fixture['repo'], fixture['module']
+                path = fixture['manifest_path']
+                control_bytes = path.read_bytes()
+                if mutation == 'old-replay-base':
+                    fixture['manifest']['integration']['base'] = fixture['baseline']
+                    module.save_manifest(path, fixture['manifest'])
+                    self.git(repo, 'add', '.syncwheel/manifest.json')
+                    self.git(repo, 'commit', '-qm', 'test: replay base omits published advance')
+                    control_bytes = path.read_bytes()
+                elif mutation in ('merge', 'root'):
+                    parents = (
+                        ['-p', fixture['local'], '-p', 'pr/local-design']
+                        if mutation == 'merge' else []
+                    )
+                    tip = self.git(
+                        repo, 'commit-tree', f"{fixture['local']}^{{tree}}", *parents,
+                        '-m', 'test: unqualified local history',
+                    ).stdout.strip()
+                    self.git(repo, 'update-ref', 'refs/heads/main', tip, fixture['local'])
+                else:
+                    if mutation == 'product-revert':
+                        changed = repo / 'unexplained.txt'
+                        changed.write_text('must not disappear through a tree-only proof\n')
+                    elif mutation == 'unmanaged-ignore':
+                        changed = repo / '.gitignore'
+                        saved_ignore = changed.read_bytes()
+                        changed.write_bytes(saved_ignore + b'foreign-ignore-rule\n')
+                    else:
+                        changed = path
+                        invalid = json.loads(control_bytes)
+                        if mutation == 'unknown-coordination-key':
+                            invalid['coordination']['unknown'] = True
+                        elif mutation == 'invalid-strategy':
+                            invalid['integration']['strategy'] = 'unknown'
+                        elif mutation == 'invalid-stack-branch':
+                            invalid['stacks'][0]['branch'] = 'bad..branch'
+                        elif mutation == 'invalid-object':
+                            invalid = {'version': 2}
+                        elif mutation == 'invalid-version':
+                            invalid['version'] = True
+                        changed.write_text('{' if mutation == 'invalid-json' else json.dumps(invalid))
+                    self.git(repo, 'add', str(changed))
+                    self.git(repo, 'commit', '-qm', 'test: unqualified intermediate transition')
+                    if mutation == 'product-revert':
+                        changed.unlink()
+                    elif mutation == 'unmanaged-ignore':
+                        changed.write_bytes(saved_ignore)
+                    else:
+                        path.write_bytes(control_bytes)
+                    self.git(repo, 'add', str(changed))
+                    self.git(repo, 'commit', '-qm', 'test: restore final control tree')
+                local = self.git(repo, 'rev-parse', 'main').stdout.strip()
+                remote = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+                refusal = (
+                    'replay does not preserve published history'
+                    if mutation == 'old-replay-base' else 'local successor of published history'
+                )
+                with self.assertRaisesRegex(module.SyncwheelError, refusal):
+                    module.reconcile_integration_ancestry(
+                        repo, path, fixture['manifest'], 'test', 'reject unqualified divergence',
+                    )
+                self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), local)
+                self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, remote)
+                self.assertEqual(path.read_bytes(), control_bytes)
+
+    def test_canonical_control_divergence_preserves_leases_at_existing_cas_boundaries(self):
+        for race in ('remote', 'state', 'input', 'destination-ref', 'destination-index'):
+            with self.subTest(race=race):
+                fixture = self.prepare_canonical_control_divergence(f'control-race-{race}')
+                repo, module, path = fixture['repo'], fixture['module'], fixture['manifest_path']
+                injected = []
+
+                def interfere(stage):
+                    boundary = 'before_checkout_alignment' if race == 'destination-index' else 'intent_saved'
+                    if stage != boundary or injected:
+                        return
+                    injected.append(stage)
+                    if race == 'destination-index':
+                        (repo / 'concurrent.txt').write_text('preserve concurrent staged content\n')
+                        self.git(repo, 'add', 'concurrent.txt')
+                    elif race == 'state':
+                        state_tip, state = self.remote_state(fixture['origin'])
+                        state['parent_state'] = state_tip
+                        state['publication_id'] = 'concurrent-state'
+                        tip = module.create_coordination_state_commit(repo, state, state_tip)
+                        self.git(repo, 'push', '--no-verify', 'origin',
+                                 f"{tip}:{module.coordination_state_ref(module.coordination_config(fixture['manifest']))}")
+                    else:
+                        parent = fixture['local'] if race == 'destination-ref' else fixture['published']
+                        tip = self.git(repo, 'commit-tree', f'{parent}^{{tree}}', '-p', parent,
+                                       '-m', 'test: concurrent observation').stdout.strip()
+                        if race == 'remote':
+                            self.git(repo, 'push', '--no-verify', 'origin', f'{tip}:refs/heads/main')
+                        else:
+                            ref = 'refs/heads/main' if race == 'destination-ref' else 'refs/remotes/origin/main'
+                            self.git(repo, 'update-ref', ref, tip, parent)
+                        injected.append(tip)
+
+                with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interfere):
+                    with self.assertRaises(module.SyncwheelError):
+                        module.reconcile_integration_ancestry(
+                            repo, path, fixture['manifest'], 'test', 'reject stale divergence',
+                        )
+                self.assertTrue(injected)
+                if race == 'destination-index':
+                    self.assertEqual(self.git(repo, 'show', ':concurrent.txt').stdout,
+                                     'preserve concurrent staged content\n')
+                else:
+                    expected = injected[1] if race == 'destination-ref' else fixture['local']
+                    self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), expected)
+
+    def test_canonical_control_divergence_recovers_interrupted_intent_without_republication(self):
+        fixture = self.prepare_canonical_control_divergence('control-divergence-retry')
+        repo, module, path = fixture['repo'], fixture['module'], fixture['manifest_path']
+        remote = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+
+        def interrupt(stage):
+            if stage == 'ref_updated':
+                raise module.SyncwheelError('test: interrupted divergence')
+
+        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(module.SyncwheelError, 'interrupted divergence'):
+                module.reconcile_integration_ancestry(
+                    repo, path, fixture['manifest'], 'test', 'retry qualified divergence',
+                )
+        final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'retry qualified divergence')
+        self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), final)
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        self.assertFalse(module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path)))
+        self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, remote)
+        self.assertEqual((repo / 'delivered.txt').read_text(), 'canonical delivered product\n')
+
+    def test_canonical_control_divergence_proof_is_portable_after_explicit_fixture_publication(self):
+        fixture = self.prepare_canonical_control_divergence('control-divergence-portable')
+        repo, module = fixture['repo'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'qualify divergent control proof')
+        final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        # Publication is explicit in this disposable portability probe; the
+        # ordinary rebuild/reconcile probes separately prove no remote writes.
+        self.run_cli(repo, 'stack', 'push', 'local-design')
+        self.run_cli(repo, 'int', 'push')
+        peer = self.clone(fixture['origin'], 'control-divergence-fresh-peer')
+        selected, path = module.load_manifest(peer)
+        self.assertFalse(module.load_control_manifest_events(peer, path))
+        observation = module.observe_published_integration_tip(peer, selected)
+        proof = module.integration_reconciliation_proof(peer, final, path, observation)
+        self.assertIsNotNone(proof)
+        self.assertEqual(proof['parents'][0], fixture['local'])
+        self.git(peer, 'merge-base', '--is-ancestor', fixture['published'], proof['parents'][1])
+        self.assertEqual(self.git(peer, 'rev-parse', 'main').stdout.strip(), final)
+        self.assertEqual((peer / 'delivered.txt').read_text(), 'canonical delivered product\n')
+        self.assertTrue((peer / 'local-design.txt').exists())
+        self.assertFalse(module.load_control_manifest_events(peer, path))
+
     def prepare_selected_control_pending_reconcile(self, label, include_stack):
         origin = self.create_remote(label)
         repo = self.clone(origin, label)
