@@ -103,6 +103,29 @@ with `--replay-mode desk` to obtain a checkout for resolution. Plumbing requires
 its target branch not to be checked out, so it cannot leave an existing desk out
 of sync with the updated ref.
 
+For `merge-stacks` integration, an explicit `int rebuild --replay-mode desk`
+prepares a detached resolution desk before automatic ancestry reconciliation.
+It never resets the primary or rewrites source branches. An existing destination
+is refused unless it is the same recorded desk. On conflict, resolve and stage
+only the reviewed result, then let Syncwheel capture it:
+
+```bash
+syncwheel int rebuild --replay-mode desk --reason "review integration conflict"
+# Edit the reported desk, then git -C <desk> add <reviewed-paths>.
+syncwheel stack resolve-integration <stack> --worktree <desk>
+syncwheel int rebuild --replay-mode desk --reason "apply reviewed resolution"
+```
+
+Repeat capture/rebuild if another stack conflicts. Capture rejects an unresolved
+index, unstaged changes, a changed desk HEAD, or changed replay inputs. Source
+commits remain declared; only the integration contribution is replaced. Choosing
+the existing base can record an empty contribution. Normal rebuilds and peers
+consume the recorded resolution, and changed source revisions require fresh
+review. After inputs change, preserve the old desk and pass a new `--worktree`
+path to start another review. Desks and receipts remain available for inspection;
+no operator files are deleted. Final application still uses ordinary guarded
+ancestry reconciliation, including its refusal of unexplained product history.
+
 Pin a mode when the default is not what a repository or an operator wants, most
 specific first: the `--replay-mode` flag, `replay_mode` in the repo-local
 `.syncwheel/profile.local.json` (`syncwheel replay-mode <mode>`), then

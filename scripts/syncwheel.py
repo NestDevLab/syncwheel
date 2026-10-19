@@ -92,6 +92,7 @@ MANIFEST_VERSION_CHANNELS = 3
 COORDINATION_MODES = {'active-active', 'disabled'}
 COORDINATION_STATE_SCHEMA_VERSION = 2
 COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
+COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS = 4
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_STATE_PREFIX = 'syncwheel/state/'
 COORDINATION_CLAIM_FILE = 'claim.json'
@@ -4861,6 +4862,14 @@ def load_manifest(repo_root, manifest_path=None):
             raise SyncwheelError(
                 f'stack {stack_id} integration_commits must be a string array when present'
             )
+        resolution = stack.get('integration_resolution')
+        if resolution is not None and (
+            not isinstance(resolution, dict) or set(resolution) != {'source_tip'}
+            or not isinstance(resolution.get('source_tip'), str)
+            or not re.fullmatch(r'[0-9a-f]{40,64}', resolution['source_tip'])
+            or integration_commits is None
+        ):
+            raise SyncwheelError(f'stack {stack_id} has an invalid integration_resolution binding')
         integration_only_commits = stack.get('integration_only_commits')
         if integration_only_commits is not None and (
             not isinstance(integration_only_commits, list)
@@ -4993,6 +5002,25 @@ def stack_integration_base_commits(stack):
     commits.
     """
     return list(stack.get('integration_commits', stack['commits']))
+
+
+def bound_merge_stack_resolution_commits(stack):
+    """Only input-bound replacements participate in merge-stack replay."""
+    return stack_integration_base_commits(stack) if stack.get('integration_resolution') else None
+
+
+def merge_stack_resolution_commits(repo_root, stack, stack_ref):
+    """A reviewed integration replacement never rewrites the source branch."""
+    resolved = bound_merge_stack_resolution_commits(stack)
+    if resolved is None:
+        return None
+    binding = stack['integration_resolution']
+    if binding and binding.get('source_tip') != commit_full_sha(repo_root, stack_ref):
+        raise SyncwheelError(
+            f"stack {stack['id']} integration resolution is stale; "
+            'run syncwheel int rebuild --replay-mode desk --reason "review changed source"'
+        )
+    return resolved
 
 
 def stack_integration_only_commits(stack):
@@ -6649,6 +6677,8 @@ def integration_reconciliation_inputs(repo_root, manifest, inputs):
         stack = stacks[stack_id]
         if manifest['integration'].get('strategy', 'cherry-pick') == 'merge-stacks':
             expected.append(('merge-stack', stack_id, stack['branch']))
+            commits.extend(commit_full_sha(repo_root, value) for value in
+                           (bound_merge_stack_resolution_commits(stack) or []))
         else:
             commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_base_commits(stack))
         commits.extend(commit_full_sha(repo_root, value) for value in stack_integration_only_commits(stack))
@@ -7601,7 +7631,8 @@ def integration_reconciliation_history(
         commit_full_sha(repo_root, commit)
         for stack in manifest['stacks']
         if selected is None or stack.get('id') in selected
-        for commit in stack_integration_commits(stack)
+        for commit in [*stack_integration_commits(stack),
+                       *(stack['commits'] if stack.get('integration_resolution') else [])]
     }
     patches = {commit_patch_id(repo_root, commit) for commit in declared}
     patches.discard(None)
@@ -11663,6 +11694,13 @@ def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=
             snapshot_stack['state'] = stack['state']
         if stack.get('depends_on'):
             snapshot_stack['depends_on'] = list(stack['depends_on'])
+        resolution = {key: copy.deepcopy(stack[key])
+                      for key in ('integration_commits', 'integration_only_commits', 'integration_resolution')
+                      if key in stack}
+        if stack.get('integration_resolution'):
+            # Resolution is integration-owned state, not a source-branch edit.
+            # int push carries both the replay objects and these bindings atomically.
+            snapshot['integration'].setdefault('resolutions', {})[stack['id']] = resolution
         snapshot['stacks'].append(snapshot_stack)
     if manifest.get('version') == MANIFEST_VERSION_CHANNELS:
         snapshot['channels'] = []
@@ -11909,6 +11947,36 @@ def remote_ref_tips(repo_root, remote, refs):
     return output
 
 
+def coordination_integration_resolutions(snapshot):
+    """Validate integration-owned replacements without permitting source edits."""
+    resolutions = snapshot.get('integration', {}).get('resolutions', {})
+    ids = {item.get('id') for item in snapshot.get('stacks', []) if isinstance(item, dict)}
+    allowed = {'integration_commits', 'integration_only_commits', 'integration_resolution'}
+    if not isinstance(resolutions, dict):
+        raise SyncwheelError('coordination integration resolutions must be an object')
+    for stack_id, resolution in resolutions.items():
+        if stack_id not in ids or not isinstance(resolution, dict) or not set(resolution).issubset(allowed):
+            raise SyncwheelError('coordination integration resolution has unknown stack or fields')
+        for field in ('integration_commits', 'integration_only_commits'):
+            if field in resolution and (
+                not isinstance(resolution[field], list)
+                or not all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40,64}', value)
+                           for value in resolution[field])
+            ):
+                raise SyncwheelError('coordination integration resolution commits must be object IDs')
+        binding = resolution.get('integration_resolution')
+        if binding is None:
+            raise SyncwheelError('coordination integration resolution requires a source binding')
+        if binding is not None and (
+            not isinstance(binding, dict) or set(binding) != {'source_tip'}
+            or not isinstance(binding['source_tip'], str)
+            or not re.fullmatch(r'[0-9a-f]{40,64}', binding['source_tip'])
+            or 'integration_commits' not in resolution
+        ):
+            raise SyncwheelError('coordination integration resolution binding is invalid')
+    return resolutions
+
+
 def validate_coordination_snapshot_refs(snapshot):
     if not isinstance(snapshot, dict):
         raise SyncwheelError('coordination state manifest must be an object')
@@ -11951,6 +12019,7 @@ def validate_coordination_snapshot_refs(snapshot):
         raise SyncwheelError('coordination state manifest stacks must be an array')
     if not isinstance(channels, list):
         raise SyncwheelError('coordination state manifest channels must be an array')
+    coordination_integration_resolutions(snapshot)
     if 'landing' in snapshot:
         normalize_landing_policy(snapshot['landing'])
     coordination_public_remote_ref_parts(
@@ -12019,12 +12088,23 @@ def validate_coordination_snapshot_refs(snapshot):
             normalize_channel_timestamp(expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt')
 
 
+def coordination_snapshot_schema(snapshot):
+    # Older peers must reject bound resolutions rather than silently erase them.
+    integration = snapshot.get('integration')
+    if isinstance(integration, dict) and integration.get('resolutions'):
+        return COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS
+    return (COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
+            if snapshot.get('version') == MANIFEST_VERSION_CHANNELS
+            else COORDINATION_STATE_SCHEMA_VERSION)
+
+
 def validate_coordination_state(state, expected_id=None, claims_mode='advisory'):
     if not isinstance(state, dict):
         raise SyncwheelError('coordination state must be an object')
     if state.get('schema_version') not in {
         COORDINATION_STATE_SCHEMA_VERSION,
         COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
+        COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS,
     }:
         raise SyncwheelError(
             f"unsupported coordination state schema: {state.get('schema_version')!r}"
@@ -12039,11 +12119,7 @@ def validate_coordination_state(state, expected_id=None, claims_mode='advisory')
     if not isinstance(state.get('manifest'), dict):
         raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
     manifest_version = state['manifest'].get('version')
-    expected_schema = (
-        COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-        if manifest_version == MANIFEST_VERSION_CHANNELS
-        else COORDINATION_STATE_SCHEMA_VERSION
-    )
+    expected_schema = coordination_snapshot_schema(state['manifest'])
     if state['schema_version'] != expected_schema:
         raise SyncwheelError(
             f'coordination state schema {state["schema_version"]} is incompatible with '
@@ -12287,11 +12363,7 @@ def build_coordination_state(
     else:
         published_manifest_digest = previous_state['manifest_digest']
     return {
-        'schema_version': (
-            COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-            if manifest.get('version') == MANIFEST_VERSION_CHANNELS
-            else COORDINATION_STATE_SCHEMA_VERSION
-        ),
+        'schema_version': coordination_snapshot_schema(snapshot),
         'coordination_id': config['id'],
         'publication_id': str(uuid.uuid4()),
         'parent_state': previous.get('tip') if previous else None,
@@ -14421,6 +14493,8 @@ def apply_coordination_snapshot(manifest, snapshot):
     )
     updated['defaults'] = defaults
     integration = dict(snapshot['integration'])
+    resolutions = coordination_integration_resolutions(snapshot)
+    integration.pop('resolutions', None)
     integration['base'] = local_coordination_ref(
         snapshot['integration']['base'],
         defaults,
@@ -14434,6 +14508,7 @@ def apply_coordination_snapshot(manifest, snapshot):
         restored['target_remote'] = local_stack.get(
             'target_remote', defaults['canonical_remote']
         )
+        restored.update(copy.deepcopy(resolutions.get(stack['id'], {})))
         restored['state'] = stack.get('state', 'published')
         restored['publication'] = {'enabled': restored['state'] != 'draft'}
         restored['meta'] = (
@@ -19010,6 +19085,14 @@ def replay_plan(repo_root, manifest, target, mode):
         for stack_id in integration['stacks']:
             stack = stacks_by_id[stack_id]
             stack_ref = stack_ref_overrides.get(stack_id, stack['branch'])
+            resolved = merge_stack_resolution_commits(repo_root, stack, stack_ref)
+            if resolved is not None:
+                for commit in resolved:
+                    steps.append(replay_exec_step(
+                        [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
+                        replay_commit_env(repo_root, commit), stack_id=stack_id,
+                    ))
+                continue
             steps.append(replay_exec_step(
                 [
                     *prefix,
@@ -19024,11 +19107,12 @@ def replay_plan(repo_root, manifest, target, mode):
             ))
         for stack_id in integration['stacks']:
             for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
-                steps.append(replay_exec_step(
+                step = replay_exec_step(
                     [*prefix, 'cherry-pick', commit],
-                    replay_commit_env(repo_root, commit),
-                    stack_id=stack_id,
-                ))
+                    replay_commit_env(repo_root, commit), stack_id=stack_id,
+                )
+                step['integration_only'] = True
+                steps.append(step)
     else:
         raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
 
@@ -19749,6 +19833,10 @@ def integration_projection_input_snapshot(repo_root, manifest):
             refs.append(integration_projection_ref_observation(
                 repo_root, 'merge-stack', stack_id, stack['branch']
             ))
+            immutable_commits.extend(
+                commit_full_sha(repo_root, value) for value in
+                (bound_merge_stack_resolution_commits(stack) or [])
+            )
         else:
             immutable_commits.extend(
                 commit_full_sha(repo_root, commit)
@@ -26375,6 +26463,8 @@ def command_stack_resolve_integration(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
+    if getattr(args, 'worktree', None):
+        return capture_integration_desk(repo_root, manifest, manifest_path, stack, args)
     integration_branch = manifest['integration']['branch']
     if args.empty and args.specs:
         raise SyncwheelError('use either --empty or resolved integration commit specs, not both')
@@ -26390,6 +26480,7 @@ def command_stack_resolve_integration(args):
                 f"resolved integration commit is not on {integration_branch}: {commit}"
             )
     stack['integration_commits'] = commits
+    stack.pop('integration_resolution', None)
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
@@ -28280,6 +28371,250 @@ def command_int_align_remote(args):
     return 0
 
 
+def integration_desk_receipt_path(repo_root, manifest_path):
+    key = hashlib.sha256(str(Path(manifest_path).resolve()).encode()).hexdigest()[:20]
+    return git_common_dir(repo_root) / 'syncwheel' / 'integration-desks' / (key + '.json')
+
+
+def integration_desk_inputs(repo_root, manifest, manifest_path):
+    return {
+        'manifest': manifest_digest(manifest),
+        'replay': integration_projection_input_snapshot(repo_root, manifest),
+        'integration_tip': ref_tip(repo_root, manifest['integration']['branch']),
+    }
+
+
+def normalized_integration_desk_inputs(repo_root, inputs, previous_tip):
+    observed = copy.deepcopy(inputs)
+    current_tip = observed['integration_tip']
+    if previous_tip != current_tip and branch_contains(repo_root, current_tip, previous_tip):
+        transitions = rev_list(repo_root, f'{previous_tip}..{current_tip}')
+        if all(
+            len(git(repo_root, 'rev-list', '--parents', '-n', '1', value).stdout.split()) == 2
+            and integration_control_only_transition(repo_root, value, value + '^')
+            for value in transitions
+        ):
+            # Normal command completion may commit the selected control manifest.
+            # Accept only proven control-only successors, never a product edit.
+            observed['integration_tip'] = previous_tip
+    return observed
+
+
+def read_integration_desk(repo_root, manifest, manifest_path, worktree):
+    receipt_path = integration_desk_receipt_path(repo_root, manifest_path)
+    if not receipt_path.exists():
+        raise SyncwheelError('no managed integration resolution desk; run int rebuild --replay-mode desk first')
+    receipt = json.loads(receipt_path.read_text())
+    desk = Path(worktree).resolve()
+    if str(desk) != receipt['worktree'] or git_common_dir(desk) != git_common_dir(repo_root):
+        raise SyncwheelError('integration resolution desk does not match its receipt')
+    if git(desk, 'symbolic-ref', '-q', 'HEAD', check=False).returncode == 0:
+        raise SyncwheelError('integration resolution desk must remain detached')
+    observed = normalized_integration_desk_inputs(
+        repo_root, integration_desk_inputs(repo_root, manifest, manifest_path),
+        receipt['inputs']['integration_tip'],
+    )
+    capture = receipt.get('capture')
+    saved_capture = capture and observed == normalized_integration_desk_inputs(
+        repo_root, capture['inputs'], receipt['inputs']['integration_tip'],
+    )
+    if receipt['inputs'] != observed and not saved_capture:
+        changed = ', '.join(key for key in observed if observed[key] != receipt['inputs'].get(key))
+        raise SyncwheelError('integration resolution desk inputs changed (' + changed + '); preserve it and use int rebuild --replay-mode desk --worktree <new-path> --reason "review changed inputs"')
+    allowed_heads = {receipt['head']}
+    if saved_capture:
+        allowed_heads.add(capture['commit'])
+    if ref_tip(desk, 'HEAD') not in allowed_heads:
+        raise SyncwheelError('integration resolution desk HEAD changed; refusing to capture unrelated work')
+    return receipt_path, receipt, desk
+
+
+def finish_integration_desk_capture(repo_root, manifest, manifest_path, receipt_path, receipt, desk):
+    capture = receipt['capture']
+    if (git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.strip()
+            or git(desk, 'diff', '--quiet', check=False).returncode != 0
+            or git(desk, 'write-tree').stdout.strip() != capture['tree']):
+        raise SyncwheelError('saved integration capture has changed desk content; preserve and review it')
+    # A write-ahead receipt binds the saved manifest, reviewed tree and exact object.
+    # Retry completes the same capture even after reset cleared MERGE_HEAD.
+    git(desk, 'reset', '--hard', capture['commit'])
+    receipt.update(head=capture['commit'], status='ready', next=receipt['next'] + 1)
+    receipt.pop('operation', None)
+    receipt.pop('capture')
+    receipt['inputs'] = integration_desk_inputs(repo_root, manifest, manifest_path)
+    atomic_write_private_json(receipt_path, receipt, indent=2)
+
+
+def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
+    if args.specs or args.empty:
+        raise SyncwheelError('--worktree cannot be combined with commit specs or --empty')
+    with control_manifest_branch_lock(repo_root, manifest['integration']['branch']):
+        receipt_path, receipt, desk = read_integration_desk(
+            repo_root, manifest, manifest_path, args.worktree,
+        )
+        step = receipt['steps'][receipt['next']] if receipt['next'] < len(receipt['steps']) else {}
+        if receipt.get('status') != 'conflict' or step.get('stack_id') != stack['id']:
+            raise SyncwheelError('this stack has no pending conflict in the integration resolution desk')
+        capture = receipt.get('capture')
+        if capture and manifest_digest(manifest) == capture['inputs']['manifest']:
+            finish_integration_desk_capture(
+                repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+            )
+            print(f"{stack['id']}: completed previously saved integration capture from {desk}")
+            return 0
+        if git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.strip():
+            raise SyncwheelError('integration resolution desk still has unresolved paths; resolve and stage them first')
+        if git(desk, 'diff', '--quiet', check=False).returncode != 0:
+            raise SyncwheelError('integration resolution desk has unstaged changes; review and stage the complete resolution')
+        operation = receipt['operation']
+        if ref_tip(desk, operation['ref']) != operation['tip']:
+            raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
+        tree = git(desk, 'write-tree').stdout.strip()
+        parent = (receipt['head'] if step.get('integration_only')
+                  else receipt['stack_bases'][stack['id']])
+        commit = parent
+        commits = []
+        if tree != ref_tree(repo_root, commit):
+            commit = git(
+                repo_root, 'commit-tree', tree, '-p', commit,
+                '-m', f"Resolve stack '{stack['id']}' on integration",
+                env=replay_hygiene_env(),
+            ).stdout.strip()
+            commits = [commit]
+        # The merge result is one reviewed replacement of this stack's contribution.
+        # Source commits and the source branch remain untouched.
+        read_integration_desk(repo_root, manifest, manifest_path, args.worktree)
+        source_tip = next(item['tip'] for item in receipt['inputs']['replay']['refs']
+                          if item['kind'] == 'merge-stack' and item['id'] == stack['id'])
+        if step.get('integration_only'):
+            previous = stack_integration_only_commits(stack)
+            offset = previous.index(step['argv'][-1])
+            stack['integration_only_commits'] = previous[:offset] + commits + previous[offset + 1:]
+        else:
+            pending = [item['argv'][-1] for item in receipt['steps'][receipt['next'] + 1:]
+                       if item.get('stack_id') == stack['id']
+                       and not item.get('integration_only')]
+            stack['integration_commits'] = commits + pending
+            stack['integration_resolution'] = {'source_tip': source_tip}
+        receipt['capture'] = {
+            'commit': commit, 'tree': tree,
+            'inputs': integration_desk_inputs(repo_root, manifest, manifest_path),
+        }
+        atomic_write_private_json(receipt_path, receipt, indent=2)
+        require_manifest_transaction_current(manifest_path)
+        save_manifest_with_ledger(
+            repo_root, manifest_path, manifest, 'stack_resolve_integration',
+            {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
+             'source_tip': source_tip},
+        )
+        finish_integration_desk_capture(
+            repo_root, manifest, manifest_path, receipt_path, receipt, desk,
+        )
+        print(f"{stack['id']}: recorded {len(commits)} resolved integration commits from {desk}")
+    return 0
+
+
+def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
+    """Prepare/reuse an isolated conflict desk before any shared-ref replay.
+
+    Ordinary rebuild remains responsible for publication ancestry, checkout leases
+    and the final integration update after the reviewed resolutions are recorded.
+    """
+    receipt_path = integration_desk_receipt_path(repo_root, manifest_path)
+    git(repo_root, 'fetch', '--all', '--prune')
+    with control_manifest_branch_lock(repo_root, manifest['integration']['branch']):
+        saved = json.loads(receipt_path.read_text()) if receipt_path.exists() else None
+        reuse = saved is not None and (not args.worktree or str(Path(args.worktree).resolve()) == saved['worktree'])
+        if reuse:
+            chosen = args.worktree or saved['worktree']
+            receipt_path, receipt, desk = read_integration_desk(
+                repo_root, manifest, manifest_path, chosen,
+            )
+        else:
+            desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
+                repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
+            ).resolve()
+            if desk.exists():
+                raise SyncwheelError(f'refusing to overwrite an existing resolution desk path: {desk}')
+            # A detached desk never moves integration, even when it is checked out
+            # in the primary. Its frozen source/ref inputs are checked on capture.
+            inputs = integration_desk_inputs(repo_root, manifest, manifest_path)
+            review_manifest = copy.deepcopy(manifest)
+            for stack in review_manifest['stacks']:
+                binding = stack.get('integration_resolution')
+                if binding and binding['source_tip'] != commit_full_sha(repo_root, stack['branch']):
+                    stack.pop('integration_commits', None)
+                    stack.pop('integration_resolution', None)
+            plan = replay_plan(
+                repo_root, review_manifest,
+                replay_target(integration=review_manifest['integration'], worktree=desk,
+                              return_tree=True, skip_contained=True), 'desk',
+            )
+            if inputs != integration_desk_inputs(repo_root, manifest, manifest_path):
+                raise SyncwheelError('integration inputs changed while planning the resolution desk; retry')
+            # Execute the observed objects, never a moving source branch name.
+            source_tips = {item['id']: item['tip'] for item in inputs['replay']['refs']
+                           if item['kind'] == 'merge-stack'}
+            for step in plan['steps'][1:]:
+                if 'merge' in step['argv']:
+                    step['argv'][step['argv'].index('merge') + 2] = source_tips[step['stack_id']]
+            desk.parent.mkdir(parents=True, exist_ok=True)
+            git(repo_root, 'worktree', 'add', '--detach', '--quiet', str(desk), inputs['replay']['refs'][0]['tip'])
+            receipt = {
+                'worktree': str(desk), 'inputs': inputs,
+                'head': ref_tip(desk, 'HEAD'), 'next': 0, 'status': 'ready',
+                'steps': plan['steps'][1:], 'stack_bases': {},
+            }
+            if saved is not None:
+                archive = receipt_path.with_name(receipt_path.stem + '-' + uuid.uuid4().hex + '.json')
+                atomic_write_private_json(archive, saved, indent=2)
+            atomic_write_private_json(receipt_path, receipt, indent=2)
+        if receipt['status'] == 'conflict':
+            stack_id = receipt['steps'][receipt['next']]['stack_id']
+            raise SyncwheelError(
+                f"resolution desk: {desk}\nResolve and stage the paths, then run:\n  "
+                + quoted(['syncwheel', 'stack', 'resolve-integration', stack_id, '--worktree', str(desk)])
+            )
+        if git(desk, 'status', '--porcelain').stdout.strip():
+            raise SyncwheelError('integration resolution desk has unrecorded work; refusing to replay over it')
+        while receipt['next'] < len(receipt['steps']):
+            step = receipt['steps'][receipt['next']]
+            argv = step['argv']
+            if not step.get('integration_only'):
+                receipt['stack_bases'].setdefault(step['stack_id'], receipt['head'])
+            atomic_write_private_json(receipt_path, receipt, indent=2)
+            skip = 'cherry-pick' in argv and branch_contains(desk, 'HEAD', argv[-1])
+            if not skip:
+                try:
+                    run(argv if step['env'] is not None else with_git_identity(repo_root, argv),
+                        cwd=repo_root, env=step['env'])
+                except SyncwheelError:
+                    paths = git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.splitlines()
+                    if not paths:
+                        raise
+                    operation_ref = 'MERGE_HEAD' if 'merge' in argv else 'CHERRY_PICK_HEAD'
+                    receipt.update(status='conflict', operation={
+                        'ref': operation_ref, 'tip': ref_tip(desk, operation_ref),
+                    })
+                    atomic_write_private_json(receipt_path, receipt, indent=2)
+                    raise SyncwheelError(
+                        f"resolution desk: {desk}\nstack: {step['stack_id']}\n"
+                        + '\n'.join(paths) + '\nResolve and stage the paths, then run:\n  '
+                        + quoted(['syncwheel', 'stack', 'resolve-integration', step['stack_id'], '--worktree', str(desk)])
+                    )
+            receipt.update(head=ref_tip(desk, 'HEAD'), next=receipt['next'] + 1)
+            atomic_write_private_json(receipt_path, receipt, indent=2)
+        # Release the branch lock before the normal guarded ancestry transaction.
+    normal = copy.copy(args)
+    normal.replay_mode, normal.worktree, normal.in_place = 'ephemeral', None, False
+    result = command_int_rebuild(normal)
+    # Keep the desk and its receipt for audit/retry. Never delete operator files.
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    receipt['inputs'] = integration_desk_inputs(repo_root, manifest, manifest_path)
+    atomic_write_private_json(receipt_path, receipt, indent=2)
+    return result
+
+
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -28300,6 +28635,27 @@ def command_int_rebuild(args):
             allow_new_operation=bool(args.reason),
         )
     preflight_control_manifest_digest(repo_root, manifest_path, manifest)
+    if (getattr(args, 'replay_mode', None) == 'desk'
+            and manifest['integration'].get('strategy') == 'merge-stacks'):
+        if args.dry_run:
+            desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
+                repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
+            ).resolve()
+            print(f'resolution desk: {desk}')
+            review_manifest = copy.deepcopy(manifest)
+            for stack in review_manifest['stacks']:
+                binding = stack.get('integration_resolution')
+                if binding and binding['source_tip'] != commit_full_sha(repo_root, stack['branch']):
+                    stack.pop('integration_commits', None)
+                    stack.pop('integration_resolution', None)
+            plan = replay_plan(repo_root, review_manifest, replay_target(
+                integration=review_manifest['integration'], worktree=desk,
+                return_tree=True, skip_contained=True), 'desk')
+            for step in plan['steps']:
+                print(replay_step_render(step))
+            print('would replay frozen stack inputs; conflicts remain in the desk for reviewed capture')
+            return 0
+        return rebuild_integration_desk(repo_root, manifest, manifest_path, args)
     integration = manifest['integration']
     validation = validate_manifest(repo_root, manifest)
     narrowed = validation['details']['integration'].get(
@@ -33191,6 +33547,7 @@ def build_parser():
         action='store_true',
         help='record that this stack was absorbed by the integration base or another resolved stack',
     )
+    stack_resolve_p.add_argument('--worktree', help='capture the staged resolution from a managed integration desk')
     stack_resolve_p.set_defaults(func=command_stack_resolve_integration)
 
     stack_classify_p = stack_sub.add_parser(
