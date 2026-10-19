@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "desk-empty-step"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,24 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "desk-empty-step",
+      "branch": "syncwheel/draft/desk-empty-step",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Recover exact empty integration-only replay steps in managed desks"
+      }
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
