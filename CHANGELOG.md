@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.2 - 2026-10-19
+
+- Recover exact empty integration-only cherry-picks through managed desk capture, preserving source refs, sibling steps, and native ancestry proofs. Reject changed operation IDs, source inputs or desk content, and recover interrupted retirement receipts without treating unknown replay failures as empty steps.
+
 ## 0.46.1 - 2026-10-19
 
 - Add plan-first stack archival with immutable source and integration archive refs, reachability proofs, reasoned resumption receipts, and exact-lease coordination close recovery. Preserve source branches and exclude archived tombstones from automatic cleanup.

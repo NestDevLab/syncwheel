@@ -7531,6 +7531,14 @@ def historically_abandoned_unmapped_commits(repo_root, manifest, commits):
     )
 
 
+def integration_only_replay_is_empty(repo_root, commit, head, tree):
+    if commit_parent_count(repo_root, commit) != 1 or ref_tree(repo_root, head) != tree:
+        return False
+    replay = git(repo_root, 'merge-tree', '--write-tree',
+                 f'--merge-base={commit}^', head, commit, check=False)
+    return replay.returncode == 0 and replay.stdout.split() == [tree]
+
+
 def historically_empty_integration_only_commits(repo_root, manifest, commits, manifest_path=None):
     """Local native capture authorizes only the exact retired no-op endpoint.
 
@@ -7555,17 +7563,16 @@ def historically_empty_integration_only_commits(repo_root, manifest, commits, ma
             expected['integration_only_commits'] = [value for value in old_only if value != commit]
             expected['integration_commits'] = [value for value in before['integration_commits'] if value != commit]
             selected = current.get(stack_id)
+            identity = lambda summary: {key: value for key, value in summary.items()
+                                        if key not in {'integration_commits', 'integration_only_commits'}}
             if (commit in wanted and commit in old_only and context.get('commits') == []
                     and expected == after and selected
-                    and manifest_stack_history_summary(selected) == after
+                    and identity(manifest_stack_history_summary(selected)) == identity(after)
+                    and commit not in stack_integration_commits(selected)
                     and ref_tip(repo_root, selected['branch']) == context.get('source_tip')
                     and all(value and commit_exists(repo_root, value) for value in (commit, head))
-                    and commit_parent_count(repo_root, commit) == 1
-                    and ref_tree(repo_root, head) == tree):
-                replay = git(repo_root, 'merge-tree', '--write-tree',
-                             f'--merge-base={commit}^', head, commit, check=False)
-                if replay.returncode == 0 and replay.stdout.split() == [tree]:
-                    retired.add(commit)
+                    and integration_only_replay_is_empty(repo_root, commit, head, tree)):
+                retired.add(commit)
         previous = summaries
     return retired
 
@@ -28718,6 +28725,17 @@ def finish_integration_desk_capture(repo_root, manifest, manifest_path, receipt_
             or git(desk, 'diff', '--quiet', check=False).returncode != 0
             or git(desk, 'write-tree').stdout.strip() != capture['tree']):
         raise SyncwheelError('saved integration capture has changed desk content; preserve and review it')
+    context = capture.get('context') or {}
+    if context.get('empty_integration_only') and not any(
+        event.get('type') == 'manifest_saved'
+        and event.get('payload', {}).get('reason') == 'stack_resolve_integration'
+        and event['payload'].get('manifest_hash') == manifest_digest(manifest)
+        and event['payload'].get('context') == context
+        for event in load_ledger_events(repo_root, manifest_path)
+    ):
+        append_ledger_event(repo_root, 'manifest_saved', manifest_event_payload(
+            manifest_path, manifest, 'stack_resolve_integration', context,
+        ), manifest_path)
     # A write-ahead receipt binds the saved manifest, reviewed tree and exact object.
     # Retry completes the same capture even after reset cleared MERGE_HEAD.
     git(desk, 'reset', '--hard', capture['commit'])
@@ -28781,19 +28799,20 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
                        and not item.get('integration_only')]
             stack['integration_commits'] = commits + pending
             stack['integration_resolution'] = {'source_tip': source_tip}
+        context = {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
+                   'source_tip': source_tip,
+                   **({'empty_integration_only': {'commit': step['argv'][-1],
+                                                  'head': receipt['head'], 'tree': tree}}
+                      if operation.get('empty') else {})}
         receipt['capture'] = {
-            'commit': commit, 'tree': tree,
+            'commit': commit, 'tree': tree, 'context': context,
             'inputs': integration_desk_inputs(repo_root, manifest, manifest_path),
         }
         atomic_write_private_json(receipt_path, receipt, indent=2)
         require_manifest_transaction_current(manifest_path)
         save_manifest_with_ledger(
             repo_root, manifest_path, manifest, 'stack_resolve_integration',
-            {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
-             'source_tip': source_tip,
-             **({'empty_integration_only': {'commit': step['argv'][-1],
-                                            'head': receipt['head'], 'tree': tree}}
-                if operation.get('empty') else {})},
+            context,
         )
         finish_integration_desk_capture(
             repo_root, manifest, manifest_path, receipt_path, receipt, desk,
@@ -28813,6 +28832,8 @@ def integration_desk_has_exact_empty_step(desk, receipt, step):
         and not ref_tip(desk, 'MERGE_HEAD') and not ref_tip(desk, 'REVERT_HEAD')
         and not git(desk, 'status', '--porcelain', '--untracked-files=all').stdout.strip()
         and git(desk, 'write-tree').stdout.strip() == ref_tree(desk, receipt['head'])
+        and integration_only_replay_is_empty(desk, argv[-1], receipt['head'],
+                                              ref_tree(desk, receipt['head']))
     )
 
 

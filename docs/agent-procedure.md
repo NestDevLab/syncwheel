@@ -174,3 +174,22 @@ Install the candidate CLI (`python3 -m pip install .`) so guard hooks can resolv
 a stable executable. Run `python3 scripts/cli-dogfood.py` for a disposable local-remote delivery and
 second-clone resume check. Every subprocess is timed and bounded; its evidence
 directory is printed at startup.
+
+### Empty integration-only desk steps
+
+A stopped integration-only cherry-pick can be reviewed through the ordinary
+`stack resolve-integration STACK --worktree DESK` command when the desk reports
+an empty step. Syncwheel verifies the exact pending SHA, unchanged HEAD, clean
+index and worktree, and an independent replay that produces the same tree.
+Capture retires only that contribution, preserves source branches and sibling
+steps, and records its exact no-op proof in the normal source ledger. Resume
+`int rebuild --replay-mode desk --worktree DESK --reason "Continue reviewed replay"`
+to execute the remainder. Legacy ready receipts with the same stopped pick can
+be resumed by the same desk rebuild command.
+
+Changed source inputs, pending operation identity, staged or unstaged content,
+and untracked work fail closed. Unknown Git failures are not classified from
+error-message text. A later normal rebuild verifies the retirement before
+carrying historical integration commits into its existing ancestry proof. An
+interrupted capture uses its write-ahead receipt to complete the same source
+ledger transition before continuing.

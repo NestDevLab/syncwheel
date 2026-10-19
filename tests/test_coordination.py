@@ -9994,6 +9994,166 @@ sys.exit(module.main())
         self.run_cli(repo, 'int', 'rebuild', '--reason', 'repeat reviewed projection')
         self.run_cli(repo, 'validate')
 
+    def empty_desk_rebuild_args(self, fixture):
+        return SimpleNamespace(repo=str(fixture['follower']), manifest=None, personal=None,
+                               worktree=str(fixture['desk']), reason='review exact empty step',
+                               dry_run=False, replay_mode='desk', in_place=False)
+
+    def test_empty_integration_only_desk_recovers_legacy_ready_receipt(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-legacy')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        # Reproduce the old handler: an empty failure leaves ready + CHERRY_PICK_HEAD.
+        with mock.patch.object(module, 'integration_desk_has_exact_empty_step', return_value=False):
+            with self.assertRaises(module.SyncwheelError):
+                module.rebuild_integration_desk(repo, manifest, path, self.empty_desk_rebuild_args(fixture))
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        legacy = json.loads(receipt_path.read_text())
+        self.assertEqual(legacy['status'], 'ready')
+        self.assertNotIn('operation', legacy)
+        self.assertEqual(module.ref_tip(desk, 'CHERRY_PICK_HEAD'), fixture['duplicate'])
+        self.assertEqual(self.git(desk, 'status', '--porcelain').stdout, '')
+        failure = self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                               '--worktree', str(desk), '--reason', 'recover exact legacy step', expected=2)
+        self.assertIn('resolve-integration', failure.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text())['status'], 'conflict')
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'use reviewed retirement')
+
+    def test_empty_integration_only_desk_rejects_unrelated_content_and_identity(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-guards')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'prepare empty step', expected=2)
+        manifest, path = module.load_manifest(repo)
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        saved = receipt_path.read_bytes()
+        receipt = json.loads(saved)
+        step = receipt['steps'][receipt['next']]
+        self.assertTrue(module.integration_desk_has_exact_empty_step(desk, receipt, step))
+        self.assertFalse(module.integration_desk_has_exact_empty_step(desk, receipt, dict(step, integration_only=False)))
+        for kind in ('unstaged', 'staged', 'untracked', 'wrong-operation', 'wrong-head'):
+            with self.subTest(kind=kind):
+                before = path.read_bytes()
+                if kind in ('unstaged', 'staged'):
+                    (desk / 'duplicate.txt').write_text('unrelated edited value\n')
+                    if kind == 'staged':
+                        self.git(desk, 'add', 'duplicate.txt')
+                elif kind == 'untracked':
+                    (desk / 'untracked.txt').write_text('keep this untracked work\n')
+                elif kind == 'wrong-operation':
+                    self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['tail'])
+                else:
+                    moved = self.git(repo, 'commit-tree', module.ref_tree(repo, receipt['head']),
+                                     '-p', receipt['head'], '-m', 'unrelated identity').stdout.strip()
+                    self.git(desk, 'update-ref', 'HEAD', moved)
+                self.assertFalse(module.integration_desk_has_exact_empty_step(desk, receipt, step))
+                self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk), expected=2)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(receipt_path.read_bytes(), saved)
+                # Fixture restoration only: native code must leave each rejected state untouched.
+                if kind in ('unstaged', 'staged'):
+                    self.git(desk, 'restore', '--source=HEAD', '--staged', '--worktree', 'duplicate.txt')
+                elif kind == 'untracked':
+                    self.assertEqual((desk / 'untracked.txt').read_text(), 'keep this untracked work\n')
+                    (desk / 'untracked.txt').unlink()
+                elif kind == 'wrong-operation':
+                    self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['duplicate'])
+                else:
+                    self.git(desk, 'update-ref', 'HEAD', receipt['head'])
+        # A forged pending SHA with a nonempty patch must not become an empty proof.
+        forged = json.loads(json.dumps(step))
+        forged['argv'][-1] = fixture['tail']
+        self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['tail'])
+        self.assertFalse(module.integration_desk_has_exact_empty_step(desk, receipt, forged))
+        self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['duplicate'])
+        branch = manifest['stacks'][0]['branch']
+        source = module.ref_tip(repo, branch)
+        moved = self.git(repo, 'commit-tree', module.ref_tree(repo, source), '-p', source, '-m', 'advanced source').stdout.strip()
+        self.git(repo, 'update-ref', 'refs/heads/' + branch, moved, source)
+        failure = self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk), expected=2)
+        self.assertIn('inputs changed', failure.stderr)
+        self.assertEqual(receipt_path.read_bytes(), saved)
+
+    def test_empty_integration_only_desk_does_not_classify_an_unknown_failure(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-unknown')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        original_run = module.run
+        def fail_before_cherry(command, **kwargs):
+            if 'cherry-pick' in command:
+                raise module.SyncwheelError('synthetic unrelated failure')
+            return original_run(command, **kwargs)
+        with mock.patch.object(module, 'run', side_effect=fail_before_cherry):
+            with self.assertRaisesRegex(module.SyncwheelError, 'synthetic unrelated failure'):
+                module.rebuild_integration_desk(repo, manifest, path, self.empty_desk_rebuild_args(fixture))
+        receipt = json.loads(module.integration_desk_receipt_path(repo, path).read_text())
+        self.assertEqual(receipt['status'], 'ready')
+        self.assertNotIn('operation', receipt)
+        self.assertIsNone(module.ref_tip(desk, 'CHERRY_PICK_HEAD'))
+        self.assertEqual(module.load_manifest(repo)[0], manifest)
+
+    def test_empty_integration_only_desk_recovers_saved_manifest_before_ledger(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-capture-recovery')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'prepare empty capture', expected=2)
+        manifest, path = module.load_manifest(repo)
+        original_append = module.append_ledger_event
+        def interrupt_ledger(root, kind, payload, *args, **kwargs):
+            if kind == 'manifest_saved' and payload.get('reason') == 'stack_resolve_integration':
+                raise OSError('interrupted after source save')
+            return original_append(root, kind, payload, *args, **kwargs)
+        with mock.patch.object(module, 'append_ledger_event', side_effect=interrupt_ledger):
+            with self.assertRaisesRegex(OSError, 'interrupted after source save'):
+                module.capture_integration_desk(repo, manifest, path, manifest['stacks'][0],
+                                               SimpleNamespace(specs=[], empty=False, worktree=str(desk)))
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        self.assertIn('capture', json.loads(receipt_path.read_text()))
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        self.assertNotIn('capture', json.loads(receipt_path.read_text()))
+        current, _ = module.load_manifest(repo)
+        self.assertEqual(module.historically_empty_integration_only_commits(
+            repo, current, [fixture['duplicate']], path), {fixture['duplicate']})
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'replay remainder after recovered capture')
+
+    def test_empty_integration_only_desk_accumulates_exact_retirements(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-multiple')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-c', 'scratch/second-empty', fixture['duplicate'])
+        (repo / 'combined.txt').write_text('additional source content\n')
+        self.git(repo, 'add', 'combined.txt')
+        self.git(repo, 'commit', '-qm', 'second separately owned empty contribution')
+        second = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['integration_only_commits'] = [fixture['duplicate'], second, fixture['tail']]
+        with module.manifest_write_transaction(repo, path, 'fixture-second-empty'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_second_empty')
+        for endpoint in (fixture['duplicate'], second):
+            self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                         '--reason', 'review each exact empty contribution', expected=2)
+            receipt = json.loads(module.integration_desk_receipt_path(repo, path).read_text())
+            self.assertEqual(receipt['operation']['tip'], endpoint)
+            self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        current, _ = module.load_manifest(repo)
+        self.assertEqual(module.historically_empty_integration_only_commits(
+            repo, current, [fixture['duplicate'], second], path), {fixture['duplicate'], second})
+        events = module.load_ledger_events(repo, path)
+        forged = json.loads(json.dumps(events))
+        for event in forged:
+            proof = event.get('payload', {}).get('context', {}).get('empty_integration_only')
+            if proof:
+                proof['tree'] = '0' * 40
+        with mock.patch.object(module, 'load_ledger_events', return_value=forged):
+            self.assertEqual(module.historically_empty_integration_only_commits(
+                repo, current, [fixture['duplicate'], second], path), set())
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'finish all remaining contributions')
+        self.assertEqual((repo / 'tail.txt').read_text(), 'remaining replay step\n')
+
     def test_merge_stack_desk_dry_run_plans_detached_review_path(self):
         fixture = self.merge_stack_conflict_desk_fixture('desk-dry-run')
         result = self.run_cli(fixture['follower'], 'int', 'rebuild', '--replay-mode', 'desk',
