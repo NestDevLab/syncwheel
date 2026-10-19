@@ -77,12 +77,12 @@
     "refs/heads/syncwheel/draft/revision-provider-control-commit-ahead-v2": "012f0c853f7ba53a75d53f2d34e2f09401af793d",
     "refs/heads/syncwheel/draft/revision-provider-primary-guard-auth": "4e03905520758c2e6124166d05f4202d6a6e01ac",
     "refs/heads/syncwheel/draft/skill-close-guidance": "fffac1d77c4574109033e8d154453c6ef6bbe092",
-    "refs/heads/syncwheel/draft/stack-archive-proof": "eda33f1bdb6c58cde8de3376029884ad2860868c",
+    "refs/heads/syncwheel/draft/stack-archive-proof": "81eac061afe72c5a932e409668e9f387c6e0f8f6",
     "refs/heads/syncwheel/draft/test-fixture-cache": "179289ae429567a1a18a590578b6a0fe4b78c255",
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T14:50:04+00:00",
+  "created_at": "2026-10-19T14:58:25+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -232,7 +232,9 @@
           "role": "canonical"
         },
         "branch": "syncwheel/draft/stack-archive-proof",
-        "commits": [],
+        "commits": [
+          "bb60e10555a6abfb16cc5697c66db2f5cade6693"
+        ],
         "id": "stack-archive-proof",
         "integration_branch": "main-integration",
         "state": "draft",
@@ -242,11 +244,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "a90601fc-5f11-4222-955b-bcc63c70bb88",
-  "parent_state": "fce149288bfeed7dbbd44f1be17f5dfaccaac25f",
+  "operation_token": "90efd903-081b-42b9-bc0d-136d868e3e7f",
+  "parent_state": "f0896d5325bd464ce2461467da08a5a3bcfa318c",
   "projection_status": "partial",
-  "publication_id": "5abfba72-77ee-4f0f-a24c-eba7529ee810",
-  "publication_scope": "create:stack-archive-proof",
+  "publication_id": "45a48bff-5b98-4345-b6dd-f69fb3e0e9ad",
+  "publication_scope": "stack:stack-archive-proof",
   "schema_version": 2,
   "syncwheel_version": "0.46.0",
   "tombstones": [
