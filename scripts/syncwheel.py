@@ -28477,8 +28477,8 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
                 repo_root, manifest, manifest_path, chosen,
             )
         else:
-            desk = Path(args.worktree).resolve() if args.worktree else (
-                Path(repo_root) / effective_worktree_root(manifest) / ('integration-desk-' + receipt_path.stem)
+            desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
+                repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
             ).resolve()
             if desk.exists():
                 raise SyncwheelError(f'refusing to overwrite an existing resolution desk path: {desk}')
