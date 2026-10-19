@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/revision-ref-guard-batching"
+  ],
+  "claimed_at": "2026-10-19T19:54:17+00:00",
+  "coordination_id": "default",
+  "operation_token": "4ee57aa0-5555-4e48-9358-b0203445cbc4",
+  "publication_scope": "stack:revision-ref-guard-batching",
+  "source_ref": "refs/heads/pr/revision-ref-guard-batching",
+  "syncwheel_version": "0.46.4"
+}
