@@ -7078,6 +7078,7 @@ def abandoned_stack_paths_match_delivery(repo_root, commits, local_tip, publishe
 def historically_closed_integration_commits(
     repo_root, tip, observation, candidates=None, delivery_tip=None,
     delivery_observation=None, merge_parent_candidates=None, abandonment_only=False,
+    absorbed_merge_tips=None,
 ):
     """Return exact commits covered by a durable coordinated close proof.
 
@@ -7219,6 +7220,10 @@ def historically_closed_integration_commits(
                             managed_parents
                         ):
                             declared.extend(managed_parents)
+                            # Preserve the proof kind: abandoned/superseded and
+                            # promotion-only ownership never authorize this set.
+                            if absorbed_merge_tips is not None and managed_tip in merge_parent_candidates:
+                                absorbed_merge_tips.add(managed_tip)
                         declared.append(managed_tip)
                     declared = [
                         commit_full_sha(repo_root, commit)
@@ -7531,6 +7536,57 @@ def historically_abandoned_unmapped_commits(repo_root, manifest, commits):
     )
 
 
+def integration_only_replay_is_empty(repo_root, commit, head, tree):
+    if commit_parent_count(repo_root, commit) != 1 or ref_tree(repo_root, head) != tree:
+        return False
+    replay = git(repo_root, 'merge-tree', '--write-tree',
+                 f'--merge-base={commit}^', head, commit, check=False)
+    return replay.returncode == 0 and replay.stdout.split() == [tree]
+
+
+def historically_empty_integration_only_commits(repo_root, manifest, commits, manifest_path=None):
+    """Local native capture authorizes only the exact retired no-op endpoint.
+
+    The subsequent ancestry reconciliation carries this old history in its
+    durable two-parent proof, which existing fresh-clone verification consumes.
+    """
+    wanted, retired, previous = set(commits), set(), {}
+    current = None
+    for event in load_ledger_events(repo_root, manifest_path):
+        if event.get('type') not in {'manifest_initialized', 'manifest_saved'}:
+            continue
+        payload = event.get('payload') or {}
+        context = payload.get('context') or {}
+        summaries = {item['id']: item for item in payload.get('stacks', [])}
+        proof = context.get('empty_integration_only')
+        stack_id = context.get('stack')
+        before, after = previous.get(stack_id), summaries.get(stack_id)
+        if payload.get('reason') == 'stack_resolve_integration' and proof and before and after:
+            commit, head, tree = (proof.get(key) for key in ('commit', 'head', 'tree'))
+            old_only = before.get('integration_only_commits', [])
+            expected = copy.deepcopy(before)
+            expected['integration_only_commits'] = [value for value in old_only if value != commit]
+            expected['integration_commits'] = [value for value in before['integration_commits'] if value != commit]
+            if current is None:
+                # History callers also accept anonymous source summaries. They
+                # cannot bind a named retirement proof and confer no permission.
+                current = {stack['id']: stack for stack in manifest.get('stacks', [])
+                           if stack.get('id')}
+            selected = current.get(stack_id)
+            identity = lambda summary: {key: value for key, value in summary.items()
+                                        if key not in {'integration_commits', 'integration_only_commits'}}
+            if (commit in wanted and commit in old_only and context.get('commits') == []
+                    and expected == after and selected
+                    and identity(manifest_stack_history_summary(selected)) == identity(after)
+                    and commit not in stack_integration_commits(selected)
+                    and ref_tip(repo_root, selected['branch']) == context.get('source_tip')
+                    and all(value and commit_exists(repo_root, value) for value in (commit, head))
+                    and integration_only_replay_is_empty(repo_root, commit, head, tree)):
+                retired.add(commit)
+        previous = summaries
+    return retired
+
+
 def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
     """Recognize old-parent history carried by an exact reconciliation proof.
 
@@ -7541,12 +7597,12 @@ def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
     """
     if not commits:
         return set()
+    carried = historically_empty_integration_only_commits(repo_root, manifest, commits)
     observation = observe_published_integration_tip(repo_root, manifest)
     if not observation or observation.get('status') != 'current':
-        return set()
+        return carried
     tip = ref_tip(repo_root, manifest['integration']['branch'])
     wanted = set(commits)
-    carried = set()
     manifest_path = integration_manifest_path(repo_root)
     base = manifest['integration']['base']
     for merge in git(repo_root, 'rev-list', '--merges', f'{base}..{tip}').stdout.splitlines():
@@ -7634,6 +7690,9 @@ def integration_reconciliation_history(
         for commit in [*stack_integration_commits(stack),
                        *(stack['commits'] if stack.get('integration_resolution') else [])]
     }
+    declared.update(historically_empty_integration_only_commits(
+        repo_root, manifest, rev_list(repo_root, f'{base}..{tip}'), manifest_path,
+    ))
     patches = {commit_patch_id(repo_root, commit) for commit in declared}
     patches.discard(None)
     patches.update(patch_ids_reachable_from_ref(repo_root, base))
@@ -7648,12 +7707,14 @@ def integration_reconciliation_history(
         parents[1] for parents in merge_parents.values() if len(parents) == 2
     }
     historical_candidates.extend(historical_merge_parents)
+    absorbed_merge_tips = set()
     closed_commits = (
         historically_closed_integration_commits(
             repo_root, tip, observation, candidates=historical_candidates,
             delivery_tip=delivery_tip,
             delivery_observation=delivery_observation,
             merge_parent_candidates=historical_merge_parents,
+            absorbed_merge_tips=absorbed_merge_tips,
         ) if not detached_replay else set()
     )
     proofs = {commit: proof for commit in history
@@ -7679,10 +7740,11 @@ def integration_reconciliation_history(
             parents = merge_parents[commit]
             if len(parents) == 2 and (
                 parents[1] in declared
+                or parents[1] in absorbed_merge_tips
                 or commit_patch_id(repo_root, parents[1]) in patches
             ):
-                # An exact auto-merge of a declared or already delivered
-                # source commit retains its ownership even if the historical
+                # An exact auto-merge of a declared, delivered, or authenticated
+                # absorbed managed merge tip retains ownership even if the historical
                 # merge itself was not recorded in the current manifest.
                 merge = git(
                     repo_root, 'merge-tree', '--write-tree',
@@ -28676,6 +28738,17 @@ def finish_integration_desk_capture(repo_root, manifest, manifest_path, receipt_
             or git(desk, 'diff', '--quiet', check=False).returncode != 0
             or git(desk, 'write-tree').stdout.strip() != capture['tree']):
         raise SyncwheelError('saved integration capture has changed desk content; preserve and review it')
+    context = capture.get('context') or {}
+    if context.get('empty_integration_only') and not any(
+        event.get('type') == 'manifest_saved'
+        and event.get('payload', {}).get('reason') == 'stack_resolve_integration'
+        and event['payload'].get('manifest_hash') == manifest_digest(manifest)
+        and event['payload'].get('context') == context
+        for event in load_ledger_events(repo_root, manifest_path)
+    ):
+        append_ledger_event(repo_root, 'manifest_saved', manifest_event_payload(
+            manifest_path, manifest, 'stack_resolve_integration', context,
+        ), manifest_path)
     # A write-ahead receipt binds the saved manifest, reviewed tree and exact object.
     # Retry completes the same capture even after reset cleared MERGE_HEAD.
     git(desk, 'reset', '--hard', capture['commit'])
@@ -28708,6 +28781,8 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         if git(desk, 'diff', '--quiet', check=False).returncode != 0:
             raise SyncwheelError('integration resolution desk has unstaged changes; review and stage the complete resolution')
         operation = receipt['operation']
+        if operation.get('empty') and not integration_desk_has_exact_empty_step(desk, receipt, step):
+            raise SyncwheelError('empty integration-only desk step changed; preserve and review it')
         if ref_tip(desk, operation['ref']) != operation['tip']:
             raise SyncwheelError('integration resolution desk operation changed; refusing unrelated resolution')
         tree = git(desk, 'write-tree').stdout.strip()
@@ -28737,22 +28812,42 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
                        and not item.get('integration_only')]
             stack['integration_commits'] = commits + pending
             stack['integration_resolution'] = {'source_tip': source_tip}
+        context = {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
+                   'source_tip': source_tip,
+                   **({'empty_integration_only': {'commit': step['argv'][-1],
+                                                  'head': receipt['head'], 'tree': tree}}
+                      if operation.get('empty') else {})}
         receipt['capture'] = {
-            'commit': commit, 'tree': tree,
+            'commit': commit, 'tree': tree, 'context': context,
             'inputs': integration_desk_inputs(repo_root, manifest, manifest_path),
         }
         atomic_write_private_json(receipt_path, receipt, indent=2)
         require_manifest_transaction_current(manifest_path)
         save_manifest_with_ledger(
             repo_root, manifest_path, manifest, 'stack_resolve_integration',
-            {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
-             'source_tip': source_tip},
+            context,
         )
         finish_integration_desk_capture(
             repo_root, manifest, manifest_path, receipt_path, receipt, desk,
         )
         print(f"{stack['id']}: recorded {len(commits)} resolved integration commits from {desk}")
     return 0
+
+
+def integration_desk_has_exact_empty_step(desk, receipt, step):
+    """Recognize only a stopped integration-only pick with no tree change."""
+    argv = step.get('argv') or []
+    return bool(
+        step.get('integration_only') and 'cherry-pick' in argv
+        and commit_parent_count(desk, argv[-1]) == 1
+        and ref_tip(desk, 'CHERRY_PICK_HEAD') == argv[-1]
+        and ref_tip(desk, 'HEAD') == receipt['head']
+        and not ref_tip(desk, 'MERGE_HEAD') and not ref_tip(desk, 'REVERT_HEAD')
+        and not git(desk, 'status', '--porcelain', '--untracked-files=all').stdout.strip()
+        and git(desk, 'write-tree').stdout.strip() == ref_tree(desk, receipt['head'])
+        and integration_only_replay_is_empty(desk, argv[-1], receipt['head'],
+                                              ref_tree(desk, receipt['head']))
+    )
 
 
 def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
@@ -28831,16 +28926,24 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
                         cwd=repo_root, env=step['env'])
                 except SyncwheelError:
                     paths = git(desk, 'diff', '--name-only', '--diff-filter=U').stdout.splitlines()
-                    if not paths:
+                    empty = integration_desk_has_exact_empty_step(desk, receipt, step)
+                    if not paths and not empty:
                         raise
+                    # Recheck the full source/ref/manifest lease after Git failed,
+                    # including a legacy ready receipt with CHERRY_PICK_HEAD.
+                    require_manifest_transaction_current(manifest_path)
+                    preflight_control_manifest_digest(repo_root, manifest_path, manifest)
+                    read_integration_desk(repo_root, manifest, manifest_path, desk)
                     operation_ref = 'MERGE_HEAD' if 'merge' in argv else 'CHERRY_PICK_HEAD'
                     receipt.update(status='conflict', operation={
                         'ref': operation_ref, 'tip': ref_tip(desk, operation_ref),
+                        **({'empty': True} if empty else {}),
                     })
                     atomic_write_private_json(receipt_path, receipt, indent=2)
                     raise SyncwheelError(
                         f"resolution desk: {desk}\nstack: {step['stack_id']}\n"
-                        + '\n'.join(paths) + '\nResolve and stage the paths, then run:\n  '
+                        + ('Empty integration-only step; review its unchanged tree.' if empty else '\n'.join(paths))
+                        + '\nResolve and stage the paths, then run:\n  '
                         + quoted(['syncwheel', 'stack', 'resolve-integration', step['stack_id'], '--worktree', str(desk)])
                     )
             receipt.update(head=ref_tip(desk, 'HEAD'), next=receipt['next'] + 1)

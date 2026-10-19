@@ -4064,6 +4064,196 @@ with module.coordination_publication_lock(Path(repo_path)):
         ):
             module.integration_reconciliation_history(repo, manifest, unsafe, {})
 
+    def test_anonymous_source_manifest_ignores_unrelated_retirement_history(self):
+        origin = self.create_remote('anonymous-retirement')
+        repo = self.clone(origin, 'anonymous-retirement')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'origin/main')
+        source = self.commit_on_branch(repo, 'scratch/anonymous', 'declared.txt')
+        tree = module.ref_tree(repo, base)
+        retired = self.git(repo, 'commit-tree', tree, '-p', base,
+                           '-m', 'empty unrelated contribution').stdout.strip()
+        before = {'id': 'unrelated', 'commits': [],
+                  'integration_commits': [retired], 'integration_only_commits': [retired]}
+        after = dict(before, integration_commits=[], integration_only_commits=[])
+        module.append_ledger_event(repo, 'manifest_initialized', {'stacks': [before]})
+        module.append_ledger_event(repo, 'manifest_saved', {
+            'reason': 'stack_resolve_integration', 'stacks': [after],
+            'context': {'stack': 'unrelated', 'commits': [],
+                        'empty_integration_only': {'commit': retired, 'head': base, 'tree': tree}},
+        })
+        manifest = {'integration': {'base': base}, 'stacks': [{'commits': [source]}]}
+        # Anonymous source summaries cannot bind a named retirement permission.
+        self.assertEqual(module.historically_empty_integration_only_commits(
+            repo, manifest, [retired]), set())
+        self.git(repo, 'switch', '-q', '-c', 'integration/anonymous', base)
+        self.git(repo, 'merge', '-q', '--no-ff', source, '-m', 'exact source merge')
+        module.integration_reconciliation_history(repo, manifest, module.ref_tip(repo, 'HEAD'), {})
+        unsafe = self.git(repo, 'commit-tree', tree, '-p', base, '-p', source,
+                          '-m', 'source merge with rollback').stdout.strip()
+        with self.assertRaisesRegex(module.SyncwheelError, 'unclassified merge'):
+            module.integration_reconciliation_history(repo, manifest, unsafe, {})
+
+    def absorbed_source_auto_merge_fixture(self, name, historical=False):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name + '-owner')
+        self.init_coordinated(repo, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        manifest, path = module.load_manifest(repo)
+        manifest['integration']['strategy'] = 'merge-stacks'
+        with module.manifest_write_transaction(repo, path, 'fixture-merge-strategy'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_merge_strategy')
+        self.run_cli(repo, 'int', 'push')
+        other = self.commit_on_branch(repo, 'scratch/' + name + '-other', 'other-owned.txt')
+        declared = self.commit_on_branch(repo, 'scratch/' + name + '-source', 'delivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'other', other, '--branch', 'pr/other')
+        self.run_cli(repo, 'stack', 'rebuild', 'other')
+        self.run_cli(repo, 'stack', 'push', 'other')
+        self.run_cli(repo, 'stack', 'create', 'retired', declared, '--branch', 'pr/retired')
+        self.run_cli(repo, 'stack', 'rebuild', 'retired')
+        self.run_cli(repo, 'stack', 'push', 'retired')
+        publisher = self.clone(origin, name + '-delivery')
+        (publisher / 'upstream.txt').write_text('upstream content\n')
+        self.git(publisher, 'add', 'upstream.txt')
+        self.git(publisher, 'commit', '-qm', 'advance upstream')
+        self.git(publisher, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', 'origin')
+        self.git(repo, 'switch', 'pr/retired')
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge current upstream into source', 'origin/main')
+        source = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', manifest['integration']['branch'])
+        if not historical:
+            self.run_cli(repo, 'stack', 'add', 'retired', source)
+        self.run_cli(repo, 'stack', 'push', 'retired')
+        # Historical integration is a real exact auto-merge retaining another
+        # stack's product, rather than a source tree with control-only changes.
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge other source', 'pr/other')
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge retired source', 'pr/retired')
+        merged = module.ref_tip(repo, 'HEAD')
+        self.run_cli(repo, 'int', 'push')
+        self.git(publisher, 'fetch', 'origin')
+        self.git(publisher, 'merge', '--squash', 'origin/pr/retired')
+        self.git(publisher, 'commit', '-qm', 'squash delivery of owned source')
+        self.git(publisher, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', 'origin')
+        if historical:
+            # Model a historical close through the real publication protocol.
+            # Modern close additionally requires the merged endpoint declared;
+            # do not weaken that gate to manufacture this historical fixture.
+            manifest, path = module.load_manifest(repo)
+            self.assertEqual(module.stack_map(manifest)['retired']['commits'], [declared])
+            manifest['stacks'] = [item for item in manifest['stacks'] if item['id'] != 'retired']
+            manifest['integration']['stacks'].remove('retired')
+            with module.manifest_write_transaction(repo, path, 'historical-close-fixture'):
+                module.coordinated_publish(
+                    repo, manifest, path, {}, 'close:retired', 'partial',
+                    operation_token='historical-close-fixture',
+                    tombstone={'stack': 'retired', 'branch': 'pr/retired',
+                               'ref': 'refs/heads/pr/retired', 'reason': 'absorbed',
+                               'closed_at': module.iso_utc_now(), 'remote_tip': source})
+                module.save_manifest(path, manifest)
+        else:
+            self.run_cli(repo, 'stack', 'close', 'retired', '--reason', 'absorbed')
+        self.run_cli(repo, 'int', 'push')
+        return {'origin': origin, 'repo': repo, 'module': module, 'source': source,
+                'declared': declared, 'merged': merged}
+
+    def assert_absorbed_source_auto_merge_in_fresh_clone(self, historical):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-auto', historical=historical)
+        module, repo = fixture['module'], fixture['repo']
+        peer = self.clone(fixture['origin'], 'absorbed-source-auto-peer')
+        self.git(peer, 'switch', '-c', 'integration/shared', 'origin/integration/shared')
+        self.disable_fixture_hooks(peer)
+        self.git(peer, 'branch', 'pr/other', 'origin/pr/other')
+        manifest, path = module.load_manifest(peer)
+        self.assertNotIn('retired', module.stack_map(manifest))
+        self.assertEqual(module.commit_parent_count(peer, fixture['source']), 2)
+        self.assertNotEqual(module.ref_tree(peer, fixture['source']), module.ref_tree(peer, fixture['merged']))
+        self.run_cli(peer, 'int', 'rebuild', '--reason', 'preserve authenticated absorbed auto-merge')
+        self.assertTrue(module.branch_contains(peer, 'integration/shared', fixture['merged']))
+        self.assertTrue((peer / 'other-owned.txt').exists())
+        self.assertTrue((peer / 'delivered.txt').exists())
+
+    def test_absorbed_source_auto_merge_is_verified_in_a_fresh_clone(self):
+        self.assert_absorbed_source_auto_merge_in_fresh_clone(False)
+
+    def test_historical_absorbed_source_auto_merge_declares_only_source_parent(self):
+        self.assert_absorbed_source_auto_merge_in_fresh_clone(True)
+
+    def test_absorbed_source_auto_merge_rejects_unproved_and_abandoned_closes(self):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-proof', historical=True)
+        repo, module = fixture['repo'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        tip = module.ref_tip(repo, manifest['integration']['branch'])
+        current = module.coordination_state_from_commit(repo, observation['state_tip'], 'default')
+        # Locate the actual native close; later integration publication remains
+        # separate, so the negative states cannot inherit the valid close token.
+        while current.get('publication_scope') != 'close:retired':
+            current = module.coordination_state_from_commit(repo, current['parent_state'], 'default')
+        close = current
+        before = module.coordination_state_from_commit(repo, close['parent_state'], 'default')
+        delivery = module.integration_projection_ref_observation(repo, 'base', 'integration', manifest['integration']['base'])
+        for kind in ('unproved', 'abandoned', 'superseded', 'promoted', 'false-tip', 'false-ref', 'false-digest'):
+            with self.subTest(kind=kind):
+                changed = json.loads(json.dumps(before if kind == 'unproved' else close))
+                if kind == 'unproved':
+                    parent = changed.get('parent_state')
+                else:
+                    parent = close['parent_state']
+                    if kind in ('abandoned', 'superseded'):
+                        changed['tombstones'][-1]['reason'] = kind
+                    elif kind == 'promoted':
+                        changed['publication_scope'] = 'promote:retired'
+                    elif kind == 'false-tip':
+                        prior = json.loads(json.dumps(before))
+                        prior['managed_refs']['refs/heads/pr/retired'] = fixture['declared']
+                        parent = module.create_coordination_state_commit(repo, prior, prior.get('parent_state'))
+                        changed['parent_state'] = parent
+                    elif kind == 'false-ref':
+                        changed['tombstones'][-1]['ref'] = 'refs/heads/pr/unrelated'
+                    else:
+                        changed['manifest_digest'] = '0' * 64
+                forged_tip = module.create_coordination_state_commit(repo, changed, parent)
+                observed = dict(observation, state_tip=forged_tip, state=changed)
+                allowed = set()
+                if kind != 'false-digest':
+                    module.historically_closed_integration_commits(
+                        repo, tip, observed, candidates=[fixture['source']],
+                        delivery_tip=delivery['tip'], delivery_observation=delivery,
+                        merge_parent_candidates=[fixture['source']], absorbed_merge_tips=allowed)
+                    self.assertEqual(allowed, set())
+                expected_error = (
+                    'manifest_digest does not match' if kind == 'false-digest'
+                    else 'integration reconciliation has unclassified merge'
+                )
+                with self.assertRaisesRegex(module.SyncwheelError, expected_error):
+                    module.integration_reconciliation_history(
+                        repo, manifest, tip, {}, path, observed,
+                        delivery_tip=delivery['tip'], delivery_observation=delivery)
+
+    def test_absorbed_source_auto_merge_rejects_altered_full_product_tree(self):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-tree', historical=True)
+        repo, module = fixture['repo'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        parent = self.git(repo, 'show', '-s', '--format=%P', fixture['merged']).stdout.split()[0]
+        wrong_tree = module.ref_tree(repo, parent)
+        unsafe = self.git(repo, 'commit-tree', wrong_tree, '-p', parent, '-p', fixture['source'],
+                          '-m', 'historical source auto-merge with product rollback').stdout.strip()
+        delivery = module.integration_projection_ref_observation(repo, 'base', 'integration', manifest['integration']['base'])
+        allowed = set()
+        module.historically_closed_integration_commits(
+            repo, unsafe, observation, candidates=[fixture['source']],
+            delivery_tip=delivery['tip'], delivery_observation=delivery,
+            merge_parent_candidates=[fixture['source']], absorbed_merge_tips=allowed)
+        self.assertEqual(allowed, {fixture['source']})
+        with self.assertRaisesRegex(module.SyncwheelError, 'unclassified merge'):
+            module.integration_reconciliation_history(
+                repo, manifest, unsafe, {}, path, observation,
+                delivery_tip=delivery['tip'], delivery_observation=delivery)
+
     def test_replay_keeps_all_46_declared_commits_from_ten_stacks(self):
         origin = self.create_remote('ten-stack-replay-46')
         repo = self.clone(origin, 'ten-stack-replay-46')
@@ -9924,6 +10114,235 @@ sys.exit(module.main())
                      '--reason', 'apply integration-only resolution')
         self.assertEqual((repo / 'only-tail.txt').read_text(), 'integration tail\n')
         self.assertEqual((repo / fixture['filename']).read_text(), 'reviewed integration-only\n')
+
+    def empty_integration_only_desk_fixture(self, name):
+        fixture = self.a14_published_tip_reuse_fixture(name, integration_strategy='merge-stacks')
+        self.a14_checkout_published_integration(fixture)
+        repo, module = fixture['follower'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        branch = manifest['stacks'][0]['branch']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        # The old integration contains a separately owned contribution.
+        (repo / 'duplicate.txt').write_text('shared addition\n')
+        self.git(repo, 'add', 'duplicate.txt')
+        self.git(repo, 'commit', '-qm', 'old integration-only contribution')
+        duplicate = module.ref_tip(repo, 'HEAD')
+        manifest['stacks'][0]['integration_only_commits'] = [duplicate]
+        with module.manifest_write_transaction(repo, path, 'fixture-only-ownership'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_only_ownership')
+        self.run_cli(repo, 'int', 'push')
+        old_integration = module.ref_tip(repo, manifest['integration']['branch'])
+        self.git(repo, 'switch', branch)
+        (repo / 'duplicate.txt').write_text('shared addition\n')
+        (repo / 'combined.txt').write_text('additional source content\n')
+        self.git(repo, 'add', 'duplicate.txt', 'combined.txt')
+        self.git(repo, 'commit', '-qm', 'source now includes old contribution and more')
+        source = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['commits'].append(source)
+        with module.manifest_write_transaction(repo, path, 'fixture-source-advance'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_source_advance')
+        # A following integration-only step must survive empty-step capture.
+        self.git(repo, 'switch', '-c', 'scratch/' + name + '-tail', duplicate)
+        (repo / 'tail.txt').write_text('remaining replay step\n')
+        self.git(repo, 'add', 'tail.txt')
+        self.git(repo, 'commit', '-qm', 'remaining integration-only step')
+        tail = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['integration_only_commits'].append(tail)
+        with module.manifest_write_transaction(repo, path, 'fixture-only-tail'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_only_tail')
+        fixture.update(desk=self.tmp / (name + '-desk'), duplicate=duplicate,
+                       tail=tail, advanced_source=source, old_integration=old_integration)
+        return fixture
+
+    def test_empty_integration_only_desk_records_exact_step_and_replays_tail(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-step')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        before_source = self.a14_source_snapshot(fixture)
+        failure = self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                               '--worktree', str(desk), '--reason', 'review empty step', expected=2)
+        self.assertIn('resolve-integration', failure.stderr)
+        manifest, path = module.load_manifest(repo)
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt['status'], 'conflict')
+        self.assertEqual(receipt['operation']['tip'], fixture['duplicate'])
+        self.assertTrue(receipt['operation']['empty'])
+        self.assertEqual(self.a14_source_snapshot(fixture), before_source)
+        self.assertEqual(self.git(desk, 'status', '--porcelain').stdout, '')
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        manifest, _ = module.load_manifest(repo)
+        self.assertEqual(manifest['stacks'][0]['integration_only_commits'], [fixture['tail']])
+        self.assertEqual(module.ref_tip(repo, manifest['stacks'][0]['branch']), fixture['advanced_source'])
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'finish reviewed empty step')
+        self.assertEqual((repo / 'tail.txt').read_text(), 'remaining replay step\n')
+        self.assertTrue(module.branch_contains(repo, manifest['integration']['branch'], fixture['old_integration']))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'repeat reviewed projection')
+        self.run_cli(repo, 'validate')
+
+    def empty_desk_rebuild_args(self, fixture):
+        return SimpleNamespace(repo=str(fixture['follower']), manifest=None, personal=None,
+                               worktree=str(fixture['desk']), reason='review exact empty step',
+                               dry_run=False, replay_mode='desk', in_place=False)
+
+    def test_empty_integration_only_desk_recovers_legacy_ready_receipt(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-legacy')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        # Reproduce the old handler: an empty failure leaves ready + CHERRY_PICK_HEAD.
+        with mock.patch.object(module, 'integration_desk_has_exact_empty_step', return_value=False):
+            with self.assertRaises(module.SyncwheelError):
+                module.rebuild_integration_desk(repo, manifest, path, self.empty_desk_rebuild_args(fixture))
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        legacy = json.loads(receipt_path.read_text())
+        self.assertEqual(legacy['status'], 'ready')
+        self.assertNotIn('operation', legacy)
+        self.assertEqual(module.ref_tip(desk, 'CHERRY_PICK_HEAD'), fixture['duplicate'])
+        self.assertEqual(self.git(desk, 'status', '--porcelain').stdout, '')
+        failure = self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                               '--worktree', str(desk), '--reason', 'recover exact legacy step', expected=2)
+        self.assertIn('resolve-integration', failure.stderr)
+        self.assertEqual(json.loads(receipt_path.read_text())['status'], 'conflict')
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'use reviewed retirement')
+
+    def test_empty_integration_only_desk_rejects_unrelated_content_and_identity(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-guards')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'prepare empty step', expected=2)
+        manifest, path = module.load_manifest(repo)
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        saved = receipt_path.read_bytes()
+        receipt = json.loads(saved)
+        step = receipt['steps'][receipt['next']]
+        self.assertTrue(module.integration_desk_has_exact_empty_step(desk, receipt, step))
+        self.assertFalse(module.integration_desk_has_exact_empty_step(desk, receipt, dict(step, integration_only=False)))
+        for kind in ('unstaged', 'staged', 'untracked', 'wrong-operation', 'wrong-head'):
+            with self.subTest(kind=kind):
+                before = path.read_bytes()
+                if kind in ('unstaged', 'staged'):
+                    (desk / 'duplicate.txt').write_text('unrelated edited value\n')
+                    if kind == 'staged':
+                        self.git(desk, 'add', 'duplicate.txt')
+                elif kind == 'untracked':
+                    (desk / 'untracked.txt').write_text('keep this untracked work\n')
+                elif kind == 'wrong-operation':
+                    self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['tail'])
+                else:
+                    moved = self.git(repo, 'commit-tree', module.ref_tree(repo, receipt['head']),
+                                     '-p', receipt['head'], '-m', 'unrelated identity').stdout.strip()
+                    self.git(desk, 'update-ref', 'HEAD', moved)
+                self.assertFalse(module.integration_desk_has_exact_empty_step(desk, receipt, step))
+                self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk), expected=2)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(receipt_path.read_bytes(), saved)
+                # Fixture restoration only: native code must leave each rejected state untouched.
+                if kind in ('unstaged', 'staged'):
+                    self.git(desk, 'restore', '--source=HEAD', '--staged', '--worktree', 'duplicate.txt')
+                elif kind == 'untracked':
+                    self.assertEqual((desk / 'untracked.txt').read_text(), 'keep this untracked work\n')
+                    (desk / 'untracked.txt').unlink()
+                elif kind == 'wrong-operation':
+                    self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['duplicate'])
+                else:
+                    self.git(desk, 'update-ref', 'HEAD', receipt['head'])
+        # A forged pending SHA with a nonempty patch must not become an empty proof.
+        forged = json.loads(json.dumps(step))
+        forged['argv'][-1] = fixture['tail']
+        self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['tail'])
+        self.assertFalse(module.integration_desk_has_exact_empty_step(desk, receipt, forged))
+        self.git(desk, 'update-ref', 'CHERRY_PICK_HEAD', fixture['duplicate'])
+        branch = manifest['stacks'][0]['branch']
+        source = module.ref_tip(repo, branch)
+        moved = self.git(repo, 'commit-tree', module.ref_tree(repo, source), '-p', source, '-m', 'advanced source').stdout.strip()
+        self.git(repo, 'update-ref', 'refs/heads/' + branch, moved, source)
+        failure = self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk), expected=2)
+        self.assertIn('inputs changed', failure.stderr)
+        self.assertEqual(receipt_path.read_bytes(), saved)
+
+    def test_empty_integration_only_desk_does_not_classify_an_unknown_failure(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-unknown')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        original_run = module.run
+        def fail_before_cherry(command, **kwargs):
+            if 'cherry-pick' in command:
+                raise module.SyncwheelError('synthetic unrelated failure')
+            return original_run(command, **kwargs)
+        with mock.patch.object(module, 'run', side_effect=fail_before_cherry):
+            with self.assertRaisesRegex(module.SyncwheelError, 'synthetic unrelated failure'):
+                module.rebuild_integration_desk(repo, manifest, path, self.empty_desk_rebuild_args(fixture))
+        receipt = json.loads(module.integration_desk_receipt_path(repo, path).read_text())
+        self.assertEqual(receipt['status'], 'ready')
+        self.assertNotIn('operation', receipt)
+        self.assertIsNone(module.ref_tip(desk, 'CHERRY_PICK_HEAD'))
+        self.assertEqual(module.load_manifest(repo)[0], manifest)
+
+    def test_empty_integration_only_desk_recovers_saved_manifest_before_ledger(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-capture-recovery')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'prepare empty capture', expected=2)
+        manifest, path = module.load_manifest(repo)
+        original_append = module.append_ledger_event
+        def interrupt_ledger(root, kind, payload, *args, **kwargs):
+            if kind == 'manifest_saved' and payload.get('reason') == 'stack_resolve_integration':
+                raise OSError('interrupted after source save')
+            return original_append(root, kind, payload, *args, **kwargs)
+        with mock.patch.object(module, 'append_ledger_event', side_effect=interrupt_ledger):
+            with self.assertRaisesRegex(OSError, 'interrupted after source save'):
+                module.capture_integration_desk(repo, manifest, path, manifest['stacks'][0],
+                                               SimpleNamespace(specs=[], empty=False, worktree=str(desk)))
+        receipt_path = module.integration_desk_receipt_path(repo, path)
+        self.assertIn('capture', json.loads(receipt_path.read_text()))
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        self.assertNotIn('capture', json.loads(receipt_path.read_text()))
+        current, _ = module.load_manifest(repo)
+        self.assertEqual(module.historically_empty_integration_only_commits(
+            repo, current, [fixture['duplicate']], path), {fixture['duplicate']})
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'replay remainder after recovered capture')
+
+    def test_empty_integration_only_desk_accumulates_exact_retirements(self):
+        fixture = self.empty_integration_only_desk_fixture('empty-multiple')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-c', 'scratch/second-empty', fixture['duplicate'])
+        (repo / 'combined.txt').write_text('additional source content\n')
+        self.git(repo, 'add', 'combined.txt')
+        self.git(repo, 'commit', '-qm', 'second separately owned empty contribution')
+        second = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['integration_only_commits'] = [fixture['duplicate'], second, fixture['tail']]
+        with module.manifest_write_transaction(repo, path, 'fixture-second-empty'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_second_empty')
+        for endpoint in (fixture['duplicate'], second):
+            self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                         '--reason', 'review each exact empty contribution', expected=2)
+            receipt = json.loads(module.integration_desk_receipt_path(repo, path).read_text())
+            self.assertEqual(receipt['operation']['tip'], endpoint)
+            self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        current, _ = module.load_manifest(repo)
+        self.assertEqual(module.historically_empty_integration_only_commits(
+            repo, current, [fixture['duplicate'], second], path), {fixture['duplicate'], second})
+        events = module.load_ledger_events(repo, path)
+        forged = json.loads(json.dumps(events))
+        for event in forged:
+            proof = event.get('payload', {}).get('context', {}).get('empty_integration_only')
+            if proof:
+                proof['tree'] = '0' * 40
+        with mock.patch.object(module, 'load_ledger_events', return_value=forged):
+            self.assertEqual(module.historically_empty_integration_only_commits(
+                repo, current, [fixture['duplicate'], second], path), set())
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'finish all remaining contributions')
+        self.assertEqual((repo / 'tail.txt').read_text(), 'remaining replay step\n')
 
     def test_merge_stack_desk_dry_run_plans_detached_review_path(self):
         fixture = self.merge_stack_conflict_desk_fixture('desk-dry-run')
