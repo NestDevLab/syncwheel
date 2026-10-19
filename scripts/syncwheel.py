@@ -7568,7 +7568,10 @@ def historically_empty_integration_only_commits(repo_root, manifest, commits, ma
             expected['integration_only_commits'] = [value for value in old_only if value != commit]
             expected['integration_commits'] = [value for value in before['integration_commits'] if value != commit]
             if current is None:
-                current = stack_map(manifest)
+                # History callers also accept anonymous source summaries. They
+                # cannot bind a named retirement proof and confer no permission.
+                current = {stack['id']: stack for stack in manifest.get('stacks', [])
+                           if stack.get('id')}
             selected = current.get(stack_id)
             identity = lambda summary: {key: value for key, value in summary.items()
                                         if key not in {'integration_commits', 'integration_only_commits'}}

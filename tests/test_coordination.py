@@ -4064,6 +4064,36 @@ with module.coordination_publication_lock(Path(repo_path)):
         ):
             module.integration_reconciliation_history(repo, manifest, unsafe, {})
 
+    def test_anonymous_source_manifest_ignores_unrelated_retirement_history(self):
+        origin = self.create_remote('anonymous-retirement')
+        repo = self.clone(origin, 'anonymous-retirement')
+        module = self.load_module()
+        base = module.ref_tip(repo, 'origin/main')
+        source = self.commit_on_branch(repo, 'scratch/anonymous', 'declared.txt')
+        tree = module.ref_tree(repo, base)
+        retired = self.git(repo, 'commit-tree', tree, '-p', base,
+                           '-m', 'empty unrelated contribution').stdout.strip()
+        before = {'id': 'unrelated', 'commits': [],
+                  'integration_commits': [retired], 'integration_only_commits': [retired]}
+        after = dict(before, integration_commits=[], integration_only_commits=[])
+        module.append_ledger_event(repo, 'manifest_initialized', {'stacks': [before]})
+        module.append_ledger_event(repo, 'manifest_saved', {
+            'reason': 'stack_resolve_integration', 'stacks': [after],
+            'context': {'stack': 'unrelated', 'commits': [],
+                        'empty_integration_only': {'commit': retired, 'head': base, 'tree': tree}},
+        })
+        manifest = {'integration': {'base': base}, 'stacks': [{'commits': [source]}]}
+        # Anonymous source summaries cannot bind a named retirement permission.
+        self.assertEqual(module.historically_empty_integration_only_commits(
+            repo, manifest, [retired]), set())
+        self.git(repo, 'switch', '-q', '-c', 'integration/anonymous', base)
+        self.git(repo, 'merge', '-q', '--no-ff', source, '-m', 'exact source merge')
+        module.integration_reconciliation_history(repo, manifest, module.ref_tip(repo, 'HEAD'), {})
+        unsafe = self.git(repo, 'commit-tree', tree, '-p', base, '-p', source,
+                          '-m', 'source merge with rollback').stdout.strip()
+        with self.assertRaisesRegex(module.SyncwheelError, 'unclassified merge'):
+            module.integration_reconciliation_history(repo, manifest, unsafe, {})
+
     def absorbed_source_auto_merge_fixture(self, name, historical=False):
         origin = self.create_remote(name)
         repo = self.clone(origin, name + '-owner')
