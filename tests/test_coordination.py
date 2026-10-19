@@ -4092,6 +4092,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'merge', '--no-ff', '-qm', 'merge current upstream into source', 'origin/main')
         source = module.ref_tip(repo, 'HEAD')
         self.git(repo, 'switch', manifest['integration']['branch'])
+        self.run_cli(repo, 'stack', 'add', 'retired', source)
         self.run_cli(repo, 'stack', 'push', 'retired')
         # Historical integration is a real exact auto-merge retaining another
         # stack's product, rather than a source tree with control-only changes.
