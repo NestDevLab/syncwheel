@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/desk-merge-conflict-fix"
   ],
-  "claimed_at": "2026-10-19T09:50:25+00:00",
+  "claimed_at": "2026-10-19T10:13:53+00:00",
   "coordination_id": "default",
-  "operation_token": "360dc624-fcc9-467f-a2d4-0a0f1dacd634",
-  "publication_scope": "create:desk-merge-conflict-fix",
+  "operation_token": "839c1d41-b30c-4665-ac3a-5beda5efb7be",
+  "publication_scope": "stack:desk-merge-conflict-fix",
   "source_ref": "refs/heads/syncwheel/draft/desk-merge-conflict-fix",
   "syncwheel_version": "0.45.7"
 }
