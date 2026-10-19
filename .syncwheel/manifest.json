@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -37,9 +37,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -51,7 +51,8 @@
         "15258fdeb62b8c022b63c63bb65e207cd334871f",
         "4f5e57a9e4547fe189555a46392f00f811a34c08",
         "f39c49c86b43366ad89f02840e9a1b42f251bb8b",
-        "15678756e092550bf6782354a500c1f156908db9"
+        "15678756e092550bf6782354a500c1f156908db9",
+        "2d66b6365fdeb9b92865ee325863176613c3a482"
       ],
       "id": "desk-merge-conflict-fix",
       "integration_branch": "main-integration",
