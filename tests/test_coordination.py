@@ -9460,6 +9460,22 @@ sys.exit(module.main())
                 forged['integration']['resolutions']['s1']['branch'] = 'unrelated/source'
                 with self.assertRaisesRegex(module.SyncwheelError, 'unknown stack or fields'):
                     module.apply_coordination_snapshot(manifest, forged)
+                branch = manifest['stacks'][0]['branch']
+                moved = self.git(repo, 'commit-tree', module.ref_tree(repo, source),
+                                 '-p', source, '-m', 'advance reviewed source').stdout.strip()
+                self.git(repo, 'update-ref', 'refs/heads/' + branch, moved, source)
+                with self.assertRaisesRegex(module.SyncwheelError, 'resolution is stale'):
+                    module.materialize_integration_projection(repo, manifest)
+                # A fresh explicit path can review the new source while keeping
+                # the old desk and its receipt available for inspection.
+                renewed = self.tmp / (name + '-renewed-desk')
+                failure = self.run_cli(
+                    repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                    '--worktree', str(renewed), '--reason', 'review changed source', expected=2,
+                )
+                self.assertIn('resolution desk:', failure.stderr)
+                self.assertTrue(desk.is_dir())
+                self.assertTrue(renewed.is_dir())
 
     def test_merge_stack_desk_capture_rejects_moving_inputs_and_preserves_work(self):
         for changed in ('source', 'integration'):
