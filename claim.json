@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/journal-operations"
-  ],
-  "claimed_at": "2026-10-19T13:28:09+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-19T13:43:04+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "a5d5076e-8d0e-487c-88fd-1e1e5b02ba97",
-  "publication_scope": "stack:journal-operations",
+  "operation_token": "bc33b361-f817-4683-a221-8d78c659123b",
+  "publication_scope": "close:journal-operations",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/journal-operations",
   "syncwheel_version": "0.45.8"
 }
