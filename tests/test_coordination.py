@@ -4064,7 +4064,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         ):
             module.integration_reconciliation_history(repo, manifest, unsafe, {})
 
-    def absorbed_source_auto_merge_fixture(self, name):
+    def absorbed_source_auto_merge_fixture(self, name, historical=False):
         origin = self.create_remote(name)
         repo = self.clone(origin, name + '-owner')
         self.init_coordinated(repo, integration_membership='required')
@@ -4093,7 +4093,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'merge', '--no-ff', '-qm', 'merge current upstream into source', 'origin/main')
         source = module.ref_tip(repo, 'HEAD')
         self.git(repo, 'switch', manifest['integration']['branch'])
-        self.run_cli(repo, 'stack', 'add', 'retired', source)
+        if not historical:
+            self.run_cli(repo, 'stack', 'add', 'retired', source)
         self.run_cli(repo, 'stack', 'push', 'retired')
         # Historical integration is a real exact auto-merge retaining another
         # stack's product, rather than a source tree with control-only changes.
@@ -4106,13 +4107,29 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(publisher, 'commit', '-qm', 'squash delivery of owned source')
         self.git(publisher, 'push', 'origin', 'main')
         self.git(repo, 'fetch', 'origin')
-        self.run_cli(repo, 'stack', 'close', 'retired', '--reason', 'absorbed')
+        if historical:
+            # Model a historical close through the real publication protocol.
+            # Modern close additionally requires the merged endpoint declared;
+            # do not weaken that gate to manufacture this historical fixture.
+            manifest, path = module.load_manifest(repo)
+            self.assertEqual(module.stack_map(manifest)['retired']['commits'], [declared])
+            manifest['stacks'] = [item for item in manifest['stacks'] if item['id'] != 'retired']
+            manifest['integration']['stacks'].remove('retired')
+            with module.manifest_write_transaction(repo, path, 'historical-close-fixture'):
+                module.coordinated_publish(
+                    repo, manifest, path, {}, 'close:retired', 'partial',
+                    tombstone={'stack': 'retired', 'branch': 'pr/retired',
+                               'ref': 'refs/heads/pr/retired', 'reason': 'absorbed',
+                               'closed_at': module.iso_utc_now(), 'remote_tip': source})
+                module.save_manifest(path, manifest)
+        else:
+            self.run_cli(repo, 'stack', 'close', 'retired', '--reason', 'absorbed')
         self.run_cli(repo, 'int', 'push')
         return {'origin': origin, 'repo': repo, 'module': module, 'source': source,
                 'declared': declared, 'merged': merged}
 
-    def test_absorbed_source_auto_merge_is_verified_in_a_fresh_clone(self):
-        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-auto')
+    def assert_absorbed_source_auto_merge_in_fresh_clone(self, historical):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-auto', historical=historical)
         module, repo = fixture['module'], fixture['repo']
         peer = self.clone(fixture['origin'], 'absorbed-source-auto-peer')
         self.git(peer, 'switch', '-c', 'integration/shared', 'origin/integration/shared')
@@ -4127,8 +4144,14 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertTrue((peer / 'other-owned.txt').exists())
         self.assertTrue((peer / 'delivered.txt').exists())
 
+    def test_absorbed_source_auto_merge_is_verified_in_a_fresh_clone(self):
+        self.assert_absorbed_source_auto_merge_in_fresh_clone(False)
+
+    def test_historical_absorbed_source_auto_merge_declares_only_source_parent(self):
+        self.assert_absorbed_source_auto_merge_in_fresh_clone(True)
+
     def test_absorbed_source_auto_merge_rejects_unproved_and_abandoned_closes(self):
-        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-proof')
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-proof', historical=True)
         repo, module = fixture['repo'], fixture['module']
         manifest, path = module.load_manifest(repo)
         observation = module.observe_published_integration_tip(repo, manifest)
@@ -4141,7 +4164,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         close = current
         before = module.coordination_state_from_commit(repo, close['parent_state'], 'default')
         delivery = module.integration_projection_ref_observation(repo, 'base', 'integration', manifest['integration']['base'])
-        for kind in ('unproved', 'abandoned', 'superseded', 'false-ref', 'false-digest'):
+        for kind in ('unproved', 'abandoned', 'superseded', 'promoted', 'false-tip', 'false-ref', 'false-digest'):
             with self.subTest(kind=kind):
                 changed = json.loads(json.dumps(before if kind == 'unproved' else close))
                 if kind == 'unproved':
@@ -4150,6 +4173,13 @@ with module.coordination_publication_lock(Path(repo_path)):
                     parent = close['parent_state']
                     if kind in ('abandoned', 'superseded'):
                         changed['tombstones'][-1]['reason'] = kind
+                    elif kind == 'promoted':
+                        changed['publication_scope'] = 'promote:retired'
+                    elif kind == 'false-tip':
+                        prior = json.loads(json.dumps(before))
+                        prior['managed_refs']['refs/heads/pr/retired'] = fixture['declared']
+                        parent = module.create_coordination_state_commit(repo, prior, prior.get('parent_state'))
+                        changed['parent_state'] = parent
                     elif kind == 'false-ref':
                         changed['tombstones'][-1]['ref'] = 'refs/heads/pr/unrelated'
                     else:
@@ -4169,7 +4199,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                         delivery_tip=delivery['tip'], delivery_observation=delivery)
 
     def test_absorbed_source_auto_merge_rejects_altered_full_product_tree(self):
-        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-tree')
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-tree', historical=True)
         repo, module = fixture['repo'], fixture['module']
         manifest, path = module.load_manifest(repo)
         observation = module.observe_published_integration_tip(repo, manifest)
