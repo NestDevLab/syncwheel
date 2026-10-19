@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.1 - 2026-10-19
+
+- Add plan-first stack archival with immutable source and integration archive refs, reachability proofs, reasoned resumption receipts, and exact-lease coordination close recovery. Preserve source branches and exclude archived tombstones from automatic cleanup.
+
 ## 0.46.0 - 2026-10-19
 
 - Record governed operations directly in journal repositories with exact-path commits, commit hooks, recoverable phase receipts, and local HEAD leases. Optional path-scoped leases accept only disjoint descendant commits under the starting provider policy.

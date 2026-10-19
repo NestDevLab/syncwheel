@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.0`
+Current version: `0.46.1`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1448,3 +1448,5 @@ For the operational flow, see [docs/core-procedure.md](docs/core-procedure.md).
 ## License
 
 MIT
+
+Defer unmerged work safely with the [proof-bound stack archive lifecycle](docs/stack-archive.md).
