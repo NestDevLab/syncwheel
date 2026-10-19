@@ -4194,7 +4194,11 @@ with module.coordination_publication_lock(Path(repo_path)):
                         delivery_tip=delivery['tip'], delivery_observation=delivery,
                         merge_parent_candidates=[fixture['source']], absorbed_merge_tips=allowed)
                     self.assertEqual(allowed, set())
-                with self.assertRaises(module.SyncwheelError):
+                expected_error = (
+                    'manifest_digest does not match' if kind == 'false-digest'
+                    else 'integration reconciliation has unclassified merge'
+                )
+                with self.assertRaisesRegex(module.SyncwheelError, expected_error):
                     module.integration_reconciliation_history(
                         repo, manifest, tip, {}, path, observed,
                         delivery_tip=delivery['tip'], delivery_observation=delivery)
