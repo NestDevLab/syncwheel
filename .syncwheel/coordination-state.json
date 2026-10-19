@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/oikuma-null-peer-repair": "488ca3c567efa7ff6d8c20081d6d7fa429341990"
+  },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -35,6 +37,7 @@
     "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
     "refs/heads/pr/o3-history-proof": "36bf233506fca6e5b3ca62ef1c5943fa0cd1ef0e",
+    "refs/heads/pr/oikuma-null-peer-repair": "6fecccd1b150e6de961d42ea802f6d46dfbe8ff6",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
@@ -83,7 +86,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T17:00:49+00:00",
+  "created_at": "2026-10-19T17:29:40+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -132,6 +135,7 @@
     "refs/heads/pr/missing-managed-ref-repair": "7733738406a41ac5db22fc089b04079616e63c08",
     "refs/heads/pr/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/pr/o3-history-proof": "164d711c7fa5e3f39585c1b6d17aa1eca6252e8e",
+    "refs/heads/pr/oikuma-null-peer-repair": "488ca3c567efa7ff6d8c20081d6d7fa429341990",
     "refs/heads/pr/pack-refs-guard": "f1c908590b18920f51b92badb971f3aefbc233b5",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
@@ -218,7 +222,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "oikuma-null-peer-repair"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -226,17 +232,32 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/oikuma-null-peer-repair",
+        "commits": [
+          "488ca3c567efa7ff6d8c20081d6d7fa429341990"
+        ],
+        "id": "oikuma-null-peer-repair",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "52b543e4-6463-48f5-a8c4-c3e99371564c",
-  "parent_state": "a2dcbefac9865a51ad659dd30c2600766d03ea27",
+  "operation_token": "b51ffbf9-861f-4bce-a79d-b376bcd0e3c5",
+  "parent_state": "44636bac108da76e549e644321c7d0a91a0dd5a2",
   "projection_status": "partial",
-  "publication_id": "ba83820c-ab2b-42bd-b089-c446332515a1",
-  "publication_scope": "close:desk-empty-step",
+  "publication_id": "b8082941-892f-418f-bc25-3fc226c519a2",
+  "publication_scope": "stack:oikuma-null-peer-repair",
   "schema_version": 2,
-  "syncwheel_version": "0.46.1",
+  "syncwheel_version": "0.46.2",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
