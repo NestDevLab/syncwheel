@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -31,50 +31,16 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "desk-empty-step"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/desk-empty-step",
-      "commits": [
-        "04cb306f9bfda716f8e95e9597b4dbac4c2b279e",
-        "163b157e77905b915603c3ac75250d86943043bb",
-        "2a5bdc75e4a528f2d238259c4a73c4dcd40a1c6d",
-        "34205a88ca749cf4378ab520a2a9bec525e5728b",
-        "f06b23729c4e36890aa6b960074ba64d2cd49ddd",
-        "afb7a0689e29a9171b42c33b2e1fe817d98102c9",
-        "10cb23a489a322e67e1dfce181bb185afd548992",
-        "9be3c7ce4ad90aa1818103aff0b821ed68aae52f",
-        "87d3524c4d637647cedc8ebb87eac5c82e95cfde",
-        "2cd62ef34e592c706ddf6e4918463b338eec1434",
-        "bc5f65380beaaa394b449c8b1e1cfb443015686d",
-        "56cf727e4c41d195b2fb75dfcedb5dbd713ec82c",
-        "11a3306f078dc97ed94e668be31f941482e5a548",
-        "4c372531c85deae453f7a6f8ff53589d1637caad"
-      ],
-      "id": "desk-empty-step",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Recover exact empty integration-only replay steps in managed desks"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
