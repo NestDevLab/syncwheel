@@ -7756,6 +7756,230 @@ with module.coordination_publication_lock(Path(repo_path)):
         manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertIn('merged-undelivered', [stack['id'] for stack in manifest['stacks']])
 
+    def archive_fixture(self):
+        origin = self.create_remote('archive-origin')
+        repo = self.clone(origin, 'archive-local')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/archive-source', 'archive-source.txt')
+        self.run_cli(repo, 'stack', 'create', 'deferred', source, '--draft')
+        request = ['stack', 'archive', 'deferred', '--reason', 'Deferred for review',
+                   '--resume-intent', 'Review the retained source before integration']
+        return origin, repo, source, request
+
+    def archive_args(self, repo, plan):
+        return SimpleNamespace(repo=str(repo), manifest=None, personal=None, stack='deferred',
+                               reason=plan['reason'], resume_intent=plan['resumeIntent'],
+                               apply=True, plan_digest=plan['planDigest'])
+
+    def test_archive_plan_is_pure_and_unmerged_content_is_retained(self):
+        origin, repo, source, request = self.archive_fixture()
+        module = self.load_module()
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        before_manifest = manifest_path.read_bytes()
+        before_refs = self.git(repo, 'show-ref').stdout
+        before_ledger = module.load_ledger_events(repo)
+        before_head = self.git(repo, 'rev-parse', 'HEAD').stdout
+        before_main = self.git(repo, 'ls-remote', 'origin', 'refs/heads/main').stdout
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        self.assertEqual(plan, json.loads(self.run_cli(repo, *request).stdout))
+        self.assertEqual(before_manifest, manifest_path.read_bytes())
+        self.assertEqual(before_refs, self.git(repo, 'show-ref').stdout)
+        self.assertEqual(before_ledger, module.load_ledger_events(repo))
+        self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'])
+        self.assertEqual(json.loads(manifest_path.read_text())['stacks'], [])
+        self.assertEqual(self.git(repo, 'diff', before_head.strip(), 'HEAD', '--', '.', ':!.syncwheel/manifest.json').stdout, '')
+        self.assertEqual(before_main, self.git(repo, 'ls-remote', 'origin', 'refs/heads/main').stdout)
+        module.verify_stack_archive_proof(repo, plan)
+        self.assertEqual(source, module.ref_tip(repo, 'scratch/archive-source'))
+        self.assertIsNotNone(module.ref_tip(repo, plan['sourceRef']))
+        self.assertTrue(self.git(repo, 'ls-remote', 'origin', plan['sourceRef']).stdout.strip())
+        _, state = self.remote_state(origin)
+        self.assertEqual(state['tombstones'][-1]['reason'], 'archived')
+        receipt = [event['payload'] for event in module.load_ledger_events(repo)
+                   if event['type'] == 'stack_closed'][-1]
+        self.assertEqual(receipt['archive_proof']['planDigest'], plan['planDigest'])
+        self.assertIsNone(receipt['delivery_tip'])
+        state_tip = self.remote_state(origin)[0]
+        self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'])
+        self.assertEqual(self.remote_state(origin)[0], state_tip)
+        old_now = module.datetime.datetime
+        class Later(old_now):
+            @classmethod
+            def now(cls, tz=None):
+                return old_now.now(tz) + module.datetime.timedelta(days=45)
+        with mock.patch.object(module.datetime, 'datetime', Later):
+            cleanup = module.coordination_gc_plan(repo, module.load_manifest(repo)[0])
+        self.assertFalse(any(item.get('branch') == 'syncwheel/draft/deferred' for item in cleanup['candidates']))
+        self.assertTrue(any('archived source is retained' in note for note in cleanup['skipped']))
+
+    def test_archive_retains_unique_integration_resolution_endpoints(self):
+        _, repo, _, request = self.archive_fixture()
+        integration_only = self.commit_on_branch(repo, 'scratch/integration-only', 'resolved-only.txt')
+        module = self.load_module()
+        manifest, path = module.load_manifest(repo)
+        manifest['stacks'][0]['integration_only_commits'] = [integration_only]
+        path.write_text(json.dumps(manifest))
+        plan = module.build_stack_archive_plan(repo, manifest, 'deferred', 'Defer', 'Review resolution')
+        self.assertIn(integration_only, plan['commits'])
+        args = self.archive_args(repo, plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            module.command_stack_archive(args)
+        module.verify_stack_archive_proof(repo, plan)
+
+    def test_archive_remote_ref_advancement_rejects_reviewed_digest(self):
+        _, repo, _, request = self.archive_fixture()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        parent = self.git(repo, 'ls-remote', 'origin', 'refs/heads/integration/shared').stdout.split()[0]
+        tip = self.git(repo, 'commit-tree', f'{parent}^{{tree}}', '-p', parent, '-m', 'peer advancement').stdout.strip()
+        self.git(repo, 'push', 'origin', f'{tip}:refs/heads/integration/shared')
+        # Source state is unchanged; the plan still binds the exact integration ref.
+        failure = self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'], expected=2)
+        self.assertIn('stale', failure.stderr)
+        self.assertEqual(self.git(repo, 'for-each-ref', 'refs/archive').stdout, '')
+
+    def test_archive_foreign_or_advanced_claim_fails_before_archive_write(self):
+        _, repo, _, request = self.archive_fixture()
+        module = self.load_module()
+        source_ref = 'refs/heads/syncwheel/draft/deferred'
+        claim_ref = module.coordination_claim_ref(source_ref)
+        previous = self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0]
+        foreign = module.create_coordination_claim_commit(repo, source_ref, 'foreign-domain', 'foreign-token', previous)
+        self.git(repo, 'push', 'origin', f'{foreign}:{claim_ref}')
+        failure = self.run_cli(repo, *request, expected=2)
+        self.assertIn('foreign or closed', failure.stderr)
+        self.assertEqual(self.git(repo, 'for-each-ref', 'refs/archive').stdout, '')
+
+    def test_archive_published_stack_uses_same_retention_proof(self):
+        _, repo, _, request = self.archive_fixture()
+        self.run_cli(repo, 'stack', 'promote', 'deferred')
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'])
+        self.load_module().verify_stack_archive_proof(repo, plan)
+        self.assertTrue(self.git(repo, 'ls-remote', 'origin', plan['sourceRef']).stdout.strip())
+
+    def test_archive_remote_claim_lease_loss_keeps_declaration(self):
+        _, repo, _, request = self.archive_fixture()
+        module = self.load_module()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        claim_ref = module.coordination_claim_ref(plan['sourceRef'])
+        previous = plan['remoteRefs'][claim_ref]
+        advanced = module.create_coordination_claim_commit(repo, plan['sourceRef'], 'default', 'peer-token', previous)
+        real_push = module.run_authorized_push
+        def race(repo_root, command, remote, refs, **kwargs):
+            self.git(repo, 'push', 'origin', f'{advanced}:{claim_ref}')
+            return real_push(repo_root, command, remote, refs, **kwargs)
+        before = (repo / '.syncwheel' / 'manifest.json').read_bytes()
+        with mock.patch.object(module, 'run_authorized_push', side_effect=race):
+            with self.assertRaises(module.SyncwheelError):
+                module.command_stack_archive(self.archive_args(repo, plan))
+        self.assertEqual(before, (repo / '.syncwheel' / 'manifest.json').read_bytes())
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin', claim_ref).stdout.split()[0], advanced)
+        module.verify_stack_archive_proof(repo, plan)
+
+    def test_archive_digest_and_ref_drift_fail_closed(self):
+        _, repo, source, request = self.archive_fixture()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        before = manifest_path.read_bytes()
+        failure = self.run_cli(repo, *request, '--apply', '--plan-digest', 'wrong', expected=2)
+        self.assertIn('stale', failure.stderr)
+        self.git(repo, 'update-ref', plan['sourceRef'], self.git(repo, 'rev-parse', 'origin/main').stdout.strip())
+        failure = self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'], expected=2)
+        self.assertIn('stale', failure.stderr)
+        self.assertEqual(before, manifest_path.read_bytes())
+        self.assertEqual(self.git(repo, 'for-each-ref', 'refs/archive').stdout, '')
+
+    def test_archive_publication_failure_retains_manifest_and_exact_retry(self):
+        _, repo, _, request = self.archive_fixture()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        module = self.load_module()
+        args = self.archive_args(repo, plan)
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        before = manifest_path.read_bytes()
+        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('publication refused')):
+            with self.assertRaisesRegex(module.SyncwheelError, 'publication refused'):
+                module.command_stack_archive(args)
+        self.assertEqual(before, manifest_path.read_bytes())
+        module.verify_stack_archive_proof(repo, plan)
+        with contextlib.redirect_stdout(io.StringIO()):
+            module.command_stack_archive(args)
+        self.assertEqual(json.loads(manifest_path.read_text())['stacks'], [])
+
+    def test_archive_reviewed_replan_can_supersede_only_its_unlanded_intent(self):
+        _, repo, _, request = self.archive_fixture()
+        module = self.load_module()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('offline')):
+            with self.assertRaises(module.SyncwheelError):
+                module.command_stack_archive(self.archive_args(repo, plan))
+        self.run_cli(repo, 'stack', 'create', 'unrelated', '--draft')
+        # The old digest cannot silently widen its lease to the new state.
+        self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'], expected=2)
+        refreshed = json.loads(self.run_cli(repo, *request).stdout)
+        self.assertNotEqual(plan['planDigest'], refreshed['planDigest'])
+        self.run_cli(repo, *request, '--apply', '--plan-digest', refreshed['planDigest'])
+        manifest = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
+        self.assertEqual([stack['id'] for stack in manifest['stacks']], ['unrelated'])
+        receipt = [event['payload'] for event in module.load_ledger_events(repo)
+                   if event['type'] == 'stack_closed'][-1]
+        self.assertEqual(receipt['archive_proof']['planDigest'], refreshed['planDigest'])
+
+    def test_archive_landed_retry_recovers_after_save_failure(self):
+        _, repo, _, request = self.archive_fixture()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        module = self.load_module()
+        args = self.archive_args(repo, plan)
+        with mock.patch.object(module, 'save_manifest', side_effect=OSError('save interrupted')):
+            with self.assertRaisesRegex(OSError, 'save interrupted'):
+                module.command_stack_archive(args)
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(module, 'coordinated_publish') as publish:
+            module.command_stack_archive(args)
+            publish.assert_not_called()
+        self.assertEqual(json.loads((repo / '.syncwheel' / 'manifest.json').read_text())['stacks'], [])
+
+    def test_archive_retry_after_ref_creation_before_receipt_uses_exact_refs(self):
+        _, repo, _, request = self.archive_fixture()
+        module = self.load_module()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        before = (repo / '.syncwheel' / 'manifest.json').read_bytes()
+        real_append = module.append_ledger_event
+        def fail_prepared(root, kind, payload, path=None):
+            if kind == 'stack_archive_prepared':
+                raise OSError('prepared receipt interrupted')
+            return real_append(root, kind, payload, path)
+        with mock.patch.object(module, 'append_ledger_event', side_effect=fail_prepared):
+            with self.assertRaisesRegex(OSError, 'receipt interrupted'):
+                module.command_stack_archive(self.archive_args(repo, plan))
+        self.assertEqual(before, (repo / '.syncwheel' / 'manifest.json').read_bytes())
+        module.verify_stack_archive_proof(repo, plan)
+        self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'])
+        self.assertEqual(json.loads((repo / '.syncwheel' / 'manifest.json').read_text())['stacks'], [])
+
+    def test_archive_ref_transaction_failure_keeps_source_declaration(self):
+        _, repo, _, request = self.archive_fixture()
+        plan = json.loads(self.run_cli(repo, *request).stdout)
+        module = self.load_module()
+        other = self.git(repo, 'rev-parse', 'origin/main').stdout.strip()
+        ref = next(iter(plan['archiveRefs']))
+        self.git(repo, 'update-ref', ref, other)
+        before = (repo / '.syncwheel' / 'manifest.json').read_bytes()
+        self.run_cli(repo, *request, '--apply', '--plan-digest', plan['planDigest'], expected=2)
+        self.assertEqual(before, (repo / '.syncwheel' / 'manifest.json').read_bytes())
+        self.assertEqual(module.ref_tip(repo, ref), other)
+        self.assertEqual(len(self.git(repo, 'for-each-ref', '--format=%(refname)', 'refs/archive').stdout.splitlines()), 1)
+
+    def test_archive_active_writer_and_delivery_close_cannot_bypass_proof(self):
+        _, repo, _, request = self.archive_fixture()
+        failure = self.run_cli(repo, 'stack', 'close', 'deferred', '--reason', 'archived', expected=2)
+        self.assertIn('use stack archive', failure.stderr)
+        opened = json.loads(self.run_cli(repo, 'worktree', 'open', 'writer', '--into', 'deferred', '--json').stdout)
+        dirty = Path(opened['lane']['path']) / 'writer-work.txt'
+        dirty.write_text('unfinished writer content')
+        failure = self.run_cli(repo, *request, expected=2)
+        self.assertIn('recovery is required', failure.stderr)
+        self.assertEqual(dirty.read_text(), 'unfinished writer content')
+
     def test_close_fails_closed_when_the_coordination_remote_is_unreachable(self):
         origin = self.create_remote('round5-close-unreachable')
         repo = self.clone(origin, 'round5-close-unreachable')
