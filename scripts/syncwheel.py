@@ -7593,9 +7593,11 @@ def historically_empty_integration_only_commits(repo_root, manifest, commits, ma
 
 
 def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
-    """Recognize old-parent history carried by an exact reconciliation proof.
+    """Recognize authenticated historical derived and reconciled old-parent history.
 
-    A reconciliation keeps the old integration as its first parent while its
+    A published derived record can remain a valid historical witness after a
+    later record replaces it in current provenance. A reconciliation keeps the
+    old integration as its first parent while its
     verified second parent supplies the product tree.  Only commits exclusive
     to that old parent can be explained by this proof; later foreign commits
     and commits in an unproved merge remain unmapped.
@@ -7608,6 +7610,13 @@ def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
         return carried
     tip = ref_tip(repo_root, manifest['integration']['branch'])
     wanted = set(commits)
+    for commit in sorted(wanted - carried):
+        if integration_reconciliation_historical_derived(
+            repo_root, commit, tip, observation
+        ):
+            carried.add(commit)
+    if carried == wanted:
+        return carried
     manifest_path = integration_manifest_path(repo_root)
     base = manifest['integration']['base']
     for merge in git(repo_root, 'rev-list', '--merges', f'{base}..{tip}').stdout.splitlines():
