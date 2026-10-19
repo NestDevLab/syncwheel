@@ -4064,6 +4064,63 @@ with module.coordination_publication_lock(Path(repo_path)):
         ):
             module.integration_reconciliation_history(repo, manifest, unsafe, {})
 
+    def absorbed_source_auto_merge_fixture(self, name):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name + '-owner')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        manifest, path = module.load_manifest(repo)
+        manifest['integration']['strategy'] = 'merge-stacks'
+        with module.manifest_write_transaction(repo, path, 'fixture-merge-strategy'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_merge_strategy')
+        other = self.commit_on_branch(repo, 'scratch/' + name + '-other', 'other-owned.txt')
+        declared = self.commit_on_branch(repo, 'scratch/' + name + '-source', 'delivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'other', other, '--branch', 'pr/other')
+        self.run_cli(repo, 'stack', 'push', 'other')
+        self.run_cli(repo, 'stack', 'create', 'retired', declared, '--branch', 'pr/retired')
+        self.run_cli(repo, 'stack', 'push', 'retired')
+        publisher = self.clone(origin, name + '-delivery')
+        (publisher / 'upstream.txt').write_text('upstream content\n')
+        self.git(publisher, 'add', 'upstream.txt')
+        self.git(publisher, 'commit', '-qm', 'advance upstream')
+        self.git(publisher, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', 'origin')
+        self.git(repo, 'switch', 'pr/retired')
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge current upstream into source', 'origin/main')
+        source = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', manifest['integration']['branch'])
+        self.run_cli(repo, 'stack', 'push', 'retired')
+        # Historical integration is a real exact auto-merge retaining another
+        # stack's product, rather than a source tree with control-only changes.
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge other source', 'pr/other')
+        self.git(repo, 'merge', '--no-ff', '-qm', 'merge retired source', 'pr/retired')
+        merged = module.ref_tip(repo, 'HEAD')
+        self.run_cli(repo, 'int', 'push')
+        self.git(publisher, 'fetch', 'origin')
+        self.git(publisher, 'merge', '--squash', 'origin/pr/retired')
+        self.git(publisher, 'commit', '-qm', 'squash delivery of owned source')
+        self.git(publisher, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', 'origin')
+        self.run_cli(repo, 'stack', 'close', 'retired', '--reason', 'absorbed')
+        return {'origin': origin, 'repo': repo, 'module': module, 'source': source,
+                'declared': declared, 'merged': merged}
+
+    def test_absorbed_source_auto_merge_is_verified_in_a_fresh_clone(self):
+        fixture = self.absorbed_source_auto_merge_fixture('absorbed-source-auto')
+        module, repo = fixture['module'], fixture['repo']
+        peer = self.clone(fixture['origin'], 'absorbed-source-auto-peer')
+        self.git(peer, 'switch', '-c', 'integration/shared', 'origin/integration/shared')
+        self.disable_fixture_hooks(peer)
+        manifest, path = module.load_manifest(peer)
+        self.assertNotIn('retired', module.stack_map(manifest))
+        self.assertEqual(module.commit_parent_count(peer, fixture['source']), 2)
+        self.assertNotEqual(module.ref_tree(peer, fixture['source']), module.ref_tree(peer, fixture['merged']))
+        self.run_cli(peer, 'int', 'rebuild', '--reason', 'preserve authenticated absorbed auto-merge')
+        self.assertTrue(module.branch_contains(peer, 'integration/shared', fixture['merged']))
+        self.assertTrue((peer / 'other-owned.txt').exists())
+        self.assertTrue((peer / 'delivered.txt').exists())
+
     def test_replay_keeps_all_46_declared_commits_from_ten_stacks(self):
         origin = self.create_remote('ten-stack-replay-46')
         repo = self.clone(origin, 'ten-stack-replay-46')
