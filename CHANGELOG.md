@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.4 - 2026-10-19
+
+- Reconcile local control-only integration divergence after external canonical delivery, preserving both histories and the selected replay without implicit publication. Verify every local-exclusive transition, reject malformed controls and unexplained product history, and retain existing state, replay, intent and CAS leases.
+
 ## 0.46.3 - 2026-10-19
 
 - Permit state-only coordination repair when unrelated managed refs were recorded and remain unpublished. Keep absent refs in reviewed guards, reject unpublished repair targets and unrelated drift, and preserve existing ownership, exact-tip and stale-plan checks.
