@@ -909,12 +909,36 @@ with module.coordination_publication_lock(Path(repo_path)):
             'plan': plan,
         }
 
-    def prepare_fast_forward_repair(self, name='fast-forward-repair'):
+    def prepare_fast_forward_repair(self, name='fast-forward-repair', *, peer=None):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
+        peer_ref = 'refs/heads/channel/repair-peer'
+        if peer is not None:
+            module = self.load_module()
+            manifest, manifest_path = module.load_manifest(repo)
+            manifest['version'] = 3
+            manifest['channels'] = [{
+                'id': 'repair-peer',
+                'branch': 'channel/repair-peer',
+                'lifecycle': 'shared',
+                'base': manifest['defaults']['base_ref'],
+                'baseRevision': module.commit_full_sha(repo, 'origin/main'),
+                'remote': 'origin',
+                'composition': [],
+            }]
+            module.save_manifest(manifest_path, manifest)
+            if peer == 'published':
+                self.git(repo, 'push', '-q', 'origin', f'origin/main:{peer_ref}')
+            else:
+                self.assertEqual(peer, 'unpublished')
         self.run_cli(repo, 'int', 'push')
         parent_tip, parent = self.remote_state(origin)
+        if peer is not None:
+            observed_peer = self.load_module().remote_ref_tips(repo, 'origin', [peer_ref])
+            self.assertIn(peer_ref, parent['managed_refs'])
+            self.assertEqual(parent['managed_refs'][peer_ref], observed_peer[peer_ref])
+            self.assertEqual(observed_peer[peer_ref] is None, peer == 'unpublished')
         branch = 'integration/shared'
         ref = f'refs/heads/{branch}'
         recorded = parent['managed_refs'][ref]
@@ -948,6 +972,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             'advance_commits': [first_advance, observed],
             'observed': observed,
             'plan': plan,
+            'peer_ref': peer_ref,
         }
 
     def legacy_state_manifest_digest(self, repo, state):
@@ -6439,6 +6464,166 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(evidence['advanceCommitsDigest'], plan['expectedAdvanceCommitsDigest'])
         for key in ('manifest', 'manifest_digest', 'tombstones'):
             self.assertEqual(child[key], fixture['parent'][key])
+
+    def test_fast_forward_repair_preserves_unpublished_peer_absence(self):
+        fixture = self.prepare_fast_forward_repair('repair-null-peer', peer='unpublished')
+        module, repo, plan = fixture['module'], fixture['repo'], fixture['plan']
+        peer_ref = fixture['peer_ref']
+        self.assertIn(peer_ref, plan['guardedRefs'])
+        self.assertIsNone(plan['guardedRefs'][peer_ref])
+        refs_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        pushes = []
+        original_push = module.run_authorized_push
+
+        def capture_push(*args, **kwargs):
+            pushes.append(args[3])
+            return original_push(*args, **kwargs)
+
+        with mock.patch.object(module, 'run_authorized_push', side_effect=capture_push):
+            result = module.apply_coordination_repair_plan(repo, fixture['manifest'], plan)
+        self.assertEqual(result['status'], 'repaired')
+        self.assertEqual(pushes, [[plan['stateRef']]])
+        child_tip, child = self.remote_state(fixture['origin'])
+        self.assertEqual(child['parent_state'], fixture['parent_tip'])
+        self.assertEqual(child['changed_refs'], {})
+        expected_managed = dict(fixture['parent']['managed_refs'])
+        expected_managed[fixture['ref']] = fixture['observed']
+        self.assertEqual(child['managed_refs'], expected_managed)
+        for key in ('manifest', 'manifest_digest', 'tombstones', 'claims'):
+            self.assertEqual(child[key], fixture['parent'][key])
+        refs_after = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        self.assertEqual(
+            refs_after,
+            refs_before.replace(fixture['parent_tip'], child_tip),
+        )
+        settled, _ = module.coordination_repair_plan(
+            repo, fixture['manifest'], fixture['ref'],
+            module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+        )
+        self.assertEqual(settled['status'], 'noop')
+        self.assertIsNone(settled['guardedRefs'][peer_ref])
+
+    def test_fast_forward_repair_rejects_unexpected_peer_publication_deletion_and_move(self):
+        for action in ('publish', 'delete', 'move'):
+            with self.subTest(action=action):
+                fixture = self.prepare_fast_forward_repair(
+                    f'repair-peer-{action}',
+                    peer='unpublished' if action == 'publish' else 'published',
+                )
+                module, repo, peer_ref = fixture['module'], fixture['repo'], fixture['peer_ref']
+                refspec = (
+                    f':{peer_ref}' if action == 'delete'
+                    else f"{fixture['observed']}:{peer_ref}"
+                )
+                self.git(repo, 'push', '--no-verify', 'origin', refspec)
+                refs_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+                with mock.patch.object(module, 'run_authorized_push') as push:
+                    with self.assertRaisesRegex(module.SyncwheelError, 'non-target managed refs'):
+                        module.coordination_repair_plan(
+                            repo, fixture['manifest'], fixture['ref'],
+                            module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+                        )
+                    with self.assertRaisesRegex(module.SyncwheelError, 'non-target managed refs'):
+                        module.apply_coordination_repair_plan(
+                            repo, fixture['manifest'], fixture['plan'],
+                        )
+                    push.assert_not_called()
+                self.assertEqual(
+                    self.git(repo, 'ls-remote', '--heads', 'origin').stdout, refs_before,
+                )
+                self.assertEqual(self.remote_state(fixture['origin'])[0], fixture['parent_tip'])
+
+    def test_repair_requires_exact_target_and_rejects_malformed_peer_tips(self):
+        fixture = self.prepare_fast_forward_repair('repair-peer-invalid', peer='unpublished')
+        module, repo, peer_ref = fixture['module'], fixture['repo'], fixture['peer_ref']
+        refs_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'lacks an exact tip'):
+            module.coordination_repair_plan(
+                repo, fixture['manifest'], peer_ref,
+                module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+            )
+        self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, refs_before)
+
+        state_tip = fixture['parent_tip']
+        for invalid_tip in ('', False, 0, 'a' * 39, 'a' * 64, []):
+            with self.subTest(tip=invalid_tip):
+                state = json.loads(json.dumps(fixture['parent']))
+                state['managed_refs'][peer_ref] = invalid_tip
+                state['parent_state'] = state_tip
+                state_tip = module.create_coordination_state_commit(repo, state, state_tip)
+                self.git(
+                    repo, 'push', '--no-verify', 'origin',
+                    f"{state_tip}:{fixture['plan']['stateRef']}",
+                )
+                with self.assertRaisesRegex(module.SyncwheelError, 'lacks an exact tip'):
+                    module.coordination_repair_plan(
+                        repo, fixture['manifest'], fixture['ref'],
+                        module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+                    )
+                self.assertEqual(self.remote_state(fixture['origin'])[0], state_tip)
+
+    def test_fast_forward_repair_rejects_tampered_null_peer_guard(self):
+        fixture = self.prepare_fast_forward_repair('repair-peer-tamper', peer='unpublished')
+        module, repo, peer_ref = fixture['module'], fixture['repo'], fixture['peer_ref']
+        refs_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        for tamper in ('omit', 'replace'):
+            with self.subTest(tamper=tamper):
+                plan = json.loads(json.dumps(fixture['plan']))
+                if tamper == 'omit':
+                    del plan['guardedRefs'][peer_ref]
+                else:
+                    plan['guardedRefs'][peer_ref] = fixture['recorded']
+                plan['planDigest'] = module.canonical_json_digest({
+                    key: value for key, value in plan.items() if key != 'planDigest'
+                })
+                with mock.patch.object(module, 'run_authorized_push') as push:
+                    with self.assertRaisesRegex(module.SyncwheelError, 'reviewed plan drifted at guardedRefs'):
+                        module.apply_coordination_repair_plan(repo, fixture['manifest'], plan)
+                    push.assert_not_called()
+                self.assertEqual(
+                    self.git(repo, 'ls-remote', '--heads', 'origin').stdout, refs_before,
+                )
+
+    def test_fast_forward_repair_guards_null_peer_before_and_after_state_cas(self):
+        for boundary in ('preflight', 'apply', 'post-cas'):
+            with self.subTest(boundary=boundary):
+                fixture = self.prepare_fast_forward_repair(
+                    f'repair-peer-{boundary}', peer='unpublished',
+                )
+                module, repo = fixture['module'], fixture['repo']
+
+                def publish_peer():
+                    self.git(
+                        repo, 'push', '--no-verify', 'origin',
+                        f"{fixture['observed']}:{fixture['peer_ref']}",
+                    )
+
+                class RacingBackend(module.FastForwardStateCasCoordinationRepairBackend):
+                    def preflight(self, **kwargs):
+                        if boundary == 'preflight':
+                            publish_peer()
+                        return super().preflight(**kwargs)
+
+                    def apply(self, **kwargs):
+                        if boundary == 'apply':
+                            publish_peer()
+                        result = super().apply(**kwargs)
+                        if boundary == 'post-cas':
+                            publish_peer()
+                        return result
+
+                with self.assertRaisesRegex(module.SyncwheelError, 'guarded refs drifted'):
+                    module.apply_coordination_repair_plan(
+                        repo, fixture['manifest'], fixture['plan'], backend=RacingBackend(),
+                    )
+                tip, state = self.remote_state(fixture['origin'])
+                self.assertIsNone(state['managed_refs'][fixture['peer_ref']])
+                if boundary == 'post-cas':
+                    self.assertNotEqual(tip, fixture['parent_tip'])
+                    self.assertEqual(state['parent_state'], fixture['parent_tip'])
+                    self.assertEqual(state['changed_refs'], {})
+                else:
+                    self.assertEqual(tip, fixture['parent_tip'])
 
     def test_fast_forward_repair_rejects_non_descendants_and_review_drift(self):
         fixture = self.prepare_fast_forward_repair('fast-forward-review-drift')

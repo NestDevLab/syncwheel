@@ -12620,6 +12620,10 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     for owned_ref, owned_tip in previous['state']['managed_refs'].items():
         if not is_valid_coordination_branch_ref(owned_ref):
             raise SyncwheelError(f'coordination repair state has an invalid managed ref: {owned_ref!r}')
+        # Partial publications record declared but unpublished peers as null.
+        # Only the selected repair target must already have an exact tip.
+        if owned_tip is None and owned_ref != repaired_ref:
+            continue
         if not isinstance(owned_tip, str) or not re.fullmatch(r'[0-9a-f]{40}', owned_tip):
             raise SyncwheelError(
                 f'coordination repair state lacks an exact tip for managed ref: {owned_ref}'
@@ -12632,6 +12636,16 @@ def coordination_repair_plan(repo_root, manifest, repaired_ref, freeze_backend='
     observed_refs = remote_ref_tips(
         repo_root, config['remote'], list(previous['state']['managed_refs'])
     )
+    drifted_peers = {
+        ref: (tip, observed_refs[ref])
+        for ref, tip in previous['state']['managed_refs'].items()
+        if ref != repaired_ref and observed_refs[ref] != tip
+    }
+    if drifted_peers:
+        raise SyncwheelError(
+            'coordination repair STOP: non-target managed refs differ from recorded state: '
+            + ', '.join(sorted(drifted_peers))
+        )
     expected_recorded = previous['state']['managed_refs'][repaired_ref]
     observed = observed_refs[repaired_ref]
     missing_ref_restore_required = observed is None
