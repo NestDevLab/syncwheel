@@ -4067,7 +4067,7 @@ with module.coordination_publication_lock(Path(repo_path)):
     def absorbed_source_auto_merge_fixture(self, name):
         origin = self.create_remote(name)
         repo = self.clone(origin, name + '-owner')
-        self.init_coordinated(repo)
+        self.init_coordinated(repo, integration_membership='required')
         self.run_cli(repo, 'int', 'push')
         module = self.load_module()
         manifest, path = module.load_manifest(repo)
