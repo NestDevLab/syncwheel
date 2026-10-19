@@ -52,7 +52,9 @@
       "integration_branch": "main-integration",
       "commits": [
         "8715dc6ed31828cc70dc379842210f954fb43686",
-        "15258fdeb62b8c022b63c63bb65e207cd334871f"
+        "15258fdeb62b8c022b63c63bb65e207cd334871f",
+        "4f5e57a9e4547fe189555a46392f00f811a34c08",
+        "f39c49c86b43366ad89f02840e9a1b42f251bb8b"
       ],
       "state": "draft",
       "publication": {
