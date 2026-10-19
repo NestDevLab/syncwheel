@@ -31,7 +31,9 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [],
+    "stacks": [
+      "desk-merge-conflict-fix"
+    ],
     "strategy": "cherry-pick"
   },
   "landing": {
@@ -40,7 +42,24 @@
     "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [],
+  "stacks": [
+    {
+      "id": "desk-merge-conflict-fix",
+      "branch": "syncwheel/draft/desk-merge-conflict-fix",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "draft",
+      "publication": {
+        "enabled": false
+      },
+      "meta": {
+        "purpose": "Allow governed desk resolution of merge-stack conflicts"
+      }
+    }
+  ],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
