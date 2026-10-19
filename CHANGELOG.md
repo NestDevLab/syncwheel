@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.3 - 2026-10-19
+
+- Permit state-only coordination repair when unrelated managed refs were recorded and remain unpublished. Keep absent refs in reviewed guards, reject unpublished repair targets and unrelated drift, and preserve existing ownership, exact-tip and stale-plan checks.
+
 ## 0.46.2 - 2026-10-19
 
 - Keep anonymous source-history summaries compatible with retirement-proof lookup without granting ownership to unnamed stacks.
