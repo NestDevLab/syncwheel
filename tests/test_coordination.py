@@ -9453,6 +9453,11 @@ sys.exit(module.main())
                 _, shared = self.remote_state(fixture['origin'])
                 self.assertEqual(shared['manifest']['integration']['resolutions']['s1']['integration_commits'],
                                  manifest['stacks'][0]['integration_commits'])
+                self.assertEqual(shared['schema_version'], module.COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS)
+                module.validate_coordination_state(shared)
+                old_schema = dict(shared, schema_version=module.COORDINATION_STATE_SCHEMA_VERSION)
+                with self.assertRaises(module.SyncwheelError):
+                    module.validate_coordination_state(old_schema)
                 restored = module.apply_coordination_snapshot(manifest, shared['manifest'])
                 self.assertEqual(restored['stacks'][0]['integration_resolution'],
                                  manifest['stacks'][0]['integration_resolution'])
@@ -9543,6 +9548,8 @@ sys.exit(module.main())
         self.git(repo, 'switch', previous)
         manifest, path = module.load_manifest(repo)
         manifest['stacks'][0]['integration_commits'] = [first, second]
+        manifest['stacks'][0]['integration_resolution'] = {
+            'source_tip': module.ref_tip(repo, manifest['stacks'][0]['branch'])}
         with module.manifest_write_transaction(repo, path, 'fixture-existing-resolution'):
             module.save_manifest_with_ledger(repo, path, manifest, 'fixture_existing_resolution')
         self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
@@ -9555,6 +9562,94 @@ sys.exit(module.main())
                      '--worktree', str(desk), '--reason', 'apply complete replacement')
         self.assertEqual((repo / 'independent.txt').read_text(), 'scratch/first-resolution\n')
         self.assertEqual((repo / fixture['filename']).read_text(), 'upstream version\n')
+
+    def test_merge_stack_legacy_unbound_merge_commit_rebuilds(self):
+        fixture = self.a14_published_tip_reuse_fixture('legacy-merge', integration_strategy='merge-stacks')
+        repo, module = fixture['follower'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        merge = module.ref_tip(repo, manifest['integration']['branch'])
+        self.assertGreater(len(self.git(repo, 'show', '-s', '--format=%P', merge).stdout.split()), 1)
+        manifest['stacks'][0]['integration_commits'] = [merge]
+        snapshot = module.coordination_manifest_snapshot(manifest, repo)
+        self.assertNotIn('resolutions', snapshot['integration'])
+        self.assertEqual(module.coordination_snapshot_schema(snapshot), 2)
+        module.additive_coordination_snapshot_delta(snapshot, snapshot, 'legacy')
+        self.assertIsNone(module.merge_stack_resolution_commits(repo, manifest['stacks'][0],
+                                                              manifest['stacks'][0]['branch']))
+        module.materialize_integration_projection(repo, manifest)
+
+    def test_merge_stack_desk_capture_preserves_pending_tail_and_resolver_author(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-tail')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-c', 'scratch/tail', fixture['source'])
+        (repo / 'tail.txt').write_text('later contribution\n')
+        self.git(repo, 'add', 'tail.txt')
+        self.git(repo, 'commit', '-qm', 'later contribution')
+        tail = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        stack = manifest['stacks'][0]
+        stack['integration_commits'] = [fixture['source'], tail]
+        stack['integration_resolution'] = {'source_tip': module.ref_tip(repo, stack['branch'])}
+        with module.manifest_write_transaction(repo, path, 'fixture-tail-resolution'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_tail_resolution')
+        self.git(repo, 'config', 'user.name', 'Resolution Reviewer')
+        self.git(repo, 'config', 'user.email', 'reviewer@example.invalid')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'review first step', expected=2)
+        (desk / fixture['filename']).write_text('reviewed first step\n')
+        self.git(desk, 'add', fixture['filename'])
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        updated, _ = module.load_manifest(repo)
+        commits = updated['stacks'][0]['integration_commits']
+        self.assertEqual(commits[-1], tail)
+        self.assertEqual(self.git(repo, 'show', '-s', '--format=%an <%ae>', commits[0]).stdout.strip(),
+                         'Resolution Reviewer <reviewer@example.invalid>')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'complete pending tail')
+        self.assertEqual((repo / 'tail.txt').read_text(), 'later contribution\n')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'ephemeral', '--reason', 'repeat tail replay')
+        self.assertEqual((repo / 'tail.txt').read_text(), 'later contribution\n')
+
+    def test_merge_stack_desk_capture_integration_only_preserves_siblings(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-only')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-c', 'scratch/only-tail', fixture['source'])
+        (repo / 'only-tail.txt').write_text('integration tail\n')
+        self.git(repo, 'add', 'only-tail.txt')
+        self.git(repo, 'commit', '-qm', 'integration-only tail')
+        tail = module.ref_tip(repo, 'HEAD')
+        self.git(repo, 'switch', previous)
+        manifest, path = module.load_manifest(repo)
+        stack = manifest['stacks'][0]
+        stack['integration_commits'] = []
+        stack['integration_resolution'] = {'source_tip': module.ref_tip(repo, stack['branch'])}
+        stack['integration_only_commits'] = [fixture['source'], tail]
+        with module.manifest_write_transaction(repo, path, 'fixture-only-resolution'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_only_resolution')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'review integration-only step', expected=2)
+        (desk / fixture['filename']).write_text('reviewed integration-only\n')
+        self.git(desk, 'add', fixture['filename'])
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        updated, _ = module.load_manifest(repo)
+        self.assertEqual(updated['stacks'][0]['integration_commits'], [])
+        self.assertEqual(updated['stacks'][0]['integration_only_commits'][-1], tail)
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                     '--reason', 'apply integration-only resolution')
+        self.assertEqual((repo / 'only-tail.txt').read_text(), 'integration tail\n')
+        self.assertEqual((repo / fixture['filename']).read_text(), 'reviewed integration-only\n')
+
+    def test_merge_stack_desk_dry_run_plans_detached_review_path(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-dry-run')
+        result = self.run_cli(fixture['follower'], 'int', 'rebuild', '--replay-mode', 'desk',
+                              '--worktree', str(fixture['desk']), '--dry-run', '--reason', 'preview review')
+        self.assertIn('resolution desk:', result.stdout)
+        self.assertIn('--detach', result.stdout)
+        self.assertIn(str(fixture['desk']), result.stdout)
+        self.assertFalse(fixture['desk'].exists())
 
     def test_ancestry_reconciliation_preserves_merge_stack_replay(self):
         repo, module, manifest, path = self.prepare_detached_reconciliation('ancestry-merge-stacks')

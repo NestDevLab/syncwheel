@@ -530,3 +530,10 @@ branch. It updates `integration_commits` without changing `commits`; stack
 rebuilds still use the latter, while integration rebuilds use the former.
 When an obsolete source commit is already absorbed by the integration base or
 another resolved stack, use `--empty` explicitly rather than inventing a commit.
+
+Bound integration resolutions publish coordination state schema 4. Older clients reject
+this schema and must upgrade before publishing; they cannot silently discard the
+resolution. Unbound legacy `integration_commits` keep their previous merge-stack
+semantics and do not add `integration.resolutions` to shared snapshots. Desk capture
+replaces only the contribution through the conflicting step, retaining pending steps.
+The resolution commit uses the resolving operator's configured Git identity.

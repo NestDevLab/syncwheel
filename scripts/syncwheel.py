@@ -92,6 +92,7 @@ MANIFEST_VERSION_CHANNELS = 3
 COORDINATION_MODES = {'active-active', 'disabled'}
 COORDINATION_STATE_SCHEMA_VERSION = 2
 COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
+COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS = 4
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_STATE_PREFIX = 'syncwheel/state/'
 COORDINATION_CLAIM_FILE = 'claim.json'
@@ -5005,9 +5006,9 @@ def stack_integration_base_commits(stack):
 
 def merge_stack_resolution_commits(repo_root, stack, stack_ref):
     """A reviewed integration replacement never rewrites the source branch."""
-    if 'integration_commits' not in stack:
+    if not stack.get('integration_resolution'):
         return None
-    binding = stack.get('integration_resolution')
+    binding = stack['integration_resolution']
     if binding and binding.get('source_tip') != commit_full_sha(repo_root, stack_ref):
         raise SyncwheelError(
             f"stack {stack['id']} integration resolution is stale; "
@@ -11690,7 +11691,7 @@ def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=
         resolution = {key: copy.deepcopy(stack[key])
                       for key in ('integration_commits', 'integration_only_commits', 'integration_resolution')
                       if key in stack}
-        if resolution:
+        if stack.get('integration_resolution'):
             # Resolution is integration-owned state, not a source-branch edit.
             # int push carries both the replay objects and these bindings atomically.
             snapshot['integration'].setdefault('resolutions', {})[stack['id']] = resolution
@@ -11958,6 +11959,8 @@ def coordination_integration_resolutions(snapshot):
             ):
                 raise SyncwheelError('coordination integration resolution commits must be object IDs')
         binding = resolution.get('integration_resolution')
+        if binding is None:
+            raise SyncwheelError('coordination integration resolution requires a source binding')
         if binding is not None and (
             not isinstance(binding, dict) or set(binding) != {'source_tip'}
             or not isinstance(binding['source_tip'], str)
@@ -12079,12 +12082,23 @@ def validate_coordination_snapshot_refs(snapshot):
             normalize_channel_timestamp(expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt')
 
 
+def coordination_snapshot_schema(snapshot):
+    # Older peers must reject bound resolutions rather than silently erase them.
+    integration = snapshot.get('integration')
+    if isinstance(integration, dict) and integration.get('resolutions'):
+        return COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS
+    return (COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
+            if snapshot.get('version') == MANIFEST_VERSION_CHANNELS
+            else COORDINATION_STATE_SCHEMA_VERSION)
+
+
 def validate_coordination_state(state, expected_id=None, claims_mode='advisory'):
     if not isinstance(state, dict):
         raise SyncwheelError('coordination state must be an object')
     if state.get('schema_version') not in {
         COORDINATION_STATE_SCHEMA_VERSION,
         COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
+        COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS,
     }:
         raise SyncwheelError(
             f"unsupported coordination state schema: {state.get('schema_version')!r}"
@@ -12099,11 +12113,7 @@ def validate_coordination_state(state, expected_id=None, claims_mode='advisory')
     if not isinstance(state.get('manifest'), dict):
         raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
     manifest_version = state['manifest'].get('version')
-    expected_schema = (
-        COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-        if manifest_version == MANIFEST_VERSION_CHANNELS
-        else COORDINATION_STATE_SCHEMA_VERSION
-    )
+    expected_schema = coordination_snapshot_schema(state['manifest'])
     if state['schema_version'] != expected_schema:
         raise SyncwheelError(
             f'coordination state schema {state["schema_version"]} is incompatible with '
@@ -12347,11 +12357,7 @@ def build_coordination_state(
     else:
         published_manifest_digest = previous_state['manifest_digest']
     return {
-        'schema_version': (
-            COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-            if manifest.get('version') == MANIFEST_VERSION_CHANNELS
-            else COORDINATION_STATE_SCHEMA_VERSION
-        ),
+        'schema_version': coordination_snapshot_schema(snapshot),
         'coordination_id': config['id'],
         'publication_id': str(uuid.uuid4()),
         'parent_state': previous.get('tip') if previous else None,
@@ -19823,7 +19829,7 @@ def integration_projection_input_snapshot(repo_root, manifest):
             ))
             immutable_commits.extend(
                 commit_full_sha(repo_root, value) for value in
-                (stack.get('integration_commits') or [])
+                ((stack.get('integration_commits') or []) if stack.get('integration_resolution') else [])
             )
         else:
             immutable_commits.extend(
@@ -28428,7 +28434,7 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
             commit = git(
                 repo_root, 'commit-tree', tree, '-p', commit,
                 '-m', f"Resolve stack '{stack['id']}' on integration",
-                env=replay_commit_env(repo_root, operation['tip']),
+                env=replay_hygiene_env(),
             ).stdout.strip()
             commits = [commit]
         # The merge result is one reviewed replacement of this stack's contribution.
@@ -28441,7 +28447,10 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
             offset = previous.index(step['argv'][-1])
             stack['integration_only_commits'] = previous[:offset] + commits + previous[offset + 1:]
         else:
-            stack['integration_commits'] = commits
+            pending = [item['argv'][-1] for item in receipt['steps'][receipt['next'] + 1:]
+                       if item.get('stack_id') == stack['id']
+                       and not item.get('integration_only')]
+            stack['integration_commits'] = commits + pending
             stack['integration_resolution'] = {'source_tip': source_tip}
         require_manifest_transaction_current(manifest_path)
         save_manifest_with_ledger(
@@ -28581,8 +28590,26 @@ def command_int_rebuild(args):
             allow_new_operation=bool(args.reason),
         )
     preflight_control_manifest_digest(repo_root, manifest_path, manifest)
-    if (getattr(args, 'replay_mode', None) == 'desk' and not args.dry_run
+    if (getattr(args, 'replay_mode', None) == 'desk'
             and manifest['integration'].get('strategy') == 'merge-stacks'):
+        if args.dry_run:
+            desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
+                repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
+            ).resolve()
+            print(f'resolution desk: {desk}')
+            review_manifest = copy.deepcopy(manifest)
+            for stack in review_manifest['stacks']:
+                binding = stack.get('integration_resolution')
+                if binding and binding['source_tip'] != commit_full_sha(repo_root, stack['branch']):
+                    stack.pop('integration_commits', None)
+                    stack.pop('integration_resolution', None)
+            plan = replay_plan(repo_root, review_manifest, replay_target(
+                integration=review_manifest['integration'], worktree=desk,
+                return_tree=True, skip_contained=True), 'desk')
+            for step in plan['steps']:
+                print(replay_step_render(step))
+            print('would replay frozen stack inputs; conflicts remain in the desk for reviewed capture')
+            return 0
         return rebuild_integration_desk(repo_root, manifest, manifest_path, args)
     integration = manifest['integration']
     validation = validate_manifest(repo_root, manifest)
