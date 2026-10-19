@@ -7078,6 +7078,7 @@ def abandoned_stack_paths_match_delivery(repo_root, commits, local_tip, publishe
 def historically_closed_integration_commits(
     repo_root, tip, observation, candidates=None, delivery_tip=None,
     delivery_observation=None, merge_parent_candidates=None, abandonment_only=False,
+    absorbed_merge_tips=None,
 ):
     """Return exact commits covered by a durable coordinated close proof.
 
@@ -7219,6 +7220,10 @@ def historically_closed_integration_commits(
                             managed_parents
                         ):
                             declared.extend(managed_parents)
+                            # Preserve the proof kind: abandoned/superseded and
+                            # promotion-only ownership never authorize this set.
+                            if absorbed_merge_tips is not None and managed_tip in merge_parent_candidates:
+                                absorbed_merge_tips.add(managed_tip)
                         declared.append(managed_tip)
                     declared = [
                         commit_full_sha(repo_root, commit)
@@ -7697,12 +7702,14 @@ def integration_reconciliation_history(
         parents[1] for parents in merge_parents.values() if len(parents) == 2
     }
     historical_candidates.extend(historical_merge_parents)
+    absorbed_merge_tips = set()
     closed_commits = (
         historically_closed_integration_commits(
             repo_root, tip, observation, candidates=historical_candidates,
             delivery_tip=delivery_tip,
             delivery_observation=delivery_observation,
             merge_parent_candidates=historical_merge_parents,
+            absorbed_merge_tips=absorbed_merge_tips,
         ) if not detached_replay else set()
     )
     proofs = {commit: proof for commit in history
@@ -7728,10 +7735,11 @@ def integration_reconciliation_history(
             parents = merge_parents[commit]
             if len(parents) == 2 and (
                 parents[1] in declared
+                or parents[1] in absorbed_merge_tips
                 or commit_patch_id(repo_root, parents[1]) in patches
             ):
-                # An exact auto-merge of a declared or already delivered
-                # source commit retains its ownership even if the historical
+                # An exact auto-merge of a declared, delivered, or authenticated
+                # absorbed managed merge tip retains ownership even if the historical
                 # merge itself was not recorded in the current manifest.
                 merge = git(
                     repo_root, 'merge-tree', '--write-tree',

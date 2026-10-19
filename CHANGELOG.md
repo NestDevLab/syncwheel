@@ -2,6 +2,8 @@
 
 ## 0.46.2 - 2026-10-19
 
+- Preserve exact historical auto-merges of two-parent managed source tips authenticated by an absorbed close, verifying the complete merge tree and refusing abandonment-only or altered-product history.
+
 - Recover exact empty integration-only cherry-picks through managed desk capture, preserving source refs, sibling steps, and native ancestry proofs. Reject changed operation IDs, source inputs or desk content, and recover interrupted retirement receipts without treating unknown replay failures as empty steps.
 
 ## 0.46.1 - 2026-10-19

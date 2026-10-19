@@ -193,3 +193,13 @@ error-message text. A later normal rebuild verifies the retirement before
 carrying historical integration commits into its existing ancestry proof. An
 interrupted capture uses its write-ahead receipt to complete the same source
 ledger transition before continuing.
+
+### Historical auto-merges after absorption
+
+Normal ancestry reconciliation accepts a historical auto-merge of a two-parent
+managed source endpoint only when the existing coordination chain proves an
+`absorbed` close, verifies both control-manifest digests, and binds a declared
+source parent to that exact managed tip. It still reconstructs the auto-merge
+and compares its entire historical tree. Abandoned, superseded or promotion-only
+ownership does not authorize this additional route; the control-only fallback
+is unchanged. The proof works from a fresh clone without a local close ledger.
