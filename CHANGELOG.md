@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.5 - 2026-10-19
+
+- Reuse authenticated published derived provenance after a newer record supersedes it during revision-provider history validation. Skip reconciliation replay only when every requested commit is already proved; retain current coordination checks and the existing fallback for unexplained history.
+
 ## 0.46.4 - 2026-10-19
 
 - Reconcile local control-only integration divergence after external canonical delivery, preserving both histories and the selected replay without implicit publication. Verify every local-exclusive transition, reject malformed controls and unexplained product history, and retain existing state, replay, intent and CAS leases.

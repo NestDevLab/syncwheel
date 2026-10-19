@@ -8,6 +8,11 @@ error, and never publishes a remote ref.
 The provider is opt-in. A workspace selects it through Agentwheel configuration;
 Syncwheel does not intercept ordinary Agentwheel or Git commands.
 
+Published derived provenance remains a historical witness after a newer record supersedes it.
+History validation reuses the same coordination-chain, ancestry, composition and commit proof
+as integration reconciliation before attempting reconciliation replay. Unexplained commits
+retain the existing reconciliation checks and rejection behavior.
+
 ## Operation sequence
 
 1. Agentwheel persists its durable start receipt before invoking the provider.
