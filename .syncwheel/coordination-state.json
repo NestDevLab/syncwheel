@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/desk-merge-conflict-fix": "59f350296e89f5f12d1178d48877053719ec0f07"
+    "refs/heads/pr/desk-merge-conflict-fix": "59f350296e89f5f12d1178d48877053719ec0f07"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -9,6 +9,7 @@
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
+    "refs/heads/pr/desk-merge-conflict-fix": "efc7544f01338da13ab91b88dc1a7884db328e27",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -47,7 +48,7 @@
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "58b2e3172c7c08ff931be56bcef9937e49281a10",
     "refs/heads/syncwheel/draft/close-published-recovery": "910530df66c2e9913de1427e074df6f862224b68",
-    "refs/heads/syncwheel/draft/desk-merge-conflict-fix": "f0559be9b7ddc8a45e4cc295dc65dea4645a21ce",
+    "refs/heads/syncwheel/draft/desk-merge-conflict-fix": "4a6c7dcf86889d25637ca6ed57919467499beaf8",
     "refs/heads/syncwheel/draft/half-state-coordination": "95e67f801cf5cf523fe1b3b2f7c9db4d7b95b94d",
     "refs/heads/syncwheel/draft/historical-absorbed-rebuild": "5e240179d09f2f5d925ab19eaa8c875608e3427a",
     "refs/heads/syncwheel/draft/historical-closed-missing-tip": "1c2b87ec8c59c85c99e4b56fe56a4c29692a01ff",
@@ -79,7 +80,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T10:13:53+00:00",
+  "created_at": "2026-10-19T10:14:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -93,6 +94,7 @@
     "refs/heads/pr/close-published-recovery": "51416e3150206d76eda43ff61809a7301b346883",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
+    "refs/heads/pr/desk-merge-conflict-fix": "59f350296e89f5f12d1178d48877053719ec0f07",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
@@ -225,7 +227,7 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/desk-merge-conflict-fix",
+        "branch": "pr/desk-merge-conflict-fix",
         "commits": [
           "8715dc6ed31828cc70dc379842210f954fb43686",
           "15258fdeb62b8c022b63c63bb65e207cd334871f",
@@ -234,18 +236,17 @@
         ],
         "id": "desk-merge-conflict-fix",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "839c1d41-b30c-4665-ac3a-5beda5efb7be",
-  "parent_state": "33f1b5fe5a014d706b43bd8b710297ad49f7f4c4",
+  "operation_token": "28490aaf-dded-4505-80db-e34f0ce49277",
+  "parent_state": "f15d9cc505f890552b06be2393e5c4d5f2e40493",
   "projection_status": "partial",
-  "publication_id": "95bc769c-bb0a-473b-b52c-1fe33e913a21",
-  "publication_scope": "stack:desk-merge-conflict-fix",
+  "publication_id": "769938d7-65b3-4016-bb6a-75a4a087af62",
+  "publication_scope": "promote:desk-merge-conflict-fix",
   "schema_version": 2,
   "syncwheel_version": "0.45.7",
   "tombstones": [
@@ -1024,6 +1025,14 @@
       "ref": "refs/heads/pr/draft-promotion-fix",
       "remote_tip": null,
       "stack": "draft-promotion-fix"
+    },
+    {
+      "branch": "syncwheel/draft/desk-merge-conflict-fix",
+      "closed_at": "2026-10-19T10:14:00+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/desk-merge-conflict-fix",
+      "remote_tip": "59f350296e89f5f12d1178d48877053719ec0f07",
+      "stack": "desk-merge-conflict-fix"
     }
   ]
 }
