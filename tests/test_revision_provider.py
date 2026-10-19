@@ -6845,3 +6845,221 @@ class RevisionIndexJournalCompatibilityTest(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class JournalRevisionProviderTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RevisionProviderRepository()
+        self.addCleanup(self.fixture.close)
+        self.root = self.fixture.repo
+        path = self.root / '.syncwheel/manifest.json'
+        path.write_text(json.dumps({
+            'version': 1, 'repository_mode': 'journal',
+            'syncwheel_tracking': 'git-tracked',
+            'journal': {'branch': 'main-integration', 'remote': 'origin',
+                        'include': ['**'], 'exclude': ['var/**'],
+                        'max_file_bytes': 1048576, 'interval': '30m'},
+        }))
+        self.fixture.git('add', '.syncwheel/manifest.json')
+        self.fixture.git('commit', '-qm', 'Configure journal repository')
+        self.backend = SYNCWHEEL.JournalRevisionBackend(protocol)
+
+    def call(self, request, action):
+        return protocol.handle_request(self.backend, protocol.parse_request({**request, 'action': action}))
+
+    def prepare(self):
+        request = self.fixture.request('preflight', reason='Record exact operation paths.')
+        (self.root / 'feature.txt').write_text('feature\n')
+        self.call(request, 'preflight')
+        return request
+
+    def test_cli_route_ignores_unrelated_dirty_and_remote_publication(self):
+        (self.root / 'unrelated.txt').write_text('other session\n')
+        request = self.fixture.request('check')
+        request['paths'] = []
+        response, _ = self.fixture.protocol_request(request)
+        self.assertEqual(response['status'], 'ready')
+        request = self.prepare()
+        response = self.call(request, 'finalize')
+        self.assertEqual(response['status'], 'verified')
+        self.assertFalse(response['published'])
+        for field in ('draftStackId', 'draftBranch', 'draftTipSha', 'controlCommitSha'):
+            self.assertIsNone(response[field])
+        self.assertEqual(self.fixture.git('diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'), 'feature.txt')
+        self.assertEqual((self.root / 'unrelated.txt').read_text(), 'other session\n')
+        self.assertEqual(self.fixture.git('diff', '--cached', '--name-only'), '')
+
+    def test_recover_each_durable_checkpoint(self):
+        for phase in ('product_objects_prepared', 'product_hooks_validated',
+                      'integration_product_cas', 'integration_product_committed', 'product_committed'):
+            with self.subTest(phase=phase):
+                request = self.fixture.request('preflight', operation_id='op-' + phase,
+                                               path=phase + '.txt')
+                (self.root / (phase + '.txt')).write_text('feature\n')
+                self.call(request, 'preflight')
+                def interrupt(actual):
+                    if actual == phase:
+                        raise RuntimeError('simulated interruption')
+                with mock.patch.object(self.backend, 'checkpoint', side_effect=interrupt):
+                    with self.assertRaisesRegex(RuntimeError, 'interruption'):
+                        self.call(request, 'finalize')
+                recovered = self.call(request, 'recover')
+                self.assertEqual(recovered['status'], 'verified')
+                head = self.fixture.git('rev-parse', 'HEAD')
+                self.assertEqual(self.call(request, 'recover')['productCommitSha'], head)
+
+    def test_hook_rejection_and_release(self):
+        hook = self.root / '.git/hooks/pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        request = self.prepare()
+        head = self.fixture.git('rev-parse', 'HEAD')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'hook rejected'):
+            self.call(request, 'finalize')
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.call(request, 'release')['status'], 'released')
+
+    def test_head_lease_default_exact_and_path_scoped_intervening_commits(self):
+        config = self.root / '.agentwheel/config.json'
+        config.parent.mkdir()
+        config.write_text(json.dumps({'mutationPolicy': {'revisioning': {'provider': {'headLease': 'path-scoped'}}}}))
+        self.fixture.git('add', '.agentwheel/config.json')
+        self.fixture.git('commit', '-qm', 'Configure path-scoped lease')
+        request = self.fixture.request('preflight')
+        (self.root / 'other.txt').write_text('independent\n')
+        self.fixture.git('add', 'other.txt')
+        self.fixture.git('commit', '-qm', 'Independent operation')
+        (self.root / 'feature.txt').write_text('feature\n')
+        self.call(request, 'preflight')
+        result = self.call(request, 'finalize')
+        self.assertEqual(result['status'], 'verified')
+        # A transient edit followed by a revert is still an overlap.
+        request = self.fixture.request('preflight', operation_id='overlap', path='feature.txt',
+                                       before=self.fixture.sha256('feature\n'), after_content='updated\n')
+        (self.root / 'feature.txt').write_text('temporary\n')
+        self.fixture.git('add', 'feature.txt')
+        self.fixture.git('commit', '-qm', 'Overlapping edit')
+        (self.root / 'feature.txt').write_text('feature\n')
+        self.fixture.git('add', 'feature.txt')
+        self.fixture.git('commit', '-qm', 'Revert overlapping edit')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'overlaps'):
+            self.call(request, 'preflight')
+
+    def test_policy_cannot_be_widened_by_later_config_commit(self):
+        request = self.fixture.request('preflight')
+        config = self.root / '.agentwheel/config.json'
+        config.parent.mkdir()
+        config.write_text(json.dumps({'mutationPolicy': {'revisioning': {'provider': {'headLease': 'path-scoped'}}}}))
+        self.fixture.git('add', '.agentwheel/config.json')
+        self.fixture.git('commit', '-qm', 'Change lease policy')
+        (self.root / 'feature.txt').write_text('feature\n')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'HEAD changed'):
+            self.call(request, 'preflight')
+
+    def test_admission_rejects_secrets_exclusions_sizes_and_deletions(self):
+        for index, (path, content) in enumerate([
+            ('private.txt', '-----BEGIN PRIVATE KEY-----\nsecret\n'),
+            ('var/excluded.txt', 'excluded\n'),
+            ('.env', 'secret\n'),
+            ('oversize.txt', 'x' * 1048577),
+        ]):
+            with self.subTest(path=path):
+                target = self.root / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content)
+                request = self.fixture.request('preflight', operation_id=f'admission-{index}',
+                                               path=path, after_content=content)
+                with self.assertRaisesRegex(protocol.RevisionProviderError, 'admission'):
+                    self.call(request, 'preflight')
+                target.unlink()
+        excluded = self.root / 'var/tracked.txt'
+        excluded.parent.mkdir(exist_ok=True)
+        excluded.write_text('old\n')
+        self.fixture.git('add', '-f', 'var/tracked.txt')
+        self.fixture.git('commit', '-qm', 'Seed excluded tracked file')
+        request = self.fixture.request('preflight', path='var/tracked.txt',
+                                       before=self.fixture.sha256('old\n'), after_content=None)
+        excluded.unlink()
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'admission'):
+            self.call(request, 'preflight')
+
+    def test_empty_and_no_commit_operations_require_exact_head(self):
+        config = self.root / '.agentwheel/config.json'
+        config.parent.mkdir()
+        config.write_text(json.dumps({'mutationPolicy': {'revisioning': {'provider': {'headLease': 'path-scoped'}}}}))
+        self.fixture.git('add', '.agentwheel/config.json')
+        self.fixture.git('commit', '-qm', 'Configure path-scoped lease')
+        request = self.fixture.request('preflight')
+        (self.root / 'independent.txt').write_text('independent\n')
+        self.fixture.git('add', 'independent.txt')
+        self.fixture.git('commit', '-qm', 'Advance independent path')
+        for payload in ({**request, 'paths': []}, {**request, 'noCommit': True}):
+            with self.assertRaisesRegex(protocol.RevisionProviderError, 'HEAD changed'):
+                self.call(payload, 'preflight')
+
+    def test_enabled_guards_accept_authorized_journal_commit(self):
+        stable_cli = self.fixture.root / 'syncwheel'
+        stable_cli.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable)
+                              + ' ' + shlex.quote(str(CLI)) + ' "$@"\n')
+        stable_cli.chmod(0o755)
+        with mock.patch.dict(os.environ, {'PATH': str(self.fixture.root) + os.pathsep + os.environ['PATH']}):
+            installed = SYNCWHEEL.install_managed_push_hook(self.root, apply=True)
+            self.assertTrue(installed['ready'])
+            request = self.fixture.request('preflight')
+            self.fixture.protocol_request(self.fixture.check_request(request))
+            (self.root / 'feature.txt').write_text('feature\n')
+            self.fixture.protocol_request(request)
+            response, _ = self.fixture.protocol_request({**request, 'action': 'finalize'})
+            self.assertEqual(response['status'], 'verified')
+            self.assertEqual(response['productCommitSha'], self.fixture.git('rev-parse', 'HEAD'))
+
+    def test_staged_index_and_overlapping_advance_after_preflight_fail_closed(self):
+        request = self.prepare()
+        (self.root / 'foreign.txt').write_text('staged\n')
+        self.fixture.git('add', 'foreign.txt')
+        before = self.fixture.git('ls-files', '--stage', '--', 'foreign.txt')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'clean, conflict-free index'):
+            self.call(request, 'finalize')
+        self.assertEqual(self.fixture.git('ls-files', '--stage', '--', 'foreign.txt'), before)
+
+    def test_ignored_secret_and_oversized_paths_cannot_bypass_admission(self):
+        ignored = self.root / '.gitignore'
+        ignored.write_text(ignored.read_text() + 'ignored.txt\n')
+        self.fixture.git('add', '.gitignore')
+        self.fixture.git('commit', '-qm', 'Ignore local scratch file')
+        for content in ('-----BEGIN PRIVATE KEY-----\nsecret\n', 'x' * 1048577):
+            (self.root / 'ignored.txt').write_text(content)
+            request = self.fixture.request('preflight', path='ignored.txt', after_content=content)
+            with self.assertRaisesRegex(protocol.RevisionProviderError, 'admission'):
+                self.call(request, 'preflight')
+
+    def test_sigkill_during_journal_index_alignment_recovers_owned_lock(self):
+        child = r'''
+import importlib.util, json, os, signal, sys
+from pathlib import Path
+scripts = Path(sys.argv[1])
+sys.path.insert(0, str(scripts))
+import syncwheel_revision_provider as protocol
+spec = importlib.util.spec_from_file_location('journal_kill_test', scripts / 'syncwheel.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+class Kill(module.JournalRevisionBackend):
+    def checkpoint(self, phase):
+        if phase == sys.argv[2]:
+            os.kill(os.getpid(), signal.SIGKILL)
+protocol.handle_request(Kill(protocol), protocol.parse_request(json.load(sys.stdin)))
+'''
+        for index, phase in enumerate(('product_index_lock_owned', 'product_index_cas')):
+            with self.subTest(phase=phase):
+                path = f'kill-{index}.txt'
+                request = self.fixture.request('preflight', operation_id=f'kill-{index}', path=path)
+                (self.root / path).write_text('feature\n')
+                self.call(request, 'preflight')
+                killed = subprocess.run([sys.executable, '-c', child, str(SCRIPTS), phase],
+                                        input=json.dumps({**request, 'action': 'finalize'}),
+                                        text=True, capture_output=True)
+                self.assertEqual(killed.returncode, -signal.SIGKILL, killed.stderr)
+                recovered, _ = self.fixture.protocol_request({**request, 'action': 'recover'})
+                self.assertEqual(recovered['status'], 'verified')
+                self.assertEqual(self.fixture.git('diff', '--cached', '--name-only'), '')
+                self.assertFalse((self.root / '.git/index.lock').exists())

@@ -510,3 +510,39 @@ syncwheel coordination compose --apply --plan-file compose-plan.json
 
 The second command publishes and therefore requires separate review and
 approval. The provider never invokes any of these handoff commands itself.
+
+
+## Journal route
+
+For `repository_mode: "journal"`, the same protocol v1 command selects a local
+journal backend. `check` requires the configured journal branch, tracked valid
+manifest, ready or explicitly disabled guards, an exact HEAD lease, and a clean,
+conflict-free index. Unrelated dirty working files and remote publication lag do
+not block an operation. No stack, integration projection, or coordination check
+runs.
+
+`preflight` verifies declared before/after hashes and journal admission (include,
+exclude, sensitive paths, file size, and secret scanning). `finalize` creates a
+commit from a temporary index on the leased HEAD, runs the existing commit hooks,
+compares-and-swaps the journal branch, and realigns only the declared index
+entries. The durable phases are `prepared → product_committed → verified`.
+`recover` resumes the recorded candidate after an interruption, including after
+branch CAS and before index alignment. `release` may discard a prepared receipt
+only while its product commit has not advanced the branch.
+
+The successful response has `productCommitSha == resultingHead`, the entire
+draft/control tuple null, and literal `published: false`. The provider never
+publishes. Use `journal publish --committed-only` and its scheduled equivalent
+for publication without snapshotting unfinished working files.
+
+The committed starting `.agentwheel/config.json` may opt into
+`mutationPolicy.revisioning.provider.headLease: "path-scoped"`; the default is
+`"exact"`. A path-scoped lease permits a descendant HEAD only when every
+intervening commit is disjoint from all declared paths, the manifest, and the
+provider configuration. Each commit is checked, so a change later reverted still
+rejects the lease. Policy changes after `expectedHead` cannot widen it. Requests
+without declared paths and `noCommit` requests retain an exact HEAD lease because
+protocol v1 cannot represent a different resulting HEAD for those terminal
+responses. Once a candidate commit is prepared its parent is fixed; a later HEAD
+move requires a fresh operation. This adds no wire fields and requires a consumer
+that verifies the same path-scoped parent rule.

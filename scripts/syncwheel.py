@@ -17129,7 +17129,7 @@ def journal_read_admitted_file(path, max_file_bytes):
     return content, fingerprint, mode
 
 
-def journal_admission(repo_root, journal):
+def journal_admission(repo_root, journal, paths=None):
     admitted = []
     excluded = []
     rejected = []
@@ -17137,6 +17137,8 @@ def journal_admission(repo_root, journal):
     blobs = {}
     for entry in journal_status_entries(repo_root):
         path = entry['path']
+        if paths is not None and path not in paths:
+            continue
         if not journal_path_matches(path, journal['include']) or journal_path_matches(path, journal['exclude']):
             excluded.append(entry)
             continue
@@ -17200,15 +17202,23 @@ def journal_index_lock(repo_root):
         lock_path.unlink(missing_ok=True)
 
 
-def journal_snapshot(repo_root, manifest, apply=False):
+def journal_snapshot(repo_root, manifest, apply=False, paths=None):
     journal = manifest['journal']
     branch = journal['branch']
     if get_current_branch(repo_root) != branch:
         raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}')
-    if not journal_real_index_clean(repo_root):
+    if paths is not None:
+        for path in paths:
+            if not isinstance(path, str) or path.startswith('/') or '\\' in path or any(
+                part in {'', '.', '..'} for part in path.split('/')
+            ) or path.split('/')[0] == '.git':
+                raise SyncwheelError('snapshot --path requires an exact repo-relative file path')
+        if git(repo_root, 'ls-files', '-u').stdout.strip():
+            raise SyncwheelError('journal snapshot requires a conflict-free index')
+    elif not journal_real_index_clean(repo_root):
         raise SyncwheelError('journal snapshot requires a clean real index')
     parent = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
-    admitted, excluded, rejected, fingerprints, blobs = journal_admission(repo_root, journal)
+    admitted, excluded, rejected, fingerprints, blobs = journal_admission(repo_root, journal, paths=paths)
     result = {
         'mode': 'apply' if apply else 'plan',
         'branch': branch,
@@ -17227,7 +17237,7 @@ def journal_snapshot(repo_root, manifest, apply=False):
     with journal_lock(repo_root), journal_index_lock(repo_root) as (real_index_path, real_index_lock):
         if git(repo_root, 'rev-parse', 'HEAD').stdout.strip() != parent:
             raise SyncwheelError('journal HEAD changed during snapshot; retry')
-        if not journal_real_index_clean(repo_root):
+        if paths is None and not journal_real_index_clean(repo_root):
             raise SyncwheelError('journal real index changed during snapshot; retry')
         with tempfile.NamedTemporaryFile(prefix='syncwheel-journal-index-', delete=False) as handle:
             index_path = Path(handle.name)
@@ -17279,7 +17289,20 @@ def journal_snapshot(repo_root, manifest, apply=False):
             if update.returncode != 0:
                 raise SyncwheelError('journal HEAD changed before commit publication; retry')
             try:
-                git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(real_index_lock)})
+                if paths is None:
+                    git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(real_index_lock)})
+                else:
+                    for entry in admitted:
+                        relative = entry['path']
+                        value = blobs.get(relative)
+                        if value is None:
+                            git(repo_root, 'update-index', '--force-remove', '--', relative,
+                                env={'GIT_INDEX_FILE': str(real_index_lock)})
+                        else:
+                            object_id = git(repo_root, 'rev-parse', f'{commit}:{relative}').stdout.strip()
+                            git(repo_root, 'update-index', '--add', '--cacheinfo',
+                                f"{value['mode']},{object_id},{relative}",
+                                env={'GIT_INDEX_FILE': str(real_index_lock)})
                 os.replace(real_index_lock, real_index_path)
             except Exception as exc:
                 rollback = git(
@@ -17330,14 +17353,14 @@ def command_journal_status(args):
 
 def command_journal_snapshot(args):
     repo_root, manifest, _ = require_journal_manifest(args)
-    payload = journal_snapshot(repo_root, manifest, apply=args.apply)
+    payload = journal_snapshot(repo_root, manifest, apply=args.apply, paths=args.paths)
     print(json.dumps(payload, indent=2))
     return 0
 
 
 def command_journal_publish(args):
     repo_root, manifest, _ = require_journal_manifest(args)
-    payload = journal_publish(repo_root, manifest, apply=args.apply)
+    payload = journal_publish(repo_root, manifest, apply=args.apply, committed_only=args.committed_only is True)
     output = dict(payload)
     output['excluded_count'] = len(output.pop('excluded'))
     output['pull'] = dict(output['pull'])
@@ -17357,15 +17380,18 @@ def journal_unroll_snapshot(repo_root, branch, commit, parent):
         git(repo_root, 'read-tree', parent)
 
 
-def journal_publish(repo_root, manifest, apply=False):
+def journal_publish(repo_root, manifest, apply=False, committed_only=False):
     journal = manifest['journal']
     branch, remote = journal['branch'], journal['remote']
     # Another clone may have published since the last run; catching up first
     # keeps two writers from wedging each other on remote-ahead.
     pull = journal_pull(repo_root, manifest, apply=apply)
     expected_parent = pull['remote_tip']
+    empty_snapshot = {'mode': 'apply' if apply else 'plan', 'branch': branch,
+                      'parent': ref_tip(repo_root, 'HEAD'), 'admitted': [],
+                      'excluded': [], 'rejected': [], 'commit': None, 'changed': False}
     if not apply:
-        payload = journal_snapshot(repo_root, manifest, apply=False)
+        payload = empty_snapshot if committed_only else journal_snapshot(repo_root, manifest, apply=False)
         payload.update({'remote': remote, 'expected_remote_tip': expected_parent, 'pull': pull})
         return payload
     local_head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
@@ -17373,7 +17399,7 @@ def journal_publish(repo_root, manifest, apply=False):
         repo_root, 'merge-base', '--is-ancestor', expected_parent, local_head, check=False
     ).returncode != 0:
         raise SyncwheelError('journal local branch diverged from the expected remote parent; STOP')
-    snapshot = journal_snapshot(repo_root, manifest, apply=True)
+    snapshot = empty_snapshot if committed_only else journal_snapshot(repo_root, manifest, apply=True)
     tip = snapshot['commit'] or local_head
     if tip != expected_parent:
         refspec = f'{tip}:refs/heads/{branch}'
@@ -17710,17 +17736,18 @@ def journal_systemctl(*args, check=True):
     return run([executable, '--user', *args], check=check)
 
 
-def journal_unit_contents(repo_root, manifest):
+def journal_unit_contents(repo_root, manifest, committed_only=False):
     executable = journal_executable()
     repo = str(repo_root.resolve())
     interval = manifest['journal']['interval']
     def systemd_quote(value):
         return '"' + value.replace('%', '%%').replace('\\', '\\\\').replace('"', '\\"') + '"'
 
+    publish_option = ' --committed-only' if committed_only else ''
     service = '\n'.join([
         '[Unit]', 'Description=Syncwheel journal snapshot and publish', '',
         '[Service]', 'Type=oneshot',
-        f'ExecStart={systemd_quote(executable)} journal publish --repo {systemd_quote(repo)} --apply', '',
+        f'ExecStart={systemd_quote(executable)} journal publish --repo {systemd_quote(repo)}{publish_option} --apply', '',
     ])
     timer = '\n'.join([
         '[Unit]', 'Description=Run Syncwheel journal periodically', '',
@@ -17739,7 +17766,7 @@ def command_journal_schedule(args):
     require_linux_scheduler()
     repo_root, manifest, _ = require_journal_manifest(args)
     unit_id, service_path, timer_path = journal_systemd_paths(repo_root)
-    service, timer = journal_unit_contents(repo_root, manifest)
+    service, timer = journal_unit_contents(repo_root, manifest, committed_only=args.committed_only is True)
     # The previous managed timer had no initial trigger. Accept only that exact
     # template as an upgrade/removal candidate, never an arbitrary unit file.
     old_timer = timer.replace(f'OnActiveSec={manifest["journal"]["interval"]}\n', '').replace(
@@ -17747,6 +17774,14 @@ def command_journal_schedule(args):
         'OnUnitInactiveSec=' + manifest['journal']['interval'] + '\nPersistent=true\n',
     )
     managed_files = ((service_path, service), (timer_path, timer))
+    alternate_service, _ = journal_unit_contents(
+        repo_root, manifest, committed_only=not (args.committed_only is True)
+    )
+
+    def is_owned_variant(path, content):
+        return (path == timer_path and content == old_timer) or (
+            path == service_path and content == alternate_service
+        )
     payload = {
         'mode': 'apply' if args.apply else 'plan', 'unit_id': unit_id,
         'service_path': str(service_path), 'timer_path': str(timer_path),
@@ -17772,7 +17807,7 @@ def command_journal_schedule(args):
     elif args.schedule_command == 'install' and args.apply:
         upgrading_legacy = timer_path.exists() and timer_path.read_text() == old_timer
         conflicts = [str(path) for path, content in managed_files if path.exists()
-                     and path.read_text() != content and not (path == timer_path and path.read_text() == old_timer)]
+                     and path.read_text() != content and not is_owned_variant(path, path.read_text())]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing overwrite: ' + ', '.join(conflicts))
         payload['managed_ref_guard'] = install_managed_push_hook(repo_root, apply=True)
@@ -17785,7 +17820,7 @@ def command_journal_schedule(args):
             journal_systemctl('restart', f'{unit_id}.timer')
     elif args.schedule_command == 'remove' and args.apply:
         conflicts = [str(path) for path, content in managed_files if path.exists()
-                     and path.read_text() != content and not (path == timer_path and path.read_text() == old_timer)]
+                     and path.read_text() != content and not is_owned_variant(path, path.read_text())]
         if conflicts:
             raise SyncwheelError('journal scheduler unit collision; refusing removal: ' + ', '.join(conflicts))
         if not service_path.exists() and not timer_path.exists():
@@ -29313,6 +29348,201 @@ def command_repo_authority_set(args):
     return 0
 
 
+def restore_pending_mode_migration(root, path, pending_path):
+    pending = json.loads(pending_path.read_text())
+    original = Path(pending['archive']) / 'manifest.json'
+    original_data = json.loads(original.read_text())
+    dirty = {entry['path'] for entry in journal_status_entries(root)}
+    if dirty - {'.syncwheel/manifest.json', '.gitignore'}:
+        raise SyncwheelError('mode migration recovery refuses unrelated working changes: ' + ', '.join(sorted(dirty)))
+    observed, _ = load_manifest(root, path)
+    if manifest_digest(observed) not in {pending['beforeDigest'], pending['afterDigest']}:
+        raise SyncwheelError('mode migration recovery manifest lease lost')
+    if get_current_branch(root) not in {pending['branch'], pending['targetBranch']}:
+        raise SyncwheelError('mode migration recovery branch lease lost')
+    for branch, tip in pending['branchTips'].items():
+        if ref_tip(root, f'refs/heads/{branch}') != tip:
+            raise SyncwheelError('mode migration recovery HEAD lease lost')
+    guard = pending['guard']
+    observed_guard, guard_error = inspect_primary_guard(root)
+    if (guard_error and primary_guard_path(root).exists()) or observed_guard not in (guard, pending['targetGuard']):
+        raise SyncwheelError('mode migration recovery guard lease lost; pending recovery retained')
+    for item in pending['metadataFiles']:
+        metadata_path = Path(item['path'])
+        if metadata_path.is_symlink() or read_text_if_exists(metadata_path) not in (item['before'], item['after']):
+            raise SyncwheelError('mode migration recovery metadata lease lost: ' + str(metadata_path))
+    # Retarget first so post-checkout also recognizes the restored branch.
+    if guard is None:
+        primary_guard_path(root).unlink(missing_ok=True)
+    else:
+        atomic_write_private_json(primary_guard_path(root), guard)
+    with ref_move_authorization(root) as authorization:
+        git(root, 'switch', pending['branch'],
+            env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
+    # Restore through the canonical transaction writer, then retain the exact
+    # committed bytes from the initially clean checkout.
+    save_manifest(path, original_data)
+    with ref_move_authorization(root) as authorization:
+        git(root, '--literal-pathspecs', 'restore', '--source=' + pending['originalHead'],
+            '--worktree', '--', '.syncwheel/manifest.json',
+            env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
+    for item in pending['metadataFiles']:
+        metadata_path = Path(item['path'])
+        if item['existed']:
+            metadata_path.write_text(item['before'])
+        else:
+            metadata_path.unlink(missing_ok=True)
+    # Keep append-only migration audit evidence local even when restoring a
+    # pre-migration checkout that lacked the managed ignore block.
+    exclude = git_info_exclude_path(root)
+    if exclude and (root / '.syncwheel/ledger').exists():
+        text = read_text_if_exists(exclude)
+        if '.syncwheel/ledger/' not in text.splitlines():
+            exclude.parent.mkdir(parents=True, exist_ok=True)
+            exclude.write_text(text + ('\n' if text and not text.endswith('\n') else '')
+                               + '.syncwheel/ledger/\n')
+    atomic_write_private_json(Path(pending['archive']) / 'rollback.json', {
+        'restoredBranch': pending['branch'], 'restoredHead': pending['originalHead'],
+        'manifestDigest': pending['beforeDigest'],
+    })
+    pending_path.unlink()
+
+
+def command_repo_mode_set(args):
+    root = resolve_repo_root(args.repo)
+    if args.personal or (args.manifest and Path(args.manifest).resolve() != (root / '.syncwheel/manifest.json').resolve()):
+        raise SyncwheelError('mode migration requires the shared default manifest')
+    path = root / '.syncwheel/manifest.json'
+    pending_path = git_common_dir(root) / 'syncwheel' / 'mode-migration-pending.json'
+    if pending_path.exists():
+        if not args.apply:
+            print(json.dumps({'mode': 'plan', 'recovery_required': True,
+                              'remedy': 'repeat repo mode set journal with --apply to restore the interrupted migration'}))
+            return 0
+        restore_pending_mode_migration(root, path, pending_path)
+    manifest, path = require_manifest(root, args.repo, args.manifest, args.personal)
+    if args.personal or path.resolve() != (root / '.syncwheel/manifest.json').resolve():
+        raise SyncwheelError('mode migration requires the shared default manifest')
+    worktrees = get_worktrees(root)
+    if worktrees and Path(worktrees[0]['path']).resolve() != root.resolve():
+        raise SyncwheelError('mode migration requires the clean primary checkout')
+    if git(root, 'status', '--porcelain', '--untracked-files=all').stdout.strip():
+        raise SyncwheelError('mode migration requires a clean primary checkout')
+    if not args.reason.strip():
+        raise SyncwheelError('mode migration requires a non-empty --reason')
+    if manifest.get('repository_mode') == 'journal':
+        raise SyncwheelError('repository is already in journal mode')
+    if manifest.get('channels'):
+        raise SyncwheelError('close or archive deployment channels before mode migration')
+    branch = args.branch
+    if run(['git', 'check-ref-format', '--branch', branch], check=False).returncode:
+        raise SyncwheelError('invalid journal branch')
+    target = ref_tip(root, f'refs/heads/{branch}')
+    if target is None or ref_tree(root, target) != ref_tree(root, 'HEAD'):
+        raise SyncwheelError('journal target branch must exist with the exact current tree; converge first')
+    if not remote_is_configured(root, args.remote):
+        raise SyncwheelError('journal remote must be configured')
+    occupied = [item for item in worktrees if item.get('branch') == branch
+                and Path(item['path']).resolve() != root.resolve()]
+    if occupied:
+        raise SyncwheelError('journal target branch is checked out in another worktree')
+    old = json.loads(path.read_text())
+    updated = dict(old)
+    dropped = ['integration', 'stacks', 'coordination', 'channels', 'landing']
+    for field in dropped:
+        updated.pop(field, None)
+    updated.update(version=args.manifest_version, repository_mode='journal', journal={
+        'branch': branch, 'remote': args.remote, 'include': args.include or ['**'],
+        'exclude': args.exclude or ['var/**', '.syncwheel/ledger/**', '.syncwheel/*.local.json'],
+        'max_file_bytes': args.max_file_bytes, 'interval': args.interval,
+    })
+    # Validate the candidate through the canonical loader before touching state.
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as candidate:
+        json.dump(updated, candidate)
+        candidate.flush()
+        normalized, _ = load_manifest(root, candidate.name)
+    archive_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+    archive = git_common_dir(root) / 'syncwheel' / 'mode-migrations' / archive_id
+    refs = {f'refs/archive/syncwheel-mode/{archive_id}/head': ref_tip(root, 'HEAD')}
+    for stack in manifest.get('stacks', []):
+        for index, commit in enumerate(stack.get('commits') or []):
+            refs[f'refs/archive/syncwheel-mode/{archive_id}/stacks/{stack["id"]}/{index}'] = commit_full_sha(root, commit)
+        tip = ref_tip(root, stack['branch'])
+        if tip:
+            refs[f'refs/archive/syncwheel-mode/{archive_id}/branches/{stack["id"]}'] = tip
+    for ref, tip in refs.items():
+        existing = ref_tip(root, ref)
+        if existing and existing != tip:
+            raise SyncwheelError('migration archive ref collision: ' + ref)
+    metadata_files = []
+    worktree_root = syncwheel_worktree_root(manifest)
+    for metadata_path, marker, end, patterns in (
+        (root / '.gitignore', SYNCWHEEL_GITIGNORE_MARKER, SYNCWHEEL_GITIGNORE_END_MARKER,
+         syncwheel_gitignore_patterns(worktree_root)),
+        (git_info_exclude_path(root), SYNCWHEEL_LOCAL_EXCLUDE_MARKER, SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER, []),
+    ):
+        if metadata_path is None:
+            continue
+        if metadata_path.is_symlink():
+            raise SyncwheelError('mode migration refuses symlink metadata: ' + str(metadata_path))
+        before = read_text_if_exists(metadata_path)
+        after, _ = replace_managed_block(before, marker, end, patterns,
+                                         all_syncwheel_managed_patterns(worktree_root))
+        metadata_files.append({'path': str(metadata_path), 'before': before,
+                               'after': after, 'existed': metadata_path.exists()})
+    guard, guard_error = inspect_primary_guard(root)
+    if guard_error and primary_guard_path(root).exists():
+        raise SyncwheelError('repair the existing primary guard before mode migration')
+    payload = {'mode': 'apply' if args.apply else 'plan', 'manifest': updated,
+               'dropped_fields': [field for field in dropped if field in old],
+               'archive': str(archive), 'archive_refs': refs, 'reason': args.reason,
+               'managed_ref_guard': install_managed_push_hook(
+                   root, manifest=normalized, manifest_path=path, reason=args.reason)}
+    if args.apply:
+        if managed_hook_syncwheel_command(root) is None:
+            raise SyncwheelError('mode migration requires a stable resolvable syncwheel CLI before changing state')
+        archive.mkdir(parents=True, exist_ok=True)
+        original = path.read_bytes()
+        archived = archive / 'manifest.json'
+        if archived.exists() and archived.read_bytes() != original:
+            raise SyncwheelError('migration manifest archive collision')
+        archived.write_bytes(original)
+        for ref, tip in refs.items():
+            if not ref_tip(root, ref):
+                git(root, 'update-ref', ref, tip, '0' * 40)
+        original_branch = get_current_branch(root)
+        atomic_write_private_json(pending_path, {
+            'archive': str(archive), 'branch': original_branch, 'targetBranch': branch,
+            'originalHead': ref_tip(root, 'HEAD'), 'guard': guard,
+            'targetGuard': primary_guard_payload(normalized), 'metadataFiles': metadata_files,
+            'beforeDigest': manifest_digest(manifest), 'afterDigest': manifest_digest(normalized),
+            'branchTips': {original_branch: ref_tip(root, 'HEAD'), branch: target},
+        })
+        try:
+            payload['managed_ref_guard'] = install_managed_push_hook(
+                root, apply=True, manifest=normalized, manifest_path=path, reason=args.reason
+            )
+            with ref_move_authorization(root) as authorization:
+                git(root, 'switch', branch, env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
+            save_manifest(path, updated)
+            append_ledger_event(root, 'repository_mode_migrated', {
+                'from': 'delivery', 'to': 'journal', 'reason': args.reason,
+                'archive': str(archive), 'archive_refs': refs,
+            }, path)
+            pending_path.unlink()
+        except BaseException as exc:
+            try:
+                restore_pending_mode_migration(root, path, pending_path)
+            except Exception as recovery_error:
+                raise SyncwheelError(
+                    'mode migration interrupted; pending recovery retained. Retry repo mode set journal --apply: '
+                    + str(recovery_error)
+                ) from exc
+            raise
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def command_repo_tracking_status(args):
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
@@ -30531,6 +30761,13 @@ class SyncwheelRevisionBackend:
             }
         except SyncwheelError as exc:
             self._fail(f'active-active handoff gate failed: {exc}')
+
+    def for_request(self, request):
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        if manifest.get('repository_mode') == 'journal':
+            return JournalRevisionBackend(self.provider)
+        return self
 
     def _validate_repository(self, repo_root, request, *, require_clean):
         manifest, manifest_path = self._manifest(repo_root)
@@ -32696,6 +32933,228 @@ class SyncwheelRevisionBackend:
         return None
 
 
+class JournalRevisionBackend(SyncwheelRevisionBackend):
+    """Local exact-path revisioning; publication is a separate journal operation."""
+
+    def _head_policy(self, repo_root, request, head):
+        config_path = '.agentwheel/config.json'
+        # Read policy from the operation's trusted starting revision. A dirty
+        # config or a later policy change cannot silently widen the lease.
+        raw = git(repo_root, 'show', f'{request.expected_head}:{config_path}', check=False)
+        policy = 'exact'
+        if raw.returncode == 0:
+            try:
+                config = json.loads(raw.stdout)
+                policy = config.get('mutationPolicy', {}).get('revisioning', {}).get('provider', {}).get('headLease', 'exact')
+            except (ValueError, AttributeError):
+                self._fail('invalid revision-provider HEAD lease configuration')
+        if policy not in {'exact', 'path-scoped'}:
+            self._fail('invalid revision-provider headLease')
+        if head == request.expected_head:
+            return policy
+        if policy != 'path-scoped' or not request.paths or request.no_commit or git(
+            repo_root, 'merge-base', '--is-ancestor', request.expected_head, head,
+            check=False,
+        ).returncode != 0:
+            self._fail('journal HEAD changed outside the allowed HEAD lease')
+        protected = {item.path for item in request.paths} | {
+            config_path, self.MANIFEST_PRODUCT_PATH,
+        }
+        for commit in rev_list(repo_root, f'{request.expected_head}..{head}'):
+            changed = set(git(repo_root, 'diff-tree', '--root', '-m',
+                              '--no-commit-id', '--name-only', '-r', '-z', commit).stdout.split('\0'))
+            if changed & protected:
+                self._fail('journal HEAD lease overlaps operation or provider configuration paths')
+        return policy
+
+    def _observe_journal(self, request, *, before=False):
+        root = self._repo_root(request)
+        manifest, path = self._manifest(root)
+        if manifest.get('repository_mode') != 'journal':
+            self._fail('journal repository mode changed')
+        if manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED:
+            self._fail('revision provider requires git-tracked metadata')
+        if git(root, 'ls-files', '--error-unmatch', '--', self.MANIFEST_PRODUCT_PATH,
+               check=False).returncode:
+            self._fail('revision provider requires a tracked manifest')
+        branch = manifest['journal']['branch']
+        if get_current_branch(root) != branch:
+            self._fail('revision provider requires the journal branch checkout')
+        hooks = managed_push_guard_policy(root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail('managed repository guards are not ready')
+        if self._index_conflicts(root) or not self._index_is_clean(root):
+            self._fail('journal provider requires a clean, conflict-free index')
+        head = ref_tip(root, 'HEAD')
+        self._head_policy(root, request, head)
+        digest = manifest_digest(manifest)
+        if request.expected_manifest_digest and digest != request.expected_manifest_digest:
+            self._fail('manifest digest changed')
+        if self.MANIFEST_PRODUCT_PATH in self._dirty_paths(root, request):
+            self._fail('journal manifest has uncommitted changes')
+        if before:
+            self._validate_hashes(root, request, 'before')
+        else:
+            self._validate_before_hashes_at_head(root, request)
+            self._validate_hashes(root, request, 'after')
+        index = self._index_observation(root)
+        return {'baselineIndexSha256': index.sha256, 'baselineIndexSemantic': index.semantic,
+                'indexAlignments': {}, 'repositoryMode': 'journal', 'manifestDigest': digest,
+                'observedManifestDigest': digest, 'integrationBranch': branch,
+                'operationParentHead': head, 'resultingHead': head,
+                'unmappedIntegrationCommits': []}
+
+    def check(self, request):
+        return self._observe_journal(request, before=True)
+
+    def _admit_paths(self, root, manifest, request):
+        paths = {item.path for item in request.paths}
+        journal = manifest['journal']
+        for path in paths:
+            if (not journal_path_matches(path, journal['include'])
+                    or journal_path_matches(path, journal['exclude'])
+                    or journal_path_sensitive(path)):
+                self._fail('journal admission refuses operation path: ' + path)
+        for path in paths:
+            # A declared file is an input even when Git ignores it or hides it
+            # from status. Read it through the provider's no-follow path reader.
+            value = self._read_product_path(root, path)
+            if value is None:
+                continue
+            if git(root, 'check-ignore', '-q', '--', path, check=False).returncode == 0:
+                self._fail('journal admission refuses ignored operation path: ' + path)
+            if len(value['bytes']) > journal['max_file_bytes']:
+                self._fail('journal admission rejected oversized content: ' + path)
+            secret = journal_secret_reason(value['bytes'])
+            if secret:
+                self._fail('journal admission rejected high-confidence secret: ' + path)
+        self._validate_hashes(root, request, 'after')
+
+    def preflight(self, request):
+        observation = self._observe_journal(request)
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        self._admit_paths(root, manifest, request)
+        return observation
+
+    def verify_recovery_gate(self, request, journal):
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        if manifest.get('repository_mode') != 'journal' or manifest_digest(manifest) != journal['observedManifestDigest']:
+            self._fail('journal manifest changed after preflight')
+        if get_current_branch(root) != journal['integrationBranch']:
+            self._fail('journal branch changed after preflight')
+        current = ref_tip(root, 'HEAD')
+        allowed = {journal['operationParentHead'], journal.get('candidateProductCommitSha')}
+        if current not in allowed:
+            # Before object preparation a disjoint writer may advance HEAD.
+            if journal['phase'] != 'prepared' or journal.get('candidateProductCommitSha'):
+                self._fail('journal HEAD changed after commit preparation')
+            self._head_policy(root, request, current)
+            if not self._index_is_clean(root):
+                self._fail('journal HEAD advancement requires a clean index')
+            journal['operationParentHead'] = current
+            index = self._index_observation(root)
+            journal.update(baselineIndexSha256=index.sha256, baselineIndexSemantic=index.semantic)
+            self.save_journal(request, journal)
+        hooks = managed_push_guard_policy(root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail('managed repository guards are not ready')
+        self._assert_no_ref_transaction_locks(root, {
+            f"refs/heads/{journal['integrationBranch']}": None,
+        })
+
+    def verify_after_paths(self, request):
+        self._observe_journal(request)
+
+    def prepare_product_commit(self, request, message):
+        root = self._repo_root(request)
+        journal = self.load_journal(request)
+        manifest, _ = self._manifest(root)
+        self._admit_paths(root, manifest, request)
+        objects = self._capture_path_objects(root, request)
+        prepared = self._prepare_exact_commit(root, journal['operationParentHead'], objects, message)
+        if prepared is None:
+            return None
+        return {'candidateProductCommitSha': prepared['commit'],
+                'candidateProductTreeSha': prepared['tree'], 'productPathObjects': objects}
+
+    def validate_prepared_commit(self, request, journal, kind):
+        root = self._repo_root(request)
+        self.verify_recovery_gate(request, journal)
+        self._verify_candidate_object(root, journal['candidateProductCommitSha'],
+                                      journal['candidateProductTreeSha'],
+                                      journal['operationParentHead'], journal['productPathObjects'])
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        before = self._hook_repository_snapshot(root, journal['productPathObjects'])
+        self._run_commit_validation_hooks(root, journal['candidateProductCommitSha'])
+        after = self._hook_repository_snapshot(root, journal['productPathObjects'])
+        before_index = before.pop('index')
+        after_index = after.pop('index')
+        if before != after or before_index.semantic != after_index.semantic:
+            self._fail('commit hook changed repository state')
+
+    def publish_prepared_commit(self, request, commit, expected_parent):
+        root = self._repo_root(request)
+        journal = self.load_journal(request)
+        self.verify_recovery_gate(request, journal)
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        current = ref_tip(root, 'HEAD')
+        if current == commit:
+            return commit
+        if current != expected_parent or not self._index_is_clean(root):
+            self._fail('journal publication HEAD or index lease lost')
+        self._assert_index_lease(root, request, journal, 'baseline', 'journal publication')
+        ref = f"refs/heads/{journal['integrationBranch']}"
+        self._cas_ref_with_leases(root, ref, commit,
+                                 {ref: self._direct_ref_observation(ref, expected_parent)})
+        self.checkpoint('integration_product_cas')
+        return commit
+
+    def _deterministic_index(self, repo_root, commit, *, allowed_worktree_paths=()):
+        request = self._journal_alignment_request
+        journal = self.load_journal(request)
+        observed = self._index_observation(repo_root)
+        # Preserve the real index's unrelated entries and extensions; only
+        # operation entries are replaced. The inherited writer supplies durable
+        # backing files, semantic leases, CAS, and proven owned-lock recovery.
+        with self._private_index_copy(self._index_path(repo_root), observed.payload) as env:
+            for path, entry in sorted(journal['productPathObjects'].items()):
+                if entry['blob'] is None:
+                    git(repo_root, 'update-index', '--force-remove', '--', path, env=env)
+                else:
+                    git(repo_root, 'update-index', '--add', '--cacheinfo',
+                        f"{entry['mode']},{entry['blob']},{path}", env=env)
+            payload = Path(env['GIT_INDEX_FILE']).read_bytes()
+            if git(repo_root, 'write-tree', env=env).stdout.strip() != ref_tree(repo_root, commit):
+                self._fail('journal replacement index does not match its exact-path commit')
+            return payload, hashlib.sha256(payload).hexdigest()
+
+    def align_index(self, request, commit):
+        self._journal_alignment_request = request
+        try:
+            result = super().align_index(request, commit)
+        finally:
+            del self._journal_alignment_request
+        self.checkpoint('integration_product_committed')
+        return result
+
+    def verify_journal_final(self, request, journal):
+        self.verify_recovery_gate(request, journal)
+        root = self._repo_root(request)
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        if not self._index_is_clean(root):
+            self._fail('journal final index is not aligned')
+
+    def verify_release(self, request, journal):
+        self.verify_recovery_gate(request, journal)
+        if journal.get('candidateProductCommitSha') and ref_tip(
+            self._repo_root(request), 'HEAD'
+        ) == journal['candidateProductCommitSha']:
+            self._fail('cannot release a published product commit; recover it instead')
+        self._observe_journal(request)
+
+
 def command_revision_provider(args):
     try:
         import syncwheel_revision_provider as provider_module
@@ -32858,6 +33317,21 @@ def build_parser():
     repo_ls_p = repo_sub.add_parser('ls', help='list repo aliases')
     repo_ls_p.add_argument('-j', '--json', action='store_true')
     repo_ls_p.set_defaults(func=command_repo_ls)
+
+    repo_mode_p = repo_sub.add_parser('mode', help='migrate the repository delivery model')
+    repo_mode_sub = repo_mode_p.add_subparsers(dest='mode_command', required=True)
+    repo_mode_set_p = repo_mode_sub.add_parser('set', parents=[common])
+    repo_mode_set_p.add_argument('repository_mode', choices=['journal'])
+    repo_mode_set_p.add_argument('--branch', default='main')
+    repo_mode_set_p.add_argument('--remote', default='origin')
+    repo_mode_set_p.add_argument('--include', action='append')
+    repo_mode_set_p.add_argument('--exclude', action='append')
+    repo_mode_set_p.add_argument('--interval', default='30m')
+    repo_mode_set_p.add_argument('--max-file-bytes', type=int, default=10485760)
+    repo_mode_set_p.add_argument('--manifest-version', type=int, choices=[1, 2], default=1)
+    repo_mode_set_p.add_argument('--reason', required=True)
+    repo_mode_set_p.add_argument('-a', '--apply', action='store_true')
+    repo_mode_set_p.set_defaults(func=command_repo_mode_set)
 
     repo_tracking_p = repo_sub.add_parser('tracking', help='inspect or set repo-local syncwheel tracking policy')
     repo_tracking_sub = repo_tracking_p.add_subparsers(dest='tracking_command', required=True)
@@ -33429,9 +33903,11 @@ def build_parser():
     journal_status_p.add_argument('-j', '--json', action='store_true')
     journal_status_p.set_defaults(func=command_journal_status)
     journal_snapshot_p = journal_sub.add_parser('snapshot', parents=[common])
+    journal_snapshot_p.add_argument('--path', dest='paths', action='append', help='snapshot only this exact path; repeatable')
     journal_snapshot_p.add_argument('-a', '--apply', action='store_true')
     journal_snapshot_p.set_defaults(func=command_journal_snapshot)
     journal_publish_p = journal_sub.add_parser('publish', parents=[common])
+    journal_publish_p.add_argument('--committed-only', action='store_true', help='publish existing commits without snapshotting working files')
     journal_publish_p.add_argument('-a', '--apply', action='store_true')
     journal_publish_p.set_defaults(func=command_journal_publish)
     journal_pull_p = journal_sub.add_parser(
@@ -33447,6 +33923,7 @@ def build_parser():
     journal_pull_p.set_defaults(func=command_journal_pull)
     journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
     journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))
+    journal_schedule_p.add_argument('--committed-only', action='store_true', help='schedule publication without working-tree snapshots')
     journal_schedule_p.add_argument('-a', '--apply', action='store_true')
     journal_schedule_p.set_defaults(func=command_journal_schedule)
 
@@ -34189,6 +34666,7 @@ def entrypoint_behavior_table():
         command_journal_publish,
         command_journal_pull,
     ), mutates='apply')
+    register((command_repo_mode_set,), mutates='apply', manifest_mutates='apply')
     # digest-heal is the one repair class that appends a local ledger event
     # alongside the remote state CAS.
     register((command_coordination_repair,), mutates='apply', manifest_mutates='apply')
