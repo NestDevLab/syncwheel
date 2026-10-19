@@ -9578,6 +9578,65 @@ sys.exit(module.main())
                                                               manifest['stacks'][0]['branch']))
         module.materialize_integration_projection(repo, manifest)
 
+    def test_merge_stack_legacy_unbound_metadata_real_cli_rebuild(self):
+        fixture = self.a14_published_tip_reuse_fixture('legacy-cli', integration_strategy='merge-stacks')
+        self.a14_checkout_published_integration(fixture)
+        repo, module = fixture['follower'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        merge = module.ref_tip(repo, manifest['integration']['branch'])
+        self.assertGreater(len(self.git(repo, 'show', '-s', '--format=%P', merge).stdout.split()), 1)
+        manifest['stacks'][0]['integration_commits'] = [fixture['source'], merge]
+        with module.manifest_write_transaction(repo, path, 'legacy-cli-fixture'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'legacy_cli_fixture')
+        upstream = self.clone(fixture['origin'], 'legacy-cli-upstream')
+        (upstream / 'upstream-extra.txt').write_text('new upstream contribution\n')
+        self.git(upstream, 'add', 'upstream-extra.txt')
+        self.git(upstream, 'commit', '-qm', 'advance upstream without conflict')
+        self.git(upstream, 'push', 'origin', 'main')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'ephemeral',
+                     '--reason', 'rebuild legacy merge metadata')
+        self.assertEqual((repo / 'upstream-extra.txt').read_text(), 'new upstream contribution\n')
+        self.assertTrue((repo / 'legacy-cli-s1.txt').exists())
+        self.assertTrue(module.branch_contains(repo, manifest['integration']['branch'], merge))
+
+    def test_merge_stack_desk_capture_retry_after_saved_binding_crash(self):
+        for after_reset in (False, True):
+            with self.subTest(after_reset=after_reset):
+                fixture = self.merge_stack_conflict_desk_fixture('capture-crash-' + str(after_reset))
+                repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+                self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                             '--reason', 'prepare capture crash', expected=2)
+                (desk / fixture['filename']).write_text('reviewed crash recovery\n')
+                self.git(desk, 'add', fixture['filename'])
+                manifest, path = module.load_manifest(repo)
+                original_git = module.git
+                def interrupted_git(root, *args, **kwargs):
+                    if Path(root) == desk and args[:2] == ('reset', '--hard'):
+                        if after_reset:
+                            original_git(root, *args, **kwargs)
+                        raise RuntimeError('simulated interruption after binding save')
+                    return original_git(root, *args, **kwargs)
+                with self.assertRaisesRegex(RuntimeError, 'simulated interruption'):
+                    with module.manifest_write_transaction(repo, path, 'capture-crash-fixture'):
+                        with mock.patch.object(module, 'git', side_effect=interrupted_git):
+                            module.capture_integration_desk(repo, manifest, path, manifest['stacks'][0],
+                                SimpleNamespace(specs=[], empty=False, worktree=str(desk)))
+                saved, _ = module.load_manifest(repo)
+                commits = saved['stacks'][0]['integration_commits'][:]
+                (desk / fixture['filename']).write_text('unreviewed later edit\n')
+                self.git(desk, 'add', fixture['filename'])
+                rejected = self.run_cli(repo, 'stack', 'resolve-integration', 's1',
+                                        '--worktree', str(desk), expected=2)
+                self.assertIn('changed desk content', rejected.stderr)
+                (desk / fixture['filename']).write_text('reviewed crash recovery\n')
+                self.git(desk, 'add', fixture['filename'])
+                self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+                recovered, _ = module.load_manifest(repo)
+                self.assertEqual(recovered['stacks'][0]['integration_commits'], commits)
+                self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
+                             '--reason', 'finish recovered capture')
+                self.assertEqual((repo / fixture['filename']).read_text(), 'reviewed crash recovery\n')
+
     def test_merge_stack_desk_capture_preserves_pending_tail_and_resolver_author(self):
         fixture = self.merge_stack_conflict_desk_fixture('desk-tail')
         repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']

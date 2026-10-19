@@ -537,3 +537,9 @@ resolution. Unbound legacy `integration_commits` keep their previous merge-stack
 semantics and do not add `integration.resolutions` to shared snapshots. Desk capture
 replaces only the contribution through the conflicting step, retaining pending steps.
 The resolution commit uses the resolving operator's configured Git identity.
+
+Roll out schema 4 support to every peer, including readers, before publishing the first
+bound resolution. Verify all peers have upgraded, then enable capture and publish
+the resolution. Older peers deliberately refuse schema 4 and cannot participate
+until upgraded. A saved desk capture can be retried after an interruption without
+creating another resolution commit; changed inputs or desk content still refuse.
