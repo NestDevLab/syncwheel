@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/stack-archive-proof"
   ],
-  "claimed_at": "2026-10-19T14:58:36+00:00",
+  "claimed_at": "2026-10-19T14:59:25+00:00",
   "coordination_id": "default",
-  "operation_token": "ddb564be-294a-4d5d-8af2-d2372877cd90",
-  "publication_scope": "promote:stack-archive-proof",
+  "operation_token": "c8162041-b354-4f83-8405-f8400d67b090",
+  "publication_scope": "stack:stack-archive-proof",
   "source_ref": "refs/heads/pr/stack-archive-proof",
   "syncwheel_version": "0.46.0"
 }
