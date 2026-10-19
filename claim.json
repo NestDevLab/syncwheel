@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/desk-merge-conflict-fix"
+  ],
+  "claimed_at": "2026-10-19T10:14:05+00:00",
+  "coordination_id": "default",
+  "operation_token": "28490aaf-dded-4505-80db-e34f0ce49277",
+  "publication_scope": "promote:desk-merge-conflict-fix",
+  "source_ref": "refs/heads/pr/desk-merge-conflict-fix",
+  "syncwheel_version": "0.45.7"
+}
