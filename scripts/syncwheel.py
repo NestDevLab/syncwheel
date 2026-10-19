@@ -16520,6 +16520,9 @@ def coordination_gc_plan(
         if stack_scope is not None and stack_id not in stack_scope:
             skipped.append(f'{label}: outside the selected stack scope')
             continue
+        if tombstone.get('reason') == 'archived':
+            skipped.append(f'{label}: archived source is retained; explicit recovery review required')
+            continue
         if ref in active_refs:
             skipped.append(f'{label}: tombstoned ref is active in the current manifest')
             continue
@@ -24396,6 +24399,7 @@ def stack_closed_payload(intent, coordination_state=None, recovered=False):
         'operation_token': intent['operation_token'],
         'coordination_state': coordination_state,
         'delivery_tip': intent.get('delivery_tip'),
+        **({'archive_proof': intent['archive_proof']} if intent.get('archive_proof') else {}),
         'recovered': recovered,
     }
 
@@ -24422,6 +24426,11 @@ def manifest_scope_options(args):
 
 
 def stack_close_command(args):
+    proof = getattr(args, '_archive_proof', None)
+    if proof:
+        return quoted(['syncwheel', 'stack', 'archive', args.stack, '--reason', proof['reason'],
+                       '--resume-intent', proof['resumeIntent'], '--plan-digest', proof['planDigest'],
+                       '--apply', *manifest_scope_options(args)])
     command = ['syncwheel', 'stack', 'close', args.stack]
     if args.reason:
         command.extend(['--reason', args.reason])
@@ -24597,6 +24606,188 @@ def recover_pending_stack_close(repo_root, manifest, manifest_path, pending):
     return True
 
 
+def stack_archive_writer_guard(repo_root, manifest, stack):
+    """An authoring lane or checked-out source must be released before archival."""
+    registry, _ = load_governed_worktree_registry(repo_root)
+    if any(lane.get('state') != 'reaped' and (
+        lane.get('target') == stack['id'] or lane.get('branch') == stack['branch']
+    ) for lane in registry['lanes']):
+        raise SyncwheelError('stack archive refuses an active writer lane; capture and release it first')
+    worktree = find_worktree_for_branch(repo_root, stack['branch'])
+    if worktree:
+        raise SyncwheelError('stack archive refuses a checked-out source branch; release its writer first')
+    _, coordination = coordination_profile(repo_root)
+    if stack['id'] in (coordination.get('locks') or {}) or local_lease_is_active(coordination):
+        raise SyncwheelError('stack archive refuses an active worktree lock or coordination lease')
+
+
+def build_stack_archive_plan(repo_root, manifest, stack_id, reason, resume_intent):
+    stack = require_stack(manifest, stack_id)
+    stack_archive_writer_guard(repo_root, manifest, stack)
+    if not reason or not reason.strip() or not resume_intent or not resume_intent.strip():
+        raise SyncwheelError('stack archive requires a nonempty --reason and --resume-intent')
+    if channel_ids_referencing_stack(manifest, stack_id) or any(
+        stack_id in item.get('depends_on', []) for item in manifest['stacks']
+    ):
+        raise SyncwheelError('stack archive refuses a stack used by an active channel or dependent stack')
+    source_ref = f"refs/heads/{stack['branch']}"
+    source_tip = ref_tip(repo_root, source_ref)
+    if not source_tip:
+        raise SyncwheelError('stack archive requires the source branch; recover it before planning')
+    # Full object IDs, including resolved/only-in-integration commits, are the
+    # proof endpoints. They need not be ancestors of the delivery branch.
+    commits = list(dict.fromkeys(commit_full_sha(repo_root, commit) for commit in [
+        source_tip, *stack.get('commits', []), *stack_integration_commits(stack),
+    ]))
+    remote_refs = {}
+    state_tip = None
+    published_generation = None
+    config = coordination_config(manifest)
+    if coordination_is_active(manifest):
+        state_ref = coordination_state_ref(config)
+        refs = list(dict.fromkeys([
+            *managed_ref_names(manifest), coordination_claim_ref(source_ref), state_ref,
+        ]))
+        remote_refs = remote_ref_tips(repo_root, config['remote'], refs)
+        state_tip = remote_refs[state_ref]
+        if not state_tip or not remote_refs.get(f"refs/heads/{manifest['integration']['branch']}"):
+            raise SyncwheelError('stack archive requires initialized published coordination; run handoff first')
+        # A preview never fetches. If a peer object is missing, handoff/fetch is
+        # an explicit prerequisite rather than a hidden write in a plan.
+        state = coordination_state_from_commit(repo_root, state_tip, config['id'], config.get('claims', 'advisory'))
+        published_stack = stack_snapshot_map(state['manifest']).get(stack_id)
+        local_stack = stack_snapshot_map(coordination_manifest_snapshot(manifest, repo_root)).get(stack_id)
+        if published_stack is not None and published_stack != local_stack:
+            raise SyncwheelError('stack archive generation differs from published state; run handoff first')
+        published_resolution = coordination_integration_resolutions(state['manifest']).get(stack_id, {})
+        published_generation = {'stack': published_stack, 'resolution': published_resolution}
+        for commit in [*published_resolution.get('integration_commits', []),
+                       *published_resolution.get('integration_only_commits', [])]:
+            sha = commit_full_sha(repo_root, commit)
+            if sha not in commits:
+                commits.append(sha)
+        claim_tip = remote_refs.get(coordination_claim_ref(source_ref))
+        if claim_tip:
+            claim = coordination_claim_from_commit(repo_root, claim_tip)
+            if claim.get('coordination_id') != config['id'] or claim.get('source_ref') != source_ref or claim.get('closed'):
+                raise SyncwheelError('stack archive source claim is foreign or closed')
+        remote_source = remote_refs.get(source_ref)
+        if state.get('managed_refs', {}).get(source_ref) != remote_source or (
+            claim_tip and state.get('claims', {}).get(source_ref) != claim_tip
+        ):
+            raise SyncwheelError('stack archive source or claim differs from coordination state; run handoff first')
+        if remote_source:
+            commits = list(dict.fromkeys([*commits, commit_full_sha(repo_root, remote_source)]))
+    plan = {
+        'schemaVersion': 1, 'kind': 'stackArchivePlan', 'stack': stack_id,
+        'stackGeneration': copy.deepcopy(stack), 'manifestDigest': manifest_digest(manifest),
+        'sourceRef': source_ref, 'sourceTip': source_tip, 'commits': commits,
+        'declaredEndpoints': {spec: commit_full_sha(repo_root, spec) for spec in [
+            *stack.get('commits', []), *stack_integration_commits(stack),
+        ]},
+        'reason': reason, 'resumeIntent': resume_intent, 'retentionDays': 30,
+        'coordinationStateTip': state_tip, 'remoteRefs': remote_refs,
+        'publishedGeneration': published_generation,
+        'remote': config['remote'] if coordination_is_active(manifest) else None,
+    }
+    digest = canonical_json_digest(plan)
+    # Timestamp identifies the retained source generation; no wall-clock input
+    # means repeated read-only previews have the same digest and endpoints.
+    stamp = git(repo_root, 'show', '-s', '--format=%ct', source_tip).stdout.strip()
+    prefix = f"refs/archive/{stamp}/{safe_ref_segment(stack_id)}/{digest}"
+    plan['archiveRefs'] = {f'{prefix}/source-tip': source_tip}
+    declared_sources = {commit_full_sha(repo_root, item) for item in stack.get('commits', [])}
+    for sha in commits:
+        if sha != source_tip:
+            label = 'declared-commit' if sha in declared_sources else 'integration-resolved'
+            plan['archiveRefs'][f'{prefix}/{label}/{sha}'] = sha
+    plan['planDigest'] = canonical_json_digest(plan)
+    return plan
+
+
+def verify_stack_archive_proof(repo_root, proof, stack=None):
+    if stack is not None:
+        if stack != proof['stackGeneration'] or ref_tip(repo_root, proof['sourceRef']) != proof['sourceTip']:
+            raise SyncwheelError('stack archive source generation changed; generate a new plan')
+    for spec, sha in proof['declaredEndpoints'].items():
+        if commit_full_sha(repo_root, spec) != sha:
+            raise SyncwheelError('stack archive declared endpoint changed; generate a new plan')
+    for ref, sha in proof['archiveRefs'].items():
+        if ref_tip(repo_root, ref) != sha:
+            raise SyncwheelError(f'stack archive retention proof is missing or changed: {ref}')
+    # Each endpoint has a direct ref, a stronger reachability proof than an
+    # ancestry walk. Keep this linear even for large historical stacks.
+    retained = set(proof['archiveRefs'].values())
+    for sha in proof['commits']:
+        if sha not in retained:
+            raise SyncwheelError(f'stack archive has no retained reachability proof for {sha}')
+
+
+def command_stack_archive(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if args.apply and not args.plan_digest:
+        raise SyncwheelError('--plan-digest is required with --apply')
+    prepared = next((event['payload'] for event in reversed(load_ledger_events(repo_root, manifest_path))
+                     if event.get('type') == 'stack_archive_prepared'
+                     and event.get('payload', {}).get('planDigest') == args.plan_digest), None) if args.apply else None
+    if prepared:
+        if prepared['stack'] != args.stack or prepared['reason'] != args.reason or prepared['resumeIntent'] != args.resume_intent:
+            raise SyncwheelError('stack archive retry does not match the prepared request')
+        plan = prepared
+        verify_stack_archive_proof(repo_root, plan)
+        terminal = next((event['payload'] for event in reversed(load_ledger_events(repo_root, manifest_path))
+                         if event.get('type') == 'stack_closed'
+                         and event.get('payload', {}).get('archive_proof', {}).get('planDigest') == args.plan_digest), None)
+        if terminal:
+            print(json.dumps(terminal, indent=2))
+            return 0
+        stack = stack_map(manifest).get(args.stack)
+        if stack is not None:
+            stack_archive_writer_guard(repo_root, manifest, stack)
+        verify_stack_archive_proof(repo_root, plan, stack)
+    else:
+        plan = build_stack_archive_plan(repo_root, manifest, args.stack, args.reason, args.resume_intent)
+        if not args.apply:
+            print(json.dumps(plan, indent=2))
+            return 0
+        if args.plan_digest != plan['planDigest']:
+            raise SyncwheelError('stack archive plan is stale; generate a new preview')
+        # One atomic local ref transaction: a partial failure leaves the source
+        # and declaration untouched, and never overwrites a different archive.
+        commands = ['start', f"verify {plan['sourceRef']} {plan['sourceTip']}"]
+        for ref, sha in plan['archiveRefs'].items():
+            existing = ref_tip(repo_root, ref)
+            commands.append(f'verify {ref} {sha}' if existing == sha else f'create {ref} {sha}')
+        commands.extend(['prepare', 'commit'])
+        run(['git', 'update-ref', '--stdin'], cwd=repo_root, input_text='\n'.join(commands) + '\n')
+        verify_stack_archive_proof(repo_root, plan, stack_map(manifest)[args.stack])
+        plan['retainedAt'] = iso_utc_now()
+        append_ledger_event(repo_root, 'stack_archive_prepared', plan, manifest_path)
+    pending = pending_stack_close_operation(repo_root, manifest_path, args.stack)
+    if pending and pending.get('archive_proof', {}).get('planDigest') != plan['planDigest']:
+        previous = pending.get('archive_proof')
+        if not previous or any(previous[key] != plan[key] for key in (
+            'stackGeneration', 'sourceTip', 'reason', 'resumeIntent',
+        )):
+            raise SyncwheelError('stack archive refuses to replace another pending close request')
+        if coordination_is_active(manifest):
+            config = coordination_config(manifest)
+            observed = read_remote_coordination_state(repo_root, config, fetch=True,
+                                                      local_manifest_version=manifest['version'])
+            if published_close_reached_remote(repo_root, config, observed, pending):
+                raise SyncwheelError('the earlier archive close landed; retry its original plan digest first')
+            abandon_unlanded_stack_close(repo_root, config, manifest_path, pending, observed)
+        else:
+            supersede_unpublished_stack_close(repo_root, manifest_path, pending)
+    close_args = copy.copy(args)
+    close_args.reason = 'archived'
+    close_args.force = False
+    close_args.delete_branch = False
+    close_args._archive_proof = plan
+    return command_stack_close(close_args)
+
+
 def command_stack_close(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -24657,6 +24848,11 @@ def command_stack_close(args):
         or (pending_close.get('reason') if pending_close else recovered_reason)
         or 'closed'
     )
+    archive_proof = getattr(args, '_archive_proof', None)
+    if reason == 'archived' and not archive_proof:
+        raise SyncwheelError('use stack archive with a reviewed plan; archived is not a delivery close reason')
+    if archive_proof:
+        verify_stack_archive_proof(repo_root, archive_proof, stack)
     landed_close = None
     published_observation = None
     if pending_close and coordination_is_active(manifest) and not pending_close.get('remote_first'):
@@ -24793,7 +24989,7 @@ def command_stack_close(args):
     # The stack's pinned base is historical; delivery ancestry belongs to the
     # current target ref, observed and fetched for this close attempt.
     needs_delivery_ancestry = (
-        landed_close is None and (reason == 'merged' or not args.force)
+        landed_close is None and not archive_proof and (reason == 'merged' or not args.force)
     )
     ancestry_ref = (
         delivery_tip if reason == 'absorbed' else
@@ -24811,7 +25007,7 @@ def command_stack_close(args):
         if result.returncode != 0:
             unmerged.append(sha)
 
-    if reason == 'absorbed':
+    if reason == 'absorbed' or archive_proof:
         unmerged = []
     if unmerged and not args.force:
         short = [commit_short_sha(repo_root, sha) for sha in unmerged[:5]]
@@ -24825,7 +25021,7 @@ def command_stack_close(args):
         )
 
     merged_note = (
-        '' if unmerged or landed_close is not None
+        '' if unmerged or landed_close is not None or archive_proof
         else f' (all commits confirmed in {ancestry_label})'
     )
 
@@ -24948,6 +25144,14 @@ def command_stack_close(args):
                 + ', '.join(published_users)
                 + '; run syncwheel handoff and update them before closing'
             )
+    if archive_proof and coordination_result is None and config:
+        if expected_state.get('tip') != archive_proof['coordinationStateTip']:
+            raise SyncwheelError('stack archive coordination state changed after the reviewed plan')
+        expected_observation = archive_proof['remoteRefs']
+        if remote_ref_tips(repo_root, config['remote'], expected_observation) != expected_observation:
+            raise SyncwheelError('stack archive refs or claims changed after the reviewed plan')
+    if archive_proof:
+        verify_stack_archive_proof(repo_root, archive_proof, stack)
     operation_token = (
         pending_close.get('operation_token') if pending_close else str(uuid.uuid4())
     )
@@ -24970,6 +25174,7 @@ def command_stack_close(args):
             coordination_manifest_snapshot(publication_manifest, repo_root)
         ),
         'delivery_tip': delivery_tip,
+        **({'archive_proof': archive_proof} if archive_proof else {}),
         'actor': governed_worktree_owner(),
     }
     if pending_close is None:
@@ -24996,6 +25201,7 @@ def command_stack_close(args):
                     'reason': reason,
                     'closed_at': iso_utc_now(),
                     'remote_tip': remote_tip,
+                    **({'archive': {'planDigest': archive_proof['planDigest'], 'retentionDays': 30}} if archive_proof else {}),
                 },
                 expected_coordination_state_tip=(
                     expected_state.get('tip')
@@ -34091,6 +34297,17 @@ def build_parser():
     stack_merge_pr_p.add_argument('-j', '--json', action='store_true')
     stack_merge_pr_p.set_defaults(func=command_stack_merge_pr)
 
+    stack_archive_p = stack_sub.add_parser(
+        'archive', parents=[common], help='retain source history and defer a stack without delivery claims',
+    )
+    stack_archive_p.add_argument('stack')
+    stack_archive_p.add_argument('--reason', required=True)
+    stack_archive_p.add_argument('--resume-intent', required=True)
+    stack_archive_p.add_argument('--plan-digest')
+    stack_archive_p.add_argument('-a', '--apply', action='store_true')
+    stack_archive_p.add_argument('-j', '--json', action='store_true')
+    stack_archive_p.set_defaults(func=command_stack_archive)
+
     stack_close_p = stack_sub.add_parser(
         'close',
         aliases=['cl'],
@@ -34654,6 +34871,7 @@ def entrypoint_behavior_table():
         command_stack_classify_integration,
         command_stack_land,
         command_stack_merge_pr,
+        command_stack_archive,
         command_worktree_release,
         command_gc,
     ), mutates='apply', manifest_mutates='apply')
@@ -34999,6 +35217,7 @@ def governed_worktree_preflight(args):
                 + labels
             )
     stack_scoped_without_global_reaping = {
+        command_stack_archive,
         command_stack_close,
         command_stack_promote,
         command_stack_push,
@@ -35071,7 +35290,7 @@ def coordination_publication_lock_requested(args):
     }
     apply_gated = {
         command_reconcile, command_resume, command_sync, command_publish,
-        command_channel_publish, command_channel_close,
+        command_channel_publish, command_channel_close, command_stack_archive,
         command_coordination_claims_backfill, command_coordination_repair,
         command_coordination_compose,
     }
