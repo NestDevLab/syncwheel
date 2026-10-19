@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/oikuma-control-divergence"
-  ],
-  "claimed_at": "2026-10-19T18:02:00+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-19T18:13:10+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "8c462a62-880d-4651-8b9b-af521a8d400e",
-  "publication_scope": "stack:oikuma-control-divergence",
+  "operation_token": "8f01b9d9-8c62-44a2-b0df-751c93c5898e",
+  "publication_scope": "close:oikuma-control-divergence",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/oikuma-control-divergence",
-  "syncwheel_version": "0.46.3"
+  "syncwheel_version": "0.46.4"
 }
