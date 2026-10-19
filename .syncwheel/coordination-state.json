@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/stack-archive-proof": "acd4c69058b2841fe7aa0b60542e87258821a875"
+    "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693"
   },
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
@@ -45,7 +45,7 @@
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
-    "refs/heads/pr/stack-archive-proof": "b93dc6a834cb0b5df81c8be0e0ace459d6f4600b",
+    "refs/heads/pr/stack-archive-proof": "d9fb4693a8ff9441faaf11b7c01795b30fa81433",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "58b2e3172c7c08ff931be56bcef9937e49281a10",
@@ -83,7 +83,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-19T14:58:36+00:00",
+  "created_at": "2026-10-19T14:59:25+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -146,7 +146,7 @@
     "refs/heads/pr/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
-    "refs/heads/pr/stack-archive-proof": "acd4c69058b2841fe7aa0b60542e87258821a875",
+    "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
     "refs/heads/pr/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
@@ -245,11 +245,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "ddb564be-294a-4d5d-8af2-d2372877cd90",
-  "parent_state": "2cc93ea187b11c0e14a01df9a5652af0e21f91ed",
+  "operation_token": "c8162041-b354-4f83-8405-f8400d67b090",
+  "parent_state": "94eb5e7e2f98088d40d2431d1b006c852755642d",
   "projection_status": "partial",
-  "publication_id": "bc6183b3-8b52-4789-a14d-21421bcccfc8",
-  "publication_scope": "promote:stack-archive-proof",
+  "publication_id": "c9c637ab-c0e5-4d23-9b18-61d4578832e7",
+  "publication_scope": "stack:stack-archive-proof",
   "schema_version": 2,
   "syncwheel_version": "0.46.0",
   "tombstones": [
