@@ -14323,6 +14323,103 @@ sys.exit(module.main())
         )
 
 
+    def test_reconcile_changed_unlanded_intent_publishes_only_current_selected_refs(self):
+        for foreign in (False, True):
+            with self.subTest(foreign=foreign):
+                fixture = self.prepare_selected_control_pending_reconcile(
+                    f'changed-unlanded-{foreign}', include_stack=True
+                )
+                module, repo, stack = fixture['module'], fixture['repo'], fixture['stack']
+                stack_ref = f"refs/heads/{stack['branch']}"
+                wanted = module.ref_tip(repo, stack['branch'])
+                old_ref = 'refs/heads/pr/unselected' if foreign else stack_ref
+                old_tip = module.ref_tip(repo, stack['base'])
+                operation = module.begin_coordination_publication(
+                    repo, fixture['manifest'], fixture['manifest_path'],
+                    {old_ref: old_tip}, 'partial', 'partial',
+                )
+                token = operation['operation_token']
+                command = [
+                    'reconcile', '--manifest', str(fixture['manifest_path']),
+                    '--apply', '--push', '--stack', stack['id'],
+                    '--skip-integration', '--rebuild', 'none', '--no-force-with-lease',
+                ]
+                self.run_cli(repo, *command)
+                state_tip, published = self.remote_state(fixture['origin'])
+                self.assertEqual(published['changed_refs'], {stack_ref: wanted})
+                self.assertEqual(published['managed_refs'][stack_ref], wanted)
+                self.assertEqual(published['managed_refs'][fixture['integration_ref']], fixture['published_tip'])
+                self.assertEqual(module.ref_tip(repo, fixture['integration_branch']), fixture['local_control_tip'])
+                self.assertEqual(fixture['manifest_path'].read_bytes(), fixture['manifest_bytes'])
+                events = module.load_ledger_events(repo, fixture['manifest_path'])
+                terminal = [event for event in events
+                            if event['type'] in module.COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES
+                            and event['payload'].get('operation_token') == token]
+                self.assertEqual([event['type'] for event in terminal], ['coordination_publish_abandoned'])
+                self.assertEqual(terminal[0]['payload']['reason'], 'not_landed')
+                self.assertFalse(module.pending_coordination_publications(repo, fixture['manifest_path']))
+                claim_ref = module.coordination_claim_ref(stack_ref)
+                claim = self.git(fixture['origin'], 'rev-parse', claim_ref).stdout.strip()
+                self.run_cli(repo, *command)
+                self.assertEqual(self.remote_state(fixture['origin'])[1]['changed_refs'], {})
+                self.assertEqual(self.git(fixture['origin'], 'rev-parse', claim_ref).stdout.strip(), claim)
+                if foreign:
+                    self.assertEqual(self.git(fixture['origin'], 'show-ref', '--verify', old_ref, expected=128).returncode, 128)
+
+    def test_reconcile_changed_intent_does_not_abandon_landed_operation(self):
+        fixture = self.prepare_selected_control_pending_reconcile('changed-landed', include_stack=True)
+        module, repo, stack = fixture['module'], fixture['repo'], fixture['stack']
+        stack_ref = f"refs/heads/{stack['branch']}"
+        old_tip = module.ref_tip(repo, stack['branch'])
+        operation = module.begin_coordination_publication(
+            repo, fixture['manifest'], fixture['manifest_path'], {stack_ref: old_tip}, 'partial', 'partial',
+        )
+        module.coordinated_publish(repo, fixture['manifest'], fixture['manifest_path'],
+                                   {stack_ref: old_tip}, 'partial', 'partial',
+                                   operation_token=operation['operation_token'])
+        state_before = self.remote_state(fixture['origin'])[0]
+        self.git(repo, 'switch', '-q', stack['branch'])
+        (repo / 'next-product.txt').write_text('next source product\n')
+        self.git(repo, 'add', 'next-product.txt')
+        self.git(repo, 'commit', '-q', '-m', 'Advance source product')
+        new_tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', fixture['integration_branch'])
+        module.require_stack(fixture['manifest'], stack['id'])['commits'].append(new_tip)
+        fixture['manifest_path'].write_text(module.canonical_manifest_file_text(fixture['manifest']))
+        parser = module.build_parser()
+        args = parser.parse_args(['reconcile', '--repo', str(repo), '--manifest', str(fixture['manifest_path']),
+                                  '--apply', '--push', '--stack', stack['id'], '--skip-integration', '--rebuild', 'none'])
+        args.git_args = []
+        self.assertEqual(args.func(args), 0)
+        self.assertNotEqual(self.remote_state(fixture['origin'])[0], state_before)
+        self.assertEqual(self.git(fixture['origin'], 'rev-parse', stack_ref).stdout.strip(), new_tip)
+        completed = [event for event in module.load_ledger_events(repo, fixture['manifest_path'])
+                     if event['type'] == 'coordination_publish_completed'
+                     and event['payload'].get('operation_token') == operation['operation_token']]
+        self.assertEqual(len(completed), 1)
+        self.assertEqual(completed[0]['payload']['coordination_status'], 'already_published')
+        abandoned = [event for event in module.load_ledger_events(repo, fixture['manifest_path'])
+                     if event['type'] == 'coordination_publish_abandoned'
+                     and event['payload'].get('operation_token') == operation['operation_token']]
+        self.assertEqual(abandoned, [])
+
+    def test_reconcile_changed_intent_stops_on_uncertain_landing_evidence(self):
+        fixture = self.prepare_selected_control_pending_reconcile('changed-uncertain', include_stack=True)
+        module, repo, stack = fixture['module'], fixture['repo'], fixture['stack']
+        operation = module.begin_coordination_publication(
+            repo, fixture['manifest'], fixture['manifest_path'],
+            {f"refs/heads/{stack['branch']}": module.ref_tip(repo, stack['base'])}, 'partial', 'partial',
+        )
+        args = module.build_parser().parse_args(['reconcile', '--repo', str(repo), '--manifest', str(fixture['manifest_path']),
+                                               '--apply', '--push', '--stack', stack['id'], '--skip-integration', '--rebuild', 'none'])
+        args.git_args = []
+        with mock.patch.object(module, 'coordinated_operation_landed', side_effect=module.SyncwheelError('uncertain landing evidence')):
+            with self.assertRaisesRegex(module.SyncwheelError, 'uncertain landing evidence'):
+                args.func(args)
+        self.assertEqual(self.remote_state(fixture['origin'])[0], fixture['state_before'])
+        self.assertEqual([intent['operation_token'] for intent in module.pending_coordination_publications(repo, fixture['manifest_path'])],
+                         [operation['operation_token']])
+
     def test_reconcile_pending_integration_refuses_unselected_control_before_publish(self):
         fixture = self.prepare_selected_control_pending_reconcile(
             'pending-integration-selected', include_stack=False

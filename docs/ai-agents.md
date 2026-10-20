@@ -133,6 +133,12 @@ no evidence holds, record `coordination_publish_abandoned` with reason
 the local rename only when the remote carries neither the promoted ref nor a
 claim bearing that token.
 
+A reconcile retry with a non-empty newly planned refset adopts an existing intent
+only when the whole changed-ref tuple matches. Otherwise the same authenticated
+landing resolver must settle it before a fresh intent can be created. A landed
+operation is never abandoned to make a different tuple publish; uncertain evidence
+stops the command. Empty-action retries retain their existing recovery contract.
+
 The manifest digest that identifies an operation is computed over the public
 manifest snapshot without `integration.derived_provenance`: the intent and the
 published state resolve that projection from different sources by design, so it

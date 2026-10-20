@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.7 - 2026-10-20
+
+- Reconcile a changed desired publication tuple through the existing authenticated landing resolver instead of adopting an incompatible pending retry. Only proven unlanded operations are abandoned; landed evidence, zero-action recovery, ref claims and state leases remain enforced.
+
 ## 0.46.6 - 2026-10-19
 
 - Bind an explicitly reviewed, exact-path draft resolution to an unresolved prepared revision-provider operation. Digest-bound plans preserve all pending leases; ordinary same-operation recovery retains hooks and atomic publication checks. Resolution itself never publishes or finalizes.

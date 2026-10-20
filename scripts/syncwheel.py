@@ -28525,6 +28525,10 @@ def command_reconcile(args):
             intent.get('operation_token')
             for intent in pending_coordination_publications(repo_root, manifest_path)
             if intent.get('scope') == publication_scope
+            # A changed desired tuple must be re-proved by the existing landing resolver,
+            # not adopted and then frozen as a mismatched retry. Empty-action retries keep
+            # their existing intent so already-published operations remain idempotent.
+            and (not coordinated_refs or intent.get('changed_refs') == coordinated_refs)
             and intent.get('fingerprint') == coordination_publication_identity(
                 repo_root,
                 manifest,
