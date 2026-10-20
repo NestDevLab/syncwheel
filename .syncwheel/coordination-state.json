@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/journal-guard-readiness": "7e098aad3cb47680aba486af6475bdaa706de8ff"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -23,7 +21,7 @@
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
-    "refs/heads/pr/journal-guard-readiness": "3f2dce37e248fb3293aa402201b630145a339265",
+    "refs/heads/pr/journal-guard-readiness": "e421e352281844a42e0bbc2ae7fdd4a72d84f446",
     "refs/heads/pr/journal-operations": "4be329dde1c6874ad6d4bbadc6ff4e3e48826d1a",
     "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
@@ -91,7 +89,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-20T11:53:03+00:00",
+  "created_at": "2026-10-20T12:03:37+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -234,8 +232,7 @@
       "branch": "main-integration",
       "stacks": [
         "resolve-prepared-projection",
-        "partial-intent-desired-refs",
-        "journal-guard-readiness"
+        "partial-intent-desired-refs"
       ],
       "strategy": "cherry-pick"
     },
@@ -274,32 +271,18 @@
         "id": "partial-intent-desired-refs",
         "integration_branch": "main-integration",
         "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/journal-guard-readiness",
-        "commits": [
-          "7e098aad3cb47680aba486af6475bdaa706de8ff"
-        ],
-        "id": "journal-guard-readiness",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "50d96411-49e9-4689-ab27-4da606d9b9d7",
-  "parent_state": "b3cae6017a21010c659167aa81c34138a3dce9fe",
+  "operation_token": "76f91f37-9f7d-443b-960c-e76e6c7c369c",
+  "parent_state": "aa9e2b550b185d0dbcaedc2f5133a742eacf0cd5",
   "projection_status": "partial",
-  "publication_id": "f249a0eb-5cfd-40a9-8c9a-318c93cea140",
-  "publication_scope": "partial",
+  "publication_id": "165d7a17-7eb2-4d2c-9cfa-8cabe90fcb92",
+  "publication_scope": "close:journal-guard-readiness",
   "schema_version": 2,
-  "syncwheel_version": "0.46.6",
+  "syncwheel_version": "0.46.8",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1156,6 +1139,14 @@
       "ref": "refs/heads/pr/revision-ref-guard-batching",
       "remote_tip": null,
       "stack": "revision-ref-guard-batching"
+    },
+    {
+      "branch": "pr/journal-guard-readiness",
+      "closed_at": "2026-10-20T12:03:34+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/journal-guard-readiness",
+      "remote_tip": null,
+      "stack": "journal-guard-readiness"
     }
   ]
 }
