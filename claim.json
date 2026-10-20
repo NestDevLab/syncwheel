@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/partial-intent-desired-refs"
+  ],
+  "claimed_at": "2026-10-20T03:39:37+00:00",
+  "coordination_id": "default",
+  "operation_token": "dd90977a-18c8-44a4-b7b8-d9bc8d4be8af",
+  "publication_scope": "partial",
+  "source_ref": "refs/heads/pr/partial-intent-desired-refs",
+  "syncwheel_version": "0.46.6"
+}
