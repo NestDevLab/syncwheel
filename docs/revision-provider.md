@@ -551,3 +551,64 @@ protocol v1 cannot represent a different resulting HEAD for those terminal
 responses. Once a candidate commit is prepared its parent is fixed; a later HEAD
 move requires a fresh operation. This adds no wire fields and requires a consumer
 that verifies the same path-scoped parent rule.
+
+
+### Explicit resolution of a prepared draft projection
+
+In delivery mode, an operator may bind an independently reviewed commit when an
+immutable prepared product cannot be projected onto the leased manifest base:
+
+```bash
+syncwheel revision-provider resolve-prepared <operation-id> \
+  --resolution <full-40-character-commit-oid> --reason "Reviewed exact projection"
+syncwheel revision-provider resolve-prepared <operation-id> \
+  --resolution <same-commit-oid> --reason "Reviewed exact projection" \
+  --plan-digest <digest-from-plan> --apply
+```
+
+The default command prints a JSON plan without changing the journal, ledger,
+index, worktree, manifest or refs. Apply takes the normal provider operation lock
+and reobserves the leases before atomically recording a resolution witness and
+an append-only audit event. The digest binds the repository, operation intent,
+immutable product, base, resolution tree, complete path objects, reason and
+current leases. A different decision for the same operation fails closed;
+retrying the same decision completes an interrupted witness/audit write once.
+
+This remedy requires `phase=prepared`, no selected route, an existing immutable
+product candidate and no draft ownership, product publication or control effects.
+The resolution must have exactly one parent equal to `baseRefSha`. Its nonempty
+changed-path set must equal **all** declared product paths, with identical blob
+bytes, modes and deletions; every other path remains the base tree. Pending
+product dirt is admitted only through the original intent's exact hashes and
+index, ref, manifest, worktree and coordination leases. Other dirty work receives
+no exemption. Journal repositories and stale leases are refused.
+
+Resolution does **not** finalize, publish, rerun a mutation or move any ref.
+Resume the caller's ordinary recovery with the **same operation ID**. Recovery
+uses `resolved-manifest-base`, retains the original product candidate and hook
+validation, and sets the draft candidate to the reviewed resolution. The native
+stack declares that resolution as its source and binds the original product as
+its integration projection (`integration_commits` and `integration_resolution`).
+The shared immutable proof is checked during route preparation, verification
+and draft ownership. Existing hooks, atomic ref/index CAS, manifest governance
+and terminal verification remain mandatory. There is no implicit fallback to
+this route and no widening of `integration.derived_paths`.
+
+
+Publishing the resolved draft's integration binding still obeys the existing
+coordination gate. Source-only publication may be refused while the integration
+configuration differs from published state. A reviewed native atomic reconcile
+can publish the owned source and integration together without rebuilding:
+
+```bash
+syncwheel reconcile --stack <owned-draft-id> --rebuild none --push \
+  --no-force-with-lease --json
+# Inspect every action and exact ref/fast-forward lease before applying.
+syncwheel reconcile --stack <owned-draft-id> --rebuild none --push \
+  --no-force-with-lease --apply
+```
+
+This is a separate publication operation, not part of `resolve-prepared`. Stop
+if its plan includes unrelated actions, a rebuild or a non-fast-forward update.
+The published snapshot retains the exact source/integration resolution binding
+so another clone can reconstruct it without the local provider journal.

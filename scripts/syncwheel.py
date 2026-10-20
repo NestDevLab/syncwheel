@@ -12354,7 +12354,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
     }
 
 
-def read_remote_coordination_states(repo_root, config):
+def read_remote_coordination_states(repo_root, config, *, fetch=True):
     result = git(
         repo_root,
         'ls-remote',
@@ -12370,10 +12370,11 @@ def read_remote_coordination_states(repo_root, config):
         tip, separator, ref = line.partition('\t')
         if not separator:
             continue
-        fetch = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
-        if fetch.returncode != 0:
-            raise SyncwheelError(fetch.stderr.strip() or f'failed to fetch coordination state {ref}')
-        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD')
+        if fetch:
+            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
+            if fetched.returncode != 0:
+                raise SyncwheelError(fetched.stderr.strip() or f'failed to fetch coordination state {ref}')
+        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD' if fetch else tip)
         expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
         if ref != expected_ref:
             raise SyncwheelError(
@@ -12405,8 +12406,9 @@ def require_exclusive_coordination_ownership(
     config,
     managed_refs,
     expected_state_refs=None,
+    *, fetch=True,
 ):
-    states = read_remote_coordination_states(repo_root, config)
+    states = read_remote_coordination_states(repo_root, config, fetch=fetch)
     observed_state_refs = {item['ref']: item['tip'] for item in states}
     if expected_state_refs is not None and observed_state_refs != expected_state_refs:
         raise SyncwheelError(
@@ -31081,7 +31083,7 @@ class SyncwheelRevisionBackend:
                 'integration, stack, or channel branch'
             )
 
-    def _fresh_coordination_handoff(self, repo_root, manifest, manifest_path=None):
+    def _fresh_coordination_handoff(self, repo_root, manifest, manifest_path=None, *, fetch=True):
         if not coordination_is_active(manifest):
             return {'mode': 'disabled', 'stateTip': None, 'manifestDigest': None}
         config = coordination_config(manifest)
@@ -31099,7 +31101,7 @@ class SyncwheelRevisionBackend:
             remote = read_remote_coordination_state(
                 repo_root,
                 config,
-                fetch=True,
+                fetch=fetch,
                 local_manifest_version=manifest['version'],
             )
             state = remote.get('state')
@@ -31108,7 +31110,7 @@ class SyncwheelRevisionBackend:
                     'active-active handoff requires an initialized published coordination state'
                 )
             current_refs = managed_ref_names(manifest)
-            require_exclusive_coordination_ownership(repo_root, config, current_refs)
+            require_exclusive_coordination_ownership(repo_root, config, current_refs, fetch=fetch)
             local_digest = coordination_manifest_digest(manifest, repo_root)
             if state.get('manifest_digest') != local_digest:
                 self._fail(
@@ -31397,7 +31399,7 @@ class SyncwheelRevisionBackend:
     def _pending_operation_manifest_matches(self, request, journal, manifest):
         """Recognize the provider's own manifest write before its journal catches up."""
         if (
-            journal.get('projectionRoute') != 'manifest-base'
+            journal.get('projectionRoute') not in {'manifest-base', 'resolved-manifest-base'}
             or journal.get('phase') != 'product_committed'
             or not journal.get('productCommitSha')
         ):
@@ -31684,6 +31686,200 @@ class SyncwheelRevisionBackend:
             )
         return path_objects
 
+    def _prepared_resolution_binding(self, request, journal, resolution, reason, leases):
+        return {
+            'repositoryRoot': request.repository_root,
+            'operationId': request.operation_id,
+            'intentDigest': request.plan_digest,
+            'candidateProductCommitSha': journal.get('candidateProductCommitSha'),
+            'candidateProductTreeSha': journal.get('candidateProductTreeSha'),
+            'baseRefSha': journal.get('baseRefSha'),
+            'resolutionCommitSha': resolution,
+            'resolutionTreeSha': ref_tree(self._repo_root(request), resolution),
+            'productPathObjects': self._journal_product_path_objects(request, journal),
+            'reason': reason,
+            'leases': leases,
+        }
+
+    def _prepared_resolution_audit(self, request, witness, *, complete=False):
+        root = self._repo_root(request)
+        _, manifest_path = self._manifest(root)
+        if complete:
+            recover_ledger_tail(root, manifest_path)
+        matches = [
+            event for event in load_ledger_events(root, manifest_path)
+            if event.get('type') == 'revision_provider_prepared_resolution'
+            and (event.get('payload') or {}).get('binding', {}).get('operationId')
+            == request.operation_id
+        ]
+        if matches and (len(matches) != 1 or matches[0].get('payload') != witness):
+            self._fail('prepared resolution audit collision')
+        if not matches:
+            if complete is False:
+                self._fail('prepared resolution audit is incomplete; retry resolve-prepared')
+            if complete:
+                append_ledger_event(
+                    root, 'revision_provider_prepared_resolution', witness, manifest_path
+                )
+                self.checkpoint('prepared_resolution_audited')
+
+    def _prepared_resolution_projection(self, request, journal, *, complete_audit=False):
+        """One immutable proof shared by preparation and every draft verifier."""
+        witness = journal.get('preparedResolution')
+        if not isinstance(witness, dict) or set(witness) != {'binding', 'planDigest'}:
+            self._fail('prepared resolution witness is missing or invalid')
+        binding = witness['binding']
+        if not isinstance(binding, dict):
+            self._fail('prepared resolution binding is invalid')
+        resolution = binding.get('resolutionCommitSha')
+        reason = binding.get('reason')
+        if (not isinstance(resolution, str)
+                or not self.provider.HEX_40.fullmatch(resolution)
+                or not isinstance(reason, str) or not reason.strip()
+                or not isinstance(binding.get('leases'), dict)):
+            self._fail('prepared resolution identity is invalid')
+        expected = self._prepared_resolution_binding(
+            request, journal, resolution, reason, binding['leases']
+        )
+        if binding != expected or canonical_json_digest(binding) != witness['planDigest']:
+            self._fail('prepared resolution witness changed')
+        parents = git(self._repo_root(request), 'rev-list', '--parents', '-n', '1',
+                      resolution, check=False)
+        if parents.returncode or parents.stdout.split() != [resolution, journal['baseRefSha']]:
+            self._fail('prepared resolution requires exactly one parent equal to baseRefSha')
+        self._verify_candidate_object(
+            self._repo_root(request), resolution, binding['resolutionTreeSha'],
+            journal['baseRefSha'], binding['productPathObjects'],
+        )
+        if deterministic_stack_replay_tip(self._repo_root(request), journal['baseRefSha'], [resolution]) != resolution:
+            self._fail('prepared resolution replay does not reproduce its exact commit tip')
+        if complete_audit is not None:
+            self._prepared_resolution_audit(request, witness, complete=complete_audit)
+        return {
+            'projectionRoute': 'resolved-manifest-base',
+            'candidateDraftCommitSha': resolution,
+            'candidateDraftTreeSha': binding['resolutionTreeSha'],
+        }
+
+    def _prepared_resolution_leases(self, request, journal):
+        """Observe pending-product leases without expiring or advancing anything."""
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        self.provider._assert_matching_journal(request, journal)
+        if (manifest.get('repository_mode') != 'delivery'
+                or manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED
+                or journal.get('repositoryMode') == 'journal'
+                or journal.get('phase') != 'prepared' or request.no_commit
+                or journal.get('operationId') != request.operation_id
+                or journal.get('projectionRoute') is not None
+                or not journal.get('candidateProductCommitSha')
+                or journal.get('request') != request.intent_json()
+                or journal.get('expectedHead') != request.expected_head
+                or journal.get('resultingHead') != request.expected_head):
+            self._fail('resolve-prepared requires an unchanged prepared delivery operation with no route')
+        if not all(isinstance(journal.get(key), str) and self.provider.HEX_40.fullmatch(journal[key])
+                   for key in ('candidateProductCommitSha', 'candidateProductTreeSha', 'baseRefSha')):
+            self._fail('prepared resolution requires immutable full product/base object IDs')
+        if any(journal.get(key) for key in (
+                'candidateDraftCommitSha', 'candidateDraftTreeSha', 'draftRefOwned',
+                'productCommitSha', 'draftStackId', 'draftBranch',
+                'candidateControlCommitSha', 'candidateControlTreeSha',
+                'controlPathObjects', 'controlHooksValidated', 'manifestReplaced',
+                'ledgerAppended', 'controlCommitSha', 'published', 'expiration',
+                'publicationState')):
+            self._fail('resolve-prepared refuses an operation with revision effects')
+        if (manifest_digest(manifest) != journal.get('observedManifestDigest')
+                or manifest_digest(manifest) != journal.get('manifestDigest')
+                or get_current_branch(root) != journal.get('integrationBranch')
+                or manifest['integration']['branch'] != journal.get('integrationBranch')
+                or ref_tip(root, 'HEAD') != request.expected_head):
+            self._fail('prepared resolution manifest, branch or HEAD lease changed')
+        hooks = managed_push_guard_policy(root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail('managed repository guards are not ready')
+        if git(root, 'ls-files', '--error-unmatch', '--', self.MANIFEST_PRODUCT_PATH,
+               check=False).returncode:
+            self._fail('prepared resolution requires a tracked manifest')
+        base = self._resolve_base_ref(root, manifest)
+        if base != tuple(journal.get(key) for key in (
+                'baseRef', 'baseRefFullName', 'baseRefSha',
+                'baseRefObjectSha', 'baseRefObservation')):
+            self._fail('prepared resolution base lease changed')
+        self._assert_base_ref_is_not_managed(manifest, base[0], base[1])
+        if (journal.get('projectionBaseSha') != base[2]
+                or journal.get('projectionBaseKind') != 'manifest-base'
+                or journal.get('integrationCompositionDigest') != integration_composition_digest(manifest)):
+            self._fail('prepared resolution projection inputs changed')
+        # Read fresh remote state without fetching or updating any refs.
+        coordination = self._fresh_coordination_handoff(root, manifest, fetch=False)
+        if coordination != journal.get('coordination'):
+            self._fail('prepared resolution coordination lease changed')
+        refs = self._journal_ref_transaction_refs(request, journal)
+        self._assert_no_ref_transaction_locks(root, refs)
+        self._assert_ref_leases(root, refs)
+        if (self._worktrees(root) != journal.get('baselineWorktrees')
+                or self._remote_refs(root) != journal.get('baselineRemoteRefs')
+                or self._managed_local_refs(root, manifest) != journal.get('managedLocalRefs')):
+            self._fail('prepared resolution worktree or ref membership lease changed')
+        self._assert_index_lease(root, request, journal, 'baseline', 'prepared resolution')
+        self._validate_before_hashes_at_head(root, request)
+        self._ensure_after_scope(root, request)
+        objects = self._journal_product_path_objects(request, journal)
+        if any(objects[item.path]['sha256'] != item.after_sha256 for item in request.paths):
+            self._fail('prepared product path hashes differ from the operation intent')
+        self._verify_candidate_object(
+            root, journal['candidateProductCommitSha'], journal['candidateProductTreeSha'],
+            request.expected_head, objects,
+        )
+        self._verify_worktree_objects(root, objects)
+        index = self._index_observation(root)
+        return {
+            'manifestDigest': manifest_digest(manifest),
+            'head': request.expected_head,
+            'refs': refs,
+            'worktrees': journal['baselineWorktrees'],
+            'indexSha256': index.sha256,
+            'indexSemantic': index.semantic,
+            'unownedDirty': self._assert_unowned_dirty_unchanged(root, request),
+            'coordination': coordination,
+        }
+
+    def resolve_prepared(self, request, resolution, reason, *, apply=False, plan_digest=None):
+        # Caller holds the same operation lock as finalize/recover. No generic
+        # dirty-worktree exemption: only the original exact pending paths pass.
+        if (not isinstance(resolution, str) or not self.provider.HEX_40.fullmatch(resolution)
+                or not isinstance(reason, str) or not reason.strip()
+                or len(reason) > 4096 or self.provider.REASON_CONTROL_CHARACTER.search(reason)):
+            self._fail('resolve-prepared requires a full commit OID and nonempty reason')
+        journal = self.load_journal(request)
+        if journal is None:
+            self._fail('resolve-prepared requires an existing prepared journal')
+        leases = self._prepared_resolution_leases(request, journal)
+        binding = self._prepared_resolution_binding(request, journal, resolution, reason, leases)
+        witness = {'binding': binding, 'planDigest': canonical_json_digest(binding)}
+        previous = journal.get('preparedResolution')
+        if previous is not None and previous != witness:
+            self._fail('a different prepared resolution is already bound to this operation')
+        candidate = dict(journal, preparedResolution=witness)
+        # One proof validates the object in plans and throughout recovery.
+        self._prepared_resolution_projection(request, candidate, complete_audit=None)
+        if previous is None:
+            self._prepared_resolution_audit(request, witness, complete=None)
+        if apply:
+            if plan_digest != witness['planDigest']:
+                self._fail('prepared resolution plan digest changed; review a fresh plan')
+            # A final fresh lease observation is a CAS immediately before the
+            # durable decision. Ref publication still uses its own atomic CAS.
+            if self._prepared_resolution_leases(request, journal) != leases:
+                self._fail('prepared resolution leases changed during apply')
+            if previous is None:
+                self.save_journal(request, candidate)
+                self.checkpoint('prepared_resolution_written')
+            self._prepared_resolution_projection(request, candidate, complete_audit=True)
+        return {'operationId': request.operation_id, 'planDigest': witness['planDigest'],
+                'resolution': binding, 'applied': apply,
+                'nextAction': 'recover the same operation; resolution does not finalize or publish'}
+
     def prepare_draft_projection(self, request, journal):
         repo_root = self._repo_root(request)
         manifest, _ = self._manifest(repo_root)
@@ -31693,6 +31889,8 @@ class SyncwheelRevisionBackend:
                 journal,
                 'manifest changed before draft object preparation',
             )
+        if journal.get('preparedResolution') is not None:
+            return self._prepared_resolution_projection(request, journal, complete_audit=True)
         projection = deterministic_stack_projection(
             repo_root,
             journal['baseRefSha'],
@@ -31748,6 +31946,11 @@ class SyncwheelRevisionBackend:
         manifest, _ = self._manifest(repo_root)
         self._expire_if_operation_lease_changed(request, journal, manifest)
         path_objects = self._journal_product_path_objects(request, journal)
+        if journal.get('preparedResolution') is not None or journal.get('projectionRoute') == 'resolved-manifest-base':
+            expected = self._prepared_resolution_projection(request, journal)
+            if any(journal.get(key) != value for key, value in expected.items()):
+                self._fail('journaled explicit projection route changed')
+            return
         projection = deterministic_stack_projection(
             repo_root,
             journal['baseRefSha'],
@@ -32230,6 +32433,11 @@ class SyncwheelRevisionBackend:
         return stdout, stderr
 
     def _verify_draft_candidate(self, repo_root, request, journal):
+        if journal.get('preparedResolution') is not None or journal.get('projectionRoute') == 'resolved-manifest-base':
+            expected = self._prepared_resolution_projection(request, journal)
+            if any(journal.get(key) != value for key, value in expected.items()):
+                self._fail('journaled explicit draft candidate changed')
+            return
         projection = deterministic_stack_projection(
             repo_root,
             journal.get('projectionBaseSha', journal['baseRefSha']),
@@ -32968,6 +33176,11 @@ class SyncwheelRevisionBackend:
                 'agentwheel_plan_digest': request.plan_digest,
             },
         }
+        if journal.get('projectionRoute') == 'resolved-manifest-base':
+            self._verify_draft_candidate(self._repo_root(request), request, journal)
+            desired['commits'] = [journal['candidateDraftCommitSha']]
+            desired['integration_commits'] = [journal['productCommitSha']]
+            desired['integration_resolution'] = {'source_tip': journal['candidateDraftCommitSha']}
         if journal.get('projectionBaseKind') == 'integration-tip':
             desired['meta']['revision_provider_projection_base'] = {
                 'kind': 'integration-tip',
@@ -32987,13 +33200,17 @@ class SyncwheelRevisionBackend:
         ]
         return stripped
 
-    def _assert_draft_branch(self, repo_root, desired, journal):
+    def _assert_draft_branch(self, repo_root, desired, journal, request):
         journal_tip = ref_tip(repo_root, desired['branch'])
-        expected_tip = deterministic_stack_replay_tip(
-            repo_root,
-            journal.get('projectionBaseSha', journal['baseRefSha']),
-            desired['commits'],
-        )
+        if journal.get('projectionRoute') == 'resolved-manifest-base':
+            self._verify_draft_candidate(repo_root, request, journal)
+            expected_tip = journal['candidateDraftCommitSha']
+        else:
+            expected_tip = deterministic_stack_replay_tip(
+                repo_root,
+                journal.get('projectionBaseSha', journal['baseRefSha']),
+                desired['commits'],
+            )
         if not expected_tip:
             self._fail('owned draft projection is no longer reproducible')
         if journal_tip != expected_tip:
@@ -33038,7 +33255,7 @@ class SyncwheelRevisionBackend:
                 self._assert_unowned_dirty_unchanged(
                     repo_root, request, allowed_outside=(self.MANIFEST_PRODUCT_PATH,)
                 )
-                self._assert_draft_branch(repo_root, desired, journal)
+                self._assert_draft_branch(repo_root, desired, journal, request)
                 context = {
                     'operation_id': request.operation_id,
                     'plan_digest': request.plan_digest,
@@ -33068,7 +33285,7 @@ class SyncwheelRevisionBackend:
                 'candidateDraftCommitSha'
             ):
                 self._fail('draft ref ownership must be proven before manifest ownership')
-            self._assert_draft_branch(repo_root, desired, journal)
+            self._assert_draft_branch(repo_root, desired, journal, request)
             manifest['stacks'].append(desired)
             if request.draft_stack_id not in manifest['integration']['stacks']:
                 manifest['integration']['stacks'].append(request.draft_stack_id)
@@ -33262,7 +33479,7 @@ class SyncwheelRevisionBackend:
             self._fail('operation draft stack ownership is missing or changed')
         if not branch_exists(repo_root, request.draft_branch):
             self._fail('operation draft branch is missing')
-        self._assert_draft_branch(repo_root, desired, journal)
+        self._assert_draft_branch(repo_root, desired, journal, request)
         if ref_tip(repo_root, request.draft_branch) != journal.get(
             'candidateDraftCommitSha'
         ):
@@ -33551,6 +33768,31 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
         self._observe_journal(request)
 
 
+def command_revision_provider_resolve_prepared(args):
+    import syncwheel_revision_provider as provider_module
+    backend = SyncwheelRevisionBackend(provider_module)
+    root = resolve_repo_root(args.repo)
+    if not provider_module.OPERATION_ID.fullmatch(args.operation_id):
+        raise SyncwheelError('invalid revision-provider operation ID')
+    path = git_common_dir(root) / 'syncwheel' / 'revision-provider' / f'{args.operation_id}.json'
+    try:
+        journal = json.loads(path.read_text())
+        intent = {key: value for key, value in journal['request'].items()
+                  if key != 'expectedManifestDigest' or value is not None}
+        request = provider_module.parse_request({**intent, 'action': 'recover'})
+        if request.operation_id != args.operation_id or request.repository_root != str(root):
+            raise SyncwheelError('prepared operation does not belong to this repository')
+        with backend.operation_lock(request):
+            result = backend.resolve_prepared(
+                request, args.resolution, args.reason,
+                apply=args.apply, plan_digest=args.plan_digest,
+            )
+    except (OSError, ValueError, KeyError, TypeError, provider_module.RevisionProviderError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_revision_provider(args):
     try:
         import syncwheel_revision_provider as provider_module
@@ -33690,6 +33932,18 @@ def build_parser():
         help='serve one strict Agentwheel revision-provider JSON request on stdin',
     )
     revision_provider_p.set_defaults(func=command_revision_provider)
+    revision_provider_sub = revision_provider_p.add_subparsers(dest='revision_provider_command')
+    resolve_prepared_p = revision_provider_sub.add_parser(
+        'resolve-prepared',
+        help='bind an exact reviewed draft object to an unresolved prepared operation',
+    )
+    resolve_prepared_p.add_argument('-r', '--repo', help='canonical operation repository path or alias')
+    resolve_prepared_p.add_argument('operation_id')
+    resolve_prepared_p.add_argument('--resolution', required=True, help='full resolution commit OID')
+    resolve_prepared_p.add_argument('--reason', required=True)
+    resolve_prepared_p.add_argument('--plan-digest')
+    resolve_prepared_p.add_argument('--apply', action='store_true')
+    resolve_prepared_p.set_defaults(func=command_revision_provider_resolve_prepared)
 
     repo_p = sub.add_parser('repo', aliases=['r'], help='manage repo aliases')
     repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
@@ -35008,6 +35262,7 @@ def entrypoint_behavior_table():
     # The revision-provider command deliberately owns its narrower transaction
     # inside the backend, after request and lease validation have completed.
     register((command_revision_provider,), mutates='always', manifest_mutates='internal')
+    register((command_revision_provider_resolve_prepared,), mutates='apply', manifest_mutates='internal')
     register((
         command_repo_add,
         command_repo_set_manifest,
