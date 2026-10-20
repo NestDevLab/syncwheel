@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/journal-guard-readiness"
-  ],
-  "claimed_at": "2026-10-20T11:53:03+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-20T12:03:37+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "50d96411-49e9-4689-ab27-4da606d9b9d7",
-  "publication_scope": "partial",
+  "operation_token": "76f91f37-9f7d-443b-960c-e76e6c7c369c",
+  "publication_scope": "close:journal-guard-readiness",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/journal-guard-readiness",
-  "syncwheel_version": "0.46.6"
+  "syncwheel_version": "0.46.8"
 }
