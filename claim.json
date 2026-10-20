@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/journal-guard-readiness"
+  ],
+  "claimed_at": "2026-10-20T11:53:03+00:00",
+  "coordination_id": "default",
+  "operation_token": "50d96411-49e9-4689-ab27-4da606d9b9d7",
+  "publication_scope": "partial",
+  "source_ref": "refs/heads/pr/journal-guard-readiness",
+  "syncwheel_version": "0.46.6"
+}
