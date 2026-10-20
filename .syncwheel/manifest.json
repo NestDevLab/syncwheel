@@ -33,7 +33,8 @@
     "branch": "main-integration",
     "stacks": [
       "resolve-prepared-projection",
-      "partial-intent-desired-refs"
+      "partial-intent-desired-refs",
+      "journal-guard-readiness"
     ],
     "strategy": "cherry-pick"
   },
@@ -80,6 +81,22 @@
       },
       "meta": {
         "purpose": "Recover unlanded scoped publication when desired refs change"
+      }
+    },
+    {
+      "id": "journal-guard-readiness",
+      "branch": "pr/journal-guard-readiness",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Match journal guard readiness to its selected branch"
       }
     }
   ],
