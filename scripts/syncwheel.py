@@ -1025,11 +1025,13 @@ def atomic_write_private_json(path, payload, *, indent=None):
     return path
 
 
+def primary_guard_branch(manifest):
+    section = 'journal' if manifest.get('repository_mode') == 'journal' else 'integration'
+    return (manifest.get(section) or {}).get('branch')
+
+
 def primary_guard_payload(manifest, *, enabled=True, reason=None):
-    if manifest.get('repository_mode') == 'journal':
-        branch = (manifest.get('journal') or {}).get('branch')
-    else:
-        branch = (manifest.get('integration') or {}).get('branch')
+    branch = primary_guard_branch(manifest)
     if not isinstance(branch, str) or not branch:
         raise SyncwheelError('cannot persist primary guard without an integration branch')
     payload = {
@@ -1570,7 +1572,7 @@ def managed_hook_bundle_status(repo_root):
 
 def managed_push_guard_policy(repo_root, manifest):
     guard, guard_error = inspect_primary_guard(repo_root)
-    selected_branch = (manifest.get('integration') or {}).get('branch')
+    selected_branch = primary_guard_branch(manifest)
     branch_matches = bool(
         guard and guard['integrationBranch'] == selected_branch
     )

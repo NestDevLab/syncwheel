@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.8 - 2026-10-20
+
+- Evaluate managed guard readiness against the journal branch in journal repositories, using the same branch selection as hook installation. Continue rejecting mismatched guards and degraded hook bundles.
+
 ## 0.46.7 - 2026-10-20
 
 - Reconcile a changed desired publication tuple through the existing authenticated landing resolver instead of adopting an incompatible pending retry. Only proven unlanded operations are abandoned; landed evidence, zero-action recovery, ref claims and state leases remain enforced.
