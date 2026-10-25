@@ -1096,6 +1096,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(registry['lanes'], [])
 
     def test_worktree_open_enforces_capacity_without_creating_a_fifth_lane(self):
+        self.set_governed_worktree_capacity({'enforcement': 'error'})
         for number in range(4):
             self.run_cli('worktree', 'open', f'lane-{number}', '--json')
 
@@ -1115,7 +1116,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         manifest_path.write_text(json.dumps(data, indent=2) + '\n')
 
     def test_worktree_open_honors_configured_capacity_limit(self):
-        self.set_governed_worktree_capacity({'limit': 2})
+        self.set_governed_worktree_capacity({'limit': 2, 'enforcement': 'error'})
         self.run_cli('worktree', 'open', 'lane-0', '--json')
         self.run_cli('worktree', 'open', 'lane-1', '--json')
 
@@ -1136,6 +1137,39 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn('warning: governed worktree capacity reached (1)', text_result.stdout)
         registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
         self.assertEqual(len(registry['lanes']), 3)
+
+    def test_worktree_open_defaults_to_warning_without_changing_existing_lanes(self):
+        original = []
+        for number in range(4):
+            lane = json.loads(self.run_cli(
+                'worktree', 'open', f'lane-{number}', '--json'
+            ).stdout)['lane']
+            (Path(lane['path']) / 'draft.txt').write_text(f'draft {number}\n')
+            original.append(lane)
+        module = self.load_syncwheel_module()
+        self.assertEqual(module.governed_worktree_capacity(self.read_manifest()),
+                         {'limit': 4, 'enforcement': 'warn'})
+
+        opened = json.loads(self.run_cli('worktree', 'open', 'lane-4', '--json').stdout)
+        self.assertEqual(opened['lane']['id'], 'lane-4')
+        self.assertTrue(any('capacity reached (4)' in line for line in opened['warnings']))
+        text_result = self.run_cli('worktree', 'open', 'lane-5')
+        self.assertIn('warning: governed worktree capacity reached (4)', text_result.stdout)
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 6)
+        self.assertEqual(registry['lanes'][:4], original)
+        for number, lane in enumerate(original):
+            self.assertEqual(module.ref_tip(self.repo, lane['branch']), lane['base'])
+            self.assertEqual((Path(lane['path']) / 'draft.txt').read_text(), f'draft {number}\n')
+
+    def test_worktree_open_limit_only_policy_defaults_to_warning(self):
+        self.set_governed_worktree_capacity({'limit': 1})
+        self.run_cli('worktree', 'open', 'lane-0', '--json')
+        opened = json.loads(self.run_cli('worktree', 'open', 'lane-1', '--json').stdout)
+        self.assertTrue(any('capacity reached (1)' in line for line in opened['warnings']))
+        text_result = self.run_cli('worktree', 'open', 'lane-2')
+        self.assertIn('warning: governed worktree capacity reached (1)', text_result.stdout)
 
     def test_worktree_open_rejects_invalid_capacity_policy(self):
         for capacity, message in (
@@ -1173,6 +1207,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual((dirty_path / 'draft.txt').read_text(), 'leave this draft alone\n')
 
     def test_worktree_open_still_blocks_a_conflicting_lane_and_counts_dirty_lane(self):
+        self.set_governed_worktree_capacity({'enforcement': 'error'})
         dirty = json.loads(self.run_cli('worktree', 'open', 'reserved', '--json').stdout)['lane']
         (Path(dirty['path']) / 'draft.txt').write_text('keep\n')
         module = self.load_syncwheel_module()
@@ -1191,6 +1226,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual((Path(dirty['path']) / 'draft.txt').read_text(), 'keep\n')
 
     def test_expired_clean_lane_is_preserved_until_explicit_recovery(self):
+        self.set_governed_worktree_capacity({'enforcement': 'error'})
         opened = json.loads(self.run_cli(
             'worktree', 'open', 'expired', '--into', 'feature-a', '--json'
         ).stdout)

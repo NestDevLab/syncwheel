@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.9 - 2026-10-25
+
+- Warn by default when governed worktree capacity is reached, including manifests that specify only a limit. Continue opening independent lanes without changing existing lanes, and preserve an explicit `enforcement: "error"` hard cap.
+
 ## 0.46.8 - 2026-10-20
 
 - Evaluate managed guard readiness against the journal branch in journal repositories, using the same branch selection as hook installation. Continue rejecting mismatched guards and degraded hook bundles.
