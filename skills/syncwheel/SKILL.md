@@ -3,7 +3,7 @@ name: syncwheel
 description: Use Syncwheel for deterministic, multi-agent-safe Git maintenance — PR branches, stacked PRs, draft stacks, integration branches, and pinned deployment-channel branches, all from a single checkout. Use whenever you are about to create a PR branch, compose a deployment channel, manage a fork/upstream/integration or PR-stack workflow, own a commit before you know which PR it belongs to, rebuild or publish a stacked PR, or coordinate Git work on a repo that other people or agents may touch concurrently or that contains a `.syncwheel/` directory. Also covers the decision of whether to commit the Syncwheel manifest (own repo) or keep it untracked (external contribution).
 allowed-tools: [Bash]
 metadata:
-  version: "1.1"
+  version: "1.2"
 ---
 
 # Syncwheel
@@ -183,8 +183,9 @@ The default light lane is for editing and committing only. It receives no
 dependency provisioning; use `--full` only for an explicitly necessary
 dependency, build, test, or debugging surface. This is not a security sandbox,
 so do not defeat the light-lane boundary with raw install/test commands. The
-lane is clone-local and bounded to four active entries unless the manifest's
-`governed_worktree_capacity` sets another `limit` or `enforcement: "warn"`. After its commits are
+clone-local lane warns at four active entries by default, permitting another
+lane. `governed_worktree_capacity` can set another `limit`; only explicit
+`enforcement: "error"` enforces a hard cap. After its commits are
 owned through the existing `stack create`, `stack add`, or
 `stack capture-integration` flow, Syncwheel stores a local recovery ref and
 reaps only a clean lane. A missing lane with an expired lease or a known-dead

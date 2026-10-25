@@ -3863,7 +3863,7 @@ def normalize_governed_worktree_capacity(value, path='manifest'):
     limit = value.get('limit', GOVERNED_WORKTREE_DEFAULT_CAPACITY)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
         raise SyncwheelError(f'{key}.limit must be a positive integer')
-    enforcement = value.get('enforcement', 'error')
+    enforcement = value.get('enforcement', 'warn')
     if enforcement not in GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS:
         raise SyncwheelError(
             f"{key}.enforcement must be one of: {', '.join(GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS)}"
