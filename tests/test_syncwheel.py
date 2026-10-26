@@ -21,6 +21,118 @@ FIXTURE = REPO_ROOT / 'tests' / 'fixtures' / 'simple-repo'
 
 
 class SyncwheelFixtureTest(unittest.TestCase):
+    def captured_personal_lane(self, name='captured-personal'):
+        manifest_path = self.repo / '.syncwheel/manifests/captured.local.json'
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps(self.read_manifest()) + '\n')
+        lane = json.loads(self.run_cli(
+            'worktree', 'open', name, '--into', 'feature-a',
+            '--manifest', str(manifest_path), '--json',
+        ).stdout)['lane']
+        path = Path(lane['path'])
+        (path / 'captured.txt').write_text('preserve captured work\n')
+        self.git('-C', str(path), 'add', 'captured.txt')
+        self.git('-C', str(path), 'commit', '-qm', 'feat: captured fixture')
+        tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        self.run_cli('stack', 'add', 'feature-a', tip,
+                     '--repo', str(self.repo), '--manifest', str(manifest_path), cwd=path)
+        module = self.load_syncwheel_module()
+        pending = next(item for item in module.load_governed_worktree_registry(self.repo)[0]['lanes']
+                       if item['id'] == name)
+        self.assertEqual(pending['state'], 'captured_pending_cleanup')
+        self.assertTrue(path.is_dir())
+        return manifest_path, lane, tip
+
+    def test_personal_captured_lane_has_named_lossless_release_without_gc(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        released = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+        self.assertFalse(Path(lane['path']).exists())
+        module = self.load_syncwheel_module()
+        metadata_paths = [manifest, module.governed_worktree_registry_path(self.repo)]
+        metadata_paths.extend(sorted(module.ledger_events_dir(self.repo, manifest).glob('*.jsonl')))
+        before_repeat = {str(path): path.read_bytes() for path in metadata_paths}
+        repeat = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertTrue(repeat['idempotent'])
+        self.assertEqual(before_repeat, {str(path): path.read_bytes() for path in metadata_paths})
+        self.assertEqual(
+            sorted(module.ledger_events_dir(self.repo, manifest).glob('*.jsonl')),
+            [path for path in metadata_paths if path.suffix == '.jsonl'],
+        )
+
+    def test_personal_captured_lane_remedy_names_release_not_global_gc(self):
+        manifest, lane, _ = self.captured_personal_lane()
+        status = json.loads(self.run_cli('status', '--manifest', str(manifest), '--json').stdout)
+        pending = next(item for item in status['governed_worktrees']['lanes']
+                       if item['id'] == lane['id'])
+        self.assertIn('worktree release', pending['remedy'])
+        self.assertNotIn('gc --apply', pending['remedy'])
+        self.assertIn(lane['id'], pending['remedy'])
+        command = shlex.split(pending['remedy'].removeprefix('retry with: '))
+        self.assertEqual(command[command.index('--manifest') + 1], str(manifest))
+        self.assertEqual(command[command.index('--reason') + 1], 'complete captured lane cleanup')
+
+    def test_personal_captured_lane_retries_stale_cwd_reason_but_protects_live_cwd(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['pending_reason'] = 'current_directory'
+        module.save_governed_worktree_registry(self.repo, registry)
+        path = Path(lane['path'])
+        refused = self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--repo', str(self.repo), '--manifest', str(manifest), '--apply',
+            cwd=path, expected=2,
+        )
+        self.assertIn('current_directory', refused.stderr)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+        self.assertEqual((path / 'captured.txt').read_text(), 'preserve captured work\n')
+        released = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+
+    def test_personal_captured_lane_release_preserves_unrelated_dirty_lane(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        foreign = json.loads(self.run_cli(
+            'worktree', 'open', 'foreign-active', '--into', 'feature-b',
+            '--manifest', str(manifest), '--json',
+        ).stdout)['lane']
+        draft = Path(foreign['path']) / 'draft.txt'
+        draft.write_text('unique foreign draft\n')
+        module = self.load_syncwheel_module()
+        registry_before = next(item for item in module.load_governed_worktree_registry(self.repo)[0]['lanes']
+                               if item['id'] == foreign['id'])
+        released = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+        registry_after = next(item for item in module.load_governed_worktree_registry(self.repo)[0]['lanes']
+                              if item['id'] == foreign['id'])
+        self.assertEqual(registry_before, registry_after)
+        self.assertEqual(draft.read_text(), 'unique foreign draft\n')
+
+    def test_personal_captured_lane_release_refuses_unique_dirty_bytes(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        path = Path(lane['path'])
+        draft = path / 'unique.txt'
+        draft.write_text('preserve unpublished bytes\n')
+        result = self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', expected=2,
+        )
+        self.assertIn('dirty', result.stderr)
+        self.assertEqual(draft.read_text(), 'preserve unpublished bytes\n')
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+
     def test_stack_close_help_teaches_absorbed_squash_delivery(self):
         result = self.run_cli('stack', 'close', '--help')
         help_text = ' '.join(result.stdout.split())

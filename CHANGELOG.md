@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.10 - 2026-10-26
+
+- Direct captured-lane recovery to the existing named `worktree release` operation with the selected manifest, rather than global GC. Retry persisted current-directory/in-use blockers through the live cleanup guards; preserve recovery refs and unrelated lanes.
+
 ## 0.46.9 - 2026-10-25
 
 - Warn by default when governed worktree capacity is reached, including manifests that specify only a limit. Continue opening independent lanes without changing existing lanes, and preserve an explicit `enforcement: "error"` hard cap.
