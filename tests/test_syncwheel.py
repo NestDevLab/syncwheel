@@ -3120,8 +3120,10 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         old_key = pending['cleanup_idempotency_key']
         self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
         remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
-        self.assertIn('syncwheel gc --apply', remedy)
+        self.assertIn('syncwheel worktree release post-anchor-advance', remedy)
+        self.assertNotIn('gc --apply', remedy)
 
+        # Legacy GC remains safe even though the scoped remedy names release.
         retried = json.loads(self.run_cli(
             'gc', '--apply', '--no-fetch', '--json'
         ).stdout)
@@ -3194,7 +3196,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
 
         remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
-        self.assertIn('syncwheel gc --apply', remedy)
+        self.assertIn('syncwheel worktree release actual-advanced-release', remedy)
+        self.assertNotIn('gc --apply', remedy)
         released = json.loads(self.run_cli(
             'worktree', 'release', 'actual-advanced-release',
             '--reason', 'operator release', '--apply', '--json',
