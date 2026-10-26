@@ -216,6 +216,12 @@ active-active channel must use the coordination remote.
 - preview `worktree release <lane> --reason <why>` before using `--apply` for a
   dead or abandoned lane; apply records the reason in the ledger and refuses an
   existing dirty worktree with its recovery remedy
+- for `captured_pending_cleanup`, first leave the lane directory, then preview the
+  named `worktree release <lane> --reason "complete captured lane cleanup"` with
+  the same `--manifest` or `--personal` selector; add `--apply` only after review.
+  This works without active-active GC and preserves a recovery ref. Dirty bytes,
+  live users and foreign locks still stop cleanup; never release another owner's
+  lane merely because its warning is visible
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback
