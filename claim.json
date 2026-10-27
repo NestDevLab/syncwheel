@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/preserve-published-ancestry"
-  ],
-  "claimed_at": "2026-10-27T17:18:50+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-27T17:51:40+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "3fe9ee2c-71d0-4fbd-9ec3-f13960ba7d93",
-  "publication_scope": "partial",
+  "operation_token": "8629a0f7-482f-4bfc-9ba4-d9ed29fd2a4e",
+  "publication_scope": "close:preserve-published-ancestry",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/preserve-published-ancestry",
-  "syncwheel_version": "0.46.10"
+  "syncwheel_version": "0.46.11"
 }
