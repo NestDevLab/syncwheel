@@ -7860,6 +7860,7 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
         if published_parent != {'tip': intent['published_tip'], 'state_tip': intent['state_tip']}:
             raise SyncwheelError('integration reconciliation intent has an unbound published parent')
         observation = {
+            'status': 'current',  # Qualification of the frozen state, not a new remote observation.
             'state': state, 'state_tip': intent['state_tip'],
             'config': coordination_config(manifest), 'remote_refs': intent['remote_refs'],
             'integration_ref': f"refs/heads/{branch}", 'published_tip': intent['published_tip'],
