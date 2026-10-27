@@ -39,7 +39,7 @@
     "refs/heads/pr/oikuma-control-divergence": "4f02732949e05ce756e36d9c1e5cbaa8ac68c234",
     "refs/heads/pr/oikuma-null-peer-repair": "35e4034cf121fcbfc7c1e028fda401b944b0effa",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
-    "refs/heads/pr/partial-intent-desired-refs": "ee3a732393e447338300c8af81c642025e9ba2a3",
+    "refs/heads/pr/partial-intent-desired-refs": "d13d5ad39b31c06b96c9414c0c41d2f6000bccc8",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/preserve-control-divergence": "d0ae5e11976a4b0fabf7861e371dcc1d78b86fb7",
@@ -91,7 +91,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-27T17:27:14+00:00",
+  "created_at": "2026-10-27T17:27:28+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -235,7 +235,6 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "partial-intent-desired-refs",
         "preserve-published-ancestry"
       ],
       "strategy": "cherry-pick"
@@ -246,21 +245,6 @@
       "strategy": "merge"
     },
     "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/partial-intent-desired-refs",
-        "commits": [
-          "04ec7ddfec77a3b710f64d7c1d1d1cca210c9fc6",
-          "2e68fd634f7009b3a4056b19fb4468cd64b7c5f5"
-        ],
-        "id": "partial-intent-desired-refs",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
       {
         "base": {
           "kind": "remote-ref",
@@ -279,11 +263,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "3fa72cb3-aca5-4994-b614-fd70ef3fed3f",
-  "parent_state": "bb5bc1d2363f7b654465bbe73af5b3ff6f2371f6",
+  "operation_token": "9f7a1b1c-fef2-4615-ae90-ee9e6735d13c",
+  "parent_state": "5d89181f922f8890b8555a879b3e9e8e97d0c00a",
   "projection_status": "partial",
-  "publication_id": "1238220a-9f6c-4165-bb33-8937bb7350ab",
-  "publication_scope": "close:resolve-prepared-projection",
+  "publication_id": "84fe21c1-18d1-4dda-9e99-b56116e7e42a",
+  "publication_scope": "close:partial-intent-desired-refs",
   "schema_version": 2,
   "syncwheel_version": "0.46.10",
   "tombstones": [
@@ -1170,6 +1154,18 @@
       "ref": "refs/heads/pr/resolve-prepared-projection",
       "remote_tip": null,
       "stack": "resolve-prepared-projection"
+    },
+    {
+      "archive": {
+        "planDigest": "1032616477edb88023be1524e32b26758ece22b48579d09c705f77e0281d92b6",
+        "retentionDays": 30
+      },
+      "branch": "pr/partial-intent-desired-refs",
+      "closed_at": "2026-10-27T17:27:24+00:00",
+      "reason": "archived",
+      "ref": "refs/heads/pr/partial-intent-desired-refs",
+      "remote_tip": null,
+      "stack": "partial-intent-desired-refs"
     }
   ]
 }
