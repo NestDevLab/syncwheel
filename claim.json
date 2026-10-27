@@ -1,0 +1,11 @@
+{
+  "changed_refs": [],
+  "claimed_at": "2026-10-27T17:11:24+00:00",
+  "closed": true,
+  "coordination_id": "default",
+  "operation_token": "1708dc4f-123d-4d2c-bd11-da7954d4d54e",
+  "publication_scope": "close:preserve-control-divergence",
+  "reason": "merged",
+  "source_ref": "refs/heads/pr/preserve-control-divergence",
+  "syncwheel_version": "0.46.10"
+}
