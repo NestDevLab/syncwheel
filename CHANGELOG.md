@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.12 - 2026-10-27
+
+- Preserve frozen observation qualification when applying or recovering three-parent reconciliation, so valid absorbed historical source proofs remain available without changing remote or CAS lease checks.
+
 ## 0.46.11 - 2026-10-27
 
 - Preserve exact published ancestry as a third reconciliation parent when independently delivered product history meets validated control-only local divergence. Bind the frozen published state through portable proofs, crash recovery and receipts; retain existing product, history and lease guards.

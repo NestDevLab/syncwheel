@@ -13901,22 +13901,74 @@ sys.exit(module.main())
         }
 
     def prepare_independently_delivered_control_divergence(self, label):
-        fixture = self.prepare_canonical_control_divergence(label)
-        repo, module = fixture['repo'], fixture['module']
-        # The approved delivery has the published product bytes but independent
-        # ancestry, as when integration and canonical delivery use separate refs.
-        delivery = self.git(
-            repo, 'commit-tree', f"{fixture['published']}^{{tree}}",
-            '-p', fixture['baseline'], '-m', 'test: independently delivered product',
-        ).stdout.strip()
-        fixture['manifest']['integration']['base'] = delivery
-        module.save_manifest(fixture['manifest_path'], fixture['manifest'])
-        self.git(repo, 'add', '.syncwheel/manifest.json')
-        self.git(repo, 'commit', '-qm', 'test: select independent canonical delivery')
-        fixture['local'] = self.git(repo, 'rev-parse', 'main').stdout.strip()
-        fixture['delivery'] = delivery
-        self.git(repo, 'merge-base', '--is-ancestor', fixture['published'], delivery, expected=1)
-        return fixture
+        origin = self.create_remote(label)
+        repo = self.clone(origin, label)
+        branch = 'integration/shared'
+        self.init_coordinated(repo, integration=branch, integration_membership='required')
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        prototype = self.commit_on_branch(repo, 'pr/historical-source', 'delivered.txt')
+        self.run_cli(repo, 'stack', 'create', 'historical-source', prototype,
+                     '--branch', 'pr/historical-source')
+        self.run_cli(repo, 'stack', 'push', 'historical-source')
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'publish historical prototype')
+        self.run_cli(repo, 'int', 'push')
+        baseline = self.git(repo, 'rev-parse', branch).stdout.strip()
+        self.git(repo, 'switch', '-q', 'pr/historical-source')
+        (repo / 'delivered.txt').write_text('canonical delivered product\n')
+        self.git(repo, 'add', 'delivered.txt')
+        self.git(repo, 'commit', '-qm', 'test: refine historical product')
+        self.git(repo, 'switch', '-q', branch)
+        self.run_cli(repo, 'stack', 'set', 'historical-source',
+                     f'{prototype}^..pr/historical-source')
+        self.run_cli(repo, 'stack', 'push', 'historical-source')
+        delivery_clone = self.clone(origin, label + '-delivery')
+        self.git(delivery_clone, 'merge', '--squash', 'origin/pr/historical-source')
+        self.git(delivery_clone, 'commit', '-qm', 'test: squash refined product into canonical delivery')
+        self.git(delivery_clone, 'push', 'origin', 'main')
+        self.git(repo, 'fetch', '-q', 'origin')
+        delivery = self.git(repo, 'rev-parse', 'origin/main').stdout.strip()
+        self.run_cli(repo, 'stack', 'close', 'historical-source', '--reason', 'absorbed')
+        # The prototype differs from the final squash. Only the real absorbed
+        # close receipt can explain its still-published integration patch.
+        self.assertNotIn(module.commit_patch_id(repo, prototype),
+                         module.patch_ids_reachable_from_ref(repo, delivery))
+        source = self.commit_on_branch(repo, 'pr/local-design', 'local-design.txt')
+        self.run_cli(repo, 'stack', 'create', 'local-design', source, '--branch', 'pr/local-design')
+        manifest, path = module.load_manifest(repo)
+        for revision in (1, 2):
+            manifest['stacks'][0]['meta']['fixture_revision'] = revision
+            module.save_manifest(path, manifest)
+            self.git(repo, 'add', '.syncwheel/manifest.json')
+            self.git(repo, 'commit', '-qm', f'test: independent control revision {revision}')
+        local = self.git(repo, 'rev-parse', branch).stdout.strip()
+        publisher = self.clone(origin, label + '-publisher')
+        self.git(publisher, 'switch', '-q', branch)
+        published_manifest, published_path = module.load_manifest(publisher)
+        published_path.write_text(json.dumps(published_manifest, indent=4) + '\n')
+        self.git(publisher, 'add', '.syncwheel/manifest.json')
+        self.git(publisher, 'commit', '-qm', 'test: published control-only revision')
+        self.git(publisher, 'push', '--no-verify', 'origin', branch)
+        published = self.git(publisher, 'rev-parse', branch).stdout.strip()
+        plan, _ = module.coordination_repair_plan(
+            repo, manifest, f'refs/heads/{branch}', module.COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+        )
+        module.apply_coordination_repair_plan(repo, manifest, plan)
+        self.git(repo, 'fetch', '-q', 'origin')
+        self.git(repo, 'merge-base', '--is-ancestor', published, delivery, expected=1)
+        self.git(repo, 'merge-base', '--is-ancestor', published, local, expected=1)
+        observation = module.observe_published_integration_tip(repo, manifest)
+        inputs = module.integration_projection_input_snapshot(repo, manifest)
+        closed = module.historically_closed_integration_commits(
+            repo, published, observation, candidates=[prototype],
+            delivery_tip=delivery, delivery_observation=inputs['refs'][0],
+        )
+        self.assertEqual(closed, {prototype})
+        return {
+            'origin': origin, 'repo': repo, 'module': module, 'manifest': manifest,
+            'manifest_path': path, 'local': local, 'published': published,
+            'baseline': baseline, 'delivery': delivery, 'branch': branch,
+        }
 
     def test_independent_control_divergence_preserves_three_histories_and_is_idempotent(self):
         fixture = self.prepare_independently_delivered_control_divergence('independent-control')
@@ -13928,7 +13980,7 @@ sys.exit(module.main())
             gitignore_bytes=(repo / '.gitignore').read_bytes(),
         )
         self.run_cli(repo, 'int', 'rebuild', '--reason', 'preserve independent published history')
-        final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        final = self.git(repo, 'rev-parse', fixture['branch']).stdout.strip()
         parents = self.git(repo, 'show', '-s', '--format=%P', final).stdout.split()
         self.assertEqual(parents, [fixture['local'], replay, fixture['published']])
         self.assertEqual(module.ref_tree(repo, final), expected_tree)
@@ -13939,7 +13991,7 @@ sys.exit(module.main())
         observation = module.observe_published_integration_tip(repo, selected)
         self.assertIsNotNone(module.integration_reconciliation_proof(repo, final, path, observation))
         self.run_cli(repo, 'int', 'rebuild', '--reason', 'repeat independent published history')
-        self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), final)
+        self.assertEqual(self.git(repo, 'rev-parse', fixture['branch']).stdout.strip(), final)
         self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
         self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, before_remote)
 
@@ -13961,7 +14013,7 @@ sys.exit(module.main())
                 self.assertEqual(len(pending), 1)
                 frozen = pending[0]['payload']['expected_control_commit']
                 self.run_cli(repo, 'int', 'rebuild', '--reason', 'recover exact independent ancestry')
-                self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), frozen)
+                self.assertEqual(self.git(repo, 'rev-parse', fixture['branch']).stdout.strip(), frozen)
                 self.assertEqual(self.git(repo, 'show', '-s', '--format=%P', frozen).stdout.split()[2], fixture['published'])
                 self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
                 self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, before_remote)
@@ -13971,10 +14023,11 @@ sys.exit(module.main())
         fixture = self.prepare_independently_delivered_control_divergence('independent-portable')
         repo, module = fixture['repo'], fixture['module']
         self.run_cli(repo, 'int', 'rebuild', '--reason', 'qualify independent published ancestry')
-        final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        final = self.git(repo, 'rev-parse', fixture['branch']).stdout.strip()
         self.run_cli(repo, 'stack', 'push', 'local-design')
         self.run_cli(repo, 'int', 'push')
         peer = self.clone(fixture['origin'], 'independent-fresh-peer')
+        self.git(peer, 'switch', '-q', fixture['branch'])
         selected, path = module.load_manifest(peer)
         self.assertFalse(module.load_control_manifest_events(peer, path))
         observation = module.observe_published_integration_tip(peer, selected)
@@ -13982,7 +14035,7 @@ sys.exit(module.main())
         self.assertIsNotNone(proof)
         self.assertEqual(proof['parents'][0], fixture['local'])
         self.assertEqual(proof['parents'][2], fixture['published'])
-        self.assertEqual(self.git(peer, 'rev-parse', 'main').stdout.strip(), final)
+        self.assertEqual(self.git(peer, 'rev-parse', fixture['branch']).stdout.strip(), final)
         self.assertEqual((peer / 'delivered.txt').read_text(), 'canonical delivered product\n')
         self.assertTrue((peer / 'local-design.txt').exists())
 
