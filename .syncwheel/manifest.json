@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "resolve-prepared-projection",
       "partial-intent-desired-refs",
       "preserve-published-ancestry"
     ],
@@ -45,25 +44,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "id": "resolve-prepared-projection",
-      "branch": "pr/resolve-prepared-projection",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "98214e879f7e1276defca75ee398988599c29a75",
-        "8899780ac274f3b873b596e325d57c1ec0efd7e7"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Explicit exact-path prepared projection resolution with durable witness and unchanged recovery leases"
-      }
-    },
     {
       "id": "partial-intent-desired-refs",
       "branch": "pr/partial-intent-desired-refs",
