@@ -34,7 +34,8 @@
     "stacks": [
       "resolve-prepared-projection",
       "partial-intent-desired-refs",
-      "preserve-control-divergence"
+      "preserve-control-divergence",
+      "preserve-published-ancestry"
     ],
     "strategy": "cherry-pick"
   },
@@ -97,6 +98,22 @@
       },
       "meta": {
         "purpose": "Preserve local and published integration ancestry across validated control-only divergence"
+      }
+    },
+    {
+      "id": "preserve-published-ancestry",
+      "branch": "pr/preserve-published-ancestry",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Preserve validated local and published integration histories"
       }
     }
   ],
