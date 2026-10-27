@@ -1025,11 +1025,13 @@ def atomic_write_private_json(path, payload, *, indent=None):
     return path
 
 
+def primary_guard_branch(manifest):
+    section = 'journal' if manifest.get('repository_mode') == 'journal' else 'integration'
+    return (manifest.get(section) or {}).get('branch')
+
+
 def primary_guard_payload(manifest, *, enabled=True, reason=None):
-    if manifest.get('repository_mode') == 'journal':
-        branch = (manifest.get('journal') or {}).get('branch')
-    else:
-        branch = (manifest.get('integration') or {}).get('branch')
+    branch = primary_guard_branch(manifest)
     if not isinstance(branch, str) or not branch:
         raise SyncwheelError('cannot persist primary guard without an integration branch')
     payload = {
@@ -1570,7 +1572,7 @@ def managed_hook_bundle_status(repo_root):
 
 def managed_push_guard_policy(repo_root, manifest):
     guard, guard_error = inspect_primary_guard(repo_root)
-    selected_branch = (manifest.get('integration') or {}).get('branch')
+    selected_branch = primary_guard_branch(manifest)
     branch_matches = bool(
         guard and guard['integrationBranch'] == selected_branch
     )
@@ -3861,7 +3863,7 @@ def normalize_governed_worktree_capacity(value, path='manifest'):
     limit = value.get('limit', GOVERNED_WORKTREE_DEFAULT_CAPACITY)
     if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
         raise SyncwheelError(f'{key}.limit must be a positive integer')
-    enforcement = value.get('enforcement', 'error')
+    enforcement = value.get('enforcement', 'warn')
     if enforcement not in GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS:
         raise SyncwheelError(
             f"{key}.enforcement must be one of: {', '.join(GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS)}"
@@ -6661,17 +6663,46 @@ def integration_reconciliation_source(repo_root, manifest_path):
     }
 
 
-def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs):
+def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs, published_parent=None):
     """Keep the declared replay graph and the prior local history as distinct parents."""
-    proof = json.dumps(
-        {'version': 2, 'inputs': inputs, 'manifest_digest': manifest_digest(manifest)},
-        sort_keys=True, separators=(',', ':'),
-    )
+    payload = {'version': 2, 'inputs': inputs, 'manifest_digest': manifest_digest(manifest)}
+    if published_parent is not None:
+        payload.update(version=3, published_parent=published_parent)
+    proof = json.dumps(payload, sort_keys=True, separators=(',', ':'))
     return git(
         repo_root, 'commit-tree', tree, '-p', local_tip, '-p', replay_tip,
+        *(['-p', published_parent['tip']] if published_parent is not None else []),
         '-m', 'chore: reconcile Syncwheel integration history\n\nSyncwheel-Reconciliation: ' + proof,
         env=replay_commit_env(repo_root, replay_tip),
     ).stdout.strip()
+
+
+def verify_reconciliation_published_parent(repo_root, manifest, local_tip, replay_tip,
+                                          published_parent, inputs, observation):
+    """Qualify one frozen published history without granting product-tree ownership."""
+    if (not isinstance(published_parent, dict)
+            or set(published_parent) != {'tip', 'state_tip'}
+            or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40}', value)
+                   for value in published_parent.values())):
+        raise SyncwheelError('integration reconciliation has an invalid published parent')
+    tip, state_tip = published_parent['tip'], published_parent['state_tip']
+    if (local_tip == replay_tip or branch_contains(repo_root, local_tip, tip)
+            or branch_contains(repo_root, replay_tip, tip)
+            or not integration_divergence_is_control_only(repo_root, local_tip, tip)):
+        raise SyncwheelError('integration reconciliation published parent is not qualified control divergence')
+    config = coordination_config(manifest)
+    state = coordination_state_from_commit(repo_root, state_tip, config['id'])
+    ref = f"refs/heads/{manifest['integration']['branch']}"
+    if state['managed_refs'].get(ref) != tip:
+        raise SyncwheelError('integration reconciliation published parent differs from its frozen state')
+    verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
+    coordination_state_chain_contains(repo_root, config['id'], state_tip, observation['state_tip'])
+    pinned, _ = integration_reconciliation_inputs(repo_root, manifest, inputs)
+    shared = shared_derived_provenance_records(repo_root, pinned, state)
+    integration_reconciliation_history(
+        repo_root, pinned, tip, shared, observation=observation,
+        delivery_tip=inputs['refs'][0]['tip'], delivery_observation=inputs['refs'][0],
+    )
 
 
 def integration_reconciliation_inputs(repo_root, manifest, inputs):
@@ -6800,14 +6831,23 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         proof = json.loads(values[0])
     except ValueError:
         return None
-    if not isinstance(proof, dict) or proof.get('version') != 2 or not isinstance(proof.get('inputs'), dict):
+    if not isinstance(proof, dict) or proof.get('version') not in (2, 3) or not isinstance(proof.get('inputs'), dict):
         return None
     control = manifest_from_tree(repo_root, commit, integration_manifest_path(repo_root))
     parents = git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
-    if control is None or len(parents) != 2 or manifest_digest(control) != proof.get('manifest_digest'):
+    if control is None or len(parents) != (3 if proof['version'] == 3 else 2) or manifest_digest(control) != proof.get('manifest_digest'):
         return None
     inputs = proof['inputs']
     pinned, overrides = integration_reconciliation_inputs(repo_root, control, inputs)
+    published_parent = proof.get('published_parent')
+    if proof['version'] == 3:
+        if not observation or not isinstance(published_parent, dict) or published_parent.get('tip') != parents[2]:
+            return None
+        verify_reconciliation_published_parent(
+            repo_root, control, parents[0], parents[1], published_parent, inputs, observation,
+        )
+    elif published_parent is not None:
+        return None
     if materialize_integration_replay(repo_root, pinned, overrides) != parents[1]:
         return None
     ignore = tree_path_entry(repo_root, commit, '.gitignore')
@@ -6820,7 +6860,7 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
     )
     if (
         tree != ref_tree(repo_root, commit)
-        or integration_reconciliation_object(repo_root, control, *parents, tree, inputs) != commit
+        or integration_reconciliation_object(repo_root, control, *parents[:2], tree, inputs, published_parent) != commit
     ):
         return None
     events = load_control_manifest_events(repo_root, manifest_path)
@@ -6830,7 +6870,9 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         and event['payload'].get('inputs') == inputs
         and event['payload'].get('replay_tip') == parents[0]
         and event['payload'].get('detached_replay_tip') == parents[1]
+        and event['payload'].get('published_parent') == published_parent
         and receipts.get(key, {}).get('type') == 'manifest_saved'
+        and receipts.get(key, {}).get('payload', {}).get('context', {}).get('published_parent') == published_parent
         for key, event in intents.items()
     )
     witness = integration_reconciliation_published_witness(
@@ -7625,8 +7667,9 @@ def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
         )
         if not proof:
             continue
-        old, replay = proof['parents']
-        carried.update(wanted.intersection(rev_list(repo_root, f'{replay}..{old}')))
+        replay = proof['parents'][1]
+        for old in [proof['parents'][0], *proof['parents'][2:]]:
+            carried.update(wanted.intersection(rev_list(repo_root, f'{replay}..{old}')))
         if carried == wanted:
             break
     return carried
@@ -7737,7 +7780,8 @@ def integration_reconciliation_history(
     carried_history = {
         old_commit
         for proof in proofs.values()
-        for old_commit in rev_list(repo_root, f"{proof['parents'][1]}..{proof['parents'][0]}")
+        for parent in [proof['parents'][0], *proof['parents'][2:]]
+        for old_commit in rev_list(repo_root, f"{proof['parents'][1]}..{parent}")
     }
     replay_ranges = [(base, tip)] if detached_replay else []
     replay_ranges.extend((proof['inputs']['refs'][0]['tip'], proof['parents'][1]) for proof in proofs.values())
@@ -7811,6 +7855,18 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
     ignore_bytes = tree_path_bytes(repo_root, ignore_entry)
     source_ignore = intent['source_lease']['gitignore']
     state = coordination_state_from_commit(repo_root, intent['state_tip'], coordination_config(manifest)['id'])
+    published_parent = intent.get('published_parent')
+    if published_parent is not None:
+        if published_parent != {'tip': intent['published_tip'], 'state_tip': intent['state_tip']}:
+            raise SyncwheelError('integration reconciliation intent has an unbound published parent')
+        observation = {
+            'state': state, 'state_tip': intent['state_tip'],
+            'config': coordination_config(manifest), 'remote_refs': intent['remote_refs'],
+            'integration_ref': f"refs/heads/{branch}", 'published_tip': intent['published_tip'],
+        }
+        verify_reconciliation_published_parent(
+            repo_root, manifest, local_tip, replay_tip, published_parent, intent['inputs'], observation,
+        )
     shared = shared_derived_provenance_records(repo_root, manifest, state)
     provenance_before, store_after, provenance_after = integration_reconciliation_provenance(
         manifest, intent['provenance_store'], shared,
@@ -7833,10 +7889,10 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
         raise SyncwheelError('integration reconciliation intent does not bind its replay and source bytes')
     parents = git(repo_root, 'show', '-s', '--format=%P', final_tip).stdout.split()
     if (
-        parents != [local_tip, replay_tip]
+        parents != [local_tip, replay_tip, *([published_parent['tip']] if published_parent is not None else [])]
         or ref_tree(repo_root, final_tip) != intent['final_tree']
         or integration_reconciliation_object(
-            repo_root, manifest, local_tip, replay_tip, intent['final_tree'], intent['inputs']
+            repo_root, manifest, local_tip, replay_tip, intent['final_tree'], intent['inputs'], published_parent
         ) != final_tip
         or manifest_digest(manifest) != intent['expected_manifest_digest']
     ):
@@ -7928,7 +7984,8 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
         control_manifest_event_payload(
             repo_root, manifest_path, manifest, final_tip, 'reconciliation',
             intent['reason'], intent['command'],
-            {'replay_tip': local_tip, 'version': 2, 'detached_replay_tip': replay_tip},
+            {'replay_tip': local_tip, 'version': 2, 'detached_replay_tip': replay_tip,
+             **({'published_parent': published_parent} if published_parent is not None else {})},
             operation_id=intent['operation_id'],
         ),
         manifest_path,
@@ -8050,8 +8107,15 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         provenance, store_after, provenance_after = integration_reconciliation_provenance(manifest, store, shared)
         pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, inputs)
         replay_tip = materialize_integration_replay(repo_root, pinned, overrides)
+        published_parent = None
         if control_divergence and not branch_contains(repo_root, replay_tip, observed['published_tip']):
-            raise SyncwheelError('integration reconciliation replay does not preserve published history')
+            published_parent = {'tip': observed['published_tip'], 'state_tip': observed['state_tip']}
+            try:
+                verify_reconciliation_published_parent(
+                    repo_root, manifest, local_tip, replay_tip, published_parent, inputs, observed,
+                )
+            except SyncwheelError as exc:
+                raise SyncwheelError('integration reconciliation replay does not preserve published history') from exc
         ignore = regular_checkout_path_bytes(repo_root, '.gitignore')
         if ignore is None:
             raise SyncwheelError('integration reconciliation requires regular ignore bytes')
@@ -8066,7 +8130,7 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         )
         integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
                                            detached_replay=True)
-        final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)
+        final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs, published_parent)
                      if replay_tip != local_tip else None)
         after = observe_published_integration_tip(repo_root, manifest)
         if (
@@ -8097,6 +8161,7 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
                 'reconciliation', reason, command, str(uuid.uuid4()),
             ),
             'version': 2, 'detached_replay_tip': replay_tip, 'final_tree': tree,
+            **({'published_parent': published_parent} if published_parent is not None else {}),
             'state_tip': observed['state_tip'], 'published_tip': observed['published_tip'],
             'remote_refs': observed['remote_refs'], 'inputs': inputs, 'source_lease': source,
             'manifest_path': str(Path(manifest_path).absolute()),
@@ -10628,17 +10693,20 @@ def governed_worktree_lane_lease_expired(lane, now):
     return bool(expires and expires <= now)
 
 
-def governed_worktree_pending_remedy(manifest, lane):
-    if lane.get('cleanup_event_type') == 'governed_worktree_released':
-        reason = shlex.quote(lane.get('cleanup_event_reason') or 'retry requested release')
-        return (
-            f"retry with: syncwheel worktree release {shlex.quote(lane['id'])} "
-            f'--reason {reason} --apply'
-        )
-    return 'retry with: syncwheel gc --apply; ' + governed_lane_remedy(manifest, lane)
+def governed_worktree_pending_remedy(manifest, lane, manifest_path=None):
+    reason = shlex.quote(
+        lane.get('cleanup_event_reason')
+        if lane.get('cleanup_event_type') == 'governed_worktree_released'
+        and lane.get('cleanup_event_reason') else 'complete captured lane cleanup'
+    )
+    selector = f' --manifest {shlex.quote(str(manifest_path))}' if manifest_path else ''
+    return (
+        f"retry with: syncwheel worktree release {shlex.quote(lane['id'])} "
+        f'--reason {reason}{selector} --apply'
+    )
 
 
-def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
+def governed_worktree_lane_status(repo_root, manifest, lane, now=None, manifest_path=None):
     now = now or datetime.datetime.now(datetime.timezone.utc)
     root = governed_worktree_root(repo_root, manifest)
     registered_path = Path(lane['path']).resolve(strict=False)
@@ -10666,13 +10734,13 @@ def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
         if lane.get('pending_reason') == 'ledger_pending':
             status.update(
                 code='ledger_pending',
-                remedy=governed_worktree_pending_remedy(manifest, lane),
+                remedy=governed_worktree_pending_remedy(manifest, lane, manifest_path),
             )
         return status
     if lane['state'] == 'captured_pending_cleanup':
         status.update(
             code=lane.get('pending_reason') or 'captured_pending_cleanup',
-            remedy=governed_worktree_pending_remedy(manifest, lane),
+            remedy=governed_worktree_pending_remedy(manifest, lane, manifest_path),
         )
         return status
     if (
@@ -10729,10 +10797,11 @@ def governed_worktree_lane_status(repo_root, manifest, lane, now=None):
     return status
 
 
-def governed_worktree_diagnostics(repo_root, manifest):
+def governed_worktree_diagnostics(repo_root, manifest, manifest_path=None):
     registry, path = load_governed_worktree_registry(repo_root)
     root = governed_worktree_root(repo_root, manifest)
-    diagnostics = [governed_worktree_lane_status(repo_root, manifest, lane) for lane in registry['lanes']]
+    diagnostics = [governed_worktree_lane_status(repo_root, manifest, lane, manifest_path=manifest_path)
+                   for lane in registry['lanes']]
     known_paths = {item['path'] for item in diagnostics if item.get('id')}
     for worktree in get_worktrees(repo_root):
         worktree_path = Path(worktree['path']).resolve(strict=False)
@@ -10749,9 +10818,9 @@ def governed_worktree_diagnostics(repo_root, manifest):
     return {'registry_path': str(path), 'lanes': diagnostics}
 
 
-def governed_worktree_warning_lines(repo_root, manifest):
+def governed_worktree_warning_lines(repo_root, manifest, manifest_path=None):
     lines = []
-    for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']:
+    for lane in governed_worktree_diagnostics(repo_root, manifest, manifest_path)['lanes']:
         if not lane['code']:
             continue
         label = lane['id'] or lane['branch'] or lane['path']
@@ -10761,8 +10830,8 @@ def governed_worktree_warning_lines(repo_root, manifest):
     return lines
 
 
-def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False):
-    lines = governed_worktree_warning_lines(repo_root, manifest)
+def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False, manifest_path=None):
+    lines = governed_worktree_warning_lines(repo_root, manifest, manifest_path)
     if not lines:
         return lines
     color = '' if os.environ.get('NO_COLOR') or not sys.stderr.isatty() else YELLOW
@@ -11367,7 +11436,7 @@ def reap_governed_worktree_lane(
         return False, {
             **status,
             'code': 'branch_advanced',
-            'remedy': governed_worktree_pending_remedy(manifest, lane),
+            'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
         }
     if retrying_advanced and current_tip:
         superseded_key = lane.get('cleanup_idempotency_key')
@@ -11397,7 +11466,7 @@ def reap_governed_worktree_lane(
         return False, {
             **status,
             'code': 'branch_advanced',
-            'remedy': governed_worktree_pending_remedy(manifest, lane),
+            'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
         }
 
     lane['state'] = 'captured_pending_cleanup'
@@ -11434,7 +11503,7 @@ def reap_governed_worktree_lane(
                 return False, {
                     **status,
                     'code': 'branch_advanced',
-                    'remedy': governed_worktree_pending_remedy(manifest, lane),
+                    'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
                 }
             deleted, delete_detail = delete_governed_worktree_branch_with_anchor(
                 repo_root,
@@ -11447,7 +11516,7 @@ def reap_governed_worktree_lane(
                 if persist:
                     persist()
                 if delete_detail['code'] == 'branch_advanced':
-                    delete_detail['remedy'] = governed_worktree_pending_remedy(manifest, lane)
+                    delete_detail['remedy'] = governed_worktree_pending_remedy(manifest, lane, manifest_path)
                 return False, {**status, **delete_detail}
             governed_worktree_cleanup_checkpoint('after_ref_transaction')
         else:
@@ -12354,7 +12423,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
     }
 
 
-def read_remote_coordination_states(repo_root, config):
+def read_remote_coordination_states(repo_root, config, *, fetch=True):
     result = git(
         repo_root,
         'ls-remote',
@@ -12370,10 +12439,11 @@ def read_remote_coordination_states(repo_root, config):
         tip, separator, ref = line.partition('\t')
         if not separator:
             continue
-        fetch = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
-        if fetch.returncode != 0:
-            raise SyncwheelError(fetch.stderr.strip() or f'failed to fetch coordination state {ref}')
-        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD')
+        if fetch:
+            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
+            if fetched.returncode != 0:
+                raise SyncwheelError(fetched.stderr.strip() or f'failed to fetch coordination state {ref}')
+        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD' if fetch else tip)
         expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
         if ref != expected_ref:
             raise SyncwheelError(
@@ -12405,8 +12475,9 @@ def require_exclusive_coordination_ownership(
     config,
     managed_refs,
     expected_state_refs=None,
+    *, fetch=True,
 ):
-    states = read_remote_coordination_states(repo_root, config)
+    states = read_remote_coordination_states(repo_root, config, fetch=fetch)
     observed_state_refs = {item['ref']: item['tip'] for item in states}
     if expected_state_refs is not None and observed_state_refs != expected_state_refs:
         raise SyncwheelError(
@@ -16842,7 +16913,7 @@ def command_gc(args):
     )
     plan = run_coordination_gc(repo_root, manifest, apply=args.apply, fetch=args.fetch)
     plan['applied'] = bool(args.apply)
-    plan['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest)
+    plan['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
     plan['governed_worktree_candidates'] = governed_candidates
     plan['governed_worktree_reaped'] = governed_result['reaped']
     plan['governed_worktree_failures'] = governed_result['failures']
@@ -16875,7 +16946,7 @@ def command_handoff(args):
         'manifest_path': str(manifest_path),
         'manifest_version': manifest['version'],
         'validation': validation,
-        'governed_worktrees': governed_worktree_diagnostics(repo_root, manifest),
+        'governed_worktrees': governed_worktree_diagnostics(repo_root, manifest, manifest_path),
         'coordination': {'mode': 'legacy'},
     }
     if config:
@@ -20849,7 +20920,7 @@ def coordination_provenance_supersede_plan(
     integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
     if not integration_tip or not branch_contains(repo_root, integration_tip, reconciliation):
         raise SyncwheelError('integration does not contain the proved reconciliation commit')
-    first_parent, replay_parent = proof['parents']
+    first_parent, replay_parent = proof['parents'][:2]
     records, diverged = derived_provenance_snapshot(
         repo_root, manifest, observed['state']
     )
@@ -21488,6 +21559,8 @@ def command_worktree_release(args):
             None,
             'expired',
             'captured_pending_cleanup',
+            'current_directory',
+            'lane_in_use',
             'reaping',
             'worktree_remove_failed',
             'branch_delete_failed',
@@ -21683,7 +21756,7 @@ def command_status(args):
         validation = validate_manifest(repo_root, manifest)
         output['validation'] = validation
         output['plan'] = build_plan(repo_root, manifest, validation)
-        output['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest)
+        output['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
         output['authority'] = manifest_authority(manifest)
     if args.json:
         print(json.dumps(output, indent=2))
@@ -21814,7 +21887,7 @@ def command_check(args):
     validation = validate_manifest(repo_root, manifest)
     plan = build_plan(repo_root, manifest, validation)
     diagnostics = integration_commit_diagnostics(repo_root, manifest, validation)
-    governed = governed_worktree_diagnostics(repo_root, manifest)
+    governed = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
     readiness_blockers = []
     if validation['errors']:
         readiness_blockers.append('validation_errors')
@@ -28523,6 +28596,10 @@ def command_reconcile(args):
             intent.get('operation_token')
             for intent in pending_coordination_publications(repo_root, manifest_path)
             if intent.get('scope') == publication_scope
+            # A changed desired tuple must be re-proved by the existing landing resolver,
+            # not adopted and then frozen as a mismatched retry. Empty-action retries keep
+            # their existing intent so already-published operations remain idempotent.
+            and (not coordinated_refs or intent.get('changed_refs') == coordinated_refs)
             and intent.get('fingerprint') == coordination_publication_identity(
                 repo_root,
                 manifest,
@@ -31081,7 +31158,7 @@ class SyncwheelRevisionBackend:
                 'integration, stack, or channel branch'
             )
 
-    def _fresh_coordination_handoff(self, repo_root, manifest, manifest_path=None):
+    def _fresh_coordination_handoff(self, repo_root, manifest, manifest_path=None, *, fetch=True):
         if not coordination_is_active(manifest):
             return {'mode': 'disabled', 'stateTip': None, 'manifestDigest': None}
         config = coordination_config(manifest)
@@ -31099,7 +31176,7 @@ class SyncwheelRevisionBackend:
             remote = read_remote_coordination_state(
                 repo_root,
                 config,
-                fetch=True,
+                fetch=fetch,
                 local_manifest_version=manifest['version'],
             )
             state = remote.get('state')
@@ -31108,7 +31185,7 @@ class SyncwheelRevisionBackend:
                     'active-active handoff requires an initialized published coordination state'
                 )
             current_refs = managed_ref_names(manifest)
-            require_exclusive_coordination_ownership(repo_root, config, current_refs)
+            require_exclusive_coordination_ownership(repo_root, config, current_refs, fetch=fetch)
             local_digest = coordination_manifest_digest(manifest, repo_root)
             if state.get('manifest_digest') != local_digest:
                 self._fail(
@@ -31397,7 +31474,7 @@ class SyncwheelRevisionBackend:
     def _pending_operation_manifest_matches(self, request, journal, manifest):
         """Recognize the provider's own manifest write before its journal catches up."""
         if (
-            journal.get('projectionRoute') != 'manifest-base'
+            journal.get('projectionRoute') not in {'manifest-base', 'resolved-manifest-base'}
             or journal.get('phase') != 'product_committed'
             or not journal.get('productCommitSha')
         ):
@@ -31684,6 +31761,200 @@ class SyncwheelRevisionBackend:
             )
         return path_objects
 
+    def _prepared_resolution_binding(self, request, journal, resolution, reason, leases):
+        return {
+            'repositoryRoot': request.repository_root,
+            'operationId': request.operation_id,
+            'intentDigest': request.plan_digest,
+            'candidateProductCommitSha': journal.get('candidateProductCommitSha'),
+            'candidateProductTreeSha': journal.get('candidateProductTreeSha'),
+            'baseRefSha': journal.get('baseRefSha'),
+            'resolutionCommitSha': resolution,
+            'resolutionTreeSha': ref_tree(self._repo_root(request), resolution),
+            'productPathObjects': self._journal_product_path_objects(request, journal),
+            'reason': reason,
+            'leases': leases,
+        }
+
+    def _prepared_resolution_audit(self, request, witness, *, complete=False):
+        root = self._repo_root(request)
+        _, manifest_path = self._manifest(root)
+        if complete:
+            recover_ledger_tail(root, manifest_path)
+        matches = [
+            event for event in load_ledger_events(root, manifest_path)
+            if event.get('type') == 'revision_provider_prepared_resolution'
+            and (event.get('payload') or {}).get('binding', {}).get('operationId')
+            == request.operation_id
+        ]
+        if matches and (len(matches) != 1 or matches[0].get('payload') != witness):
+            self._fail('prepared resolution audit collision')
+        if not matches:
+            if complete is False:
+                self._fail('prepared resolution audit is incomplete; retry resolve-prepared')
+            if complete:
+                append_ledger_event(
+                    root, 'revision_provider_prepared_resolution', witness, manifest_path
+                )
+                self.checkpoint('prepared_resolution_audited')
+
+    def _prepared_resolution_projection(self, request, journal, *, complete_audit=False):
+        """One immutable proof shared by preparation and every draft verifier."""
+        witness = journal.get('preparedResolution')
+        if not isinstance(witness, dict) or set(witness) != {'binding', 'planDigest'}:
+            self._fail('prepared resolution witness is missing or invalid')
+        binding = witness['binding']
+        if not isinstance(binding, dict):
+            self._fail('prepared resolution binding is invalid')
+        resolution = binding.get('resolutionCommitSha')
+        reason = binding.get('reason')
+        if (not isinstance(resolution, str)
+                or not self.provider.HEX_40.fullmatch(resolution)
+                or not isinstance(reason, str) or not reason.strip()
+                or not isinstance(binding.get('leases'), dict)):
+            self._fail('prepared resolution identity is invalid')
+        expected = self._prepared_resolution_binding(
+            request, journal, resolution, reason, binding['leases']
+        )
+        if binding != expected or canonical_json_digest(binding) != witness['planDigest']:
+            self._fail('prepared resolution witness changed')
+        parents = git(self._repo_root(request), 'rev-list', '--parents', '-n', '1',
+                      resolution, check=False)
+        if parents.returncode or parents.stdout.split() != [resolution, journal['baseRefSha']]:
+            self._fail('prepared resolution requires exactly one parent equal to baseRefSha')
+        self._verify_candidate_object(
+            self._repo_root(request), resolution, binding['resolutionTreeSha'],
+            journal['baseRefSha'], binding['productPathObjects'],
+        )
+        if deterministic_stack_replay_tip(self._repo_root(request), journal['baseRefSha'], [resolution]) != resolution:
+            self._fail('prepared resolution replay does not reproduce its exact commit tip')
+        if complete_audit is not None:
+            self._prepared_resolution_audit(request, witness, complete=complete_audit)
+        return {
+            'projectionRoute': 'resolved-manifest-base',
+            'candidateDraftCommitSha': resolution,
+            'candidateDraftTreeSha': binding['resolutionTreeSha'],
+        }
+
+    def _prepared_resolution_leases(self, request, journal):
+        """Observe pending-product leases without expiring or advancing anything."""
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        self.provider._assert_matching_journal(request, journal)
+        if (manifest.get('repository_mode') != 'delivery'
+                or manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED
+                or journal.get('repositoryMode') == 'journal'
+                or journal.get('phase') != 'prepared' or request.no_commit
+                or journal.get('operationId') != request.operation_id
+                or journal.get('projectionRoute') is not None
+                or not journal.get('candidateProductCommitSha')
+                or journal.get('request') != request.intent_json()
+                or journal.get('expectedHead') != request.expected_head
+                or journal.get('resultingHead') != request.expected_head):
+            self._fail('resolve-prepared requires an unchanged prepared delivery operation with no route')
+        if not all(isinstance(journal.get(key), str) and self.provider.HEX_40.fullmatch(journal[key])
+                   for key in ('candidateProductCommitSha', 'candidateProductTreeSha', 'baseRefSha')):
+            self._fail('prepared resolution requires immutable full product/base object IDs')
+        if any(journal.get(key) for key in (
+                'candidateDraftCommitSha', 'candidateDraftTreeSha', 'draftRefOwned',
+                'productCommitSha', 'draftStackId', 'draftBranch',
+                'candidateControlCommitSha', 'candidateControlTreeSha',
+                'controlPathObjects', 'controlHooksValidated', 'manifestReplaced',
+                'ledgerAppended', 'controlCommitSha', 'published', 'expiration',
+                'publicationState')):
+            self._fail('resolve-prepared refuses an operation with revision effects')
+        if (manifest_digest(manifest) != journal.get('observedManifestDigest')
+                or manifest_digest(manifest) != journal.get('manifestDigest')
+                or get_current_branch(root) != journal.get('integrationBranch')
+                or manifest['integration']['branch'] != journal.get('integrationBranch')
+                or ref_tip(root, 'HEAD') != request.expected_head):
+            self._fail('prepared resolution manifest, branch or HEAD lease changed')
+        hooks = managed_push_guard_policy(root, manifest)
+        if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
+            self._fail('managed repository guards are not ready')
+        if git(root, 'ls-files', '--error-unmatch', '--', self.MANIFEST_PRODUCT_PATH,
+               check=False).returncode:
+            self._fail('prepared resolution requires a tracked manifest')
+        base = self._resolve_base_ref(root, manifest)
+        if base != tuple(journal.get(key) for key in (
+                'baseRef', 'baseRefFullName', 'baseRefSha',
+                'baseRefObjectSha', 'baseRefObservation')):
+            self._fail('prepared resolution base lease changed')
+        self._assert_base_ref_is_not_managed(manifest, base[0], base[1])
+        if (journal.get('projectionBaseSha') != base[2]
+                or journal.get('projectionBaseKind') != 'manifest-base'
+                or journal.get('integrationCompositionDigest') != integration_composition_digest(manifest)):
+            self._fail('prepared resolution projection inputs changed')
+        # Read fresh remote state without fetching or updating any refs.
+        coordination = self._fresh_coordination_handoff(root, manifest, fetch=False)
+        if coordination != journal.get('coordination'):
+            self._fail('prepared resolution coordination lease changed')
+        refs = self._journal_ref_transaction_refs(request, journal)
+        self._assert_no_ref_transaction_locks(root, refs)
+        self._assert_ref_leases(root, refs)
+        if (self._worktrees(root) != journal.get('baselineWorktrees')
+                or self._remote_refs(root) != journal.get('baselineRemoteRefs')
+                or self._managed_local_refs(root, manifest) != journal.get('managedLocalRefs')):
+            self._fail('prepared resolution worktree or ref membership lease changed')
+        self._assert_index_lease(root, request, journal, 'baseline', 'prepared resolution')
+        self._validate_before_hashes_at_head(root, request)
+        self._ensure_after_scope(root, request)
+        objects = self._journal_product_path_objects(request, journal)
+        if any(objects[item.path]['sha256'] != item.after_sha256 for item in request.paths):
+            self._fail('prepared product path hashes differ from the operation intent')
+        self._verify_candidate_object(
+            root, journal['candidateProductCommitSha'], journal['candidateProductTreeSha'],
+            request.expected_head, objects,
+        )
+        self._verify_worktree_objects(root, objects)
+        index = self._index_observation(root)
+        return {
+            'manifestDigest': manifest_digest(manifest),
+            'head': request.expected_head,
+            'refs': refs,
+            'worktrees': journal['baselineWorktrees'],
+            'indexSha256': index.sha256,
+            'indexSemantic': index.semantic,
+            'unownedDirty': self._assert_unowned_dirty_unchanged(root, request),
+            'coordination': coordination,
+        }
+
+    def resolve_prepared(self, request, resolution, reason, *, apply=False, plan_digest=None):
+        # Caller holds the same operation lock as finalize/recover. No generic
+        # dirty-worktree exemption: only the original exact pending paths pass.
+        if (not isinstance(resolution, str) or not self.provider.HEX_40.fullmatch(resolution)
+                or not isinstance(reason, str) or not reason.strip()
+                or len(reason) > 4096 or self.provider.REASON_CONTROL_CHARACTER.search(reason)):
+            self._fail('resolve-prepared requires a full commit OID and nonempty reason')
+        journal = self.load_journal(request)
+        if journal is None:
+            self._fail('resolve-prepared requires an existing prepared journal')
+        leases = self._prepared_resolution_leases(request, journal)
+        binding = self._prepared_resolution_binding(request, journal, resolution, reason, leases)
+        witness = {'binding': binding, 'planDigest': canonical_json_digest(binding)}
+        previous = journal.get('preparedResolution')
+        if previous is not None and previous != witness:
+            self._fail('a different prepared resolution is already bound to this operation')
+        candidate = dict(journal, preparedResolution=witness)
+        # One proof validates the object in plans and throughout recovery.
+        self._prepared_resolution_projection(request, candidate, complete_audit=None)
+        if previous is None:
+            self._prepared_resolution_audit(request, witness, complete=None)
+        if apply:
+            if plan_digest != witness['planDigest']:
+                self._fail('prepared resolution plan digest changed; review a fresh plan')
+            # A final fresh lease observation is a CAS immediately before the
+            # durable decision. Ref publication still uses its own atomic CAS.
+            if self._prepared_resolution_leases(request, journal) != leases:
+                self._fail('prepared resolution leases changed during apply')
+            if previous is None:
+                self.save_journal(request, candidate)
+                self.checkpoint('prepared_resolution_written')
+            self._prepared_resolution_projection(request, candidate, complete_audit=True)
+        return {'operationId': request.operation_id, 'planDigest': witness['planDigest'],
+                'resolution': binding, 'applied': apply,
+                'nextAction': 'recover the same operation; resolution does not finalize or publish'}
+
     def prepare_draft_projection(self, request, journal):
         repo_root = self._repo_root(request)
         manifest, _ = self._manifest(repo_root)
@@ -31693,6 +31964,8 @@ class SyncwheelRevisionBackend:
                 journal,
                 'manifest changed before draft object preparation',
             )
+        if journal.get('preparedResolution') is not None:
+            return self._prepared_resolution_projection(request, journal, complete_audit=True)
         projection = deterministic_stack_projection(
             repo_root,
             journal['baseRefSha'],
@@ -31748,6 +32021,11 @@ class SyncwheelRevisionBackend:
         manifest, _ = self._manifest(repo_root)
         self._expire_if_operation_lease_changed(request, journal, manifest)
         path_objects = self._journal_product_path_objects(request, journal)
+        if journal.get('preparedResolution') is not None or journal.get('projectionRoute') == 'resolved-manifest-base':
+            expected = self._prepared_resolution_projection(request, journal)
+            if any(journal.get(key) != value for key, value in expected.items()):
+                self._fail('journaled explicit projection route changed')
+            return
         projection = deterministic_stack_projection(
             repo_root,
             journal['baseRefSha'],
@@ -32230,6 +32508,11 @@ class SyncwheelRevisionBackend:
         return stdout, stderr
 
     def _verify_draft_candidate(self, repo_root, request, journal):
+        if journal.get('preparedResolution') is not None or journal.get('projectionRoute') == 'resolved-manifest-base':
+            expected = self._prepared_resolution_projection(request, journal)
+            if any(journal.get(key) != value for key, value in expected.items()):
+                self._fail('journaled explicit draft candidate changed')
+            return
         projection = deterministic_stack_projection(
             repo_root,
             journal.get('projectionBaseSha', journal['baseRefSha']),
@@ -32968,6 +33251,11 @@ class SyncwheelRevisionBackend:
                 'agentwheel_plan_digest': request.plan_digest,
             },
         }
+        if journal.get('projectionRoute') == 'resolved-manifest-base':
+            self._verify_draft_candidate(self._repo_root(request), request, journal)
+            desired['commits'] = [journal['candidateDraftCommitSha']]
+            desired['integration_commits'] = [journal['productCommitSha']]
+            desired['integration_resolution'] = {'source_tip': journal['candidateDraftCommitSha']}
         if journal.get('projectionBaseKind') == 'integration-tip':
             desired['meta']['revision_provider_projection_base'] = {
                 'kind': 'integration-tip',
@@ -32987,13 +33275,17 @@ class SyncwheelRevisionBackend:
         ]
         return stripped
 
-    def _assert_draft_branch(self, repo_root, desired, journal):
+    def _assert_draft_branch(self, repo_root, desired, journal, request):
         journal_tip = ref_tip(repo_root, desired['branch'])
-        expected_tip = deterministic_stack_replay_tip(
-            repo_root,
-            journal.get('projectionBaseSha', journal['baseRefSha']),
-            desired['commits'],
-        )
+        if journal.get('projectionRoute') == 'resolved-manifest-base':
+            self._verify_draft_candidate(repo_root, request, journal)
+            expected_tip = journal['candidateDraftCommitSha']
+        else:
+            expected_tip = deterministic_stack_replay_tip(
+                repo_root,
+                journal.get('projectionBaseSha', journal['baseRefSha']),
+                desired['commits'],
+            )
         if not expected_tip:
             self._fail('owned draft projection is no longer reproducible')
         if journal_tip != expected_tip:
@@ -33038,7 +33330,7 @@ class SyncwheelRevisionBackend:
                 self._assert_unowned_dirty_unchanged(
                     repo_root, request, allowed_outside=(self.MANIFEST_PRODUCT_PATH,)
                 )
-                self._assert_draft_branch(repo_root, desired, journal)
+                self._assert_draft_branch(repo_root, desired, journal, request)
                 context = {
                     'operation_id': request.operation_id,
                     'plan_digest': request.plan_digest,
@@ -33068,7 +33360,7 @@ class SyncwheelRevisionBackend:
                 'candidateDraftCommitSha'
             ):
                 self._fail('draft ref ownership must be proven before manifest ownership')
-            self._assert_draft_branch(repo_root, desired, journal)
+            self._assert_draft_branch(repo_root, desired, journal, request)
             manifest['stacks'].append(desired)
             if request.draft_stack_id not in manifest['integration']['stacks']:
                 manifest['integration']['stacks'].append(request.draft_stack_id)
@@ -33262,7 +33554,7 @@ class SyncwheelRevisionBackend:
             self._fail('operation draft stack ownership is missing or changed')
         if not branch_exists(repo_root, request.draft_branch):
             self._fail('operation draft branch is missing')
-        self._assert_draft_branch(repo_root, desired, journal)
+        self._assert_draft_branch(repo_root, desired, journal, request)
         if ref_tip(repo_root, request.draft_branch) != journal.get(
             'candidateDraftCommitSha'
         ):
@@ -33551,6 +33843,31 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
         self._observe_journal(request)
 
 
+def command_revision_provider_resolve_prepared(args):
+    import syncwheel_revision_provider as provider_module
+    backend = SyncwheelRevisionBackend(provider_module)
+    root = resolve_repo_root(args.repo)
+    if not provider_module.OPERATION_ID.fullmatch(args.operation_id):
+        raise SyncwheelError('invalid revision-provider operation ID')
+    path = git_common_dir(root) / 'syncwheel' / 'revision-provider' / f'{args.operation_id}.json'
+    try:
+        journal = json.loads(path.read_text())
+        intent = {key: value for key, value in journal['request'].items()
+                  if key != 'expectedManifestDigest' or value is not None}
+        request = provider_module.parse_request({**intent, 'action': 'recover'})
+        if request.operation_id != args.operation_id or request.repository_root != str(root):
+            raise SyncwheelError('prepared operation does not belong to this repository')
+        with backend.operation_lock(request):
+            result = backend.resolve_prepared(
+                request, args.resolution, args.reason,
+                apply=args.apply, plan_digest=args.plan_digest,
+            )
+    except (OSError, ValueError, KeyError, TypeError, provider_module.RevisionProviderError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_revision_provider(args):
     try:
         import syncwheel_revision_provider as provider_module
@@ -33690,6 +34007,18 @@ def build_parser():
         help='serve one strict Agentwheel revision-provider JSON request on stdin',
     )
     revision_provider_p.set_defaults(func=command_revision_provider)
+    revision_provider_sub = revision_provider_p.add_subparsers(dest='revision_provider_command')
+    resolve_prepared_p = revision_provider_sub.add_parser(
+        'resolve-prepared',
+        help='bind an exact reviewed draft object to an unresolved prepared operation',
+    )
+    resolve_prepared_p.add_argument('-r', '--repo', help='canonical operation repository path or alias')
+    resolve_prepared_p.add_argument('operation_id')
+    resolve_prepared_p.add_argument('--resolution', required=True, help='full resolution commit OID')
+    resolve_prepared_p.add_argument('--reason', required=True)
+    resolve_prepared_p.add_argument('--plan-digest')
+    resolve_prepared_p.add_argument('--apply', action='store_true')
+    resolve_prepared_p.set_defaults(func=command_revision_provider_resolve_prepared)
 
     repo_p = sub.add_parser('repo', aliases=['r'], help='manage repo aliases')
     repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
@@ -35008,6 +35337,7 @@ def entrypoint_behavior_table():
     # The revision-provider command deliberately owns its narrower transaction
     # inside the backend, after request and lease validation have completed.
     register((command_revision_provider,), mutates='always', manifest_mutates='internal')
+    register((command_revision_provider_resolve_prepared,), mutates='apply', manifest_mutates='internal')
     register((
         command_repo_add,
         command_repo_set_manifest,
@@ -35382,7 +35712,7 @@ def governed_worktree_preflight(args):
         # Open checks its own target and registry under the lock. Recovery of
         # unrelated lanes belongs to explicit release and gc commands.
         return
-    emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)))
+    emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)), manifest_path=manifest_path)
     if args.func == command_stack_create:
         requested_branch = (
             f'syncwheel/draft/{safe_ref_segment(args.stack)}'

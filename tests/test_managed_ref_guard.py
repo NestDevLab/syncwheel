@@ -606,6 +606,25 @@ class ManagedRefGuardTests(unittest.TestCase):
             json.dumps(manifest, indent=2) + '\n'
         )
 
+    def test_journal_guard_readiness_uses_the_selected_journal_branch(self):
+        self._make_journal_manifest()
+        result = syncwheel.install_managed_push_hook(self.repo, apply=True)
+        self.assertTrue(result['ready'], result)
+        manifest = syncwheel.manifest_for_guard(self.repo)
+        policy = syncwheel.managed_push_guard_policy(self.repo, manifest)
+        self.assertTrue(policy['ready'], policy)
+        self.assertTrue(policy['enforced'])
+        self.assertEqual(
+            syncwheel.inspect_primary_guard(self.repo)[0]['integrationBranch'], 'journal'
+        )
+
+        # A valid hook bundle cannot make a guard for another branch ready.
+        manifest['journal']['branch'] = 'other-journal'
+        policy = syncwheel.managed_push_guard_policy(self.repo, manifest)
+        self.assertFalse(policy['ready'])
+        self.assertFalse(policy['enforced'])
+        self.assertIn('other-journal', '; '.join(policy['degradedCauses']))
+
     def test_degraded_guard_protects_a_journal_repository_integration_ref(self):
         # A journal manifest declares no integration branch at all, so nothing
         # in the tree can name the ref guard.json was protecting.

@@ -4369,6 +4369,296 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
         self.assertEqual([item['path'] for item in remaining], ['locks/b.lock'])
 
 
+class PreparedResolutionTest(unittest.TestCase):
+    def setUp(self):
+        self.fixture = RevisionProviderRepository()
+        self.addCleanup(self.fixture.close)
+        self.fixture.install_existing_stack(path='base.txt', content='stack\n')
+        self.payload = self.fixture.request(
+            'preflight', operation_id='explicit-resolution', path='base.txt',
+            before=self.fixture.sha256('stack\n'), after_content='reviewed\n',
+        )
+        self.request = protocol.parse_request(self.payload)
+        self.backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        protocol.handle_request(self.backend, protocol.parse_request(self.fixture.check_request(self.payload)))
+        (self.fixture.repo / 'base.txt').write_text('reviewed\n')
+        protocol.handle_request(self.backend, self.request)
+        # The actual failed finalize leaves its immutable candidate prepared.
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'conflicting draft projection'):
+            protocol.handle_request(self.backend, protocol.parse_request({**self.payload, 'action': 'finalize'}))
+        self.journal = self.backend.load_journal(self.request)
+        self.resolution = self.object(self.journal['baseRefSha'], self.journal['productPathObjects'])
+
+    def object(self, parent, paths):
+        return self.backend._prepare_exact_commit(
+            self.fixture.repo, parent, paths, 'test: reviewed exact projection\n'
+        )['commit']
+
+    def resolve(self, *, resolution=None, apply=False, digest=None):
+        with self.backend.operation_lock(self.request):
+            return self.backend.resolve_prepared(
+                self.request, resolution or self.resolution, 'Reviewed exact draft resolution.',
+                apply=apply, plan_digest=digest,
+            )
+
+    def bind(self):
+        plan = self.resolve()
+        self.resolve(apply=True, digest=plan['planDigest'])
+        return plan
+
+    def test_cli_plan_apply_and_full_same_operation_recovery(self):
+        before_refs = self.fixture.all_ref_bindings()
+        before_index = self.fixture.raw_index_bytes()
+        before_manifest = self.fixture.manifest_path.read_bytes()
+        before_journal = self.backend._journal_path(self.request).read_bytes()
+        argv = ('revision-provider', 'resolve-prepared', self.request.operation_id,
+                '--resolution', self.resolution, '--reason', 'Reviewed exact draft resolution.')
+        plan_result = self.fixture.cli(*argv)
+        plan = json.loads(plan_result.stdout)
+        self.assertFalse(plan['applied'])
+        self.assertEqual(self.backend._journal_path(self.request).read_bytes(), before_journal)
+        self.fixture.cli(*argv, '--apply', '--plan-digest', plan['planDigest'])
+        self.assertEqual(self.fixture.all_ref_bindings(), before_refs)
+        self.assertEqual(self.fixture.raw_index_bytes(), before_index)
+        self.assertEqual(self.fixture.manifest_path.read_bytes(), before_manifest)
+        bound = self.backend.load_journal(self.request)
+        self.assertEqual(bound['candidateProductCommitSha'], self.journal['candidateProductCommitSha'])
+        self.assertIsNone(bound['projectionRoute'])
+        response, _ = self.fixture.protocol_request({**self.payload, 'action': 'recover'})
+        self.assertEqual(response['operationId'], self.request.operation_id)
+        self.assertEqual(response['status'], 'verified')
+        final = self.backend.load_journal(self.request)
+        self.assertEqual(final['projectionRoute'], 'resolved-manifest-base')
+        self.assertEqual(final['candidateDraftCommitSha'], self.resolution)
+        self.assertEqual(final['candidateProductCommitSha'], self.journal['candidateProductCommitSha'])
+        self.assertEqual(self.fixture.git('rev-parse', 'refs/heads/' + self.request.draft_branch), self.resolution)
+        self.assertFalse(response['published'])
+
+    def test_rejects_wrong_parent_merge_extra_missing_blob_mode_and_deletion(self):
+        paths = self.journal['productPathObjects']
+        other = self.object(self.request.expected_head, paths)
+        tree = self.fixture.git('rev-parse', self.resolution + '^{tree}')
+        merge = self.fixture.git('commit-tree', tree, '-p', self.journal['baseRefSha'],
+                                 '-p', self.request.expected_head, '-m', 'test: merge rejected')
+        blob = self.fixture.git('rev-parse', self.request.expected_head + ':base.txt')
+        wrong_blob = {'base.txt': {**paths['base.txt'], 'blob': blob,
+                                  'sha256': self.fixture.sha256('stack\n')}}
+        extra = {**paths, 'extra.txt': paths['base.txt']}
+        wrong_mode = {'base.txt': {**paths['base.txt'], 'mode': '100755'}}
+        deleted = {'base.txt': {'blob': None, 'sha256': None, 'mode': None}}
+        missing = {'different.txt': paths['base.txt']}
+        invalid = [other, merge, self.object(self.journal['baseRefSha'], wrong_blob),
+                   self.object(self.journal['baseRefSha'], extra),
+                   self.object(self.journal['baseRefSha'], wrong_mode),
+                   self.object(self.journal['baseRefSha'], deleted),
+                   self.object(self.journal['baseRefSha'], missing)]
+        for commit in invalid:
+            with self.subTest(commit=commit), self.assertRaises(protocol.RevisionProviderError):
+                self.resolve(resolution=commit)
+        self.assertNotIn('preparedResolution', self.backend.load_journal(self.request))
+
+    def test_plan_digest_and_changed_lease_fail_without_writes(self):
+        plan = self.resolve()
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'plan digest'):
+            self.resolve(apply=True, digest='0' * 64)
+        self.fixture.git('update-ref', 'refs/remotes/origin/main', self.request.expected_head)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'lease'):
+            self.resolve(apply=True, digest=plan['planDigest'])
+        self.assertNotIn('preparedResolution', self.backend.load_journal(self.request))
+
+    def test_unknown_dirty_path_and_staged_change_are_not_exempted(self):
+        (self.fixture.repo / 'foreign.txt').write_text('foreign\n')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'unowned dirty'):
+            self.resolve()
+        (self.fixture.repo / 'foreign.txt').unlink()
+        self.fixture.git('add', 'base.txt')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'index lease'):
+            self.resolve()
+
+    def test_idempotence_different_resolution_and_witness_tamper(self):
+        plan = self.bind()
+        self.resolve(apply=True, digest=plan['planDigest'])
+        tree = self.fixture.git('rev-parse', self.resolution + '^{tree}')
+        other = self.fixture.git('commit-tree', tree, '-p', self.journal['baseRefSha'],
+                                 '-m', 'test: another reviewed message')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'different prepared resolution'):
+            self.resolve(resolution=other)
+        journal = self.backend.load_journal(self.request)
+        journal['preparedResolution']['binding']['reason'] = 'tampered'
+        self.backend.save_journal(self.request, journal)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'witness changed'):
+            protocol.handle_request(self.backend, protocol.parse_request({**self.payload, 'action': 'recover'}))
+
+    def test_crash_between_journal_and_audit_and_after_audit_retries_once(self):
+        for checkpoint in ('prepared_resolution_written', 'prepared_resolution_audited'):
+            with self.subTest(checkpoint=checkpoint):
+                # Both checkpoints belong to the same operation: the second
+                # retry must not append another event after the first recovery.
+                plan = self.resolve()
+                original = self.backend.checkpoint
+                def stop(phase):
+                    if phase == checkpoint:
+                        raise RuntimeError('simulated interruption')
+                self.backend.checkpoint = stop
+                try:
+                    if checkpoint == 'prepared_resolution_written':
+                        with self.assertRaisesRegex(RuntimeError, 'simulated interruption'):
+                            self.resolve(apply=True, digest=plan['planDigest'])
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, 'simulated interruption'):
+                            self.resolve(apply=True, digest=plan['planDigest'])
+                finally:
+                    self.backend.checkpoint = original
+        self.resolve(apply=True, digest=plan['planDigest'])
+        events = [event for event in SYNCWHEEL.load_ledger_events(self.fixture.repo)
+                  if event['type'] == 'revision_provider_prepared_resolution']
+        self.assertEqual(len(events), 1)
+        protocol.handle_request(self.backend, protocol.parse_request({**self.payload, 'action': 'recover'}))
+
+    def test_hook_rejection_remains_before_any_ref_ownership(self):
+        self.bind()
+        hooks = Path(self.fixture.git('rev-parse', '--git-path', 'hooks'))
+        if not hooks.is_absolute():
+            hooks = self.fixture.repo / hooks
+        hook = hooks / 'pre-commit'
+        hook.write_text('#!/bin/sh\nexit 1\n')
+        hook.chmod(0o755)
+        before = self.fixture.all_ref_bindings()
+        with self.assertRaises(protocol.RevisionProviderError):
+            protocol.handle_request(self.backend, protocol.parse_request({**self.payload, 'action': 'recover'}))
+        self.assertEqual(self.fixture.all_ref_bindings(), before)
+        self.assertFalse(self.backend.load_journal(self.request)['productHooksValidated'])
+
+    def test_recovery_after_manifest_save_and_tampered_draft_tip(self):
+        self.bind()
+        original = self.backend.checkpoint
+        def stop(phase):
+            if phase == 'manifest_replace_written':
+                raise RuntimeError('interrupted manifest save')
+        self.backend.checkpoint = stop
+        recover = protocol.parse_request({**self.payload, 'action': 'recover'})
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'interrupted manifest save'):
+                protocol.handle_request(self.backend, recover)
+        finally:
+            self.backend.checkpoint = original
+        saved = self.backend.load_journal(self.request)
+        self.assertFalse(saved['manifestReplaced'])
+        self.assertEqual(saved['phase'], 'product_committed')
+        tree = self.fixture.git('rev-parse', self.resolution + '^{tree}')
+        other = self.fixture.git('commit-tree', tree, '-p', self.journal['baseRefSha'],
+                                 '-m', 'test: unowned same-tree tip')
+        self.fixture.git('update-ref', 'refs/heads/' + self.request.draft_branch, other)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'ref lease'):
+            protocol.handle_request(self.backend, recover)
+        self.fixture.git('update-ref', 'refs/heads/' + self.request.draft_branch, self.resolution)
+        result = protocol.handle_request(self.backend, recover)
+        self.assertEqual(result['status'], 'verified')
+        stack = SYNCWHEEL.stack_map(self.fixture.read_manifest())[self.request.draft_stack_id]
+        self.assertEqual(stack['commits'], [self.resolution])
+        self.assertEqual(stack['integration_commits'], [saved['productCommitSha']])
+        self.assertEqual(stack['integration_resolution'], {'source_tip': self.resolution})
+        self.assertEqual(SYNCWHEEL.deterministic_stack_replay_tip(
+            self.fixture.repo, stack['base'], stack['commits']), self.resolution)
+
+    def test_rejects_route_phase_and_product_object_tampering(self):
+        for changes in ({'phase': 'product_committed'}, {'projectionRoute': 'derived'},
+                        {'candidateProductCommitSha': None}, {'draftRefOwned': True},
+                        {'baseRefSha': self.request.expected_head}):
+            with self.subTest(changes=changes):
+                journal = {**self.journal, **changes}
+                self.backend.save_journal(self.request, journal)
+                with self.assertRaises(protocol.RevisionProviderError):
+                    self.resolve()
+        self.backend.save_journal(self.request, self.journal)
+
+    def test_complete_multi_path_deletion_and_mode_proof(self):
+        fixture = RevisionProviderRepository()
+        self.addCleanup(fixture.close)
+        payload = fixture.request('preflight', operation_id='all-paths-proof',
+                                  path='base.txt', before=fixture.sha256('base\n'))
+        payload['paths'] = [
+            {'path': 'base.txt', 'beforeSha256': fixture.sha256('base\n'), 'afterSha256': None},
+            {'path': 'new.txt', 'beforeSha256': None, 'afterSha256': fixture.sha256('new\n')},
+        ]
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        request = protocol.parse_request(payload)
+        protocol.handle_request(backend, protocol.parse_request(fixture.check_request(payload)))
+        (fixture.repo / 'base.txt').unlink()
+        (fixture.repo / 'new.txt').write_text('new\n')
+        (fixture.repo / 'new.txt').chmod(0o755)
+        protocol.handle_request(backend, request)
+        journal = backend.load_journal(request)
+        journal.update(backend.prepare_product_commit(request, 'test: exact multi-path product\n'))
+        backend.save_journal(request, journal)
+        objects = journal['productPathObjects']
+        resolution = backend._prepare_exact_commit(
+            fixture.repo, journal['baseRefSha'], objects, 'test: exact reviewed deletion\n')['commit']
+        plan = backend.resolve_prepared(request, resolution, 'Reviewed deletion and executable mode.')
+        self.assertEqual(plan['resolution']['productPathObjects']['new.txt']['mode'], '100755')
+        missing = backend._prepare_exact_commit(
+            fixture.repo, journal['baseRefSha'], {'new.txt': objects['new.txt']},
+            'test: omitted deletion\n')['commit']
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'exact path allowlist'):
+            backend.resolve_prepared(request, missing, 'Reject missing deletion.')
+        backend.resolve_prepared(request, resolution, 'Reviewed deletion and executable mode.',
+                                 apply=True, plan_digest=plan['planDigest'])
+        result = protocol.handle_request(backend, protocol.parse_request({**payload, 'action': 'recover'}))
+        self.assertEqual(result['status'], 'verified')
+
+    def test_atomic_publication_and_fresh_coordination_clone(self):
+        fixture = RevisionProviderRepository(coordination_mode='active-active')
+        self.addCleanup(fixture.close)
+        fixture.install_existing_stack(path='base.txt', content='stack\n')
+        fixture.cli('stack', 'push', 'existing')
+        fixture.cli('int', 'push')
+        payload = fixture.request('preflight', operation_id='published-resolution', path='base.txt',
+                                  before=fixture.sha256('stack\n'), after_content='reviewed\n')
+        backend = SYNCWHEEL.SyncwheelRevisionBackend(protocol)
+        request = protocol.parse_request(payload)
+        protocol.handle_request(backend, protocol.parse_request(fixture.check_request(payload)))
+        (fixture.repo / 'base.txt').write_text('reviewed\n')
+        protocol.handle_request(backend, request)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'conflicting draft projection'):
+            protocol.handle_request(backend, protocol.parse_request({**payload, 'action': 'finalize'}))
+        journal = backend.load_journal(request)
+        resolution = backend._prepare_exact_commit(
+            fixture.repo, journal['baseRefSha'], journal['productPathObjects'],
+            'test: publish reviewed projection\n')['commit']
+        # Plan observes remote coordination but must not fetch or change FETCH_HEAD.
+        fetch_head = fixture.repo / '.git' / 'FETCH_HEAD'
+        before_fetch = fetch_head.read_bytes() if fetch_head.exists() else None
+        plan = backend.resolve_prepared(request, resolution, 'Review source projection.')
+        self.assertEqual(fetch_head.read_bytes() if fetch_head.exists() else None, before_fetch)
+        backend.resolve_prepared(request, resolution, 'Review source projection.',
+                                 apply=True, plan_digest=plan['planDigest'])
+        result = protocol.handle_request(backend, protocol.parse_request({**payload, 'action': 'recover'}))
+        self.assertEqual(result['status'], 'verified')
+        fixture.cli('reconcile', '--stack', request.draft_stack_id, '--rebuild', 'none',
+                    '--push', '--no-force-with-lease', '--apply')
+        peer = CoordinationPeer(fixture, 'resolution-peer')
+        peer_manifest = peer.read_manifest()
+        state = SYNCWHEEL.read_remote_coordination_state(
+            peer.repo, SYNCWHEEL.coordination_config(peer_manifest), fetch=False,
+            local_manifest_version=peer_manifest['version'])['state']
+        source = next(stack for stack in state['manifest']['stacks'] if stack['id'] == request.draft_stack_id)
+        self.assertEqual(source['commits'], [resolution])
+        binding = SYNCWHEEL.coordination_integration_resolutions(state['manifest'])[request.draft_stack_id]
+        self.assertEqual(binding['integration_commits'], [result['productCommitSha']])
+        self.assertEqual(binding['integration_resolution'], {'source_tip': resolution})
+        self.assertEqual(SYNCWHEEL.deterministic_stack_replay_tip(
+            peer.repo, journal['baseRefSha'], source['commits']), resolution)
+        self.assertFalse((peer.repo / '.git' / 'syncwheel' / 'revision-provider').exists())
+
+    def test_operation_lock_excludes_another_resolver(self):
+        with self.backend.operation_lock(self.request):
+            result = self.fixture.cli(
+                'revision-provider', 'resolve-prepared', self.request.operation_id,
+                '--resolution', self.resolution, '--reason', 'Concurrent resolution', expected=2,
+            )
+        self.assertIn('another revision-provider operation', result.stderr)
+
+
 class RevisionProviderRecoveryTest(unittest.TestCase):
     def _prepared_with_refreshed_index(self, fixture, operation_id, *, byte_exact=False):
         payload = fixture.request('preflight', operation_id=operation_id)

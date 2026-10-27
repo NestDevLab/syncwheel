@@ -21,6 +21,118 @@ FIXTURE = REPO_ROOT / 'tests' / 'fixtures' / 'simple-repo'
 
 
 class SyncwheelFixtureTest(unittest.TestCase):
+    def captured_personal_lane(self, name='captured-personal'):
+        manifest_path = self.repo / '.syncwheel/manifests/captured.local.json'
+        manifest_path.parent.mkdir(parents=True)
+        manifest_path.write_text(json.dumps(self.read_manifest()) + '\n')
+        lane = json.loads(self.run_cli(
+            'worktree', 'open', name, '--into', 'feature-a',
+            '--manifest', str(manifest_path), '--json',
+        ).stdout)['lane']
+        path = Path(lane['path'])
+        (path / 'captured.txt').write_text('preserve captured work\n')
+        self.git('-C', str(path), 'add', 'captured.txt')
+        self.git('-C', str(path), 'commit', '-qm', 'feat: captured fixture')
+        tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        self.run_cli('stack', 'add', 'feature-a', tip,
+                     '--repo', str(self.repo), '--manifest', str(manifest_path), cwd=path)
+        module = self.load_syncwheel_module()
+        pending = next(item for item in module.load_governed_worktree_registry(self.repo)[0]['lanes']
+                       if item['id'] == name)
+        self.assertEqual(pending['state'], 'captured_pending_cleanup')
+        self.assertTrue(path.is_dir())
+        return manifest_path, lane, tip
+
+    def test_personal_captured_lane_has_named_lossless_release_without_gc(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        released = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+        self.assertFalse(Path(lane['path']).exists())
+        module = self.load_syncwheel_module()
+        metadata_paths = [manifest, module.governed_worktree_registry_path(self.repo)]
+        metadata_paths.extend(sorted(module.ledger_events_dir(self.repo, manifest).glob('*.jsonl')))
+        before_repeat = {str(path): path.read_bytes() for path in metadata_paths}
+        repeat = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertTrue(repeat['idempotent'])
+        self.assertEqual(before_repeat, {str(path): path.read_bytes() for path in metadata_paths})
+        self.assertEqual(
+            sorted(module.ledger_events_dir(self.repo, manifest).glob('*.jsonl')),
+            [path for path in metadata_paths if path.suffix == '.jsonl'],
+        )
+
+    def test_personal_captured_lane_remedy_names_release_not_global_gc(self):
+        manifest, lane, _ = self.captured_personal_lane()
+        status = json.loads(self.run_cli('status', '--manifest', str(manifest), '--json').stdout)
+        pending = next(item for item in status['governed_worktrees']['lanes']
+                       if item['id'] == lane['id'])
+        self.assertIn('worktree release', pending['remedy'])
+        self.assertNotIn('gc --apply', pending['remedy'])
+        self.assertIn(lane['id'], pending['remedy'])
+        command = shlex.split(pending['remedy'].removeprefix('retry with: '))
+        self.assertEqual(command[command.index('--manifest') + 1], str(manifest))
+        self.assertEqual(command[command.index('--reason') + 1], 'complete captured lane cleanup')
+
+    def test_personal_captured_lane_retries_stale_cwd_reason_but_protects_live_cwd(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['pending_reason'] = 'current_directory'
+        module.save_governed_worktree_registry(self.repo, registry)
+        path = Path(lane['path'])
+        refused = self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--repo', str(self.repo), '--manifest', str(manifest), '--apply',
+            cwd=path, expected=2,
+        )
+        self.assertIn('current_directory', refused.stderr)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+        self.assertEqual((path / 'captured.txt').read_text(), 'preserve captured work\n')
+        released = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+
+    def test_personal_captured_lane_release_preserves_unrelated_dirty_lane(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        foreign = json.loads(self.run_cli(
+            'worktree', 'open', 'foreign-active', '--into', 'feature-b',
+            '--manifest', str(manifest), '--json',
+        ).stdout)['lane']
+        draft = Path(foreign['path']) / 'draft.txt'
+        draft.write_text('unique foreign draft\n')
+        module = self.load_syncwheel_module()
+        registry_before = next(item for item in module.load_governed_worktree_registry(self.repo)[0]['lanes']
+                               if item['id'] == foreign['id'])
+        released = json.loads(self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', '--json',
+        ).stdout)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+        registry_after = next(item for item in module.load_governed_worktree_registry(self.repo)[0]['lanes']
+                              if item['id'] == foreign['id'])
+        self.assertEqual(registry_before, registry_after)
+        self.assertEqual(draft.read_text(), 'unique foreign draft\n')
+
+    def test_personal_captured_lane_release_refuses_unique_dirty_bytes(self):
+        manifest, lane, tip = self.captured_personal_lane()
+        path = Path(lane['path'])
+        draft = path / 'unique.txt'
+        draft.write_text('preserve unpublished bytes\n')
+        result = self.run_cli(
+            'worktree', 'release', lane['id'], '--reason', 'captured source delivered',
+            '--manifest', str(manifest), '--apply', expected=2,
+        )
+        self.assertIn('dirty', result.stderr)
+        self.assertEqual(draft.read_text(), 'preserve unpublished bytes\n')
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+
     def test_stack_close_help_teaches_absorbed_squash_delivery(self):
         result = self.run_cli('stack', 'close', '--help')
         help_text = ' '.join(result.stdout.split())
@@ -1096,6 +1208,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(registry['lanes'], [])
 
     def test_worktree_open_enforces_capacity_without_creating_a_fifth_lane(self):
+        self.set_governed_worktree_capacity({'enforcement': 'error'})
         for number in range(4):
             self.run_cli('worktree', 'open', f'lane-{number}', '--json')
 
@@ -1115,7 +1228,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         manifest_path.write_text(json.dumps(data, indent=2) + '\n')
 
     def test_worktree_open_honors_configured_capacity_limit(self):
-        self.set_governed_worktree_capacity({'limit': 2})
+        self.set_governed_worktree_capacity({'limit': 2, 'enforcement': 'error'})
         self.run_cli('worktree', 'open', 'lane-0', '--json')
         self.run_cli('worktree', 'open', 'lane-1', '--json')
 
@@ -1136,6 +1249,39 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn('warning: governed worktree capacity reached (1)', text_result.stdout)
         registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
         self.assertEqual(len(registry['lanes']), 3)
+
+    def test_worktree_open_defaults_to_warning_without_changing_existing_lanes(self):
+        original = []
+        for number in range(4):
+            lane = json.loads(self.run_cli(
+                'worktree', 'open', f'lane-{number}', '--json'
+            ).stdout)['lane']
+            (Path(lane['path']) / 'draft.txt').write_text(f'draft {number}\n')
+            original.append(lane)
+        module = self.load_syncwheel_module()
+        self.assertEqual(module.governed_worktree_capacity(self.read_manifest()),
+                         {'limit': 4, 'enforcement': 'warn'})
+
+        opened = json.loads(self.run_cli('worktree', 'open', 'lane-4', '--json').stdout)
+        self.assertEqual(opened['lane']['id'], 'lane-4')
+        self.assertTrue(any('capacity reached (4)' in line for line in opened['warnings']))
+        text_result = self.run_cli('worktree', 'open', 'lane-5')
+        self.assertIn('warning: governed worktree capacity reached (4)', text_result.stdout)
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(len(registry['lanes']), 6)
+        self.assertEqual(registry['lanes'][:4], original)
+        for number, lane in enumerate(original):
+            self.assertEqual(module.ref_tip(self.repo, lane['branch']), lane['base'])
+            self.assertEqual((Path(lane['path']) / 'draft.txt').read_text(), f'draft {number}\n')
+
+    def test_worktree_open_limit_only_policy_defaults_to_warning(self):
+        self.set_governed_worktree_capacity({'limit': 1})
+        self.run_cli('worktree', 'open', 'lane-0', '--json')
+        opened = json.loads(self.run_cli('worktree', 'open', 'lane-1', '--json').stdout)
+        self.assertTrue(any('capacity reached (1)' in line for line in opened['warnings']))
+        text_result = self.run_cli('worktree', 'open', 'lane-2')
+        self.assertIn('warning: governed worktree capacity reached (1)', text_result.stdout)
 
     def test_worktree_open_rejects_invalid_capacity_policy(self):
         for capacity, message in (
@@ -1173,6 +1319,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual((dirty_path / 'draft.txt').read_text(), 'leave this draft alone\n')
 
     def test_worktree_open_still_blocks_a_conflicting_lane_and_counts_dirty_lane(self):
+        self.set_governed_worktree_capacity({'enforcement': 'error'})
         dirty = json.loads(self.run_cli('worktree', 'open', 'reserved', '--json').stdout)['lane']
         (Path(dirty['path']) / 'draft.txt').write_text('keep\n')
         module = self.load_syncwheel_module()
@@ -1191,6 +1338,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual((Path(dirty['path']) / 'draft.txt').read_text(), 'keep\n')
 
     def test_expired_clean_lane_is_preserved_until_explicit_recovery(self):
+        self.set_governed_worktree_capacity({'enforcement': 'error'})
         opened = json.loads(self.run_cli(
             'worktree', 'open', 'expired', '--into', 'feature-a', '--json'
         ).stdout)
@@ -2972,8 +3120,10 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         old_key = pending['cleanup_idempotency_key']
         self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
         remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
-        self.assertIn('syncwheel gc --apply', remedy)
+        self.assertIn('syncwheel worktree release post-anchor-advance', remedy)
+        self.assertNotIn('gc --apply', remedy)
 
+        # Legacy GC remains safe even though the scoped remedy names release.
         retried = json.loads(self.run_cli(
             'gc', '--apply', '--no-fetch', '--json'
         ).stdout)
@@ -3046,7 +3196,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(module.ref_tip(self.repo, old_recovery_ref), anchored_tip)
 
         remedy = module.governed_worktree_pending_remedy(self.read_manifest(), pending)
-        self.assertIn('syncwheel gc --apply', remedy)
+        self.assertIn('syncwheel worktree release actual-advanced-release', remedy)
+        self.assertNotIn('gc --apply', remedy)
         released = json.loads(self.run_cli(
             'worktree', 'release', 'actual-advanced-release',
             '--reason', 'operator release', '--apply', '--json',

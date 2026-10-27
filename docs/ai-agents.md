@@ -133,6 +133,12 @@ no evidence holds, record `coordination_publish_abandoned` with reason
 the local rename only when the remote carries neither the promoted ref nor a
 claim bearing that token.
 
+A reconcile retry with a non-empty newly planned refset adopts an existing intent
+only when the whole changed-ref tuple matches. Otherwise the same authenticated
+landing resolver must settle it before a fresh intent can be created. A landed
+operation is never abandoned to make a different tuple publish; uncertain evidence
+stops the command. Empty-action retries retain their existing recovery contract.
+
 The manifest digest that identifies an operation is computed over the public
 manifest snapshot without `integration.derived_provenance`: the intent and the
 published state resolve that projection from different sources by design, so it
@@ -210,6 +216,12 @@ active-active channel must use the coordination remote.
 - preview `worktree release <lane> --reason <why>` before using `--apply` for a
   dead or abandoned lane; apply records the reason in the ledger and refuses an
   existing dirty worktree with its recovery remedy
+- for `captured_pending_cleanup`, first leave the lane directory, then preview the
+  named `worktree release <lane> --reason "complete captured lane cleanup"` with
+  the same `--manifest` or `--personal` selector; add `--apply` only after review.
+  This works without active-active GC and preserves a recovery ref. Dirty bytes,
+  live users and foreign locks still stop cleanup; never release another owner's
+  lane merely because its warning is visible
 - use `--dry-run` when inspecting rebuild/push commands
 - prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
   inspection or fallback

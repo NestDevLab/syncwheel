@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.46.11 - 2026-10-27
+
+- Preserve exact published ancestry as a third reconciliation parent when independently delivered product history meets validated control-only local divergence. Bind the frozen published state through portable proofs, crash recovery and receipts; retain existing product, history and lease guards.
+
+## 0.46.10 - 2026-10-26
+
+- Direct captured-lane recovery to the existing named `worktree release` operation with the selected manifest, rather than global GC. Retry persisted current-directory/in-use blockers through the live cleanup guards; preserve recovery refs and unrelated lanes.
+
+## 0.46.9 - 2026-10-25
+
+- Warn by default when governed worktree capacity is reached, including manifests that specify only a limit. Continue opening independent lanes without changing existing lanes, and preserve an explicit `enforcement: "error"` hard cap.
+
+## 0.46.8 - 2026-10-20
+
+- Evaluate managed guard readiness against the journal branch in journal repositories, using the same branch selection as hook installation. Continue rejecting mismatched guards and degraded hook bundles.
+
+## 0.46.7 - 2026-10-20
+
+- Reconcile a changed desired publication tuple through the existing authenticated landing resolver instead of adopting an incompatible pending retry. Only proven unlanded operations are abandoned; landed evidence, zero-action recovery, ref claims and state leases remain enforced.
+
+## 0.46.6 - 2026-10-19
+
+- Bind an explicitly reviewed, exact-path draft resolution to an unresolved prepared revision-provider operation. Digest-bound plans preserve all pending leases; ordinary same-operation recovery retains hooks and atomic publication checks. Resolution itself never publishes or finalizes.
+
 ## 0.46.5 - 2026-10-19
 
 - Reuse authenticated published derived provenance after a newer record supersedes it during revision-provider history validation. Skip reconciliation replay only when every requested commit is already proved; retain current coordination checks and the existing fallback for unexplained history.
