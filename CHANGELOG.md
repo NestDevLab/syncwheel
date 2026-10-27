@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.11 - 2026-10-27
+
+- Preserve exact published ancestry as a third reconciliation parent when independently delivered product history meets validated control-only local divergence. Bind the frozen published state through portable proofs, crash recovery and receipts; retain existing product, history and lease guards.
+
 ## 0.46.10 - 2026-10-26
 
 - Direct captured-lane recovery to the existing named `worktree release` operation with the selected manifest, rather than global GC. Retry persisted current-directory/in-use blockers through the live cleanup guards; preserve recovery refs and unrelated lanes.

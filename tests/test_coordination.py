@@ -13900,6 +13900,92 @@ sys.exit(module.main())
             'baseline': baseline,
         }
 
+    def prepare_independently_delivered_control_divergence(self, label):
+        fixture = self.prepare_canonical_control_divergence(label)
+        repo, module = fixture['repo'], fixture['module']
+        # The approved delivery has the published product bytes but independent
+        # ancestry, as when integration and canonical delivery use separate refs.
+        delivery = self.git(
+            repo, 'commit-tree', f"{fixture['published']}^{{tree}}",
+            '-p', fixture['baseline'], '-m', 'test: independently delivered product',
+        ).stdout.strip()
+        fixture['manifest']['integration']['base'] = delivery
+        module.save_manifest(fixture['manifest_path'], fixture['manifest'])
+        self.git(repo, 'add', '.syncwheel/manifest.json')
+        self.git(repo, 'commit', '-qm', 'test: select independent canonical delivery')
+        fixture['local'] = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        fixture['delivery'] = delivery
+        self.git(repo, 'merge-base', '--is-ancestor', fixture['published'], delivery, expected=1)
+        return fixture
+
+    def test_independent_control_divergence_preserves_three_histories_and_is_idempotent(self):
+        fixture = self.prepare_independently_delivered_control_divergence('independent-control')
+        repo, module = fixture['repo'], fixture['module']
+        before_remote = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        replay = module.materialize_integration_replay(repo, fixture['manifest'])
+        expected_tree = module.materialize_control_manifest_projection_tree(
+            repo, fixture['manifest'], module.ref_tree(repo, replay),
+            gitignore_bytes=(repo / '.gitignore').read_bytes(),
+        )
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'preserve independent published history')
+        final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        parents = self.git(repo, 'show', '-s', '--format=%P', final).stdout.split()
+        self.assertEqual(parents, [fixture['local'], replay, fixture['published']])
+        self.assertEqual(module.ref_tree(repo, final), expected_tree)
+        for previous in [fixture['local'], fixture['published'], fixture['delivery']]:
+            self.git(repo, 'merge-base', '--is-ancestor', previous, final)
+        selected, path = module.load_manifest(repo)
+        self.assertEqual(module.manifest_digest(selected), module.manifest_digest(fixture['manifest']))
+        observation = module.observe_published_integration_tip(repo, selected)
+        self.assertIsNotNone(module.integration_reconciliation_proof(repo, final, path, observation))
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'repeat independent published history')
+        self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), final)
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, before_remote)
+
+    def test_independent_control_divergence_recovers_the_frozen_three_parent_object(self):
+        for checkpoint in ('intent_saved', 'ref_updated'):
+            with self.subTest(checkpoint=checkpoint):
+                fixture = self.prepare_independently_delivered_control_divergence('independent-retry-' + checkpoint)
+                repo, module, path = fixture['repo'], fixture['module'], fixture['manifest_path']
+                before_remote = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+                def interrupt(stage):
+                    if stage == checkpoint:
+                        raise module.SyncwheelError('test: interrupted independent reconciliation')
+                with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+                    with self.assertRaisesRegex(module.SyncwheelError, 'interrupted independent'):
+                        module.reconcile_integration_ancestry(
+                            repo, path, fixture['manifest'], 'test', 'recover exact independent ancestry',
+                        )
+                pending = module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path))
+                self.assertEqual(len(pending), 1)
+                frozen = pending[0]['payload']['expected_control_commit']
+                self.run_cli(repo, 'int', 'rebuild', '--reason', 'recover exact independent ancestry')
+                self.assertEqual(self.git(repo, 'rev-parse', 'main').stdout.strip(), frozen)
+                self.assertEqual(self.git(repo, 'show', '-s', '--format=%P', frozen).stdout.split()[2], fixture['published'])
+                self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+                self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout, before_remote)
+                self.assertFalse(module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path)))
+
+    def test_independent_control_divergence_proof_is_portable(self):
+        fixture = self.prepare_independently_delivered_control_divergence('independent-portable')
+        repo, module = fixture['repo'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--reason', 'qualify independent published ancestry')
+        final = self.git(repo, 'rev-parse', 'main').stdout.strip()
+        self.run_cli(repo, 'stack', 'push', 'local-design')
+        self.run_cli(repo, 'int', 'push')
+        peer = self.clone(fixture['origin'], 'independent-fresh-peer')
+        selected, path = module.load_manifest(peer)
+        self.assertFalse(module.load_control_manifest_events(peer, path))
+        observation = module.observe_published_integration_tip(peer, selected)
+        proof = module.integration_reconciliation_proof(peer, final, path, observation)
+        self.assertIsNotNone(proof)
+        self.assertEqual(proof['parents'][0], fixture['local'])
+        self.assertEqual(proof['parents'][2], fixture['published'])
+        self.assertEqual(self.git(peer, 'rev-parse', 'main').stdout.strip(), final)
+        self.assertEqual((peer / 'delivered.txt').read_text(), 'canonical delivered product\n')
+        self.assertTrue((peer / 'local-design.txt').exists())
+
     def test_canonical_control_divergence_rebuild_and_reconcile_preserve_both_histories(self):
         for command in ('rebuild', 'reconcile'):
             with self.subTest(command=command):
