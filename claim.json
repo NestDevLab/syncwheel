@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/preserve-closed-history-status"
+  ],
+  "claimed_at": "2026-10-27T18:08:45+00:00",
+  "coordination_id": "default",
+  "operation_token": "f3aea6a4-864f-4681-bb8c-96d5d2f616c7",
+  "publication_scope": "partial",
+  "source_ref": "refs/heads/pr/preserve-closed-history-status",
+  "syncwheel_version": "0.46.11"
+}
