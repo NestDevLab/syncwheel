@@ -43,7 +43,7 @@
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
     "refs/heads/pr/preserve-control-divergence": "d0ae5e11976a4b0fabf7861e371dcc1d78b86fb7",
-    "refs/heads/pr/preserve-published-ancestry": "5696bf52a4278869985296ba50f94cb6b139a735",
+    "refs/heads/pr/preserve-published-ancestry": "5af5cae2f629cae4b40733440490bcd4c5f13637",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
     "refs/heads/pr/read-only-git-auth": "8214480681f3a822f5d3c158defbeba29a5ad631",
     "refs/heads/pr/recover-semantic-lease": "6c91ea1a41630a2452c364fa4377fc41d3c6ac1b",
@@ -91,7 +91,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-27T17:27:28+00:00",
+  "created_at": "2026-10-27T17:51:40+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -234,9 +234,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "preserve-published-ancestry"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -244,32 +242,17 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/preserve-published-ancestry",
-        "commits": [
-          "c2dd1ecc6c84b032245dc75ba684971ff1e00396"
-        ],
-        "id": "preserve-published-ancestry",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "9f7a1b1c-fef2-4615-ae90-ee9e6735d13c",
-  "parent_state": "5d89181f922f8890b8555a879b3e9e8e97d0c00a",
+  "operation_token": "8629a0f7-482f-4bfc-9ba4-d9ed29fd2a4e",
+  "parent_state": "2b70281183ff370d37ab999cb7446555fe1e8911",
   "projection_status": "partial",
-  "publication_id": "84fe21c1-18d1-4dda-9e99-b56116e7e42a",
-  "publication_scope": "close:partial-intent-desired-refs",
+  "publication_id": "466bec11-f232-4fc8-af62-30bbc217b351",
+  "publication_scope": "close:preserve-published-ancestry",
   "schema_version": 2,
-  "syncwheel_version": "0.46.10",
+  "syncwheel_version": "0.46.11",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1166,6 +1149,14 @@
       "ref": "refs/heads/pr/partial-intent-desired-refs",
       "remote_tip": null,
       "stack": "partial-intent-desired-refs"
+    },
+    {
+      "branch": "pr/preserve-published-ancestry",
+      "closed_at": "2026-10-27T17:51:37+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/preserve-published-ancestry",
+      "remote_tip": null,
+      "stack": "preserve-published-ancestry"
     }
   ]
 }
