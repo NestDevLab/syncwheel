@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/preserve-published-ancestry"
+  ],
+  "claimed_at": "2026-10-27T17:18:50+00:00",
+  "coordination_id": "default",
+  "operation_token": "3fe9ee2c-71d0-4fbd-9ec3-f13960ba7d93",
+  "publication_scope": "partial",
+  "source_ref": "refs/heads/pr/preserve-published-ancestry",
+  "syncwheel_version": "0.46.10"
+}
