@@ -1,7 +1,9 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "d25646b7c412596123252314ae5567e2ad083306"
+  },
   "claims": {
-    "refs/heads/main-integration": "b02b700f14f900b1ddc5bc564f748eda3f3182a2",
+    "refs/heads/main-integration": "5a56e313c6551073a04dabbd5a6ed4f0abfc0cec",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -92,11 +94,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-27T18:23:06+00:00",
+  "created_at": "2026-10-27T18:24:50+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "8255d2266647b7d83c93f044954a2cb371752697",
+    "refs/heads/main-integration": "d25646b7c412596123252314ae5567e2ad083306",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -248,11 +250,11 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "9e94e681-e0be-49cc-a76d-b01cee0eb476",
-  "parent_state": "ff527f4224a7aedb4e858c9baad52dea9ecf7391",
+  "operation_token": "54c87701-9af6-40aa-aa4c-69cb8c7c87fd",
+  "parent_state": "297620c6bcedc8fc1e18f7f7bd3fe5b51d744f88",
   "projection_status": "partial",
-  "publication_id": "994c805a-6db9-451d-928d-0c5c39c5cc43",
-  "publication_scope": "close:preserve-closed-history-status",
+  "publication_id": "156d8aaf-325f-4bba-9710-aaf7a219e6ca",
+  "publication_scope": "integration",
   "schema_version": 2,
   "syncwheel_version": "0.46.12",
   "tombstones": [
