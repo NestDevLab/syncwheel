@@ -42,6 +42,7 @@
     "refs/heads/pr/partial-intent-desired-refs": "ee3a732393e447338300c8af81c642025e9ba2a3",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
+    "refs/heads/pr/preserve-control-divergence": "d0ae5e11976a4b0fabf7861e371dcc1d78b86fb7",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
     "refs/heads/pr/read-only-git-auth": "8214480681f3a822f5d3c158defbeba29a5ad631",
     "refs/heads/pr/recover-semantic-lease": "6c91ea1a41630a2452c364fa4377fc41d3c6ac1b",
@@ -89,7 +90,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-20T12:03:37+00:00",
+  "created_at": "2026-10-27T17:11:24+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -145,6 +146,7 @@
     "refs/heads/pr/partial-intent-desired-refs": "2e68fd634f7009b3a4056b19fb4468cd64b7c5f5",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
+    "refs/heads/pr/preserve-control-divergence": null,
     "refs/heads/pr/primary-checkout-hooks": "9e17cd7d8f5b27afe6bc572ea409fd65911e6dd6",
     "refs/heads/pr/promote-recovery-adoption": "43ff1cd8dee517f7afb1dbae6fe4ecfc42fda2ad",
     "refs/heads/pr/read-only-git-auth": "dffccd1eab3b9e248dbdcb3057011f21ef3941ac",
@@ -276,13 +278,13 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "76f91f37-9f7d-443b-960c-e76e6c7c369c",
-  "parent_state": "aa9e2b550b185d0dbcaedc2f5133a742eacf0cd5",
+  "operation_token": "1708dc4f-123d-4d2c-bd11-da7954d4d54e",
+  "parent_state": "2268f9ac7cdc9389521537d18269f0796cfe6188",
   "projection_status": "partial",
-  "publication_id": "165d7a17-7eb2-4d2c-9cfa-8cabe90fcb92",
-  "publication_scope": "close:journal-guard-readiness",
+  "publication_id": "e5fad087-ba9d-4c0e-89cd-23353ebbc749",
+  "publication_scope": "close:preserve-control-divergence",
   "schema_version": 2,
-  "syncwheel_version": "0.46.8",
+  "syncwheel_version": "0.46.10",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1147,6 +1149,14 @@
       "ref": "refs/heads/pr/journal-guard-readiness",
       "remote_tip": null,
       "stack": "journal-guard-readiness"
+    },
+    {
+      "branch": "pr/preserve-control-divergence",
+      "closed_at": "2026-10-27T17:11:21+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/preserve-control-divergence",
+      "remote_tip": null,
+      "stack": "preserve-control-divergence"
     }
   ]
 }
