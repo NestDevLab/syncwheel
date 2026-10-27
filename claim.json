@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/partial-intent-desired-refs"
-  ],
-  "claimed_at": "2026-10-20T03:39:37+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-10-27T17:27:28+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "dd90977a-18c8-44a4-b7b8-d9bc8d4be8af",
-  "publication_scope": "partial",
+  "operation_token": "9f7a1b1c-fef2-4615-ae90-ee9e6735d13c",
+  "publication_scope": "close:partial-intent-desired-refs",
+  "reason": "archived",
   "source_ref": "refs/heads/pr/partial-intent-desired-refs",
-  "syncwheel_version": "0.46.6"
+  "syncwheel_version": "0.46.10"
 }
