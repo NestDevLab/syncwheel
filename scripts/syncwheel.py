@@ -6663,17 +6663,46 @@ def integration_reconciliation_source(repo_root, manifest_path):
     }
 
 
-def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs):
+def integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs, published_parent=None):
     """Keep the declared replay graph and the prior local history as distinct parents."""
-    proof = json.dumps(
-        {'version': 2, 'inputs': inputs, 'manifest_digest': manifest_digest(manifest)},
-        sort_keys=True, separators=(',', ':'),
-    )
+    payload = {'version': 2, 'inputs': inputs, 'manifest_digest': manifest_digest(manifest)}
+    if published_parent is not None:
+        payload.update(version=3, published_parent=published_parent)
+    proof = json.dumps(payload, sort_keys=True, separators=(',', ':'))
     return git(
         repo_root, 'commit-tree', tree, '-p', local_tip, '-p', replay_tip,
+        *(['-p', published_parent['tip']] if published_parent is not None else []),
         '-m', 'chore: reconcile Syncwheel integration history\n\nSyncwheel-Reconciliation: ' + proof,
         env=replay_commit_env(repo_root, replay_tip),
     ).stdout.strip()
+
+
+def verify_reconciliation_published_parent(repo_root, manifest, local_tip, replay_tip,
+                                          published_parent, inputs, observation):
+    """Qualify one frozen published history without granting product-tree ownership."""
+    if (not isinstance(published_parent, dict)
+            or set(published_parent) != {'tip', 'state_tip'}
+            or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40}', value)
+                   for value in published_parent.values())):
+        raise SyncwheelError('integration reconciliation has an invalid published parent')
+    tip, state_tip = published_parent['tip'], published_parent['state_tip']
+    if (local_tip == replay_tip or branch_contains(repo_root, local_tip, tip)
+            or branch_contains(repo_root, replay_tip, tip)
+            or not integration_divergence_is_control_only(repo_root, local_tip, tip)):
+        raise SyncwheelError('integration reconciliation published parent is not qualified control divergence')
+    config = coordination_config(manifest)
+    state = coordination_state_from_commit(repo_root, state_tip, config['id'])
+    ref = f"refs/heads/{manifest['integration']['branch']}"
+    if state['managed_refs'].get(ref) != tip:
+        raise SyncwheelError('integration reconciliation published parent differs from its frozen state')
+    verify_coordination_state_manifest_digest(repo_root, state, config['remote'])
+    coordination_state_chain_contains(repo_root, config['id'], state_tip, observation['state_tip'])
+    pinned, _ = integration_reconciliation_inputs(repo_root, manifest, inputs)
+    shared = shared_derived_provenance_records(repo_root, pinned, state)
+    integration_reconciliation_history(
+        repo_root, pinned, tip, shared, observation=observation,
+        delivery_tip=inputs['refs'][0]['tip'], delivery_observation=inputs['refs'][0],
+    )
 
 
 def integration_reconciliation_inputs(repo_root, manifest, inputs):
@@ -6802,14 +6831,23 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         proof = json.loads(values[0])
     except ValueError:
         return None
-    if not isinstance(proof, dict) or proof.get('version') != 2 or not isinstance(proof.get('inputs'), dict):
+    if not isinstance(proof, dict) or proof.get('version') not in (2, 3) or not isinstance(proof.get('inputs'), dict):
         return None
     control = manifest_from_tree(repo_root, commit, integration_manifest_path(repo_root))
     parents = git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
-    if control is None or len(parents) != 2 or manifest_digest(control) != proof.get('manifest_digest'):
+    if control is None or len(parents) != (3 if proof['version'] == 3 else 2) or manifest_digest(control) != proof.get('manifest_digest'):
         return None
     inputs = proof['inputs']
     pinned, overrides = integration_reconciliation_inputs(repo_root, control, inputs)
+    published_parent = proof.get('published_parent')
+    if proof['version'] == 3:
+        if not observation or not isinstance(published_parent, dict) or published_parent.get('tip') != parents[2]:
+            return None
+        verify_reconciliation_published_parent(
+            repo_root, control, parents[0], parents[1], published_parent, inputs, observation,
+        )
+    elif published_parent is not None:
+        return None
     if materialize_integration_replay(repo_root, pinned, overrides) != parents[1]:
         return None
     ignore = tree_path_entry(repo_root, commit, '.gitignore')
@@ -6822,7 +6860,7 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
     )
     if (
         tree != ref_tree(repo_root, commit)
-        or integration_reconciliation_object(repo_root, control, *parents, tree, inputs) != commit
+        or integration_reconciliation_object(repo_root, control, *parents[:2], tree, inputs, published_parent) != commit
     ):
         return None
     events = load_control_manifest_events(repo_root, manifest_path)
@@ -6832,7 +6870,9 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         and event['payload'].get('inputs') == inputs
         and event['payload'].get('replay_tip') == parents[0]
         and event['payload'].get('detached_replay_tip') == parents[1]
+        and event['payload'].get('published_parent') == published_parent
         and receipts.get(key, {}).get('type') == 'manifest_saved'
+        and receipts.get(key, {}).get('payload', {}).get('context', {}).get('published_parent') == published_parent
         for key, event in intents.items()
     )
     witness = integration_reconciliation_published_witness(
@@ -7627,8 +7667,9 @@ def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
         )
         if not proof:
             continue
-        old, replay = proof['parents']
-        carried.update(wanted.intersection(rev_list(repo_root, f'{replay}..{old}')))
+        replay = proof['parents'][1]
+        for old in [proof['parents'][0], *proof['parents'][2:]]:
+            carried.update(wanted.intersection(rev_list(repo_root, f'{replay}..{old}')))
         if carried == wanted:
             break
     return carried
@@ -7739,7 +7780,8 @@ def integration_reconciliation_history(
     carried_history = {
         old_commit
         for proof in proofs.values()
-        for old_commit in rev_list(repo_root, f"{proof['parents'][1]}..{proof['parents'][0]}")
+        for parent in [proof['parents'][0], *proof['parents'][2:]]
+        for old_commit in rev_list(repo_root, f"{proof['parents'][1]}..{parent}")
     }
     replay_ranges = [(base, tip)] if detached_replay else []
     replay_ranges.extend((proof['inputs']['refs'][0]['tip'], proof['parents'][1]) for proof in proofs.values())
@@ -7813,6 +7855,18 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
     ignore_bytes = tree_path_bytes(repo_root, ignore_entry)
     source_ignore = intent['source_lease']['gitignore']
     state = coordination_state_from_commit(repo_root, intent['state_tip'], coordination_config(manifest)['id'])
+    published_parent = intent.get('published_parent')
+    if published_parent is not None:
+        if published_parent != {'tip': intent['published_tip'], 'state_tip': intent['state_tip']}:
+            raise SyncwheelError('integration reconciliation intent has an unbound published parent')
+        observation = {
+            'state': state, 'state_tip': intent['state_tip'],
+            'config': coordination_config(manifest), 'remote_refs': intent['remote_refs'],
+            'integration_ref': f"refs/heads/{branch}", 'published_tip': intent['published_tip'],
+        }
+        verify_reconciliation_published_parent(
+            repo_root, manifest, local_tip, replay_tip, published_parent, intent['inputs'], observation,
+        )
     shared = shared_derived_provenance_records(repo_root, manifest, state)
     provenance_before, store_after, provenance_after = integration_reconciliation_provenance(
         manifest, intent['provenance_store'], shared,
@@ -7835,10 +7889,10 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
         raise SyncwheelError('integration reconciliation intent does not bind its replay and source bytes')
     parents = git(repo_root, 'show', '-s', '--format=%P', final_tip).stdout.split()
     if (
-        parents != [local_tip, replay_tip]
+        parents != [local_tip, replay_tip, *([published_parent['tip']] if published_parent is not None else [])]
         or ref_tree(repo_root, final_tip) != intent['final_tree']
         or integration_reconciliation_object(
-            repo_root, manifest, local_tip, replay_tip, intent['final_tree'], intent['inputs']
+            repo_root, manifest, local_tip, replay_tip, intent['final_tree'], intent['inputs'], published_parent
         ) != final_tip
         or manifest_digest(manifest) != intent['expected_manifest_digest']
     ):
@@ -7930,7 +7984,8 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
         control_manifest_event_payload(
             repo_root, manifest_path, manifest, final_tip, 'reconciliation',
             intent['reason'], intent['command'],
-            {'replay_tip': local_tip, 'version': 2, 'detached_replay_tip': replay_tip},
+            {'replay_tip': local_tip, 'version': 2, 'detached_replay_tip': replay_tip,
+             **({'published_parent': published_parent} if published_parent is not None else {})},
             operation_id=intent['operation_id'],
         ),
         manifest_path,
@@ -8052,8 +8107,15 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         provenance, store_after, provenance_after = integration_reconciliation_provenance(manifest, store, shared)
         pinned, overrides = integration_reconciliation_inputs(repo_root, manifest, inputs)
         replay_tip = materialize_integration_replay(repo_root, pinned, overrides)
+        published_parent = None
         if control_divergence and not branch_contains(repo_root, replay_tip, observed['published_tip']):
-            raise SyncwheelError('integration reconciliation replay does not preserve published history')
+            published_parent = {'tip': observed['published_tip'], 'state_tip': observed['state_tip']}
+            try:
+                verify_reconciliation_published_parent(
+                    repo_root, manifest, local_tip, replay_tip, published_parent, inputs, observed,
+                )
+            except SyncwheelError as exc:
+                raise SyncwheelError('integration reconciliation replay does not preserve published history') from exc
         ignore = regular_checkout_path_bytes(repo_root, '.gitignore')
         if ignore is None:
             raise SyncwheelError('integration reconciliation requires regular ignore bytes')
@@ -8068,7 +8130,7 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         )
         integration_reconciliation_history(repo_root, pinned, replay_tip, provenance, manifest_path, observed,
                                            detached_replay=True)
-        final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs)
+        final_tip = (integration_reconciliation_object(repo_root, manifest, local_tip, replay_tip, tree, inputs, published_parent)
                      if replay_tip != local_tip else None)
         after = observe_published_integration_tip(repo_root, manifest)
         if (
@@ -8099,6 +8161,7 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
                 'reconciliation', reason, command, str(uuid.uuid4()),
             ),
             'version': 2, 'detached_replay_tip': replay_tip, 'final_tree': tree,
+            **({'published_parent': published_parent} if published_parent is not None else {}),
             'state_tip': observed['state_tip'], 'published_tip': observed['published_tip'],
             'remote_refs': observed['remote_refs'], 'inputs': inputs, 'source_lease': source,
             'manifest_path': str(Path(manifest_path).absolute()),
@@ -20857,7 +20920,7 @@ def coordination_provenance_supersede_plan(
     integration_tip = ref_tip(repo_root, manifest['integration']['branch'])
     if not integration_tip or not branch_contains(repo_root, integration_tip, reconciliation):
         raise SyncwheelError('integration does not contain the proved reconciliation commit')
-    first_parent, replay_parent = proof['parents']
+    first_parent, replay_parent = proof['parents'][:2]
     records, diverged = derived_provenance_snapshot(
         repo_root, manifest, observed['state']
     )
