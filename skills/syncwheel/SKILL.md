@@ -23,7 +23,7 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
 1. **Never author in the primary checkout.** It stays on `manifest.integration.branch` as
    the shared test projection. Open a governed lane instead:
    ```bash
-   syncwheel worktree open <lane> [--into <stack>] [--full]
+   syncwheel worktree open <lane> [--into <stack>] [--full --approved-by <approver> --reason "<why>"]
    ```
    As of 0.42.4, where the guard hooks are installed, this is enforced: a manual commit on
    the primary, or an unauthorized move of the integration ref there, is refused, and every
@@ -76,8 +76,10 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    syncwheel int rebuild --reason "<why>"
    ```
 
-4. **Every mutating command carries `--reason`; it is mandatory in `ai-managed`
-   repositories.** Pass it always, not only on the commands that already refuse to run
+4. **Mutating commands carry `--reason`; it is mandatory in `ai-managed`
+   repositories.** Commit-only `worktree open` is the explicit exception: it rejects
+   `--reason` and `--approved-by` without `--full`. Pass a reason whenever supported,
+   not only on the commands that already refuse to run
    without one (`int rebuild` in an ai-managed repo, `hooks remove --disable`,
    `worktree release`, `coordination provenance reset`, among others). The reason lands in
    the append-only ledger together with the actor and the exact command:
@@ -176,13 +178,18 @@ must continue, use the explicit governed fallback instead of manual worktree
 surgery:
 
 ```bash
-syncwheel worktree open <lane> [--into <existing-stack>] [--full]
+syncwheel worktree open <lane> [--into <existing-stack>] [--full --approved-by <approver> --reason "<why>"]
 ```
 
-The default light lane is for editing and committing only. It receives no
-dependency provisioning; use `--full` only for an explicitly necessary
-dependency, build, test, or debugging surface. This is not a security sandbox,
-so do not defeat the light-lane boundary with raw install/test commands. The
+Commit-only light lanes are the default and receive no dependency provisioning.
+Before using `--full`
+for dependencies, builds, tests, or debugging, ask the repository owner for explicit
+human approval in your thread first. Then rerun with `--approved-by <approver>
+--reason "<why>"`. Both values must be non-empty; they are rejected without
+`--full`. A selected manifest may restrict names with `full_lane_approvers`.
+The lane registry and status JSON record the approval name, reason, and timestamp.
+This is not a security sandbox, so do not defeat the light-lane boundary with raw
+install/test commands. The
 clone-local lane warns at four active entries by default, permitting another
 lane. `governed_worktree_capacity` can set another `limit`; only explicit
 `enforcement: "error"` enforces a hard cap. After its commits are
