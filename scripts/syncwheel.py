@@ -21682,8 +21682,9 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id):
         lock = worktree.get('locked')
         if not lock or lock == governed_worktree_cleanup_lock_reason(lane):
             refuse('an explicit Git worktree retention lock is required')
-        dirty = local_worktree_status(path)
-        if dirty is None or dirty:
+        status = git(path, 'status', '--porcelain=v1', '--untracked-files=all',
+                     '--ignore-submodules=none', check=False)
+        if status.returncode or status.stdout.strip():
             refuse('tracked or untracked source changes remain')
         tip = ref_tip(repo_root, lane['branch'])
         if not tip or ref_tip(path, 'HEAD') != tip or tip != target_tip:

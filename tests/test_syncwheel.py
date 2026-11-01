@@ -39,7 +39,8 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.git('-C', str(path), 'commit', '-qm', 'feat: captured source')
         tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
         self.git('worktree', 'lock', '--reason', 'Keep validated source for inspection', str(path))
-        self.run_cli('stack', 'capture-integration', 'feature-a', tip, cwd=path)
+        self.run_cli('stack', 'capture-integration', 'feature-a', tip,
+                     '--repo', str(self.repo), cwd=path)
         self.assertEqual(self.git('rev-parse', 'pr/feature-a'), tip)
         exclude = Path(self.git('rev-parse', '--git-path', 'info/exclude'))
         if not exclude.is_absolute():
@@ -136,6 +137,7 @@ class SyncwheelFixtureTest(unittest.TestCase):
                                retain_captured_worktrees='Keep evidence', dry_run=True)
         module.governed_worktree_preflight(args)
         module.verify_retained_captured_worktrees(self.repo, manifest, args)
+        self.git('-C', str(path), 'config', 'status.showUntrackedFiles', 'no')
         (path / 'untracked-source.txt').write_text('unvalidated source\n')
         with self.assertRaisesRegex(module.SyncwheelError, 'source changes remain'):
             module.verify_retained_captured_worktrees(self.repo, manifest, args)

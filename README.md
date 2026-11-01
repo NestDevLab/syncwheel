@@ -104,6 +104,8 @@ Every retained lane must have completed native capture, remain registered and lo
 have no tracked or untracked source edits or interrupted cleanup, and have exactly
 the publication HEAD. All its commits must belong to the selected stack. These proofs
 are checked again before publication. Legacy pushes pin that HEAD in the refspec.
+The Git lock protects against cleanup, not subsequent edits; publication uses the
+commit, not the copy's mutable files.
 The default recovery requirement and destructive-operation guards remain unchanged.
 
 `syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` should be
