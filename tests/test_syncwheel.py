@@ -21,6 +21,126 @@ FIXTURE = REPO_ROOT / 'tests' / 'fixtures' / 'simple-repo'
 
 
 class SyncwheelFixtureTest(unittest.TestCase):
+    def captured_push_copy(self):
+        manifest = self.read_manifest()
+        stack = next(item for item in manifest['stacks'] if item['id'] == 'feature-a')
+        base = self.git('rev-parse', stack['branch'])
+        stack.update(base=base, commits=[])
+        (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest) + '\n')
+        lane = json.loads(self.run_cli(
+            'worktree', 'open', 'kept-validation', '--into', 'feature-a', '--base', base, '--json'
+        ).stdout)['lane']
+        path = Path(lane['path'])
+        (path / 'captured.txt').write_text('verified source\n')
+        package = path / 'packages/local'
+        package.mkdir(parents=True)
+        (package / 'cli.js').write_text('console.log("fixture");\n')
+        self.git('-C', str(path), 'add', 'captured.txt', 'packages/local/cli.js')
+        self.git('-C', str(path), 'commit', '-qm', 'feat: captured source')
+        tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        self.git('worktree', 'lock', '--reason', 'Keep validated source for inspection', str(path))
+        self.run_cli('stack', 'capture-integration', 'feature-a', tip, cwd=path)
+        self.assertEqual(self.git('rev-parse', 'pr/feature-a'), tip)
+        exclude = Path(self.git('rev-parse', '--git-path', 'info/exclude'))
+        if not exclude.is_absolute():
+            exclude = self.repo / exclude
+        with exclude.open('a') as handle:
+            handle.write('\nnode_modules/\n')
+        modules = path / 'node_modules'
+        (modules / '@example').mkdir(parents=True)
+        (modules / '.bin').mkdir()
+        (modules / '@example/local').symlink_to('../../packages/local', target_is_directory=True)
+        (modules / '.bin/local').symlink_to('../@example/local/cli.js')
+        (modules / 'cached.bin').write_bytes(b'preserve dependency and validation bytes\x00')
+        origin = self.tmp / 'retained-origin.git'
+        self.git('clone', '--bare', '-q', str(self.repo), str(origin))
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('--git-dir=' + str(origin), 'update-ref', 'refs/heads/pr/feature-a', base)
+        return path, tip, base, origin
+
+    def test_retained_captured_push_preserves_source_dependencies_and_registration(self):
+        path, tip, base, origin = self.captured_push_copy()
+        module = self.load_syncwheel_module()
+        registry_path = module.governed_worktree_registry_path(self.repo)
+        registry_before = registry_path.read_bytes()
+        ignored = path / 'node_modules/cached.bin'
+        data_before = ignored.read_bytes()
+        self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', expected=2)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), base)
+        result = self.run_cli(
+            'stack', 'push', 'feature-a', '--remote', 'origin',
+            '--retain-captured-worktrees', 'Keep validation evidence',
+        )
+        self.assertIn('preserving captured worktree kept-validation', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), tip)
+        self.assertEqual(ignored.read_bytes(), data_before)
+        self.assertEqual(os.readlink(path / 'node_modules/@example/local'), '../../packages/local')
+        self.assertEqual(os.readlink(path / 'node_modules/.bin/local'), '../@example/local/cli.js')
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+        self.assertTrue(module.find_worktree_record_for_branch(self.repo, 'syncwheel/lane/kept-validation')['locked'])
+
+    def test_retained_captured_push_refuses_unlocked_or_dirty_copies(self):
+        path, _, base, origin = self.captured_push_copy()
+        args = ('stack', 'push', 'feature-a', '--remote', 'origin',
+                '--retain-captured-worktrees', 'Keep validation evidence')
+        self.git('worktree', 'unlock', str(path))
+        self.assertIn('retention lock', self.run_cli(*args, expected=2).stderr)
+        self.git('worktree', 'lock', '--reason', 'Keep validated source for inspection', str(path))
+        (path / 'captured.txt').write_text('unvalidated source\n')
+        self.assertIn('source changes remain', self.run_cli(*args, expected=2).stderr)
+        self.git('-C', str(path), 'add', 'captured.txt')
+        self.assertIn('source changes remain', self.run_cli(*args, expected=2).stderr)
+        self.git('-C', str(path), 'commit', '-qm', 'feat: not captured')
+        self.assertIn('match exactly', self.run_cli(*args, expected=2).stderr)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), base)
+
+    def test_retained_captured_push_refuses_uncaptured_cleanup_and_missing_ownership(self):
+        path, _, base, origin = self.captured_push_copy()
+        module = self.load_syncwheel_module()
+        original, _ = module.load_governed_worktree_registry(self.repo)
+        cases = [({'state': 'active'}, 'completed native capture'),
+                 ({'pending_reason': 'branch_advanced'}, 'interrupted cleanup'),
+                 ({'cleanup_tip': 'unknown'}, 'interrupted cleanup'),
+                 ({'captured_at': ''}, 'capture evidence is missing'),
+                 ({'path': str(self.tmp)}, 'outside the governed root'),
+                 ({'generation_token': ''}, 'completed native capture')]
+        for changes, expected in cases:
+            with self.subTest(changes=changes):
+                registry = json.loads(json.dumps(original))
+                registry['lanes'][0].update(changes)
+                module.save_governed_worktree_registry(self.repo, registry)
+                result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
+                                      '--retain-captured-worktrees', 'Keep evidence', expected=2)
+                self.assertIn(expected, result.stderr)
+                self.assertTrue(path.is_dir())
+        module.save_governed_worktree_registry(self.repo, original)
+        manifest = self.read_manifest()
+        next(item for item in manifest['stacks'] if item['id'] == 'feature-a')['commits'] = []
+        (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest) + '\n')
+        self.assertIn('not fully owned', self.run_cli(
+            'stack', 'push', 'feature-a', '--remote', 'origin',
+            '--retain-captured-worktrees', 'Keep evidence', expected=2,
+        ).stderr)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), base)
+
+    def test_retained_captured_push_rechecks_source_and_rejects_blank_reason(self):
+        path, _, base, origin = self.captured_push_copy()
+        result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
+                              '--retain-captured-worktrees', '  ', expected=2)
+        self.assertIn('non-empty reason', result.stderr)
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        args = SimpleNamespace(repo=str(self.repo), manifest=None, personal=None,
+                               func=module.command_stack_push, stack='feature-a',
+                               retain_captured_worktrees='Keep evidence', dry_run=True)
+        module.governed_worktree_preflight(args)
+        module.verify_retained_captured_worktrees(self.repo, manifest, args)
+        (path / 'untracked-source.txt').write_text('unvalidated source\n')
+        with self.assertRaisesRegex(module.SyncwheelError, 'source changes remain'):
+            module.verify_retained_captured_worktrees(self.repo, manifest, args)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), base)
+
     def captured_personal_lane(self, name='captured-personal'):
         manifest_path = self.repo / '.syncwheel/manifests/captured.local.json'
         manifest_path.parent.mkdir(parents=True)

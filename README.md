@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.12`
+Current version: `0.46.13`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -91,6 +91,20 @@ Default behavior is conservative:
 
 For legacy manifests, use `--no-force-with-lease` only when a normal push is
 intentionally required.
+
+To publish without removing a captured validation copy, explicitly retain it:
+
+```bash
+git worktree lock --reason "Keep validated source for inspection" <captured-worktree>
+syncwheel stack push feature-a --retain-captured-worktrees "Keep validation evidence"
+```
+
+This does not release, remove, unlock or change the copy or its ignored dependencies.
+Every retained lane must have completed native capture, remain registered and locked,
+have no tracked or untracked source edits or interrupted cleanup, and have exactly
+the publication HEAD. All its commits must belong to the selected stack. These proofs
+are checked again before publication. Legacy pushes pin that HEAD in the refspec.
+The default recovery requirement and destructive-operation guards remain unchanged.
 
 `syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` should be
 tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
