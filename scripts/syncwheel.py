@@ -21650,7 +21650,7 @@ def governed_worktree_commit_set(repo_root, lane):
     return set(rev_list(repo_root, f"{lane['base']}..{lane['branch']}"))
 
 
-def retained_captured_worktree_snapshot(repo_root, manifest, stack_id):
+def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, capture=False):
     """Prove that retained copies cannot contribute unpublished working-tree state."""
     stack = require_stack(manifest, stack_id)
     registry, _ = load_governed_worktree_registry(repo_root)
@@ -21687,23 +21687,52 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id):
         if status.returncode or status.stdout.strip():
             refuse('tracked or untracked source changes remain')
         tip = ref_tip(repo_root, lane['branch'])
-        if not tip or ref_tip(path, 'HEAD') != tip or tip != target_tip:
+        if not target_tip or not tip or ref_tip(path, 'HEAD') != tip or (not capture and tip != target_tip):
             refuse('the captured HEAD and stack publication HEAD must match exactly')
         commits = governed_worktree_commit_set(repo_root, lane)
         if not commits or not commits.issubset(owned) or tip not in owned:
             refuse('the captured commits are not fully owned by the selected stack')
+        if capture:
+            base = commit_full_sha(repo_root, stack['base'])
+            rows = [line.split() for line in git(
+                repo_root, 'rev-list', '--reverse', '--parents', f'{base}..{tip}'
+            ).stdout.splitlines()]
+            declared = list(dict.fromkeys(commit_full_sha(repo_root, item) for item in stack['commits']))
+            if [row[0] for row in rows] != declared:
+                refuse('recapture requires the complete declared history on the stack base')
+            previous = base
+            for row in rows:
+                if row[1:] != [previous]:
+                    refuse('recapture requires contiguous single-parent history')
+                previous = row[0]
         snapshots.append({
-            'lane': dict(lane), 'tip': tip, 'lock': lock,
+            'lane': dict(lane), 'tip': tip, 'target_tip': target_tip, 'lock': lock,
             'owned_commits': sorted(owned),
         })
     return sorted(snapshots, key=lambda item: item['lane']['id'])
 
 
-def verify_retained_captured_worktrees(repo_root, manifest, args):
+def retained_capture_manifest(repo_root, manifest, args):
+    if args.func != command_stack_capture_integration:
+        return manifest
+    proposed = copy.deepcopy(manifest)
+    stack = require_stack(proposed, args.stack)
+    commits = [commit_full_sha(repo_root, item) for item in stack['commits']]
+    for spec in args.specs:
+        commits.extend(commit_list_for_spec(repo_root, spec))
+    stack['commits'] = list(dict.fromkeys(commits))
+    return proposed
+
+
+def verify_retained_captured_worktrees(repo_root, manifest, args, *, after_capture=False):
     if getattr(args, 'retain_captured_worktrees', None) is None:
         return []
     expected = getattr(args, '_retained_captured_worktree_snapshot', None)
-    observed = retained_captured_worktree_snapshot(repo_root, manifest, args.stack)
+    capture = args.func == command_stack_capture_integration and not after_capture
+    proposed = retained_capture_manifest(repo_root, manifest, args) if capture else manifest
+    observed = retained_captured_worktree_snapshot(repo_root, proposed, args.stack, capture=capture)
+    if after_capture and expected is not None:
+        expected = [{**item, 'target_tip': item['tip']} for item in expected]
     if expected is None or observed != expected:
         raise SyncwheelError('retained captured worktrees changed after preflight; refusing publication')
     return observed
@@ -27257,6 +27286,7 @@ def rebuild_stack_from_manifest(
 def command_stack_capture_integration(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    verify_retained_captured_worktrees(repo_root, manifest, args)
     stack = require_stack(manifest, args.stack)
 
     # Expand every requested spec before changing stack ownership or refs.
@@ -27317,12 +27347,15 @@ def command_stack_capture_integration(args):
             'actor': governed_worktree_owner(),
         },
     )
-    capture_governed_worktrees_for_stack(
-        repo_root,
-        manifest,
-        args.stack,
-        manifest_path=manifest_path,
-    )
+    if getattr(args, 'retain_captured_worktrees', None) is not None:
+        verify_retained_captured_worktrees(repo_root, manifest, args, after_capture=True)
+    else:
+        capture_governed_worktrees_for_stack(
+            repo_root,
+            manifest,
+            args.stack,
+            manifest_path=manifest_path,
+        )
     print(f"{args.stack}: captured {len(added_commits)} integration commit(s)")
     return 0
 
@@ -34844,6 +34877,10 @@ def build_parser():
     )
     stack_capture_p.add_argument('stack')
     stack_capture_p.add_argument('specs', nargs='+')
+    stack_capture_p.add_argument(
+        '--retain-captured-worktrees', metavar='REASON',
+        help='recapture contiguous committed history without removing locked captured copies',
+    )
     stack_capture_p.set_defaults(func=command_stack_capture_integration)
 
     stack_rebuild_p = stack_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
@@ -35822,14 +35859,17 @@ def governed_worktree_preflight(args):
         scoped_stack_label = 'this stack'
     elif args.func in {command_reconcile, command_resume} and getattr(args, 'stack', None):
         scoped_stacks = set(args.stack)
+    if args.func in {command_stack_push, command_stack_capture_integration} and getattr(
+        args, 'retain_captured_worktrees', None
+    ) is not None:
+        if not args.retain_captured_worktrees.strip():
+            raise SyncwheelError('--retain-captured-worktrees requires a non-empty reason')
+        proposed = retained_capture_manifest(repo_root, manifest, args)
+        args._retained_captured_worktree_snapshot = retained_captured_worktree_snapshot(
+            repo_root, proposed, args.stack, capture=args.func == command_stack_capture_integration
+        )
+        return
     if scoped_stacks:
-        if args.func == command_stack_push and getattr(args, 'retain_captured_worktrees', None) is not None:
-            if not args.retain_captured_worktrees.strip():
-                raise SyncwheelError('--retain-captured-worktrees requires a non-empty reason')
-            args._retained_captured_worktree_snapshot = retained_captured_worktree_snapshot(
-                repo_root, manifest, args.stack
-            )
-            return
         registry, _ = load_governed_worktree_registry(repo_root)
         blockers = [
             lane for lane in registry['lanes']

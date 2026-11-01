@@ -108,6 +108,18 @@ The Git lock protects against cleanup, not subsequent edits; publication uses th
 commit, not the copy's mutable files.
 The default recovery requirement and destructive-operation guards remain unchanged.
 
+Further committed corrections to an already captured copy can be recaptured without
+cleanup using the same explicit option:
+
+```bash
+syncwheel stack capture-integration feature-a <commit-or-range> --retain-captured-worktrees "Keep validation evidence"
+```
+
+The proposed complete stack history must be contiguous, single-parent history on
+the selected stack base and end exactly at the retained HEAD. Unrelated or missing
+commits fail before ownership changes. Capture rechecks the copy before changing
+refs and verifies the resulting publication HEAD without reaping any retained copy.
+
 `syncwheel_tracking=git-tracked` means `.syncwheel/manifest.json` should be
 tracked by Git. `syncwheel_tracking=local-only` keeps Syncwheel metadata local
 through `.git/info/exclude`: without active-active coordination the integration

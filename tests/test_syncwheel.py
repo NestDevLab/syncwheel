@@ -143,6 +143,42 @@ class SyncwheelFixtureTest(unittest.TestCase):
             module.verify_retained_captured_worktrees(self.repo, manifest, args)
         self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), base)
 
+    def test_retained_captured_recapture_preserves_copy_and_publishes_updated_commit(self):
+        path, old_tip, _, origin = self.captured_push_copy()
+        (path / 'captured.txt').write_text('verified correction\n')
+        self.git('-C', str(path), 'add', 'captured.txt')
+        self.git('-C', str(path), 'commit', '-qm', 'fix: captured correction')
+        tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        ignored_before = (path / 'node_modules/cached.bin').read_bytes()
+        self.run_cli('stack', 'capture-integration', 'feature-a', tip,
+                     '--retain-captured-worktrees', 'Keep validation evidence')
+        self.assertEqual(self.git('rev-parse', 'pr/feature-a'), tip)
+        self.assertNotEqual(old_tip, tip)
+        self.assertEqual((path / 'node_modules/cached.bin').read_bytes(), ignored_before)
+        self.assertEqual((path / 'captured.txt').read_text(), 'verified correction\n')
+        self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
+                     '--retain-captured-worktrees', 'Keep validation evidence')
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), tip)
+        self.assertTrue(path.is_dir())
+
+    def test_retained_captured_recapture_refuses_incomplete_or_unrelated_history(self):
+        path, old_tip, _, _ = self.captured_push_copy()
+        (path / 'captured.txt').write_text('verified correction\n')
+        self.git('-C', str(path), 'add', 'captured.txt')
+        self.git('-C', str(path), 'commit', '-qm', 'fix: captured correction')
+        tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        manifest_path = self.repo / '.syncwheel/manifest.json'
+        before = manifest_path.read_bytes()
+        result = self.run_cli('stack', 'capture-integration', 'feature-a', 'main',
+                              '--retain-captured-worktrees', 'Keep evidence', expected=2)
+        self.assertIn('not fully owned', result.stderr)
+        result = self.run_cli('stack', 'capture-integration', 'feature-a', tip, 'main',
+                              '--retain-captured-worktrees', 'Keep evidence', expected=2)
+        self.assertIn('complete declared history', result.stderr)
+        self.assertEqual(manifest_path.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', 'pr/feature-a'), old_tip)
+        self.assertTrue(path.is_dir())
+
     def captured_personal_lane(self, name='captured-personal'):
         manifest_path = self.repo / '.syncwheel/manifests/captured.local.json'
         manifest_path.parent.mkdir(parents=True)

@@ -2,7 +2,7 @@
 
 ## 0.46.13 - 2026-11-01
 
-- Add explicit guarded stack publication with retained captured worktrees. Require locked, clean, fully owned copies at the exact publication HEAD, revalidate before pushing, and preserve all files and cleanup metadata without weakening the default recovery guard.
+- Add explicit guarded recapture and stack publication with retained captured worktrees. Require locked, clean, fully owned copies and exact contiguous history, revalidate before capture/publication, and preserve all files and cleanup metadata without weakening the default recovery guard.
 
 ## 0.46.12 - 2026-10-27
 
