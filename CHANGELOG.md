@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.13 - 2026-11-01
+
+- Keep commit-only lanes as the default. Require explicit repository owner approval for `worktree open --full`, reject missing approval before startup side effects, optionally restrict approver names with `full_lane_approvers`, and expose the recorded approval in lane status. Approval options are rejected without `--full`.
+
 ## 0.46.12 - 2026-10-27
 
 - Preserve frozen observation qualification when applying or recovering three-parent reconciliation, so valid absorbed historical source proofs remain available without changing remote or CAS lease checks.

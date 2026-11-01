@@ -396,6 +396,12 @@ python3 scripts/syncwheel.py manifest require-integration --apply
   `human-gated`. Set it with `syncwheel repo authority set`; it is never
   enabled automatically and is not part of coordination state
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
+- `full_lane_approvers` optionally restricts `worktree open --full` to an array
+  of non-empty approver names (exact, case-sensitive match). An absent key accepts
+  any non-empty name; an empty array denies all full lanes. The selected shared or
+  personal manifest controls this policy. Both `--approved-by` and `--reason` are
+  required for `--full` and rejected without it; approval must first be obtained
+  from the repository owner in the current thread
 - `governed_worktree_capacity` is optional: `limit` (positive integer, default
   `4`) sets the active governed lane threshold per clone. `enforcement` defaults
   to `warn`, which adds the capacity message to lane warnings and still opens

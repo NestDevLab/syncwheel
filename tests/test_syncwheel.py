@@ -1147,12 +1147,101 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         self.assertEqual(lane['id'], 'quick-fix')
         self.assertFalse(lane['full'])
+        self.assertNotIn('approval', lane)
         self.assertEqual(lane['branch'], 'syncwheel/lane/quick-fix')
         self.assertTrue(Path(lane['path']).is_dir())
         self.assertTrue(Path(lane['path']).is_relative_to(self.repo / '.syncwheel' / 'wt'))
         registry = json.loads(Path(data['registry_path']).read_text())
         self.assertEqual(registry['version'], 1)
         self.assertEqual(registry['lanes'], [lane])
+
+    def assert_full_lane_refused_without_writes(self, *options, message):
+        before = {str(p.relative_to(self.repo)): p.read_bytes()
+                  for p in self.repo.rglob('*') if p.is_file()}
+        result = self.run_cli('worktree', 'open', 'approval-check', *options, expected=2)
+        self.assertIn(message, result.stderr)
+        after = {str(p.relative_to(self.repo)): p.read_bytes()
+                 for p in self.repo.rglob('*') if p.is_file()}
+        self.assertEqual(before, after)
+        self.assertNotIn('syncwheel/lane/approval-check', self.git('branch', '--list'))
+
+    def test_worktree_open_full_requires_approver_and_reason_without_side_effects(self):
+        remedy = ('--full installs dependencies and builds in the lane; ask the repository owner '
+                  'for explicit approval in your thread first, then rerun with '
+                  '--approved-by <approver> --reason "<why>"')
+        for options in (
+            (), ('--reason', 'run checks'), ('--approved-by', 'maintainer'),
+            ('--approved-by', '', '--reason', 'run checks'),
+            ('--approved-by', 'maintainer', '--reason', ''),
+            ('--approved-by', '  ', '--reason', 'run checks'),
+            ('--approved-by', 'maintainer', '--reason', '  '),
+        ):
+            with self.subTest(options=options):
+                self.assert_full_lane_refused_without_writes('--full', *options, message=remedy)
+
+    def test_worktree_open_full_restricts_configured_approvers_without_writes(self):
+        manifest = self.read_manifest()
+        manifest['full_lane_approvers'] = ['maintainer']
+        (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest))
+        self.assert_full_lane_refused_without_writes(
+            '--full', '--approved-by', 'other', '--reason', 'run checks',
+            message='--approved-by must match a configured full_lane_approvers entry',
+        )
+
+    def test_worktree_open_full_records_approval_and_surfaces_status(self):
+        for restricted in (False, True):
+            with self.subTest(restricted=restricted):
+                if restricted:
+                    manifest = self.read_manifest()
+                    manifest['full_lane_approvers'] = ['maintainer']
+                    (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest))
+                data = json.loads(self.run_cli(
+                    'worktree', 'open', f'approved-{restricted}', '--full',
+                    '--approved-by', ' maintainer ', '--reason', ' run checks ', '--json',
+                ).stdout)
+                lane = data['lane']
+                self.assertTrue(lane['full'])
+                approval = lane['approval']
+                self.assertEqual(approval['approved_by'], 'maintainer')
+                self.assertEqual(approval['reason'], 'run checks')
+                self.assertIsNotNone(self.load_syncwheel_module().parse_coordination_timestamp(
+                    approval['timestamp']))
+                stored = json.loads(Path(data['registry_path']).read_text())['lanes'][-1]
+                self.assertEqual(stored, lane)
+                status = json.loads(self.run_cli('status', '--json').stdout)
+                observed = next(item for item in status['governed_worktrees']['lanes']
+                                if item['id'] == lane['id'])
+                self.assertEqual(observed['approval'], approval)
+                text = self.run_cli('status').stdout
+                self.assertIn('approved by: maintainer at ' + approval['timestamp'], text)
+                self.assertIn('approval reason: run checks', text)
+
+    def test_worktree_open_light_rejects_approval_options_without_writes(self):
+        for options in (('--approved-by', 'maintainer'), ('--reason', 'run checks'),
+                        ('--approved-by', ''), ('--reason', '')):
+            with self.subTest(options=options):
+                self.assert_full_lane_refused_without_writes(
+                    *options, message='--approved-by and --reason require --full')
+
+    def test_worktree_open_empty_approver_allowlist_denies_full_lane(self):
+        manifest = self.read_manifest()
+        manifest['full_lane_approvers'] = []
+        (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest))
+        self.assert_full_lane_refused_without_writes(
+            '--full', '--approved-by', 'maintainer', '--reason', 'run checks',
+            message='--approved-by must match a configured full_lane_approvers entry',
+        )
+
+    def test_worktree_open_rejects_invalid_full_lane_approvers(self):
+        for value in ('maintainer', None, [''], ['  '], [42]):
+            with self.subTest(value=value):
+                manifest = self.read_manifest()
+                manifest['full_lane_approvers'] = value
+                (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest))
+                self.assert_full_lane_refused_without_writes(
+                    '--full', '--approved-by', 'maintainer', '--reason', 'run checks',
+                    message='full_lane_approvers must be a list of non-empty names',
+                )
 
     def test_worktree_open_explicit_base_uses_exact_stack_tip_from_other_checkout(self):
         manifest = self.read_manifest()

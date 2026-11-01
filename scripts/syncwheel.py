@@ -4801,6 +4801,14 @@ def normalize_manifest_data(data, path):
             data['governed_worktree_capacity']
         )
 
+    if 'full_lane_approvers' in data:
+        approvers = data['full_lane_approvers']
+        if not isinstance(approvers, list) or any(
+            not isinstance(item, str) or not item.strip() for item in approvers
+        ):
+            raise SyncwheelError('full_lane_approvers must be a list of non-empty names')
+        data['full_lane_approvers'] = [item.strip() for item in approvers]
+
     defaults = data.setdefault('defaults', {})
     canonical_remote = defaults.setdefault('canonical_remote', 'origin')
     defaults.setdefault('publication_remote', 'fork')
@@ -10728,6 +10736,7 @@ def governed_worktree_lane_status(repo_root, manifest, lane, now=None, manifest_
         'target': lane.get('target'), 'lease_expires_at': lane['lease_expires_at'],
         'code': None, 'remedy': None,
     }
+    status['approval'] = lane.get('approval')
     if path_moved:
         status['registered_path'] = str(registered_path)
         status['path_moved'] = True
@@ -21337,9 +21346,38 @@ def command_worktree_unlock(args):
     return 0
 
 
+def print_full_lane_approval(approval):
+    print(f"  approved by: {approval['approved_by']} at {approval['timestamp']}")
+    print(f"  approval reason: {approval['reason']}")
+
+
+def validate_full_lane_approval(args, manifest=None):
+    """Check approval before any startup maintenance or lane mutation."""
+    approved_by = (getattr(args, 'approved_by', None) or '').strip()
+    reason = (getattr(args, 'reason', None) or '').strip()
+    if not args.full:
+        if getattr(args, 'approved_by', None) is not None or getattr(args, 'reason', None) is not None:
+            raise SyncwheelError('--approved-by and --reason require --full')
+        return None
+    if not approved_by or not reason:
+        raise SyncwheelError(
+            '--full installs dependencies and builds in the lane; ask the repository owner '
+            'for explicit approval in your thread first, then rerun with '
+            '--approved-by <approver> --reason "<why>"'
+        )
+    if manifest is None:
+        repo_root = resolve_repo_root(args.repo)
+        manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    approvers = manifest.get('full_lane_approvers')
+    if approvers is not None and approved_by not in approvers:
+        raise SyncwheelError('--approved-by must match a configured full_lane_approvers entry')
+    return {'approved_by': approved_by, 'reason': reason}
+
+
 def command_worktree_open(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    approval = validate_full_lane_approval(args, manifest)
     lane_id = safe_ref_segment(args.lane)
     stack = require_stack(manifest, args.into) if args.into else None
     base_ref = getattr(args, 'base', None)
@@ -21421,6 +21459,8 @@ def command_worktree_open(args):
                 seconds=GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS
             )).isoformat(),
         }
+        if approval is not None:
+            lane['approval'] = {**approval, 'timestamp': now.isoformat()}
         run(['git', 'worktree', 'add', '-b', branch, str(path), base], cwd=repo_root)
         try:
             registry['lanes'].append(lane)
@@ -21437,6 +21477,8 @@ def command_worktree_open(args):
         print(f"opened {mode} governed worktree {lane['id']}: {lane['path']}")
         print(f"  branch: {lane['branch']}")
         print(f"  lease: {lane['lease_expires_at']}")
+        if lane.get('approval'):
+            print_full_lane_approval(lane['approval'])
         if lane['target']:
             print(f"  target stack: {lane['target']}")
         for warning in warnings:
@@ -21783,6 +21825,8 @@ def command_status(args):
         for lane in governed:
             detail = f" ({lane['code']})" if lane['code'] else ''
             print(f"  - {lane['id'] or lane['branch']}: state={lane['state']}{detail}")
+            if lane.get('approval'):
+                print_full_lane_approval(lane['approval'])
     print('\nstashes:')
     if snapshot['stashes']:
         for line in snapshot['stashes']:
@@ -34361,7 +34405,9 @@ def build_parser():
     worktree_open_p.add_argument('lane')
     worktree_open_p.add_argument('--into', help='optional existing stack that will own this lane\'s commits')
     worktree_open_p.add_argument('--base', help='with --into, start at that stack\'s exact projected tip instead of the current checkout HEAD')
-    worktree_open_p.add_argument('--full', action='store_true', help='mark this explicitly requested lane as eligible for dependency, build, test, and debug work')
+    worktree_open_p.add_argument('--full', action='store_true', help='allow dependency, build, test, and debug work only with explicit repository owner approval')
+    worktree_open_p.add_argument('--approved-by', help='name of the human who explicitly approved --full')
+    worktree_open_p.add_argument('--reason', help='why the owner approved this full lane (requires --full)')
     worktree_open_p.add_argument('-j', '--json', action='store_true')
     worktree_open_p.set_defaults(func=command_worktree_open)
 
@@ -35953,6 +35999,12 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
+    if args.func == command_worktree_open:
+        try:
+            validate_full_lane_approval(args)
+        except SyncwheelError as exc:
+            print(f'error: {exc}', file=sys.stderr)
+            return 2
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
     guard_callback = args.func in {

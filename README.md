@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.12`
+Current version: `0.46.13`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -321,15 +321,22 @@ an automatic reaction to a lock:
 
 ```bash
 syncwheel worktree open concise-change
-syncwheel worktree open dependency-repair --full
+syncwheel worktree open dependency-repair --full --approved-by maintainer --reason "Run dependency checks"
 ```
 
 `open` creates one clone-local, registered worktree below the configured
 `syncwheel_worktree_root` and prints its path. A light lane is for authoring and
-committing only; Syncwheel does not provision dependencies there. `--full` is
-the explicit, bounded choice when dependency installation, builds, tests, or
-debugging are necessary. It is a lifecycle declaration, not a sandbox: a raw
-shell can still bypass it, so agents must keep that boundary in their procedure.
+committing only; Syncwheel does not provision dependencies there. `--full` requires
+explicit human approval from the repository owner in the current thread before dependency installation, builds, tests, or debugging.
+Pass both `--approved-by <approver>` and `--reason "<why>"`; missing or blank
+values refuse the command before any side effects. These options are rejected
+without `--full`. The selected manifest (including personal manifests) may set
+`"full_lane_approvers": ["maintainer"]` to restrict names by exact, case-sensitive
+match. When absent, any non-empty name is accepted; an empty list denies all full
+lanes. These flags record a human approval attestation; they do not authenticate
+the approver. The local lane record and status (including JSON) expose `approval`
+with `approved_by`, `reason`, and a UTC `timestamp`. It is a lifecycle declaration,
+not a sandbox: a raw shell can still bypass it, so agents must keep that boundary in their procedure.
 
 Each clone warns when four active lanes are already open by default, while still
 allowing another lane. A repository can change the warning threshold with
@@ -1412,13 +1419,14 @@ Four ratified working rules, in full in
 [docs/ai-agents.md](docs/ai-agents.md#ratified-working-rules-read-this-first):
 
 1. never author or commit in the primary checkout — open a governed lane with
-   `syncwheel worktree open <lane> [--into <stack> [--base <stack-branch>]] [--full]`
+   `syncwheel worktree open <lane> [--into <stack> [--base <stack-branch>]] [--full --approved-by <approver> --reason "<why>"]`
 2. never resolve a replay conflict with raw git — retry with `--replay-mode desk`, then
    resolve through `stack absorb` / `stack resolve-integration`
 3. integration composition is declared and visible — check `syncwheel int show` before
    testing there or blaming your own code
-4. every mutating command carries `--reason`, mandatory in `ai-managed` repositories,
-   surfaced in `syncwheel ledger show` with the actor and command
+4. mutating commands carry `--reason`, mandatory in `ai-managed` repositories,
+   surfaced in `syncwheel ledger show` with the actor and command. The explicit
+   exception is commit-only `worktree open`, which rejects approval options
 
 Recommended sequence:
 1. `repo tracking status`

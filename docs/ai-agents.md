@@ -17,6 +17,12 @@ The AI agent owns:
 - deciding which exact stack revisions belong in a deployment channel and
   obtaining separate evidence for any external deployment
 
+Commit-only light lanes are the default. Before using `--full`, ask the repository
+owner for explicit human approval in your thread, then pass `--approved-by
+<approver> --reason "<why>"`. Both values must be non-empty; these options are
+rejected without `--full`. A selected manifest may restrict names with
+`full_lane_approvers`. Approval is recorded in the lane registry and status JSON.
+
 ## Ratified working rules (read this first)
 
 Ratified operating rules (MGT-0206). Rule 2 is the one a real incident violated by
@@ -25,7 +31,7 @@ existed, it just was not prominent enough. Follow all four exactly.
 
 1. Never author or commit in the primary checkout; it stays on
    `manifest.integration.branch`. Open a governed lane: `syncwheel worktree open <lane>
-   [--into <stack>] [--full]`. As of 0.42.4, where hooks are installed
+   [--into <stack>] [--full --approved-by <approver> --reason "<why>"]`. As of 0.42.4, where hooks are installed
    (`syncwheel hooks install --apply`), a manual commit or unauthorized integration-ref
    move in the primary is refused, and mutating commands refuse while it is dirty. The only
    opt-out is a reasoned, ledgered disable: `syncwheel hooks remove --disable --reason
@@ -51,10 +57,12 @@ existed, it just was not prominent enough. Follow all four exactly.
    close a normally merged stack with `--reason merged`, or a squash/rebase delivery
    with `--reason absorbed`, then validate and rebuild. `absorbed` verifies final
    delivered content and does not require `--force`.
-4. Every mutating command carries `--reason`; it is mandatory in `ai-managed` repositories
+4. Mutating commands carry `--reason`; it is mandatory in `ai-managed` repositories
    and already enforced on several commands individually (`int rebuild` when ai-managed,
    `hooks remove --disable`, `worktree release`, `coordination provenance reset`). Pass it
-   always. It lands in the ledger with the actor and the exact command:
+   whenever supported. Commit-only `worktree open` is the explicit exception: it
+   rejects `--reason` and `--approved-by` without `--full`. The reason lands in the
+   ledger with the actor and the exact command:
    `syncwheel ledger show`.
 
 **When something looks wrong:** do not force a push, do not hand-edit the manifest or the
