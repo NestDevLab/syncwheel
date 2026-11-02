@@ -50,6 +50,32 @@ head, green CI, no unresolved review work, and a mergeable PR. The final
 `gh pr merge` remains subject to GitHub's server-side enforcement. Other 403s,
 public repositories, and unrecognized errors remain blocked.
 
+## Alternative observation of complete absence
+
+The adapter can observe empty rules through GraphQL when a private repository's
+REST branch-protection or branch-rules endpoint returns HTTP 403 with the exact
+message `Upgrade to GitHub Pro or make this repository public to enable this feature.`
+This is alternative evidence, independent of the `private_free_rules` bypass.
+It does not assume that an unavailable REST endpoint means no rules exist.
+
+Both REST and GraphQL must identify the requested repository as private and the
+actor as admin. The static GraphQL query uses owner/name variables and requests
+`branchProtectionRules(first:100)` plus
+`rulesets(first:100,includeParents:true)`. Both connections must report integer
+`totalCount: 0`, empty `nodes`, and boolean `hasNextPage: false`. Any GraphQL
+errors, missing fields, nonempty or paginated connections, identity mismatch,
+permission denial, or incompatible REST observation leaves the original REST
+failure blocking. Existing nonempty REST observations are never overwritten.
+
+Successful proof sets `rules.observationSource` to `graphql-complete-empty` and
+records the returned repository and complete connections in `emptyRulesEvidence`.
+The normalized empty rule values have observation status 200, while
+`restObservation` preserves the actual REST statuses, values and errors; it does
+not claim that the REST requests succeeded. Without proof the source stays
+`rest`. The core merge gates remain unchanged: `rulesFallback` stays null, and
+CI, reviews, provenance and pinned-head checks still apply. This proof does not
+request an admin merge.
+
 ## Plan and apply
 
 The stack must be `published`, its remote branch must exactly match the
@@ -76,8 +102,9 @@ The fixed adapter invokes only `gh pr merge`, pins the operation with
 only when GitHub proves that required reviews are the sole remaining blocker.
 CI failures, conflicts, stale bases, changes requested, unresolved threads,
 merge queues, unknown rules, and unrecognized states always stop the plan.
-Unavailable rule APIs stop the plan unless the exact GitHub Free private-repo
-response is covered by the explicit `private_free_rules` policy above.
+Unavailable rule APIs stop the plan unless complete alternative observation
+proves absence as described above, or the explicit `private_free_rules` policy
+covers the exact GitHub Free private-repo response.
 
 If the command or connection fails after preparation, repeating the same
 operation id and digest reconciles the remote PR without issuing a second

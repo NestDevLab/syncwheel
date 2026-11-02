@@ -30,6 +30,16 @@ THREAD_QUERY = (
 )
 
 
+EMPTY_RULES_QUERY = (
+    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){"
+    "nameWithOwner viewerPermission isPrivate "
+    "branchProtectionRules(first:100){totalCount pageInfo{hasNextPage} nodes{pattern}} "
+    "rulesets(first:100,includeParents:true){totalCount pageInfo{hasNextPage} nodes{id}}"
+    "}}"
+)
+PLAN_LIMIT_MESSAGE = "Upgrade to GitHub Pro or make this repository public to enable this feature."
+
+
 class AdapterError(RuntimeError):
     pass
 
@@ -211,6 +221,102 @@ def _optional_api(repo, path, cwd):
         return {"status": 200, "value": None, "detail": f"non-JSON response: {exc}"}
 
 
+def _plan_limited(result):
+    detail = result.get("detail")
+    return (
+        type(result.get("status")) is int and result["status"] == 403
+        and result.get("value") is None
+        and isinstance(detail, str)
+        and re.fullmatch(
+            r"(?:gh: )?" + re.escape(PLAN_LIMIT_MESSAGE) + r"(?: \(HTTP 403\))?",
+            detail,
+        ) is not None
+    )
+
+
+def _compatible_empty_rest(result, empty_value):
+    if _plan_limited(result):
+        return True
+    if type(result.get("status")) is not int:
+        return False
+    if result["status"] == 404:
+        return result.get("value") is None
+    return (
+        result["status"] == 200 and result.get("detail") is None
+        and type(result.get("value")) is type(empty_value)
+        and result["value"] == empty_value
+    )
+
+
+def _complete_empty_connection(value):
+    return (
+        isinstance(value, dict)
+        and type(value.get("totalCount")) is int and value["totalCount"] == 0
+        and isinstance(value.get("nodes"), list) and value["nodes"] == []
+        and isinstance(value.get("pageInfo"), dict)
+        and value["pageInfo"].get("hasNextPage") is False
+    )
+
+
+def _observe_rules(repository, repo_info, protection, rulesets, cwd):
+    rules = {
+        "branchProtection": protection.get("value"),
+        "branchProtectionStatus": protection.get("status"),
+        "branchProtectionError": protection.get("detail"),
+        "rulesets": rulesets.get("value"),
+        "rulesetsStatus": rulesets.get("status"),
+        "rulesetsError": rulesets.get("detail"),
+        "observationSource": "rest",
+    }
+    if not (_plan_limited(protection) or _plan_limited(rulesets)):
+        return rules
+    if not (
+        repo_info.get("private") is True
+        and isinstance(repo_info.get("full_name"), str)
+        and repo_info["full_name"].casefold() == repository.casefold()
+        and isinstance(repo_info.get("permissions"), dict)
+        and repo_info["permissions"].get("admin") is True
+        and _compatible_empty_rest(protection, {})
+        and _compatible_empty_rest(rulesets, [])
+    ):
+        return rules
+    owner, name = _split_repository(repository)
+    try:
+        graph = run_json([
+            "api", "graphql", "-f", f"query={EMPTY_RULES_QUERY}",
+            "-F", f"owner={owner}", "-F", f"name={name}",
+        ], cwd)["value"]
+    except AdapterError as exc:
+        rules["emptyRulesEvidenceError"] = str(exc)
+        return rules
+    # Any GraphQL errors, including errors alongside data, invalidate the proof.
+    if not isinstance(graph, dict) or "errors" in graph:
+        return rules
+    data = graph.get("data")
+    evidence = data.get("repository") if isinstance(data, dict) else None
+    if not (
+        isinstance(evidence, dict)
+        and isinstance(evidence.get("nameWithOwner"), str)
+        and evidence["nameWithOwner"].casefold() == repository.casefold()
+        and evidence.get("viewerPermission") == "ADMIN"
+        and evidence.get("isPrivate") is True
+        and _complete_empty_connection(evidence.get("branchProtectionRules"))
+        and _complete_empty_connection(evidence.get("rulesets"))
+    ):
+        return rules
+    # Preserve the actual REST failures separately; normalized status describes
+    # the successful alternative observation, never a synthetic REST success.
+    rules.update({
+        "restObservation": {"branchProtection": protection, "rulesets": rulesets},
+        "observationSource": "graphql-complete-empty",
+        "emptyRulesEvidence": evidence,
+        "branchProtection": {}, "branchProtectionStatus": 200,
+        "branchProtectionError": None,
+        "rulesets": [], "rulesetsStatus": 200, "rulesetsError": None,
+    })
+    return rules
+
+
 def observe(request, cwd):
     repository = validate_repository(request.get("repository"))
     base_branch = validate_branch(request.get("baseBranch"), "baseBranch")
@@ -304,15 +410,10 @@ def observe(request, cwd):
             "mergeCommit": (pr.get("mergeCommit") or {}).get("oid") if isinstance(pr.get("mergeCommit"), dict) else None,
             "threadsTruncated": threads_truncated,
         },
-        "rules": {
-            "branchProtection": protection.get("value"),
-            "branchProtectionStatus": protection.get("status"),
-            "branchProtectionError": protection.get("detail"),
-            "rulesets": rulesets.get("value"),
-            "rulesetsStatus": rulesets.get("status"),
-            "rulesetsError": rulesets.get("detail"),
-            "allowMergeMethods": allow,
-        },
+        "rules": dict(
+            _observe_rules(repository, repo_info, protection, rulesets, cwd),
+            allowMergeMethods=allow,
+        ),
     }
 
 
