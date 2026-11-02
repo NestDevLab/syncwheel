@@ -17937,6 +17937,164 @@ def command_journal_pull(args):
     return 0
 
 
+def journal_recover_clean_paths(repo_root, paths):
+    dirty = [entry['path'] for entry in journal_status_entries(repo_root)]
+    conflicts = sorted({path for path in dirty if any(
+        path == touched or path.startswith(touched + '/') or touched.startswith(path + '/')
+        for touched in paths
+    )})
+    if conflicts:
+        raise SyncwheelError('journal recover refuses local changes on replay paths: ' + ', '.join(conflicts))
+
+
+def journal_recover_move(repo_root, branch, before, after):
+    """Align the checkout without discarding edits, then CAS through the owned ref guard."""
+    if get_current_branch(repo_root) != branch or ref_tip(repo_root, 'HEAD') != before:
+        raise SyncwheelError('journal branch changed during recovery; STOP')
+    # Two-tree checkout refuses dirty overlaps and untracked obstructions itself.
+    git(repo_root, 'read-tree', '-m', '-u', before, after)
+    moved = git(repo_root, 'update-ref', f'refs/heads/{branch}', after, before, check=False)
+    if moved.returncode:
+        git(repo_root, 'read-tree', '-m', '-u', after, before)
+        raise SyncwheelError('journal recovery ref lease lost; checkout restored: ' + moved.stderr.strip())
+
+
+def journal_recover(repo_root, manifest, apply=False, rollback=None):
+    journal = manifest['journal']
+    branch, remote = journal['branch'], journal['remote']
+    if get_current_branch(repo_root) != branch:
+        raise SyncwheelError('journal recovery requires the journal branch checked out')
+    if rollback:
+        receipt = json.loads(Path(rollback).read_text())
+        if receipt.get('branch') != branch or receipt.get('operation') != 'journal-recover':
+            raise SyncwheelError('receipt does not describe recovery of this journal branch')
+        before, after = receipt['after'], receipt['before']
+        if ref_tip(repo_root, 'HEAD') != before:
+            raise SyncwheelError('journal rollback requires the exact recovered head; STOP')
+        paths = [path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', before, after).split(b'\0') if path]
+        journal_recover_clean_paths(repo_root, paths)
+        if apply:
+            with journal_lock(repo_root):
+                journal_recover_clean_paths(repo_root, paths)
+                journal_recover_move(repo_root, branch, before, after)
+        return {'mode': 'apply' if apply else 'plan', 'operation': 'rollback',
+                'before': before, 'after': after, 'changed': apply}
+    # Fetch all advertised remote refs, including tags and other branches: a local
+    # snapshot published on another ref must never be rewritten.
+    git(repo_root, 'fetch', '--quiet', '--all', '--tags')
+    published_tips = []
+    for name in git(repo_root, 'remote').stdout.splitlines():
+        advertised = git(repo_root, 'ls-remote', '--refs', name).stdout.splitlines()
+        refs = [line.split()[1] for line in advertised]
+        if refs:
+            git(repo_root, 'fetch', '--quiet', '--no-tags', name, *refs)
+        for line in advertised:
+            object_id = line.split()[0]
+            peeled = git(repo_root, 'rev-parse', '--verify', object_id + '^{commit}', check=False)
+            if peeled.returncode == 0:
+                published_tips.append((line.split()[1], peeled.stdout.strip()))
+    tip = journal_remote_tip(repo_root, remote, branch)
+    if tip is None:
+        raise SyncwheelError('journal recovery requires an existing remote branch')
+    head = ref_tip(repo_root, 'HEAD')
+    ahead, behind = map(int, git(repo_root, 'rev-list', '--left-right', '--count', f'{head}...{tip}').stdout.split())
+    relation = 'diverged' if ahead and behind else 'ahead-only' if ahead else 'behind-only' if behind else 'in-sync'
+    plan = {'mode': 'apply' if apply else 'plan', 'branch': branch, 'remote': remote,
+            'before': head, 'remote_tip': tip, 'relation': relation,
+            'ahead': ahead, 'behind': behind, 'changed': False, 'replayed': {}}
+    if relation == 'behind-only':
+        plan['pull'] = journal_pull(repo_root, manifest, apply=apply)
+        plan['changed'] = plan['pull']['changed']
+        return plan
+    if relation != 'diverged':
+        if ahead:
+            plan['next'] = 'syncwheel journal publish --committed-only'
+        return plan
+    commits = git(repo_root, 'rev-list', '--reverse', '--topo-order', f'{tip}..{head}').stdout.splitlines()
+    remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/', 'refs/tags/').stdout.splitlines()
+    published_tips.extend((ref, ref) for ref in remote_refs)
+    for commit in commits:
+        if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
+            raise SyncwheelError(f'journal recovery requires single-parent snapshots: {commit}')
+        for remote_ref, remote_commit in published_tips:
+            if git(repo_root, 'merge-base', '--is-ancestor', commit, remote_commit, check=False).returncode == 0:
+                raise SyncwheelError(f'journal recovery refuses already-published commit {commit} on {remote_ref}')
+    paths = {path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', head, tip).split(b'\0') if path}
+    for commit in commits:
+        paths.update(path.decode() for path in git_bytes(repo_root, 'diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-z', '-r', commit).split(b'\0') if path)
+    journal_recover_clean_paths(repo_root, paths)
+    if not apply:
+        plan['commits'] = commits
+        return plan
+    with journal_lock(repo_root):
+        if ref_tip(repo_root, 'HEAD') != head:
+            raise SyncwheelError('journal head changed during recovery; STOP')
+        journal_recover_clean_paths(repo_root, paths)
+        directory = git_common_dir(repo_root) / 'syncwheel' / 'journal-recover'
+        directory.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='replay-', dir=directory) as temporary:
+            worktree = Path(temporary) / 'worktree'
+            git(repo_root, 'worktree', 'add', '--quiet', '--detach', str(worktree), tip)
+            try:
+                parent = tip
+                for commit in commits:
+                    picked = git(worktree, 'cherry-pick', '--no-commit', commit, check=False)
+                    if picked.returncode:
+                        conflicts = [path.decode() for path in git_bytes(worktree, 'diff', '--name-only', '--diff-filter=U', '-z').split(b'\0') if path]
+                        raise SyncwheelError(f'journal recovery conflict at {commit}: '
+                                             + ', '.join(conflicts) + '; ' + picked.stderr.strip())
+                    tree = git(worktree, 'write-tree').stdout.strip()
+                    # Rebuild the commit from its raw headers/message to preserve
+                    # author, committer, timestamps, encoding and message bytes.
+                    raw = git_bytes(repo_root, 'cat-file', 'commit', commit)
+                    headers, message = raw.split(b'\n\n', 1)
+                    kept = []
+                    skip = False
+                    for line in headers.split(b'\n'):
+                        if line.startswith(b' '):
+                            if not skip:
+                                kept.append(line)
+                            continue
+                        skip = line.startswith((b'tree ', b'parent ', b'gpgsig ', b'gpgsig-sha256 ', b'mergetag '))
+                        if not skip:
+                            kept.append(line)
+                    content = (f'tree {tree}\nparent {parent}\n'.encode()
+                               + b'\n'.join(kept) + b'\n\n' + message)
+                    result = subprocess.run(['git', 'hash-object', '-t', 'commit', '-w', '--stdin'],
+                                            cwd=repo_root, input=content, capture_output=True,
+                                            env=managed_process_env())
+                    if result.returncode:
+                        raise SyncwheelError(result.stderr.decode(errors='replace'))
+                    parent = result.stdout.decode().strip()
+                    plan['replayed'][commit] = parent
+                    git(worktree, 'reset', '--quiet', '--hard', parent)
+                journal_recover_clean_paths(repo_root, paths)
+                stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                receipt_path = directory / f'{head}-{parent}.json'
+                receipt = {'operation': 'journal-recover', 'branch': branch, 'before': head,
+                           'after': parent, 'remote_tip': tip, 'replayed': plan['replayed'],
+                           'timestamp': stamp, 'status': 'prepared',
+                           'rollback': 'syncwheel journal recover --rollback '
+                                       + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root)) + ' --apply'}
+                atomic_write_private_json(receipt_path, receipt)
+                journal_recover_move(repo_root, branch, head, parent)
+                receipt['status'] = 'complete'
+                atomic_write_private_json(receipt_path, receipt)
+                plan.update({'after': parent, 'changed': True, 'receipt': str(receipt_path),
+                             'next': 'syncwheel journal publish --committed-only'})
+            finally:
+                # Only the isolated replay is disposable, including conflict state.
+                git(repo_root, 'worktree', 'remove', '--force', str(worktree))
+    return plan
+
+
+def command_journal_recover(args):
+    repo_root, manifest, _ = require_journal_manifest(args)
+    payload = journal_recover(repo_root, manifest, apply=args.apply, rollback=args.rollback)
+    print(json.dumps(payload, indent=2))
+    return 0
+
+
 def journal_unit_id(repo_root):
     safe = ''.join(char.lower() if char.isalnum() else '-' for char in repo_root.name).strip('-') or 'repo'
     digest = hashlib.sha256(str(repo_root.resolve()).encode()).hexdigest()[:12]
@@ -34747,6 +34905,10 @@ def build_parser():
         'fast-forward, and three-way merge them back where possible',
     )
     journal_pull_p.set_defaults(func=command_journal_pull)
+    journal_recover_p = journal_sub.add_parser('recover', parents=[common], help='replay unpublished diverged snapshots without publishing')
+    journal_recover_p.add_argument('--apply', action='store_true')
+    journal_recover_p.add_argument('--rollback', metavar='RECEIPT')
+    journal_recover_p.set_defaults(func=command_journal_recover)
     journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
     journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))
     journal_schedule_p.add_argument('--committed-only', action='store_true', help='schedule publication without working-tree snapshots')
@@ -35511,7 +35673,7 @@ def entrypoint_behavior_table():
     register((
         command_journal_snapshot,
         command_journal_publish,
-        command_journal_pull,
+        command_journal_pull, command_journal_recover,
     ), mutates='apply')
     register((command_repo_mode_set,), mutates='apply', manifest_mutates='apply')
     # digest-heal is the one repair class that appends a local ledger event
@@ -36015,7 +36177,7 @@ def execute_parsed_command(args):
             )
     guarded_publishers = {
         command_stack_push, command_int_push, command_journal_publish,
-        command_journal_pull, command_channel_publish, command_reconcile, command_resume,
+        command_journal_pull, command_journal_recover, command_channel_publish, command_reconcile, command_resume,
         command_sync, command_publish, command_stack_land,
     }
     if args.func in guarded_publishers and hasattr(args, 'repo'):

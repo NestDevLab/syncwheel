@@ -94,6 +94,131 @@ class JournalModeTest(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def local_commit(self, path='local.txt', content='local\n'):
+        (self.repo / path).write_text(content)
+        self.git('add', path)
+        self.git('commit', '-q', '-m', 'local snapshot')
+        return self.git('rev-parse', 'HEAD')
+
+    def test_recover_in_sync_and_ahead_only_never_publish(self):
+        aligned = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+        self.assertEqual(aligned['relation'], 'in-sync')
+        remote = self.git('rev-parse', 'origin/journal')
+        head = self.local_commit()
+        result = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+        self.assertEqual(result['relation'], 'ahead-only')
+        self.assertIn('publish --committed-only', result['next'])
+        self.assertFalse(result['changed'])
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('ls-remote', 'origin', 'refs/heads/journal').split()[0], remote)
+
+    def test_recover_behind_uses_guarded_pull(self):
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        self.arm_ref_guard()
+        result = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+        self.assertEqual(result['relation'], 'behind-only')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), tip)
+        self.assertTrue(result['pull']['changed'])
+
+    def test_recover_replays_preserves_metadata_receipt_and_guarded_rollback(self):
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        first = self.local_commit()
+        second = self.local_commit('second.txt', 'second\n')
+        self.arm_ref_guard()
+        metadata = {commit: self.git('show', '-s', '--format=%an|%ae|%at|%ai|%cn|%ce|%ct|%ci|%B', commit)
+                    for commit in (first, second)}
+        (self.repo / 'unrelated.txt').write_text('keep\n')
+        plan = json.loads(self.cli('journal', 'recover').stdout)
+        self.assertEqual(plan['relation'], 'diverged')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), second)
+        result = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+        self.assertTrue(result['changed'])
+        self.assertEqual(len(result['replayed']), 2)
+        for old, new in result['replayed'].items():
+            self.assertEqual(self.git('show', '-s', '--format=%an|%ae|%at|%ai|%cn|%ce|%ct|%ci|%B', new), metadata[old])
+        self.assertEqual(self.git('rev-parse', result['replayed'][first] + '^'), tip)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), result['replayed'][second])
+        self.assertEqual(self.git('diff', '--cached'), '')
+        self.assertEqual((self.repo / 'remote.txt').read_text(), 'remote\n')
+        self.assertEqual((self.repo / 'unrelated.txt').read_text(), 'keep\n')
+        self.assertEqual(self.git('ls-remote', 'origin', 'refs/heads/journal').split()[0], tip)
+        receipt = json.loads(Path(result['receipt']).read_text())
+        self.assertEqual(receipt['before'], second)
+        self.assertEqual(receipt['after'], result['after'])
+        self.assertEqual(receipt['status'], 'complete')
+        self.assertEqual(receipt['replayed'], result['replayed'])
+        self.assertIn('--rollback', receipt['rollback'])
+        self.cli('journal', 'recover', '--rollback', result['receipt'], '--apply')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), second)
+        self.assertFalse((self.repo / 'remote.txt').exists())
+        self.assertEqual((self.repo / 'unrelated.txt').read_text(), 'keep\n')
+
+    def test_recover_conflict_leaves_ref_index_checkout_and_worktrees_unchanged(self):
+        self.publish_from_other_clone({'notes.txt': 'remote\n'})
+        head = self.local_commit('notes.txt', 'local\n')
+        self.arm_ref_guard()
+        (self.repo / 'unrelated.txt').write_text('staged\n')
+        self.git('add', 'unrelated.txt')
+        before = (self.repo / '.git' / 'index').read_bytes()
+        worktrees = self.git('worktree', 'list', '--porcelain')
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+        self.assertIn(head, result.stderr)
+        self.assertIn('notes.txt', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual((self.repo / '.git' / 'index').read_bytes(), before)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'local\n')
+        self.assertEqual(self.git('worktree', 'list', '--porcelain'), worktrees)
+
+    def test_recover_refuses_published_commit_on_another_remote_branch(self):
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        head = self.local_commit()
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/published')
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_recover_refuses_commit_published_on_custom_remote_ref(self):
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        head = self.local_commit()
+        self.git('push', '-q', 'origin', 'HEAD:refs/archive/snapshot')
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_recover_preserves_unrelated_staged_and_dirty_files(self):
+        (self.repo / 'untouched.txt').write_text('base\n')
+        self.git('add', 'untouched.txt')
+        self.git('commit', '-qm', 'seed unrelated')
+        self.git('push', '-q', 'origin', 'journal')
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        self.local_commit()
+        (self.repo / 'untouched.txt').write_text('staged\n')
+        self.git('add', 'untouched.txt')
+        (self.repo / 'untouched.txt').write_text('dirty\n')
+        staged = self.git('diff', '--cached')
+        dirty = self.git('diff')
+        self.cli('journal', 'recover', '--apply')
+        self.assertEqual(self.git('diff', '--cached'), staged)
+        self.assertEqual(self.git('diff'), dirty)
+
+    def test_recover_empty_replay_retains_snapshot(self):
+        self.publish_from_other_clone({'same.txt': 'same\n'})
+        head = self.local_commit('same.txt', 'same\n')
+        result = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+        new = result['replayed'][head]
+        self.assertEqual(self.git('rev-parse', new + '^{tree}'), self.git('rev-parse', new + '^' + '^{tree}'))
+        self.assertEqual(self.git('show', '-s', '--format=%B', new), 'local snapshot')
+
+    def test_recover_refuses_dirty_replay_path_without_stashing(self):
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        head = self.local_commit()
+        (self.repo / 'local.txt').write_text('dirty\n')
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+        self.assertIn('local.txt', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual((self.repo / 'local.txt').read_text(), 'dirty\n')
+        self.assertEqual(self.git('stash', 'list'), '')
+
     def test_snapshot_modified_new_deleted_excluded_and_idempotent(self):
         (self.repo / 'notes.txt').write_text('two\n')
         (self.repo / 'new.txt').write_text('new\n')

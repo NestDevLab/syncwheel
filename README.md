@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.13`
+Current version: `0.46.14`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1479,3 +1479,38 @@ For the operational flow, see [docs/core-procedure.md](docs/core-procedure.md).
 MIT
 
 Defer unmerged work safely with the [proof-bound stack archive lifecycle](docs/stack-archive.md).
+
+
+### Recover diverged journal snapshots
+
+When local unpublished snapshots and new remote commits diverge, preview and
+apply a recovery before publishing:
+
+```bash
+syncwheel journal recover
+syncwheel journal recover --apply
+syncwheel journal publish --committed-only --apply
+```
+
+Recovery is journal-only. It fetches remote refs, reports in-sync, ahead-only,
+behind-only or diverged, and delegates behind-only updates to journal pull.
+Diverged recovery refuses snapshots reachable from any advertised remote ref,
+merge commits, and dirty or obstructing replay paths; it never stashes. It
+replays single-parent snapshots in an isolated worktree, retaining author,
+committer, dates and message; signatures are removed because the commit changes.
+Conflicts name the original commit and paths, and leave the original branch,
+index and checkout unchanged. Unrelated local changes are preserved.
+
+Success moves only the local branch through the managed ref guard. A private
+JSON receipt under the Git directory records the old/new tips, ordered commit
+map, timestamp and exact rollback command. The rollback requires the exact
+recovered head and clean affected paths:
+
+```bash
+syncwheel journal recover --rollback <receipt> --apply
+```
+
+Recovery and rollback never push. Review the recovered history before running
+journal publish. A prepared receipt retained after interruption records the
+intended transition; inspect the branch before deciding whether rollback is
+needed.
