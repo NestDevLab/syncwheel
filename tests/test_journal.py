@@ -209,6 +209,17 @@ class JournalModeTest(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', new + '^{tree}'), self.git('rev-parse', new + '^' + '^{tree}'))
         self.assertEqual(self.git('show', '-s', '--format=%B', new), 'local snapshot')
 
+    def test_recover_refuses_ignored_obstruction(self):
+        tip = self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        head = self.local_commit()
+        with (self.repo / '.git/info/exclude').open('a') as handle:
+            handle.write('remote.txt\n')
+        (self.repo / 'remote.txt').write_text('ignored local bytes\n')
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+        self.assertIn('remote.txt', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual((self.repo / 'remote.txt').read_text(), 'ignored local bytes\n')
+
     def test_recover_refuses_dirty_replay_path_without_stashing(self):
         self.publish_from_other_clone({'remote.txt': 'remote\n'})
         head = self.local_commit()

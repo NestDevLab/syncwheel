@@ -17938,7 +17938,12 @@ def command_journal_pull(args):
 
 
 def journal_recover_clean_paths(repo_root, paths):
-    dirty = [entry['path'] for entry in journal_status_entries(repo_root)]
+    status = git(repo_root, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
+                 '--ignore-submodules=none', '--no-renames').stdout
+    dirty = [entry[3:] for entry in status.split('\0') if entry]
+    dirty.extend(path.decode() for path in git_bytes(
+        repo_root, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'
+    ).split(b'\0') if path)
     conflicts = sorted({path for path in dirty if any(
         path == touched or path.startswith(touched + '/') or touched.startswith(path + '/')
         for touched in paths
@@ -17959,7 +17964,7 @@ def journal_recover_move(repo_root, branch, before, after):
         raise SyncwheelError('journal recovery ref lease lost; checkout restored: ' + moved.stderr.strip())
 
 
-def journal_recover(repo_root, manifest, apply=False, rollback=None):
+def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_path=None):
     journal = manifest['journal']
     branch, remote = journal['branch'], journal['remote']
     if get_current_branch(repo_root) != branch:
@@ -18011,7 +18016,7 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None):
             plan['next'] = 'syncwheel journal publish --committed-only'
         return plan
     commits = git(repo_root, 'rev-list', '--reverse', '--topo-order', f'{tip}..{head}').stdout.splitlines()
-    remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/', 'refs/tags/').stdout.splitlines()
+    remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/').stdout.splitlines()
     published_tips.extend((ref, ref) for ref in remote_refs)
     for commit in commits:
         if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
@@ -18075,7 +18080,8 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None):
                            'after': parent, 'remote_tip': tip, 'replayed': plan['replayed'],
                            'timestamp': stamp, 'status': 'prepared',
                            'rollback': 'syncwheel journal recover --rollback '
-                                       + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root)) + ' --apply'}
+                                       + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root))
+                                       + (' -M ' + shlex.quote(str(manifest_path)) if manifest_path else '') + ' --apply'}
                 atomic_write_private_json(receipt_path, receipt)
                 journal_recover_move(repo_root, branch, head, parent)
                 receipt['status'] = 'complete'
@@ -18089,8 +18095,9 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None):
 
 
 def command_journal_recover(args):
-    repo_root, manifest, _ = require_journal_manifest(args)
-    payload = journal_recover(repo_root, manifest, apply=args.apply, rollback=args.rollback)
+    repo_root, manifest, manifest_path = require_journal_manifest(args)
+    payload = journal_recover(repo_root, manifest, apply=args.apply, rollback=args.rollback,
+                              manifest_path=manifest_path)
     print(json.dumps(payload, indent=2))
     return 0
 
