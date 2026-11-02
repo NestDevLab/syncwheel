@@ -32,7 +32,8 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "github-empty-rules"
+      "github-empty-rules",
+      "journal-recover"
     ],
     "strategy": "cherry-pick"
   },
@@ -57,6 +58,22 @@
       },
       "meta": {
         "purpose": "Observe complete empty GitHub rule connections when private-plan REST endpoints are unavailable"
+      }
+    },
+    {
+      "id": "journal-recover",
+      "branch": "pr/journal-recover",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Recover unpublished diverged journal snapshots safely"
       }
     }
   ],
