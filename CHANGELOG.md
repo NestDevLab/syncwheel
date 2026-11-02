@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.46.14 - 2026-11-02
+
+- Add plan-first journal recovery for unpublished diverged snapshots, with isolated replay, guarded local ref updates, conflict preservation, and rollback receipts. Recovery never publishes.
+
+## 0.46.13 - 2026-11-01
+
+- Add explicit guarded recapture and stack publication with retained captured worktrees. Require locked, clean, fully owned copies and exact contiguous history, revalidate before capture/publication, and preserve all files and cleanup metadata without weakening the default recovery guard.
+
 ## 0.46.12 - 2026-10-27
 
 - Preserve frozen observation qualification when applying or recovering three-parent reconciliation, so valid absorbed historical source proofs remain available without changing remote or CAS lease checks.

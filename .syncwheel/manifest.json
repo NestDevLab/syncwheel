@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -38,45 +38,45 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "github-empty-rules",
-      "branch": "pr/github-empty-rules",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/github-empty-rules",
       "commits": [
         "65ba0f93c3533afa54cc50df47ce1641c950f6df"
       ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
+      "id": "github-empty-rules",
+      "integration_branch": "main-integration",
       "meta": {
         "purpose": "Observe complete empty GitHub rule connections when private-plan REST endpoints are unavailable"
-      }
-    },
-    {
-      "id": "journal-recover",
-      "branch": "pr/journal-recover",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "published",
+      },
       "publication": {
         "enabled": true
       },
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "origin/main",
+      "branch": "pr/journal-recover",
+      "commits": [],
+      "id": "journal-recover",
+      "integration_branch": "main-integration",
       "meta": {
         "purpose": "Recover unpublished diverged journal snapshots safely"
-      }
+      },
+      "publication": {
+        "enabled": true
+      },
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
