@@ -245,6 +245,7 @@ class ControlReplayTest(unittest.TestCase):
         self.f.git('commit', '-qm', 'test: later coordination object')
         advanced = self.f.git('rev-parse', 'HEAD')
         self.f.git('switch', '-q', 'main')
+        self.f.git('push', '--quiet', 'origin', f'{advanced}:refs/heads/later-object')
         real_observe = self.module.remote_ref_tips
         def advance_after_observation(repo, remote, refs):
             result = real_observe(repo, remote, refs)
