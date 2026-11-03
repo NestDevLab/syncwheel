@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.17 - 2026-11-03
+
+- Scope `stack add` recovery to its selected stack, preserving unrelated retained captured worktrees and their locks while capturing applicable source lanes. Keep selected-stack cleanup guards and scope pending promotion recovery to the same stack.
+
 ## 0.46.16 - 2026-11-03
 
 - Allow `stack set --target-branch` to update delivery metadata after a dependency lands, preserving source commits, bases, refs and integration mappings. Reject invalid targets and conflicts with `--published`, and record previous and new targets in the normal ledger.
