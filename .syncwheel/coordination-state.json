@@ -1,8 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "8057d4799ecf9295d8a89b319f67c791e90daec2",
-    "refs/heads/pr/github-empty-rules": "f840d0adfe62c954d117d127296e66d4a611a8af"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "cbc2b4ae6c9daffdceaf23c604ee292e4cad2f32",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -15,7 +12,7 @@
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
-    "refs/heads/pr/github-empty-rules": "9790b9eb5c3509364d9883811c26c3dd421b92c9",
+    "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
     "refs/heads/pr/half-state-coordination": "de07ec9d17938ce45fb423baee976e1e7d918d95",
     "refs/heads/pr/historical-absorbed-rebuild": "f3ce81b711897b8ac327d93dccaa8926a61ac84a",
@@ -98,7 +95,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-03T08:53:03+00:00",
+  "created_at": "2026-11-03T09:06:19+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -245,9 +242,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "github-empty-rules"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -255,32 +250,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/github-empty-rules",
-        "commits": [
-          "5e4e0e9af4077083ebe3ca2cc0a01202a0a1d539",
-          "1450780726ddc34425c97e84cc4c72e135ce3d33",
-          "f840d0adfe62c954d117d127296e66d4a611a8af"
-        ],
-        "id": "github-empty-rules",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "8c72404f26a90a54dc9def0a8e0182c290f0d42fc2df07b6b98e245f2cdb8b49",
-  "operation_token": "0ecd47b2-094d-4e09-860c-20022be2d074",
-  "parent_state": "bd80643c74ec17c2718efac891f2bfb41ef6bccc",
+  "operation_token": "7e71cc19-fc41-4b77-a47f-2c8bec8055a8",
+  "parent_state": "5e20f627ca1ed55dff12c86ee42c07367769e9a1",
   "projection_status": "partial",
-  "publication_id": "7b55ebff-9a3b-4056-8064-452f88c71fb7",
-  "publication_scope": "stack:github-empty-rules",
+  "publication_id": "a42222a2-5eef-43fe-a9e3-4ba4f6147140",
+  "publication_scope": "close:github-empty-rules",
   "schema_version": 2,
   "syncwheel_version": "0.46.14",
   "tombstones": [
@@ -1211,6 +1189,14 @@
       "ref": "refs/heads/pr/journal-recover",
       "remote_tip": null,
       "stack": "journal-recover"
+    },
+    {
+      "branch": "pr/github-empty-rules",
+      "closed_at": "2026-11-03T09:06:16+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/github-empty-rules",
+      "remote_tip": null,
+      "stack": "github-empty-rules"
     }
   ]
 }
