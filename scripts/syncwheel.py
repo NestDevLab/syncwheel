@@ -27105,7 +27105,8 @@ def command_stack_set(args):
         if (target_branch.startswith('-')
                 or not is_valid_coordination_branch_ref(f'refs/heads/{target_branch}')):
             raise SyncwheelError('stack set --target-branch requires a valid branch name')
-        if target_branch in (stack['branch'], manifest['integration']['branch']):
+        if target_branch in (stack['branch'], stack.get('integration_branch'),
+                             manifest['integration']['branch']):
             raise SyncwheelError('stack delivery target cannot be its source or integration branch')
     previous_target = stack['target_branch']
     if args.specs:

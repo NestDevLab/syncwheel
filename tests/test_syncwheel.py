@@ -4859,9 +4859,12 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
     def test_stack_set_target_rejects_invalid_or_conflicting_input_without_writes(self):
         path = self.repo / '.syncwheel/manifest.json'
+        manifest = self.read_manifest()
+        manifest['stacks'][0]['integration_branch'] = 'integration/topic'
+        path.write_text(json.dumps(manifest) + '\n')
         before = path.read_bytes()
         refs = self.git('for-each-ref', '--format=%(refname) %(objectname)')
-        for branch in ('', '../bad', 'bad..name', '-bad', 'pr/feature-a',
+        for branch in ('', '../bad', 'bad..name', '-bad', 'pr/feature-a', 'integration/topic',
                        self.read_manifest()['integration']['branch']):
             with self.subTest(branch=branch):
                 self.run_cli('stack', 'set', 'feature-a', '--target-branch', branch, expected=2)
