@@ -1,12 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/main-integration",
-    "refs/heads/pr/scoped-integration-resolution"
-  ],
-  "claimed_at": "2026-11-03T22:57:46+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-03T23:09:58+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "925b92ff-6a95-45e3-8c32-c4f1e9f56ebe",
-  "publication_scope": "stack:scoped-integration-resolution",
+  "operation_token": "454a273b-41db-442f-880e-da26a15618d3",
+  "publication_scope": "close:scoped-integration-resolution",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/scoped-integration-resolution",
-  "syncwheel_version": "0.46.17"
+  "syncwheel_version": "0.46.18"
 }
