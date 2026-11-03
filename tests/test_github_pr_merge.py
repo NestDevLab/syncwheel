@@ -496,7 +496,7 @@ class GithubPrMergeTest(unittest.TestCase):
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
         self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
         policy = self.policy()
-        policy['allowed_bypasses'] = []
+        policy['allowed_bypasses'] = ['required_reviews']
         profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
         profile['github_pr_merge'] = policy
         (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
