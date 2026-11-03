@@ -1,7 +1,10 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "56bd54168518c83ca58a1633345b2b9c379c1216",
+    "refs/heads/pr/stack-target": "260faf31dd0e81c93c19555b7dc0fe96c0e45c27"
+  },
   "claims": {
-    "refs/heads/main-integration": "cbc2b4ae6c9daffdceaf23c604ee292e4cad2f32",
+    "refs/heads/main-integration": "bd3178cc59b0f9ba3ea6105798f16e47c841f881",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -57,6 +60,7 @@
     "refs/heads/pr/revision-ref-guard-batching": "9ec874da7ba3782fd4ebc8a1dc18b154f73d5042",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
+    "refs/heads/pr/stack-target": "085df337e640d6b3294204e11f3af16d64e2c3c8",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
     "refs/heads/syncwheel/draft/abandoned-history-reconciliation": "b1f616e3fb8aff14a85e5ef3fca787e7fa6b3bca",
     "refs/heads/syncwheel/draft/absorbed-rebuild-history-fix": "58b2e3172c7c08ff931be56bcef9937e49281a10",
@@ -95,11 +99,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-03T09:06:19+00:00",
+  "created_at": "2026-11-03T09:09:56+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "8057d4799ecf9295d8a89b319f67c791e90daec2",
+    "refs/heads/main-integration": "56bd54168518c83ca58a1633345b2b9c379c1216",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -172,6 +176,7 @@
     "refs/heads/pr/revision-ref-guard-batching": "186267b551ce8e16df90aa7b3df01b7417304d29",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
+    "refs/heads/pr/stack-target": "260faf31dd0e81c93c19555b7dc0fe96c0e45c27",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
     "refs/heads/pr/worktree-release-dirty-primary": "5cec03d0ed3c88d0b9be0796e67cbe9f3b3cba68",
     "refs/heads/release/agentwheel-0230": "8357acfe809baa9d52c162853c15505ff184fd76",
@@ -242,7 +247,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "stack-target"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -250,17 +257,34 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/stack-target",
+        "commits": [
+          "f9cc3893a81943b757241f9122861e57e63a9d0e",
+          "4c94a744d027c323b05e10c3c434189580d31bc3",
+          "260faf31dd0e81c93c19555b7dc0fe96c0e45c27"
+        ],
+        "id": "stack-target",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "8c72404f26a90a54dc9def0a8e0182c290f0d42fc2df07b6b98e245f2cdb8b49",
-  "operation_token": "7e71cc19-fc41-4b77-a47f-2c8bec8055a8",
-  "parent_state": "5e20f627ca1ed55dff12c86ee42c07367769e9a1",
+  "manifest_digest": "f77b0c7ae824d12bfba31010b705063039056fd3ba8a34db8e52d2ed07986775",
+  "operation_token": "dddfe0b5-2341-4e04-9cdc-5b75057865fd",
+  "parent_state": "0a8b7037a200ed91f6795287b38bb8c4311d12f6",
   "projection_status": "partial",
-  "publication_id": "a42222a2-5eef-43fe-a9e3-4ba4f6147140",
-  "publication_scope": "close:github-empty-rules",
+  "publication_id": "9f43c018-4a82-4cd3-8148-73e80ca69aea",
+  "publication_scope": "stack:stack-target",
   "schema_version": 2,
-  "syncwheel_version": "0.46.14",
+  "syncwheel_version": "0.46.15",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
