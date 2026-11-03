@@ -1,0 +1,12 @@
+{
+  "changed_refs": [
+    "refs/heads/main-integration",
+    "refs/heads/pr/scoped-integration-resolution"
+  ],
+  "claimed_at": "2026-11-03T22:57:46+00:00",
+  "coordination_id": "default",
+  "operation_token": "925b92ff-6a95-45e3-8c32-c4f1e9f56ebe",
+  "publication_scope": "stack:scoped-integration-resolution",
+  "source_ref": "refs/heads/pr/scoped-integration-resolution",
+  "syncwheel_version": "0.46.17"
+}
