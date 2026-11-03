@@ -1,12 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/main-integration",
-    "refs/heads/pr/stack-target"
-  ],
-  "claimed_at": "2026-11-03T09:22:30+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-03T09:42:51+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "cabe182d-3b84-4863-91b3-e2229bc664ab",
-  "publication_scope": "stack:stack-target",
+  "operation_token": "6e4aec2a-0d10-4bc9-9f93-52137d60278b",
+  "publication_scope": "close:stack-target",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/stack-target",
   "syncwheel_version": "0.46.15"
 }
