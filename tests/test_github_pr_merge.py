@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import importlib.util
 import io
 import json
@@ -341,6 +342,202 @@ class GithubPrMergeTest(unittest.TestCase):
             'rulesetsError': detail,
         }
         return observed
+
+    def empty_rules_proof(self):
+        return {'data': {'repository': {
+            'nameWithOwner': 'Example/project', 'viewerPermission': 'ADMIN', 'isPrivate': True,
+            'branchProtectionRules': {'totalCount': 0, 'pageInfo': {'hasNextPage': False}, 'nodes': []},
+            'rulesets': {'totalCount': 0, 'pageInfo': {'hasNextPage': False}, 'nodes': []},
+        }}}
+
+    def observe_empty_rules(self, graph=None, *, protection=None, rulesets=None, repo_info=None, repository="Example/project"):
+        limited = {'status': 403, 'value': None, 'detail': 'gh: ' + ADAPTER.PLAN_LIMIT_MESSAGE + ' (HTTP 403)'}
+        if graph is None:
+            graph = self.empty_rules_proof()
+            graph['data']['repository']['nameWithOwner'] = repository
+        with mock.patch.object(ADAPTER, 'run_json', return_value={
+            'ok': True, 'value': graph,
+        }) as query:
+            result = ADAPTER._observe_rules(
+                repository, repo_info if repo_info is not None else {
+                    'private': True, 'full_name': repository, 'permissions': {'admin': True},
+                }, protection if protection is not None else limited,
+                rulesets if rulesets is not None else limited, self.repo,
+            )
+        return result, query
+
+    def test_graphql_empty_rules_preserves_rest_provenance_and_uses_variables(self):
+        rules, query = self.observe_empty_rules()
+        self.assertEqual(rules['observationSource'], 'graphql-complete-empty')
+        self.assertEqual(rules['branchProtection'], {})
+        self.assertEqual(rules['rulesets'], [])
+        for field in ('branchProtection', 'rulesets'):
+            self.assertEqual(rules[field + 'Status'], 200)
+            self.assertIsNone(rules[field + 'Error'])
+            self.assertEqual(rules['restObservation'][field]['status'], 403)
+            self.assertIn(ADAPTER.PLAN_LIMIT_MESSAGE, rules['restObservation'][field]['detail'])
+        argv = query.call_args.args[0]
+        self.assertIn('query=' + ADAPTER.EMPTY_RULES_QUERY, argv)
+        self.assertIn('owner=Example', argv)
+        self.assertIn('name=project', argv)
+        self.assertNotIn('Example', ADAPTER.EMPTY_RULES_QUERY)
+        self.assertEqual(rules['emptyRulesEvidence'], self.empty_rules_proof()['data']['repository'])
+
+    def test_graphql_empty_rules_rejects_partial_errors_identity_and_nonempty_connections(self):
+        invalid = [None, [], {}, {'errors': [], **self.empty_rules_proof()},
+                   {'errors': [{'message': 'denied'}], **self.empty_rules_proof()},
+                   {'data': None}, {'data': {'repository': None}}]
+        for field, values in {
+            'nameWithOwner': [None, 'Other/project', 42],
+            'viewerPermission': [None, 'WRITE', 'MAINTAIN'],
+            'isPrivate': [None, False, 1],
+        }.items():
+            for value in values:
+                graph = self.empty_rules_proof()
+                graph['data']['repository'][field] = value
+                invalid.append(graph)
+        for connection in ('branchProtectionRules', 'rulesets'):
+            for value in (None, [], {},
+                          {'totalCount': 1, 'pageInfo': {'hasNextPage': False}, 'nodes': []},
+                          {'totalCount': False, 'pageInfo': {'hasNextPage': False}, 'nodes': []},
+                          {'totalCount': '0', 'pageInfo': {'hasNextPage': False}, 'nodes': []},
+                          {'totalCount': 0.0, 'pageInfo': {'hasNextPage': False}, 'nodes': []},
+                          {'totalCount': 0, 'pageInfo': {'hasNextPage': True}, 'nodes': []},
+                          {'totalCount': 0, 'pageInfo': {'hasNextPage': 0}, 'nodes': []},
+                          {'totalCount': 0, 'pageInfo': {}, 'nodes': []},
+                          {'totalCount': 0, 'pageInfo': None, 'nodes': []},
+                          {'totalCount': 0, 'pageInfo': {'hasNextPage': False}, 'nodes': None},
+                          {'totalCount': 0, 'pageInfo': {'hasNextPage': False}, 'nodes': [{}]}):
+                graph = self.empty_rules_proof()
+                graph['data']['repository'][connection] = value
+                invalid.append(graph)
+        for graph in invalid:
+            with self.subTest(graph=graph):
+                # None must be passed directly rather than the success helper default.
+                with mock.patch.object(ADAPTER, 'run_json', return_value={'value': graph}):
+                    limited = {'status': 403, 'value': None, 'detail': ADAPTER.PLAN_LIMIT_MESSAGE}
+                    rules = ADAPTER._observe_rules('Example/project', {
+                        'private': True, 'full_name': 'Example/project', 'permissions': {'admin': True},
+                    }, limited, limited, self.repo)
+                self.assertEqual(rules['observationSource'], 'rest')
+                self.assertEqual(rules['rulesetsStatus'], 403)
+                self.assertNotIn('emptyRulesEvidence', rules)
+
+    def test_observe_integrates_empty_rules_proof_after_rest_failures(self):
+        graph = self.empty_rules_proof()
+        repo = {'private': True, 'full_name': 'Example/project', 'permissions': {'admin': True}}
+        limited = {'status': 403, 'value': None, 'detail': ADAPTER.PLAN_LIMIT_MESSAGE}
+        replies = [{'value': value} for value in (repo, {'login': 'fixture'}, {}, {}, graph)]
+        with mock.patch.object(ADAPTER, 'run_json', side_effect=replies) as query, \
+             mock.patch.object(ADAPTER, '_optional_api', return_value=limited) as rest:
+            observed = ADAPTER.observe({
+                'repository': 'Example/project', 'baseBranch': 'main', 'pullRequestNumber': 25,
+            }, self.repo)
+        self.assertEqual(rest.call_count, 2)
+        self.assertIn('query=' + ADAPTER.EMPTY_RULES_QUERY, query.call_args.args[0])
+        self.assertEqual(observed['rules']['observationSource'], 'graphql-complete-empty')
+        self.assertEqual(observed['rules']['restObservation']['rulesets'], limited)
+
+    def test_graphql_empty_rules_requires_compatible_rest_and_private_admin_identity(self):
+        incompatible = [
+            {'status': 403, 'value': None, 'detail': 'Resource not accessible by integration'},
+            {'status': 403, 'value': None, 'detail': ADAPTER.PLAN_LIMIT_MESSAGE + ' denied'},
+            {'status': 500, 'value': None, 'detail': ADAPTER.PLAN_LIMIT_MESSAGE},
+            {'status': -1, 'value': None, 'detail': 'timeout'},
+            {'status': 200, 'value': None, 'detail': 'invalid JSON'},
+            {'status': 200, 'value': {'required_status_checks': {}}, 'detail': None},
+            {'status': 200, 'value': [{'type': 'pull_request'}], 'detail': None},
+            {'status': 404, 'value': {}, 'detail': None},
+        ]
+        for endpoint in ('protection', 'rulesets'):
+            for result in incompatible:
+                with self.subTest(endpoint=endpoint, result=result):
+                    rules, query = self.observe_empty_rules(**{endpoint: result})
+                    query.assert_not_called()
+                    self.assertEqual(rules['observationSource'], 'rest')
+        for field, values in {
+            'private': [False, None, 1], 'full_name': [None, 'Other/project'],
+            'permissions': [None, {}, {'admin': False}, {'admin': 1}],
+        }.items():
+            for value in values:
+                info = {'private': True, 'full_name': 'Example/project', 'permissions': {'admin': True}}
+                info[field] = value
+                rules, query = self.observe_empty_rules(repo_info=info)
+                query.assert_not_called()
+                self.assertEqual(rules['observationSource'], 'rest')
+        # Both ordinary REST observations remain REST-only, without querying GraphQL.
+        rules, query = self.observe_empty_rules(
+            protection={'status': 404, 'value': None, 'detail': None},
+            rulesets={'status': 200, 'value': [], 'detail': None},
+        )
+        query.assert_not_called()
+        self.assertEqual(rules['observationSource'], 'rest')
+
+    def test_graphql_empty_rules_accepts_compatible_mixed_rest_observations(self):
+        for endpoint, value in (('protection', {}), ('rulesets', [])):
+            for status in (200, 404):
+                with self.subTest(endpoint=endpoint, status=status):
+                    rules, query = self.observe_empty_rules(**{endpoint: {
+                        'status': status, 'value': value if status == 200 else None, 'detail': None,
+                    }})
+                    query.assert_called_once()
+                    self.assertEqual(rules['observationSource'], 'graphql-complete-empty')
+
+    def test_graphql_empty_rules_command_failure_retains_rest_failure(self):
+        limited = {'status': 403, 'value': None, 'detail': ADAPTER.PLAN_LIMIT_MESSAGE}
+        with mock.patch.object(ADAPTER, 'run_json', side_effect=ADAPTER.AdapterError('query failed')):
+            rules = ADAPTER._observe_rules('Example/project', {
+                'private': True, 'full_name': 'Example/project', 'permissions': {'admin': True},
+            }, limited, limited, self.repo)
+        self.assertEqual(rules['branchProtectionStatus'], 403)
+        self.assertEqual(rules['emptyRulesEvidenceError'], 'query failed')
+
+    def test_graphql_empty_rules_proof_allows_normal_plan_without_bypasses(self):
+        self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
+        policy = self.policy()
+        policy['allowed_bypasses'] = ['required_reviews']
+        profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
+        profile['github_pr_merge'] = policy
+        (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
+        observed = self.private_free_observation()
+        observed['rules'], _ = self.observe_empty_rules(repository=observed['repository'])
+        for valid in (True, False):
+            candidate = copy.deepcopy(observed)
+            if not valid:
+                candidate['rules'] = self.private_free_observation()['rules']
+            with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+                 mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=candidate):
+                plan = SYNCWHEEL.build_github_pr_merge_plan(
+                    self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+                )
+            self.assertIsNone(plan['rulesFallback'])
+            self.assertEqual(plan['status'], 'ready' if valid else 'blocked')
+            if valid:
+                self.assertEqual(plan['path'], 'normal')
+                self.assertNotIn('--admin', plan['command'])
+                self.assertIn('--match-head-commit', plan['command'])
+                self.assertIn(self.head, plan['command'])
+                self.assertFalse(any(item['code'] == 'private_free_rules_unavailable' for item in plan['warnings']))
+            else:
+                self.assertTrue(any(item['code'] == 'rules_unavailable' for item in plan['blockers']))
+
+        # Alternative rule evidence does not relax CI, review, or provenance gates.
+        failed_check = copy.deepcopy(observed)
+        failed_check['pr']['checks'][0]['status'] = 'FAILURE'
+        failed_check['pr']['checks'][0]['conclusion'] = 'FAILURE'
+        unresolved_review = copy.deepcopy(observed)
+        unresolved_review['pr']['review']['unresolvedThreads'] = [{'isResolved': False}]
+        foreign_author = copy.deepcopy(observed)
+        foreign_author['pr']['author'] = 'other-fixture'
+        for candidate in (failed_check, unresolved_review, foreign_author):
+            with mock.patch.object(SYNCWHEEL, 'validate_manifest', return_value={'errors': []}), \
+                 mock.patch.object(SYNCWHEEL, 'github_adapter_request', return_value=candidate):
+                plan = SYNCWHEEL.build_github_pr_merge_plan(
+                    self.repo, self.manifest, self.manifest_path, 'feature', self.args()
+                )
+            self.assertEqual(plan['status'], 'blocked')
+            self.assertIsNone(plan['rulesFallback'])
 
     def test_private_free_rules_fallback_requires_explicit_policy(self):
         observed = self.private_free_observation()
