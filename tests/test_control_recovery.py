@@ -181,6 +181,20 @@ class ControlReplayTest(unittest.TestCase):
                     self.module.command_manifest_recover_control(args)
         self.assertEqual(self.f.read_manifest()['stacks'], [])
 
+    def test_recovery_rechecks_remote_tracking_inputs_at_apply_boundary(self):
+        self.prepare(interrupted=True)
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        args = SimpleNamespace(repo=str(self.f.repo), manifest=None, personal=None,
+                               from_backup=self.backup, apply=True, reason='reviewed recovery',
+                               plan_digest=plan['planDigest'])
+        def move_base():
+            self.f.git('update-ref', 'refs/remotes/origin/main', self.source)
+        with self.module.manifest_write_transaction(self.f.repo, self.path, commit_tracked_changes=False):
+            with mock.patch.object(self.module, 'control_recovery_checkpoint', side_effect=move_base):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
+                    self.module.command_manifest_recover_control(args)
+        self.assertEqual(self.f.read_manifest()['stacks'], [])
+
     def prepare_state_remote(self):
         self.f.git('switch', '-qc', 'syncwheel/state/default')
         state_path = self.f.repo / '.syncwheel/coordination-state.json'
@@ -245,6 +259,7 @@ class ControlReplayTest(unittest.TestCase):
         self.f.git('commit', '-qm', 'test: later coordination object')
         advanced = self.f.git('rev-parse', 'HEAD')
         self.f.git('switch', '-q', 'main')
+        self.f.git('push', '--quiet', 'origin', f'{advanced}:refs/heads/later-object')
         real_observe = self.module.remote_ref_tips
         def advance_after_observation(repo, remote, refs):
             result = real_observe(repo, remote, refs)

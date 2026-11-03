@@ -29862,7 +29862,7 @@ def control_recovery_observation(repo_root):
         'branch': get_current_branch(repo_root),
         'indexTree': git(repo_root, 'write-tree').stdout.strip(),
         'status': git(repo_root, 'status', '--porcelain', '--untracked-files=all').stdout,
-        'refs': git(repo_root, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/').stdout,
+        'refs': git(repo_root, 'for-each-ref', '--format=%(refname) %(objectname)').stdout,
         'paths': paths,
     }
 
