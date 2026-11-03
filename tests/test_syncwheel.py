@@ -4836,7 +4836,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(feature_a['commits'], [beta, alpha])
 
     def test_stack_set_target_preserves_source_and_integration_metadata(self):
-        manifest = self.read_manifest()
+        manifest, _ = self.load_syncwheel_module().load_manifest(self.repo)
         stack = manifest['stacks'][1]
         stack['integration_commits'] = list(stack['commits'])
         manifest_path = self.repo / '.syncwheel/manifest.json'
