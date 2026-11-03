@@ -1,12 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/main-integration",
-    "refs/heads/pr/scoped-stack-add"
-  ],
-  "claimed_at": "2026-11-03T22:29:56+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-03T22:45:58+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "22b5aecc-8a44-4c94-ae98-2dbe53a6e88a",
-  "publication_scope": "stack:scoped-stack-add",
+  "operation_token": "3c1f9c84-d68c-4e3d-a486-fac083e7a9ac",
+  "publication_scope": "close:scoped-stack-add",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/scoped-stack-add",
-  "syncwheel_version": "0.46.16"
+  "syncwheel_version": "0.46.17"
 }
