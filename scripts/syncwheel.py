@@ -27383,7 +27383,9 @@ def validate_integration_first_base(repo_root, manifest, added_commits):
 def command_stack_add(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    complete_pending_promote_intents(repo_root, manifest, manifest_path)
+    complete_pending_promote_intents(
+        repo_root, manifest, manifest_path, only_stacks={args.stack},
+    )
     stack = require_stack(manifest, args.stack)
     previous_commits = list(stack['commits'])
     commits = list(previous_commits)
@@ -35969,6 +35971,7 @@ def governed_worktree_reaping_requested(args):
         command_int_push,
         command_int_rebuild,
         command_stack_create,
+        command_stack_add,
     }:
         return False
     always_mutating = {
@@ -36068,9 +36071,22 @@ def governed_worktree_preflight(args):
                 + ', '.join(lane['id'] for lane in blockers)
             )
         return
-    if not governed_worktree_reaping_requested(args):
+    candidate_ids = None
+    if args.func == command_stack_add:
+        # Capture below handles active lanes whose commits become owned by
+        # this stack. Only recover existing cleanup candidates for this stack;
+        # unrelated retained copies belong to explicit release/gc.
+        candidate_ids = {
+            lane['id'] for lane in governed_worktree_cleanup_candidates(repo_root, manifest)
+            if lane.get('target') == args.stack
+        }
+        if not candidate_ids:
+            return
+    elif not governed_worktree_reaping_requested(args):
         return
-    cleanup = reconcile_governed_worktrees(repo_root, manifest, manifest_path)
+    cleanup = reconcile_governed_worktrees(
+        repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
+    )
     if cleanup['failures']:
         details = ', '.join(
             f"{item['id']} [{item['code']}]" for item in cleanup['failures']

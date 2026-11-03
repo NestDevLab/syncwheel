@@ -81,6 +81,79 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
         self.assertTrue(module.find_worktree_record_for_branch(self.repo, 'syncwheel/lane/kept-validation')['locked'])
 
+    def exercise_stack_add_preserving_unrelated_captured_orphan(self, *, targeted):
+        path, tip, _, _ = self.captured_push_copy()
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        manifest['stacks'] = [stack for stack in manifest['stacks'] if stack['id'] != 'feature-a']
+        manifest['integration']['stacks'] = [
+            stack for stack in manifest['integration']['stacks'] if stack != 'feature-a'
+        ]
+        (self.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest) + '\n')
+        evidence = path / 'node_modules/validation.json'
+        evidence.write_text('{"verified": true}\n')
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        retained = next(lane for lane in registry['lanes'] if lane['id'] == 'kept-validation')
+        self.assertEqual(retained['state'], 'captured_pending_cleanup')
+        record = module.find_worktree_record_for_branch(self.repo, retained['branch'])
+        before = {
+            str(item.relative_to(path)): (
+                ('symlink', os.readlink(item)) if item.is_symlink() else ('file', item.read_bytes())
+            )
+            for item in path.rglob('*') if item.is_symlink() or item.is_file()
+        }
+
+        self.run_cli('stack', 'create', 'independent', '--branch', 'pr/independent')
+        opened = json.loads(self.run_cli(
+            'worktree', 'open', 'new-source',
+            *(['--into', 'independent'] if targeted else []), '--json',
+        ).stdout)['lane']
+        current = Path(opened['path'])
+        (current / 'new-source.txt').write_text('independent source\n')
+        self.git('-C', str(current), 'add', 'new-source.txt')
+        self.git('-C', str(current), 'commit', '-qm', 'feat: independent source')
+        current_tip = self.git('-C', str(current), 'rev-parse', 'HEAD')
+        self.run_cli('stack', 'add', 'independent', current_tip,
+                     '--repo', str(self.repo), cwd=current)
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(next(lane for lane in registry['lanes']
+                              if lane['id'] == retained['id']), retained)
+        captured = next(lane for lane in registry['lanes'] if lane['id'] == opened['id'])
+        self.assertEqual(captured['state'], 'captured_pending_cleanup')
+        stack = next(stack for stack in self.read_manifest()['stacks'] if stack['id'] == 'independent')
+        self.assertIn(current_tip, stack['commits'])
+        self.assertEqual(module.find_worktree_record_for_branch(self.repo, retained['branch']), record)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+        self.assertEqual(self.git('rev-parse', retained['branch']), tip)
+        self.assertEqual(self.git('-C', str(path), 'status', '--porcelain'), '')
+        self.assertEqual({
+            str(item.relative_to(path)): (
+                ('symlink', os.readlink(item)) if item.is_symlink() else ('file', item.read_bytes())
+            )
+            for item in path.rglob('*') if item.is_symlink() or item.is_file()
+        }, before)
+
+    def test_stack_add_captures_selected_lane_preserving_unrelated_locked_orphan(self):
+        self.exercise_stack_add_preserving_unrelated_captured_orphan(targeted=True)
+
+    def test_stack_add_captures_unowned_lane_preserving_unrelated_locked_orphan(self):
+        self.exercise_stack_add_preserving_unrelated_captured_orphan(targeted=False)
+
+    def test_stack_add_refuses_locked_captured_lane_for_selected_stack(self):
+        path, tip, _, _ = self.captured_push_copy()
+        module = self.load_syncwheel_module()
+        registry_path = module.governed_worktree_registry_path(self.repo)
+        before = registry_path.read_bytes()
+        manifest_before = (self.repo / '.syncwheel/manifest.json').read_bytes()
+
+        result = self.run_cli('stack', 'add', 'feature-a', tip, expected=2)
+
+        self.assertIn('kept-validation [lane_in_use]', result.stderr)
+        self.assertEqual(registry_path.read_bytes(), before)
+        self.assertEqual((self.repo / '.syncwheel/manifest.json').read_bytes(), manifest_before)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+
     def test_retained_captured_push_refuses_unlocked_or_dirty_copies(self):
         path, _, base, origin = self.captured_push_copy()
         args = ('stack', 'push', 'feature-a', '--remote', 'origin',
@@ -1696,6 +1769,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
         manifest = json.loads(manifest_path.read_text())
         cases = (
+            (module.command_stack_add, False, {
+                'only_stacks': {'feature-a'},
+            }),
             (module.command_stack_close, False, {
                 'skip_stacks': {'feature-a'},
                 'only_stacks': {'feature-a'},
