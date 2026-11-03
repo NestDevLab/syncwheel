@@ -21,9 +21,10 @@ class ControlReplayTest(unittest.TestCase):
                                'strategy': 'cherry-pick', 'stacks': []}
         data['stacks'] = []
         self.path.write_text(json.dumps(data) + '\n')
-        self.module.ensure_managed_tracking_files(self.f.repo, 'git-tracked', 'var/syncwheel')
+        self.module.ensure_syncwheel_metadata_excluded(self.f.repo, 'git-tracked', 'var/syncwheel')
         ignore = self.f.repo / '.gitignore'
-        ignore.write_text(ignore.read_text() + '\n# Append-only transaction metadata\n.syncwheel/manifest-ledger/\n')
+        if interrupted:
+            ignore.write_text(ignore.read_text() + '\n# Append-only transaction metadata\n.syncwheel/manifest-ledger/\n')
         self.f.git('add', '-f', '.syncwheel/manifest.json', '.gitignore')
         self.f.git('commit', '-qm', 'test: track replay base control')
         base = self.f.git('rev-parse', 'HEAD')
