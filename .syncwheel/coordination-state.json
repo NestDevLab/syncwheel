@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "d25646b7c412596123252314ae5567e2ad083306"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "5a56e313c6551073a04dabbd5a6ed4f0abfc0cec",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -26,6 +24,7 @@
     "refs/heads/pr/journal-guard-readiness": "e421e352281844a42e0bbc2ae7fdd4a72d84f446",
     "refs/heads/pr/journal-operations": "4be329dde1c6874ad6d4bbadc6ff4e3e48826d1a",
     "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
+    "refs/heads/pr/journal-recover-delivery": "078e2061b8f0288f53088e6c1da024373269878e",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/lane-capacity-policy": "ebf6cbce4a4faf7fbedd98fbed65deb6346f26f5",
     "refs/heads/pr/local-only-control-manifest": "fc87f8d59c5c3475cde1b3525997e5ebafb280e1",
@@ -94,7 +93,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-10-27T18:24:50+00:00",
+  "created_at": "2026-11-03T08:08:10+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -131,6 +130,7 @@
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-operations": "df881e8d83fa074d7589ee7137e7130143e2e108",
     "refs/heads/pr/journal-publish-compact": "ecb827e1631de3e45395c55b2b8defe5797c4ea3",
+    "refs/heads/pr/journal-recover-delivery": null,
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
     "refs/heads/pr/lane-capacity-policy": "f2ab8a762356392c9a5a80dbd7f10aae3501d6af",
     "refs/heads/pr/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19",
@@ -250,13 +250,13 @@
     "version": 2
   },
   "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "54c87701-9af6-40aa-aa4c-69cb8c7c87fd",
-  "parent_state": "297620c6bcedc8fc1e18f7f7bd3fe5b51d744f88",
+  "operation_token": "cfb5d2dd-3fcd-4828-8bac-6a4e407244bd",
+  "parent_state": "0f50fe460c7d6466b6153bbe3b8489f8030f57e0",
   "projection_status": "partial",
-  "publication_id": "156d8aaf-325f-4bba-9710-aaf7a219e6ca",
-  "publication_scope": "integration",
+  "publication_id": "400c9ce6-d621-49b8-8630-34ae6c5d78af",
+  "publication_scope": "close:journal-recover-delivery",
   "schema_version": 2,
-  "syncwheel_version": "0.46.12",
+  "syncwheel_version": "0.46.14",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1169,6 +1169,14 @@
       "ref": "refs/heads/pr/preserve-closed-history-status",
       "remote_tip": null,
       "stack": "preserve-closed-history-status"
+    },
+    {
+      "branch": "pr/journal-recover-delivery",
+      "closed_at": "2026-11-03T08:08:07+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/journal-recover-delivery",
+      "remote_tip": null,
+      "stack": "journal-recover-delivery"
     }
   ]
 }
