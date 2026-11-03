@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -37,31 +37,31 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
-      "id": "stack-target",
-      "branch": "pr/stack-target",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/stack-target",
       "commits": [
         "956f9898aa2b10d1db3310a6c53f9b3ebb43b259",
         "e7e41b3e0f1b88aed3c991dd44a5ec4d2e502713",
         "21ad93c5889cb3c4b33603eaf41d67509513fa64"
       ],
-      "state": "published",
+      "id": "stack-target",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Update a stack delivery target without changing its source projection"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Update a stack delivery target without changing its source projection"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
