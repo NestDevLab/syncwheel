@@ -8961,7 +8961,7 @@ sys.exit(module.main())
         with_spec = self.run_cli(repo, 'stack', 'set', 'y', '--published', y1, expected=2)
         self.assertIn('stack set --published takes no commit specs', with_spec.stderr)
         without_spec = self.run_cli(repo, 'stack', 'set', 'y', expected=2)
-        self.assertIn('stack set requires commit specs, or --published', without_spec.stderr)
+        self.assertIn('stack set requires commit specs, --target-branch, or --published', without_spec.stderr)
         manifest_path = repo / '.syncwheel' / 'manifest.json'
         manifest = json.loads(manifest_path.read_text())
         {item['id']: item for item in manifest['stacks']}['y']['target_branch'] = 'release'
