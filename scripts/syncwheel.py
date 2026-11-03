@@ -36041,6 +36041,7 @@ def governed_worktree_preflight(args):
         command_stack_promote,
         command_stack_push,
         command_stack_rebuild,
+        command_stack_resolve_integration,
     }
     scoped_stacks = None
     scoped_stack_label = 'the selected stack'
