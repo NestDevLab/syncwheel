@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -37,9 +37,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -49,7 +49,8 @@
       "commits": [
         "f9cc3893a81943b757241f9122861e57e63a9d0e",
         "4c94a744d027c323b05e10c3c434189580d31bc3",
-        "260faf31dd0e81c93c19555b7dc0fe96c0e45c27"
+        "260faf31dd0e81c93c19555b7dc0fe96c0e45c27",
+        "6f1fc012199cfe8d2d70d68d21ec4089f29759b8"
       ],
       "id": "stack-target",
       "integration_branch": "main-integration",
