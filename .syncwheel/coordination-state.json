@@ -1,9 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "95591f169b270e5dae6cda86dc8ef92fe5912c89"
+    "refs/heads/main-integration": "f88d94a6a1e3f162c8cae9297bad8a6980b4fc9e",
+    "refs/heads/pr/scoped-integration-resolution": "257cc025e05a570e4a97111df5b2b109004896b0"
   },
   "claims": {
-    "refs/heads/main-integration": "e154a62b596861f2b27c0cbd6418df23597b6cd8",
+    "refs/heads/main-integration": "879f4f7e63685d177179608c87eb73e59ab3de92",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -57,6 +58,7 @@
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "a2114bf2fadf8baa2f6eec3798a47e7e0f34c236",
     "refs/heads/pr/revision-ref-guard-batching": "9ec874da7ba3782fd4ebc8a1dc18b154f73d5042",
+    "refs/heads/pr/scoped-integration-resolution": "da815c59f9270db67a38a3af7306c160c48bafc9",
     "refs/heads/pr/scoped-stack-add": "a13fd09b3f3bb0a122784232b7ac4035f53de5c1",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
@@ -99,11 +101,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-03T22:47:11+00:00",
+  "created_at": "2026-11-03T22:57:46+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "95591f169b270e5dae6cda86dc8ef92fe5912c89",
+    "refs/heads/main-integration": "f88d94a6a1e3f162c8cae9297bad8a6980b4fc9e",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -174,6 +176,7 @@
     "refs/heads/pr/revision-index-semantic-lease": "78f4c9a5055d7455059aa009b2550621545f679a",
     "refs/heads/pr/revision-provider-primary-guard-auth-v2": "516d5c5375a7f7dbb871b3e9286c0551ff4e3d71",
     "refs/heads/pr/revision-ref-guard-batching": "186267b551ce8e16df90aa7b3df01b7417304d29",
+    "refs/heads/pr/scoped-integration-resolution": "257cc025e05a570e4a97111df5b2b109004896b0",
     "refs/heads/pr/scoped-stack-add": "74561e7e4f4b17eb5a7097b76e6bc8767b9bf2ea",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
@@ -248,7 +251,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "scoped-integration-resolution"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -256,15 +261,30 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/scoped-integration-resolution",
+        "commits": [
+          "e88b43325e8dde95dbb1ea309e4f94df666aeeb0"
+        ],
+        "id": "scoped-integration-resolution",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "941ceeb4eb8dbcbc0f630fb1d4297c4fb43dc129ef7d4c12c125a769786d3a0a",
-  "operation_token": "be1eae64-9cb0-4ced-8822-a1acc7b42b2b",
-  "parent_state": "3d4458a6109abcb7603bdd01da6d076d9ed0df0d",
+  "manifest_digest": "2642c337301bc119fbcf2ca9af3481e1fe944f5f6bef5f729e09f2dc2edf2429",
+  "operation_token": "925b92ff-6a95-45e3-8c32-c4f1e9f56ebe",
+  "parent_state": "12e8f193214045ab41375d2058e5e3c6124924e7",
   "projection_status": "partial",
-  "publication_id": "588d76ef-f67f-4479-9a6e-d597d84b1562",
-  "publication_scope": "integration",
+  "publication_id": "07e1813a-1203-4784-a853-b4b9531f50c5",
+  "publication_scope": "stack:scoped-integration-resolution",
   "schema_version": 2,
   "syncwheel_version": "0.46.17",
   "tombstones": [
