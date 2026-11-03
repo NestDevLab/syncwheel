@@ -1,0 +1,154 @@
+import json
+import unittest
+from types import SimpleNamespace
+from unittest import mock
+
+import test_syncwheel as fixtures
+
+
+class ControlReplayTest(unittest.TestCase):
+    def setUp(self):
+        self.f = fixtures.SyncwheelFixtureTest('runTest')
+        self.f.setUp()
+        self.addCleanup(self.f.tearDown)
+        self.module = self.f.load_syncwheel_module()
+        self.path = self.f.repo / '.syncwheel/manifest.json'
+
+    def prepare(self, interrupted=False):
+        data = self.f.read_manifest()
+        data.update(syncwheel_tracking='git-tracked', syncwheel_worktree_root='var/syncwheel')
+        data['integration'] = {'branch': 'main', 'base': self.f.git('rev-parse', 'HEAD'),
+                               'strategy': 'cherry-pick', 'stacks': []}
+        data['stacks'] = []
+        self.path.write_text(json.dumps(data) + '\n')
+        self.module.ensure_managed_tracking_files(self.f.repo, 'git-tracked', 'var/syncwheel')
+        ignore = self.f.repo / '.gitignore'
+        ignore.write_text(ignore.read_text() + '\n# Append-only transaction metadata\n.syncwheel/manifest-ledger/\n')
+        self.f.git('add', '-f', '.syncwheel/manifest.json', '.gitignore')
+        self.f.git('commit', '-qm', 'test: track replay base control')
+        base = self.f.git('rev-parse', 'HEAD')
+        self.f.git('switch', '-qc', 'pr/change')
+        (self.f.repo / 'gamma.txt').write_text('preserve source product\n')
+        self.f.git('add', 'gamma.txt')
+        self.f.git('commit', '-qm', 'test: product change')
+        self.source = self.f.git('rev-parse', 'HEAD')
+        self.f.git('switch', '-q', 'main')
+        data['integration'].update(base=base, stacks=['change'])
+        data['stacks'] = [{'id': 'change', 'branch': 'pr/change', 'base': base,
+                           'target_remote': 'origin', 'target_branch': 'main',
+                           'integration_branch': 'main', 'commits': [self.source]}]
+        self.path.write_text(json.dumps(data) + '\n')
+        self.f.git('add', '-f', '.syncwheel/manifest.json')
+        self.f.git('commit', '-qm', 'test: save declared control')
+        self.expected, _ = self.module.load_manifest(self.f.repo, self.path)
+        self.backup = 'backup/main-before-syncwheel-20261104T000000Z'
+        self.f.git('branch', self.backup)
+        if interrupted:
+            # Test-only simulation of the pre-fix interrupted native replay.
+            self.f.git('reset', '--hard', self.source)
+
+    def plan(self):
+        return json.loads(self.f.run_cli(
+            'manifest', 'recover-control', '--from-backup', self.backup,
+        ).stdout)
+
+    def apply(self, plan, expected=0):
+        return self.f.run_cli(
+            'manifest', 'recover-control', '--from-backup', self.backup,
+            '--plan-digest', plan['planDigest'], '--reason', 'recover reviewed replay',
+            '--apply', expected=expected,
+        )
+
+    def test_ephemeral_rebuild_restores_normalized_tracked_control(self):
+        self.prepare()
+        for _ in range(2):
+            self.f.run_cli('int', 'rebuild', '--replay-mode', 'ephemeral',
+                           '--reason', 'verified ephemeral replay')
+            restored, _ = self.module.load_manifest(self.f.repo, self.path)
+            self.assertEqual(restored, self.expected)
+            self.assertEqual(self.f.git('rev-parse', 'pr/change'), self.source)
+            self.assertEqual((self.f.repo / 'gamma.txt').read_text(), 'preserve source product\n')
+            self.assertEqual(self.f.tracked_status(), '')
+
+    def test_unknown_manifest_change_is_not_acknowledged_as_replay(self):
+        self.prepare()
+        with self.module.manifest_write_transaction(self.f.repo, self.path, commit_tracked_changes=False):
+            self.f.git('reset', '--hard', self.source)
+            edited = self.f.read_manifest()
+            edited['defaults']['base_branch'] = 'unreviewed-change'
+            self.path.write_text(json.dumps(edited) + '\n')
+            before = self.path.read_bytes()
+            with self.assertRaisesRegex(self.module.SyncwheelError, 'manifest changed unexpectedly'):
+                self.module.restore_control_manifest_after_integration_rebuild(
+                    self.f.repo, self.path, self.expected, self.source, 'ephemeral',
+                )
+            self.assertEqual(self.path.read_bytes(), before)
+
+    def test_recovery_is_plan_first_preserves_product_and_commits_only_control(self):
+        self.prepare(interrupted=True)
+        head = self.f.git('rev-parse', 'HEAD')
+        plan = self.plan()
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.f.read_manifest()['stacks'], [])
+        self.apply(plan)
+        restored, _ = self.module.load_manifest(self.f.repo, self.path)
+        self.assertEqual(restored, self.expected)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD^'), head)
+        self.assertEqual(self.f.git('rev-parse', 'pr/change'), self.source)
+        paths = self.f.git('diff', '--name-only', 'HEAD^', 'HEAD').splitlines()
+        self.assertIn('.syncwheel/manifest.json', paths)
+        self.assertLessEqual(set(paths), {'.syncwheel/manifest.json', '.gitignore'})
+        self.assertEqual(self.f.tracked_status(), '')
+        again = self.plan()
+        self.assertTrue(again['alreadyRestored'])
+        restored_head = self.f.git('rev-parse', 'HEAD')
+        self.apply(again)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), restored_head)
+
+    def test_recovery_rejects_stale_plan(self):
+        self.prepare(interrupted=True)
+        plan = self.plan()
+        self.f.git('commit', '--allow-empty', '-qm', 'test: concurrent ref advance')
+        result = self.apply(plan, expected=2)
+        self.assertIn('exact current --plan-digest', result.stderr)
+        self.assertEqual(self.f.read_manifest()['stacks'], [])
+
+    def test_recovery_rejects_changed_product_tree(self):
+        self.prepare(interrupted=True)
+        (self.f.repo / 'gamma.txt').write_text('independent product edit\n')
+        self.f.git('add', 'gamma.txt')
+        self.f.git('commit', '-qm', 'test: other product change')
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('does not reproduce the current product tree', result.stderr)
+        self.assertEqual((self.f.repo / 'gamma.txt').read_text(), 'independent product edit\n')
+
+    def test_recovery_rejects_edited_manifest_and_ignore(self):
+        self.prepare(interrupted=True)
+        original = self.path.read_bytes()
+        self.path.write_bytes(original + b'\n')
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('edited replay manifest', result.stderr)
+        self.path.write_bytes(original)
+        ignore = self.f.repo / '.gitignore'
+        ignore.write_text(ignore.read_text() + '\n!independent-file\n')
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('unrelated ignore changes', result.stderr)
+
+    def test_recovery_requires_native_backup_ref(self):
+        self.prepare(interrupted=True)
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', 'pr/change', expected=2)
+        self.assertIn('explicit native integration backup ref', result.stderr)
+
+    def test_recovery_rechecks_concurrent_edit_at_apply_boundary(self):
+        self.prepare(interrupted=True)
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        args = SimpleNamespace(repo=str(self.f.repo), manifest=None, personal=None,
+                               from_backup=self.backup, apply=True, reason='reviewed recovery',
+                               plan_digest=plan['planDigest'])
+        def edit():
+            self.path.write_bytes(self.path.read_bytes() + b'\n')
+        with self.module.manifest_write_transaction(self.f.repo, self.path, commit_tracked_changes=False):
+            with mock.patch.object(self.module, 'control_recovery_checkpoint', side_effect=edit):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
+                    self.module.command_manifest_recover_control(args)
+        self.assertEqual(self.f.read_manifest()['stacks'], [])

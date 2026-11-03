@@ -175,6 +175,34 @@ a stable executable. Run `python3 scripts/cli-dogfood.py` for a disposable local
 second-clone resume check. Every subprocess is timed and bounded; its evidence
 directory is printed at startup.
 
+### Tracked control recovery after an interrupted local replay
+
+An ephemeral replay may reset a checked-out integration branch to a tree carrying
+an older tracked manifest. The normal persistence checkpoint accepts only the
+exact manifest bytes proved by that replay, including manifests with omitted
+defaults; an independent checkout edit still fails closed.
+
+For a legacy interruption without a persistence intent, inspect the native backup
+ref and preview the bounded local recovery:
+
+```bash
+syncwheel manifest recover-control --from-backup backup/integration/example-before-syncwheel-TIMESTAMP
+```
+
+Review its backup commit, current checkout/index/refs, replay proof and digest.
+Apply that exact plan with `--apply --plan-digest DIGEST --reason "Restore reviewed replay control"`.
+The command requires the canonical git-tracked delivery manifest, a native backup
+for the same integration branch, and an independently reproduced product tree.
+Active-active coordination, edited manifests, staged/unrelated work and unrelated
+ignore changes are refused. Only the tracked manifest and a proved native managed
+ignore rewrite can be committed; product commits, source branches, private local
+policy, recovery refs and foreign worktrees are preserved. Replan on drift; never
+use a manual reset, manifest edit or a bypass of the transaction guard.
+
+Recovery does not publish or attest validation. Verify the restored recipes and
+source ownership, then run the normal integration checks and exact-head delivery
+plan. An already restored input is a no-op under a freshly observed plan.
+
 ### Empty integration-only desk steps
 
 A stopped integration-only cherry-pick can be reviewed through the ordinary

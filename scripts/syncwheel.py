@@ -8221,8 +8221,11 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         # integration branch. It is the one known in-command transition that
         # may replace the source before the control CAS. Record that observed
         # replay digest in the intent; every other change still fails closed.
-        if replayed_source_digest == observed_digest:
-            transaction['expectedDigest'] = replayed_source_digest
+        if replayed_source_digest != transaction['expectedDigest']:
+            # Tree JSON may omit defaults that load_manifest normalizes. Compare
+            # the actual replay bytes through the same verified checkpoint used
+            # for in-place replay, rather than comparing raw and normalized data.
+            acknowledge_in_place_manifest_replay(repo_root, manifest_path, replay_tip)
     events = load_control_manifest_events(repo_root, manifest_path)
     pending_intent, matching_intents, receipts = control_manifest_operation_intent(
         events,
@@ -29847,6 +29850,112 @@ def compare_manifests(left, right):
     }
 
 
+def control_recovery_observation(repo_root):
+    paths = {
+        path: checkout_path_observation(repo_root, path)['fingerprint']
+        for path in ('.syncwheel/manifest.json', '.gitignore')
+    }
+    return {
+        'head': ref_tip(repo_root, 'HEAD'),
+        'branch': get_current_branch(repo_root),
+        'indexTree': git(repo_root, 'write-tree').stdout.strip(),
+        'status': git(repo_root, 'status', '--porcelain', '--untracked-files=all').stdout,
+        'refs': git(repo_root, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads/').stdout,
+        'paths': paths,
+    }
+
+
+def control_recovery_plan(repo_root, manifest_path, backup_ref):
+    """Prove a local failed replay before restoring its declared control input."""
+    if Path(manifest_path).resolve() != integration_manifest_path(repo_root).resolve():
+        raise SyncwheelError('control recovery requires the canonical repository manifest')
+    current, _ = load_manifest(repo_root, manifest_path)
+    if not current:
+        raise SyncwheelError('control recovery requires a readable replay manifest')
+    branch = current['integration']['branch']
+    backup_ref = backup_ref.removeprefix('refs/heads/')
+    if not backup_ref.startswith(f'backup/{branch}-before-syncwheel-'):
+        raise SyncwheelError('control recovery requires an explicit native integration backup ref')
+    source = ref_tip(repo_root, f'refs/heads/{backup_ref}')
+    if not source:
+        raise SyncwheelError('control recovery backup ref is missing')
+    original = manifest_from_tree(repo_root, source, integration_manifest_path(repo_root))
+    if original is None:
+        raise SyncwheelError('control recovery backup has no tracked manifest')
+    desired = normalize_manifest_data(original, manifest_path)
+    if desired['integration']['branch'] != branch:
+        raise SyncwheelError('control recovery backup names a different integration branch')
+    if any(m.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED
+           or m.get('repository_mode') != 'delivery' or coordination_is_active(m)
+           for m in (current, desired)):
+        raise SyncwheelError('control recovery supports local git-tracked delivery manifests only')
+    before = control_recovery_observation(repo_root)
+    if before['branch'] != branch:
+        raise SyncwheelError('control recovery requires the integration checkout')
+    if git(repo_root, 'diff', '--cached', '--name-only').stdout.strip():
+        raise SyncwheelError('control recovery refuses a staged index')
+    if regular_checkout_path_bytes(repo_root, '.syncwheel/manifest.json') != git(
+        repo_root, 'show', f"{before['head']}:.syncwheel/manifest.json"
+    ).stdout.encode():
+        raise SyncwheelError('control recovery refuses an edited replay manifest')
+    changed = [line[3:] for line in before['status'].splitlines()]
+    if any(path != '.gitignore' for path in changed):
+        raise SyncwheelError('control recovery refuses unrelated checkout changes')
+    ignore_changed = bool(changed)
+    if ignore_changed:
+        baseline = git(repo_root, 'show', f"{before['head']}:.gitignore").stdout
+        expected, _ = replace_managed_block(
+            baseline, SYNCWHEEL_GITIGNORE_MARKER, SYNCWHEEL_GITIGNORE_END_MARKER,
+            syncwheel_gitignore_patterns(syncwheel_worktree_root(desired)),
+            all_syncwheel_managed_patterns(syncwheel_worktree_root(desired)),
+        )
+        if regular_checkout_path_bytes(repo_root, '.gitignore') != expected.encode():
+            raise SyncwheelError('control recovery refuses unrelated ignore changes')
+    replay = materialize_integration_replay(repo_root, desired)
+    differences = git(repo_root, 'diff', '--name-only', replay, before['head']).stdout.splitlines()
+    if any(path not in {'.syncwheel/manifest.json', '.gitignore'} for path in differences):
+        raise SyncwheelError('control recovery replay does not reproduce the current product tree')
+    if control_recovery_observation(repo_root) != before:
+        raise SyncwheelError('control recovery inputs changed during proof')
+    plan = {
+        'schemaVersion': 1, 'kind': 'controlManifestRecoveryPlan',
+        'backupRef': backup_ref, 'backupCommit': source, 'observation': before,
+        'replayCommit': replay, 'manifestDigestBefore': manifest_digest(current),
+        'manifestDigestAfter': manifest_digest(desired), 'commitManagedIgnore': ignore_changed,
+        'alreadyRestored': manifest_digest(current) == manifest_digest(desired) and not ignore_changed,
+    }
+    plan['planDigest'] = canonical_json_digest(plan)
+    return plan, desired
+
+
+def control_recovery_checkpoint():
+    """Fault-injection seam before a reviewed control recovery mutation."""
+    return None
+
+
+def command_manifest_recover_control(args):
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    plan, desired = control_recovery_plan(repo_root, manifest_path, args.from_backup)
+    if args.apply:
+        if not args.reason or not args.reason.strip():
+            raise SyncwheelError('control recovery apply requires --reason')
+        if not args.plan_digest or args.plan_digest != plan['planDigest']:
+            raise SyncwheelError('control recovery requires the exact current --plan-digest')
+        control_recovery_checkpoint()
+        if control_recovery_observation(repo_root) != plan['observation']:
+            raise SyncwheelError('control recovery inputs changed before apply')
+        if not plan['alreadyRestored']:
+            save_manifest_with_ledger(
+                repo_root, manifest_path, desired, args.reason,
+                {'command': 'syncwheel manifest recover-control', 'recoveryPlan': plan},
+            )
+            if plan['commitManagedIgnore']:
+                active_manifest_write_transaction(manifest_path)['gitignoreWritten'] = True
+    print(json.dumps({**plan, 'applied': bool(args.apply)}, indent=2))
+    return 0
+
+
 def command_manifest_compare(args):
     repo_root = resolve_repo_root(args.repo)
     left, left_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -34740,6 +34849,16 @@ def build_parser():
     manifest_compare_p.add_argument('-j', '--json', action='store_true')
     manifest_compare_p.set_defaults(func=command_manifest_compare)
 
+    manifest_recover_p = manifest_sub.add_parser(
+        'recover-control', parents=[common],
+        help='plan or restore tracked control metadata from a verified native replay backup',
+    )
+    manifest_recover_p.add_argument('--from-backup', required=True)
+    manifest_recover_p.add_argument('--plan-digest')
+    manifest_recover_p.add_argument('--reason')
+    manifest_recover_p.add_argument('-a', '--apply', action='store_true')
+    manifest_recover_p.set_defaults(func=command_manifest_recover_control)
+
     manifest_require_integration_p = manifest_sub.add_parser(
         'require-integration',
         help='require every declared stack to participate in integration',
@@ -35703,6 +35822,7 @@ def entrypoint_behavior_table():
         command_journal_pull, command_journal_recover,
     ), mutates='apply')
     register((command_repo_mode_set,), mutates='apply', manifest_mutates='apply')
+    register((command_manifest_recover_control,), mutates='apply', manifest_mutates='apply', remedy=True)
     # digest-heal is the one repair class that appends a local ledger event
     # alongside the remote state CAS.
     register((command_coordination_repair,), mutates='apply', manifest_mutates='apply')
