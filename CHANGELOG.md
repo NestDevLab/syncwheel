@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.18 - 2026-11-03
+
+- Scope `stack resolve-integration` preflight to its selected stack, preserving unrelated retained captured worktrees while continuing to block recovery-required lanes belonging to the selected stack.
+
 ## 0.46.17 - 2026-11-03
 
 - Scope `stack add` recovery to its selected stack, preserving unrelated retained captured worktrees and their locks while capturing applicable source lanes. Keep selected-stack cleanup guards and scope pending promotion recovery to the same stack.

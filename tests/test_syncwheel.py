@@ -4950,6 +4950,68 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                      '--target-branch', 'main', expected=2)
         self.assertEqual(path.read_bytes(), before)
 
+    def test_stack_resolve_integration_preserves_unrelated_locked_captured_orphan(self):
+        path, tip, _, _ = self.captured_push_copy()
+        module = self.load_syncwheel_module()
+        manifest = self.read_manifest()
+        manifest['stacks'] = [stack for stack in manifest['stacks'] if stack['id'] != 'feature-a']
+        manifest['integration']['stacks'] = [
+            stack for stack in manifest['integration']['stacks'] if stack != 'feature-a'
+        ]
+        manifest_path = self.repo / '.syncwheel/manifest.json'
+        manifest_path.write_text(json.dumps(manifest) + '\n')
+        source = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-b')
+        evidence = path / 'node_modules/validation.json'
+        evidence.write_text('{"verified": true}\n')
+        registry_path = module.governed_worktree_registry_path(self.repo)
+        registry_before = registry_path.read_bytes()
+        record = module.find_worktree_record_for_branch(self.repo, 'syncwheel/lane/kept-validation')
+        refs = self.git('for-each-ref', '--format=%(refname) %(objectname)')
+
+        def payload():
+            return {
+                str(item.relative_to(path)): (
+                    ('symlink', os.readlink(item)) if item.is_symlink() else ('file', item.read_bytes())
+                )
+                for item in path.rglob('*') if item.is_symlink() or item.is_file()
+            }
+
+        before = payload()
+        self.run_cli('stack', 'resolve-integration', 'feature-b', '--empty')
+
+        updated = next(stack for stack in self.read_manifest()['stacks'] if stack['id'] == 'feature-b')
+        self.assertEqual(updated['integration_commits'], [])
+        self.assertEqual({key: value for key, value in updated.items()
+                          if key != 'integration_commits'}, source)
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        self.assertEqual(module.find_worktree_record_for_branch(
+            self.repo, 'syncwheel/lane/kept-validation'), record)
+        self.assertEqual(self.git('for-each-ref', '--format=%(refname) %(objectname)'), refs)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+        self.assertEqual(self.git('-C', str(path), 'status', '--porcelain'), '')
+        self.assertEqual(payload(), before)
+
+    def test_stack_resolve_integration_blocks_a_lane_for_selected_stack(self):
+        for captured in (False, True):
+            with self.subTest(captured=captured):
+                if captured:
+                    self.captured_push_copy()
+                    stack_id = 'feature-a'
+                else:
+                    stack_id = 'feature-b'
+                    self.run_cli('worktree', 'open', 'selected-resolution', '--into', stack_id)
+                module = self.load_syncwheel_module()
+                registry_path = module.governed_worktree_registry_path(self.repo)
+                registry_before = registry_path.read_bytes()
+                manifest_path = self.repo / '.syncwheel/manifest.json'
+                manifest_before = manifest_path.read_bytes()
+
+                result = self.run_cli('stack', 'resolve-integration', stack_id, '--empty', expected=2)
+
+                self.assertIn('recovery is required before updating this stack', result.stderr)
+                self.assertEqual(registry_path.read_bytes(), registry_before)
+                self.assertEqual(manifest_path.read_bytes(), manifest_before)
+
     def test_stack_resolve_integration_keeps_source_projection_intact(self):
         self.git('switch', '-q', '-c', 'integration/test', 'main')
         Path(self.repo / 'gamma.txt').write_text('resolved integration\n')
