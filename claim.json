@@ -1,0 +1,12 @@
+{
+  "changed_refs": [
+    "refs/heads/main-integration",
+    "refs/heads/pr/scoped-stack-add"
+  ],
+  "claimed_at": "2026-11-03T22:29:56+00:00",
+  "coordination_id": "default",
+  "operation_token": "22b5aecc-8a44-4c94-ae98-2dbe53a6e88a",
+  "publication_scope": "stack:scoped-stack-add",
+  "source_ref": "refs/heads/pr/scoped-stack-add",
+  "syncwheel_version": "0.46.16"
+}
