@@ -140,6 +140,33 @@ class ControlReplayTest(unittest.TestCase):
         result = self.f.run_cli('manifest', 'recover-control', '--from-backup', 'pr/change', expected=2)
         self.assertIn('explicit native integration backup ref', result.stderr)
 
+    def test_recovery_remedy_still_refuses_uncommitted_product_work(self):
+        self.prepare(interrupted=True)
+        path = self.f.repo / 'gamma.txt'
+        path.write_text('preserve unrelated uncommitted work\n')
+        head = self.f.git('rev-parse', 'HEAD')
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('unrelated checkout changes', result.stderr)
+        self.assertEqual(path.read_text(), 'preserve unrelated uncommitted work\n')
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+
+    def test_recovery_preview_is_read_only_and_apply_requires_a_plan(self):
+        parser = self.module.build_parser()
+        argv = ['manifest', 'recover-control', '--from-backup', 'backup/main-before-syncwheel-test']
+        preview, apply = parser.parse_args(argv), parser.parse_args([*argv, '--apply'])
+        self.assertFalse(self.module.syncwheel_mutation_requested(preview))
+        self.assertFalse(self.module.manifest_mutation_requested(preview))
+        self.assertTrue(self.module.syncwheel_mutation_requested(apply))
+        self.assertTrue(self.module.manifest_mutation_requested(apply))
+        self.prepare(interrupted=True)
+        head = self.f.git('rev-parse', 'HEAD')
+        result = self.f.run_cli(
+            'manifest', 'recover-control', '--from-backup', self.backup,
+            '--apply', '--reason', 'reviewed recovery', expected=2,
+        )
+        self.assertIn('exact current --plan-digest', result.stderr)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+
     def test_recovery_rechecks_concurrent_edit_at_apply_boundary(self):
         self.prepare(interrupted=True)
         plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
