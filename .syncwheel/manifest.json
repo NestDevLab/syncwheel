@@ -33,8 +33,7 @@
     "branch": "main-integration",
     "stacks": [
       "github-empty-rules",
-      "journal-recover",
-      "journal-recover-delivery"
+      "journal-recover"
     ],
     "strategy": "cherry-pick"
   },
@@ -77,25 +76,6 @@
       },
       "meta": {
         "purpose": "Recover unpublished diverged journal snapshots safely"
-      }
-    },
-    {
-      "id": "journal-recover-delivery",
-      "branch": "pr/journal-recover-delivery",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "a2661bf927fba1b0384e6dab10888da57686f925",
-        "f70d1293e6b2262ff27daf36e690b35ca1b40818"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Guarded recovery of unpublished diverged journal snapshots"
       }
     }
   ],
