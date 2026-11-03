@@ -1,0 +1,11 @@
+{
+  "changed_refs": [],
+  "claimed_at": "2026-11-03T08:08:10+00:00",
+  "closed": true,
+  "coordination_id": "default",
+  "operation_token": "cfb5d2dd-3fcd-4828-8bac-6a4e407244bd",
+  "publication_scope": "close:journal-recover-delivery",
+  "reason": "absorbed",
+  "source_ref": "refs/heads/pr/journal-recover-delivery",
+  "syncwheel_version": "0.46.14"
+}
