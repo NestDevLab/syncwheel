@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.15`
+Current version: `0.46.16`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1017,6 +1017,13 @@ python3 scripts/syncwheel.py stack add feature-a HEAD
 Use `stack sync` when the branch already represents the intended PR stack. Use
 `stack set` or `stack add` when you want to declare an explicit revision range
 or append a new commit.
+
+After a parent PR lands, use `stack set <id> --target-branch main` to update
+only the stack's delivery target. Source commits, base, branch refs and integration
+mappings remain unchanged; GitHub PR retargeting is a separate operation. The
+command validates the branch name, rejects source/integration targets and
+`--published` combinations, and records previous/new targets in the ledger.
+Commit specs may be supplied to update both fields in one operation.
 
 Under active-active coordination, `stack set <id> --published` drops an
 unpublished local change to a published stack: it resets the stack's commits to
