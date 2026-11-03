@@ -1,12 +1,12 @@
 {
   "changed_refs": [
     "refs/heads/main-integration",
-    "refs/heads/pr/github-empty-rules"
+    "refs/heads/pr/stack-target"
   ],
-  "claimed_at": "2026-11-03T08:53:03+00:00",
+  "claimed_at": "2026-11-03T09:09:56+00:00",
   "coordination_id": "default",
-  "operation_token": "0ecd47b2-094d-4e09-860c-20022be2d074",
-  "publication_scope": "stack:github-empty-rules",
+  "operation_token": "dddfe0b5-2341-4e04-9cdc-5b75057865fd",
+  "publication_scope": "stack:stack-target",
   "source_ref": "refs/heads/main-integration",
-  "syncwheel_version": "0.46.14"
+  "syncwheel_version": "0.46.15"
 }
