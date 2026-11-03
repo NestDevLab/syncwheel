@@ -1,10 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "7ea0fe58f04c6b3fed692cc62593496753550b3c",
-    "refs/heads/pr/github-empty-rules": "1450780726ddc34425c97e84cc4c72e135ce3d33"
+    "refs/heads/main-integration": "8057d4799ecf9295d8a89b319f67c791e90daec2",
+    "refs/heads/pr/github-empty-rules": "f840d0adfe62c954d117d127296e66d4a611a8af"
   },
   "claims": {
-    "refs/heads/main-integration": "541d7b0525c448714adc60e2ecfc9ebf8927d717",
+    "refs/heads/main-integration": "cbc2b4ae6c9daffdceaf23c604ee292e4cad2f32",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -15,7 +15,7 @@
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
-    "refs/heads/pr/github-empty-rules": "9a42e9d8f93ca6d30ab13f16288a11f96a892c71",
+    "refs/heads/pr/github-empty-rules": "9790b9eb5c3509364d9883811c26c3dd421b92c9",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
     "refs/heads/pr/half-state-coordination": "de07ec9d17938ce45fb423baee976e1e7d918d95",
     "refs/heads/pr/historical-absorbed-rebuild": "f3ce81b711897b8ac327d93dccaa8926a61ac84a",
@@ -98,11 +98,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-03T08:46:45+00:00",
+  "created_at": "2026-11-03T08:53:03+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "7ea0fe58f04c6b3fed692cc62593496753550b3c",
+    "refs/heads/main-integration": "8057d4799ecf9295d8a89b319f67c791e90daec2",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -122,7 +122,7 @@
     "refs/heads/pr/fixture-cli-tests": "45095862a6316f4733bbbc5b4fcb0a01c2406fa3",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
     "refs/heads/pr/fleet-coordination-invariants-v2": "67ffb3361cdc55213cadd16f70c15854b6a6d98b",
-    "refs/heads/pr/github-empty-rules": "1450780726ddc34425c97e84cc4c72e135ce3d33",
+    "refs/heads/pr/github-empty-rules": "f840d0adfe62c954d117d127296e66d4a611a8af",
     "refs/heads/pr/graph-lock-provenance-supersede": "acdb819d22a912b58bba6182967de7fa46b9b350",
     "refs/heads/pr/half-state-coordination": "92d8b0e249a5d8f3a99f1cbadebdf671e8152e8f",
     "refs/heads/pr/historical-absorbed-rebuild": "794f65f91048117e2d042f83f45823175fe4bf7e",
@@ -264,8 +264,9 @@
         },
         "branch": "pr/github-empty-rules",
         "commits": [
-          "65ba0f93c3533afa54cc50df47ce1641c950f6df",
-          "1450780726ddc34425c97e84cc4c72e135ce3d33"
+          "5e4e0e9af4077083ebe3ca2cc0a01202a0a1d539",
+          "1450780726ddc34425c97e84cc4c72e135ce3d33",
+          "f840d0adfe62c954d117d127296e66d4a611a8af"
         ],
         "id": "github-empty-rules",
         "integration_branch": "main-integration",
@@ -274,11 +275,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "b18dc274bca53fb2c5e03bd9d095143a16ffda7038e1e01670ad42b43ae570f7",
-  "operation_token": "69e5d920-e756-4f88-a53b-bfc5f9736d95",
-  "parent_state": "a5290eb29372f38ca36801f7dfb9a0bb5be29983",
+  "manifest_digest": "8c72404f26a90a54dc9def0a8e0182c290f0d42fc2df07b6b98e245f2cdb8b49",
+  "operation_token": "0ecd47b2-094d-4e09-860c-20022be2d074",
+  "parent_state": "bd80643c74ec17c2718efac891f2bfb41ef6bccc",
   "projection_status": "partial",
-  "publication_id": "a77c7b21-1e29-45fc-af4c-0f5f9b79f564",
+  "publication_id": "7b55ebff-9a3b-4056-8064-452f88c71fb7",
   "publication_scope": "stack:github-empty-rules",
   "schema_version": 2,
   "syncwheel_version": "0.46.14",
