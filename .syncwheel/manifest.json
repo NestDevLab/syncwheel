@@ -32,7 +32,6 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "scoped-integration-resolution",
       "ephemeral-control-replay"
     ],
     "strategy": "cherry-pick"
@@ -44,24 +43,6 @@
   },
   "repository_mode": "delivery",
   "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/scoped-integration-resolution",
-      "commits": [
-        "e88b43325e8dde95dbb1ea309e4f94df666aeeb0"
-      ],
-      "id": "scoped-integration-resolution",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Preserve unrelated retained lanes during integration resolution"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
     {
       "id": "ephemeral-control-replay",
       "branch": "pr/ephemeral-control-replay",
