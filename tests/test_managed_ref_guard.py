@@ -2200,6 +2200,8 @@ class ManagedRefGuardTests(unittest.TestCase):
         for argv in (
             ['worktree', 'open', 'lane', '--into', 'feature', '--repo', str(self.repo)],
             ['stack', 'capture-integration', 'feature', 'HEAD', '--repo', str(self.repo)],
+            ['manifest', 'recover-control', '--from-backup', 'backup/main-integration-before-syncwheel-test',
+             '--repo', str(self.repo)],
             ['hooks', 'install', '--apply', '--repo', str(self.repo)],
             ['hooks', 'remove', '--disable', '--reason', 'recovery', '--apply', '--repo', str(self.repo)],
         ):
@@ -2215,6 +2217,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             'command_hooks_install',
             'command_hooks_remove',
             'command_stack_capture_integration',
+            'command_manifest_recover_control',
             'command_worktree_open',
         })
         non_remedy = parser.parse_args([

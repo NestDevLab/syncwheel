@@ -140,6 +140,33 @@ class ControlReplayTest(unittest.TestCase):
         result = self.f.run_cli('manifest', 'recover-control', '--from-backup', 'pr/change', expected=2)
         self.assertIn('explicit native integration backup ref', result.stderr)
 
+    def test_recovery_remedy_still_refuses_uncommitted_product_work(self):
+        self.prepare(interrupted=True)
+        path = self.f.repo / 'gamma.txt'
+        path.write_text('preserve unrelated uncommitted work\n')
+        head = self.f.git('rev-parse', 'HEAD')
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('unrelated checkout changes', result.stderr)
+        self.assertEqual(path.read_text(), 'preserve unrelated uncommitted work\n')
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+
+    def test_recovery_preview_is_read_only_and_apply_requires_a_plan(self):
+        parser = self.module.build_parser()
+        argv = ['manifest', 'recover-control', '--from-backup', 'backup/main-before-syncwheel-test']
+        preview, apply = parser.parse_args(argv), parser.parse_args([*argv, '--apply'])
+        self.assertFalse(self.module.syncwheel_mutation_requested(preview))
+        self.assertFalse(self.module.manifest_mutation_requested(preview))
+        self.assertTrue(self.module.syncwheel_mutation_requested(apply))
+        self.assertTrue(self.module.manifest_mutation_requested(apply))
+        self.prepare(interrupted=True)
+        head = self.f.git('rev-parse', 'HEAD')
+        result = self.f.run_cli(
+            'manifest', 'recover-control', '--from-backup', self.backup,
+            '--apply', '--reason', 'reviewed recovery', expected=2,
+        )
+        self.assertIn('exact current --plan-digest', result.stderr)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+
     def test_recovery_rechecks_concurrent_edit_at_apply_boundary(self):
         self.prepare(interrupted=True)
         plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
@@ -153,3 +180,82 @@ class ControlReplayTest(unittest.TestCase):
                 with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
                     self.module.command_manifest_recover_control(args)
         self.assertEqual(self.f.read_manifest()['stacks'], [])
+
+    def prepare_state_remote(self):
+        self.f.git('switch', '-qc', 'syncwheel/state/default')
+        state_path = self.f.repo / '.syncwheel/coordination-state.json'
+        state_path.write_text(json.dumps({
+            'manifest': {'version': 1}, 'coordination_id': 'default', 'marker': 'observed',
+        }) + '\n')
+        self.f.git('add', '-f', '.syncwheel/coordination-state.json')
+        self.f.git('commit', '-qm', 'test: observed coordination object')
+        observed = self.f.git('rev-parse', 'HEAD')
+        self.f.git('switch', '-q', 'main')
+        origin = self.f.tmp / 'origin.git'
+        self.f.git('clone', '--bare', '-q', str(self.f.repo), str(origin))
+        self.f.git('remote', 'add', 'origin', str(origin))
+        config = {'remote': 'origin', 'id': 'default',
+                  'state_branch': 'syncwheel/state/default', 'claims': 'advisory'}
+        return observed, origin, config
+
+    def read_state_json(self, repo, commit, *_args):
+        # Real Git object reads isolate provenance from the unchanged schema parser.
+        return json.loads(self.f.git('show', f'{commit}:.syncwheel/coordination-state.json'))
+
+    def test_state_read_survives_an_unrelated_fetch_overwriting_fetch_head(self):
+        observed, _origin, config = self.prepare_state_remote()
+        real_git = self.module.git
+        def interfering_fetch(repo, *args, **kwargs):
+            result = real_git(repo, *args, **kwargs)
+            if args and args[0] == 'fetch':
+                self.f.git('fetch', '--quiet', 'origin', 'main')
+            return result
+        with mock.patch.object(self.module, 'git', side_effect=interfering_fetch), \
+             mock.patch.object(self.module, 'coordination_state_from_commit', side_effect=self.read_state_json):
+            result = self.module.read_remote_coordination_state(
+                self.f.repo, config, local_manifest_version=1,
+            )
+        self.assertNotEqual(self.f.git('rev-parse', 'FETCH_HEAD'), observed)
+        self.assertEqual(result['tip'], observed)
+        self.assertEqual(result['state']['marker'], 'observed')
+
+    def test_state_scan_keeps_each_observed_tip_when_fetch_head_is_overwritten(self):
+        observed, _origin, config = self.prepare_state_remote()
+        real_git = self.module.git
+        def interfering_fetch(repo, *args, **kwargs):
+            result = real_git(repo, *args, **kwargs)
+            if args and args[0] == 'fetch':
+                self.f.git('fetch', '--quiet', 'origin', 'main')
+            return result
+        with mock.patch.object(self.module, 'git', side_effect=interfering_fetch), \
+             mock.patch.object(self.module, 'coordination_state_from_commit', side_effect=self.read_state_json):
+            results = self.module.read_remote_coordination_states(self.f.repo, config)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['tip'], observed)
+        self.assertEqual(results[0]['state']['marker'], 'observed')
+
+    def test_state_read_keeps_tip_and_payload_paired_when_remote_advances(self):
+        observed, origin, config = self.prepare_state_remote()
+        self.f.git('switch', '-q', 'syncwheel/state/default')
+        path = self.f.repo / '.syncwheel/coordination-state.json'
+        data = json.loads(path.read_text())
+        data['marker'] = 'advanced'
+        path.write_text(json.dumps(data) + '\n')
+        self.f.git('add', '-f', '.syncwheel/coordination-state.json')
+        self.f.git('commit', '-qm', 'test: later coordination object')
+        advanced = self.f.git('rev-parse', 'HEAD')
+        self.f.git('switch', '-q', 'main')
+        real_observe = self.module.remote_ref_tips
+        def advance_after_observation(repo, remote, refs):
+            result = real_observe(repo, remote, refs)
+            self.f.git('--git-dir=' + str(origin), 'update-ref',
+                       'refs/heads/syncwheel/state/default', advanced, observed)
+            return result
+        with mock.patch.object(self.module, 'remote_ref_tips', side_effect=advance_after_observation), \
+             mock.patch.object(self.module, 'coordination_state_from_commit', side_effect=self.read_state_json):
+            result = self.module.read_remote_coordination_state(
+                self.f.repo, config, local_manifest_version=1,
+            )
+        self.assertEqual(self.f.git('rev-parse', 'FETCH_HEAD'), advanced)
+        self.assertEqual(result['tip'], observed)
+        self.assertEqual(result['state']['marker'], 'observed')

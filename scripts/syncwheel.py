@@ -12401,7 +12401,9 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
             raise SyncwheelError(
                 result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
             )
-        commit = 'FETCH_HEAD'
+        # FETCH_HEAD is clone-global and another fetch may replace it before
+        # the read. Keep the state paired with the remote tip we observed.
+        commit = tip
     else:
         commit = tip
     state = coordination_state_from_commit(
@@ -12447,7 +12449,7 @@ def read_remote_coordination_states(repo_root, config, *, fetch=True):
             fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
             if fetched.returncode != 0:
                 raise SyncwheelError(fetched.stderr.strip() or f'failed to fetch coordination state {ref}')
-        state = coordination_state_from_commit(repo_root, 'FETCH_HEAD' if fetch else tip)
+        state = coordination_state_from_commit(repo_root, tip)
         expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
         if ref != expected_ref:
             raise SyncwheelError(
