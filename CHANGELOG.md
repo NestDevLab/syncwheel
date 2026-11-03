@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.15 - 2026-11-03
+
+- Observe complete empty GitHub rule connections through matching GraphQL evidence when REST reports the precise private-plan limitation, preserving REST evidence and existing merge gates.
+
 ## 0.46.14 - 2026-11-02
 
 - Add plan-first journal recovery for unpublished diverged snapshots, with isolated replay, guarded local ref updates, conflict preservation, and rollback receipts. Recovery never publishes.
