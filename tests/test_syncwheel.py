@@ -4835,6 +4835,42 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         feature_a = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-a')
         self.assertEqual(feature_a['commits'], [beta, alpha])
 
+    def test_stack_set_target_preserves_source_and_integration_metadata(self):
+        manifest = self.read_manifest()
+        stack = manifest['stacks'][1]
+        stack['integration_commits'] = list(stack['commits'])
+        manifest_path = self.repo / '.syncwheel/manifest.json'
+        manifest_path.write_text(json.dumps(manifest) + '\n')
+        before = self.git('for-each-ref', '--format=%(refname) %(objectname)')
+        self.run_cli('stack', 'set', stack['id'], '--target-branch', 'release/next')
+        updated = next(s for s in self.read_manifest()['stacks'] if s['id'] == stack['id'])
+        self.assertEqual(updated, {**stack, 'target_branch': 'release/next'})
+        self.assertEqual(self.git('for-each-ref', '--format=%(refname) %(objectname)'), before)
+        ledger = self.run_cli('ledger', 'show', '--json').stdout
+        self.assertIn('previous_target_branch', ledger)
+        self.assertIn('release/next', ledger)
+
+    def test_stack_set_target_and_commits_can_be_updated_together(self):
+        commit = self.git('rev-parse', 'HEAD')
+        self.run_cli('stack', 'set', 'feature-a', '--target-branch', 'release/next', commit)
+        updated = next(s for s in self.read_manifest()['stacks'] if s['id'] == 'feature-a')
+        self.assertEqual(updated['commits'], [commit])
+        self.assertEqual(updated['target_branch'], 'release/next')
+
+    def test_stack_set_target_rejects_invalid_or_conflicting_input_without_writes(self):
+        path = self.repo / '.syncwheel/manifest.json'
+        before = path.read_bytes()
+        refs = self.git('for-each-ref', '--format=%(refname) %(objectname)')
+        for branch in ('', '../bad', 'bad..name', '-bad', 'pr/feature-a',
+                       self.read_manifest()['integration']['branch']):
+            with self.subTest(branch=branch):
+                self.run_cli('stack', 'set', 'feature-a', '--target-branch', branch, expected=2)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual(self.git('for-each-ref', '--format=%(refname) %(objectname)'), refs)
+        self.run_cli('stack', 'set', 'feature-a', '--published',
+                     '--target-branch', 'main', expected=2)
+        self.assertEqual(path.read_bytes(), before)
+
     def test_stack_resolve_integration_keeps_source_projection_intact(self):
         self.git('switch', '-q', '-c', 'integration/test', 'main')
         Path(self.repo / 'gamma.txt').write_text('resolved integration\n')

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.16 - 2026-11-03
+
+- Allow `stack set --target-branch` to update delivery metadata after a dependency lands, preserving source commits, bases, refs and integration mappings. Reject invalid targets and conflicts with `--published`, and record previous and new targets in the normal ledger.
+
 ## 0.46.15 - 2026-11-03
 
 - Observe complete empty GitHub rule connections through matching GraphQL evidence when REST reports the precise private-plan limitation, preserving REST evidence and existing merge gates.

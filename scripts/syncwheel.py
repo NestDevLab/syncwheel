@@ -27092,22 +27092,38 @@ def command_stack_set(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     stack = require_stack(manifest, args.stack)
+    target_branch = getattr(args, 'target_branch', None)
     if args.published:
+        if target_branch is not None:
+            raise SyncwheelError('stack set --published cannot be combined with --target-branch')
         if args.specs:
             raise SyncwheelError('stack set --published takes no commit specs')
         return reset_stack_to_published(repo_root, manifest, manifest_path, stack, args)
-    if not args.specs:
-        raise SyncwheelError('stack set requires commit specs, or --published')
-    commits = []
-    for spec in args.specs:
-        commits.extend(commit_list_for_spec(repo_root, spec))
-    stack['commits'] = list(dict.fromkeys(commits))
+    if not args.specs and target_branch is None:
+        raise SyncwheelError('stack set requires commit specs, --target-branch, or --published')
+    if target_branch is not None:
+        if (target_branch.startswith('-')
+                or not is_valid_coordination_branch_ref(f'refs/heads/{target_branch}')):
+            raise SyncwheelError('stack set --target-branch requires a valid branch name')
+        if target_branch in (stack['branch'], manifest['integration']['branch']):
+            raise SyncwheelError('stack delivery target cannot be its source or integration branch')
+    previous_target = stack['target_branch']
+    if args.specs:
+        commits = []
+        for spec in args.specs:
+            commits.extend(commit_list_for_spec(repo_root, spec))
+        stack['commits'] = list(dict.fromkeys(commits))
+    if target_branch is not None:
+        stack['target_branch'] = target_branch
+    context = {'stack': args.stack, 'branch': stack['branch'], 'actor': governed_worktree_owner()}
+    if target_branch is not None:
+        context.update(previous_target_branch=previous_target, target_branch=target_branch)
     save_manifest_with_ledger(
         repo_root,
         manifest_path,
         manifest,
         'stack_set',
-        {'stack': args.stack, 'branch': stack['branch'], 'actor': governed_worktree_owner()},
+        context,
     )
     print(f"{args.stack}: set {len(stack['commits'])} commits")
     return 0
@@ -34999,6 +35015,7 @@ def build_parser():
     stack_set_p = stack_sub.add_parser('set', parents=[common])
     stack_set_p.add_argument('stack')
     stack_set_p.add_argument('specs', nargs='*')
+    stack_set_p.add_argument('--target-branch', help='update delivery target metadata without rebuilding refs')
     stack_set_p.add_argument(
         '--published',
         action='store_true',
