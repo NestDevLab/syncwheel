@@ -329,6 +329,114 @@ class ControlReplayTest(unittest.TestCase):
                   'state_branch': 'syncwheel/state/default', 'claims': 'advisory'}
         return observed, origin, config
 
+    def interrupt_recovery(self, stage):
+        self.prepare(interrupted=True)
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        def interrupt(observed):
+            if observed == stage:
+                raise RuntimeError('simulated process interruption')
+        with self.assertRaisesRegex(RuntimeError, 'process interruption'):
+            with self.module.manifest_write_transaction(self.f.repo, self.path):
+                with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+                    self.module.command_manifest_recover_control(self.recovery_args(plan))
+        pending = self.module.control_recovery_pending(self.f.repo, self.path)
+        self.assertIsNotNone(pending)
+        self.assertEqual(pending['recovery_policy'], 'explicit-plan-only')
+        self.assertEqual(pending['expected_control_commit'], plan['expectedControlCommit'])
+        return plan
+
+    def assert_cli_quarantine_preserves_foreign_work(self, stage):
+        self.interrupt_recovery(stage)
+        ignore = self.f.repo / '.gitignore'
+        ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        result = self.f.run_cli('stack', 'create', 'independent', '--branch',
+                               'pr/independent', '--base', 'main', expected=2)
+        # At ref_updated the preflight may refuse the temporary staged manifest
+        # even earlier. Either path must preserve the complete observed state.
+        self.assertTrue('quarantined' in result.stderr or 'unrelated staged paths' in result.stderr)
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
+        self.assertNotIn('foreign-generated/', self.f.git('show', 'HEAD:.gitignore'))
+        self.assertFalse(any(s['id'] == 'independent' for s in self.f.read_manifest()['stacks']))
+
+    def test_restart_after_ref_cas_never_captures_foreign_ignore_via_cli(self):
+        self.assert_cli_quarantine_preserves_foreign_work('ref_updated')
+
+    def test_restart_after_alignment_never_captures_foreign_ignore_via_cli(self):
+        self.assert_cli_quarantine_preserves_foreign_work('checkout_aligned')
+
+    def test_restart_consumer_refuses_without_writing_a_receipt(self):
+        self.interrupt_recovery('checkout_aligned')
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                self.module.recover_incomplete_control_manifest_persistence(
+                    self.f.repo, self.path, self.expected, allow_new_operation=True)
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
+
+    def test_interrupted_recovery_requires_and_accepts_a_fresh_explicit_plan(self):
+        original = self.interrupt_recovery('checkout_aligned')
+        refused = self.f.run_cli('stack', 'create', 'independent', '--branch',
+                                'pr/independent', '--base', 'main', expected=2)
+        self.assertIn('quarantined', refused.stderr)
+        self.apply(original, expected=2)
+        fresh = self.plan()
+        self.assertIsNotNone(fresh['pendingIntent'])
+        self.assertTrue(fresh['alreadyRestored'])
+        head = self.f.git('rev-parse', 'HEAD')
+        self.apply(fresh)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+        self.assertIsNone(self.module.control_recovery_pending(self.f.repo, self.path))
+        self.assertEqual(self.f.tracked_status(), '')
+        self.assertFalse(any(s['id'] == 'independent' for s in self.f.read_manifest()['stacks']))
+
+    def test_fresh_explicit_plan_refuses_post_crash_foreign_ignore(self):
+        self.interrupt_recovery('checkout_aligned')
+        ignore = self.f.repo / '.gitignore'
+        ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
+        before = self.module.control_recovery_observation(self.f.repo)
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('unrelated ignore changes', result.stderr)
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+
+    def test_restart_never_adopts_a_foreign_product_commit(self):
+        self.interrupt_recovery('checkout_aligned')
+        (self.f.repo / 'delta.txt').write_text('foreign product\n')
+        self.f.git('add', 'delta.txt')
+        self.f.git('commit', '-qm', 'test: concurrent product after crash')
+        before = self.module.control_recovery_observation(self.f.repo)
+        result = self.f.run_cli('stack', 'create', 'independent', '--branch',
+                               'pr/independent', '--base', 'main', expected=2)
+        self.assertIn('quarantined', result.stderr)
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+        self.assertIn('does not reproduce the current product tree', result.stderr)
+
+    def test_guarded_object_is_incompatible_with_older_automatic_consumers(self):
+        self.prepare(interrupted=True)
+        parent = self.f.git('rev-parse', 'HEAD')
+        guarded = self.module.materialize_control_manifest_commit(
+            self.f.repo, self.expected, parent,
+            self.module.CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION)
+        ordinary = self.module.materialize_control_manifest_commit(self.f.repo, self.expected, parent)
+        self.assertNotEqual(guarded, ordinary)
+        self.assertEqual(self.f.git('rev-parse', guarded + '^{tree}'),
+                         self.f.git('rev-parse', ordinary + '^{tree}'))
+
+    def test_direct_restore_cannot_bypass_the_pending_explicit_plan_gate(self):
+        plan = self.interrupt_recovery('checkout_aligned')
+        before = self.module.control_recovery_observation(self.f.repo)
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                self.module.restore_control_manifest_after_integration_rebuild(
+                    self.f.repo, self.path, self.expected, plan['controlReplayTip'], 'recovery',
+                    identity_version=plan['controlIdentity'])
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+
     def read_state_json(self, repo, commit, *_args):
         # Real Git object reads isolate provenance from the unchanged schema parser.
         return json.loads(self.f.git('show', f'{commit}:.syncwheel/coordination-state.json'))
