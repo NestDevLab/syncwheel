@@ -34445,7 +34445,9 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
     def _prepared_supersession_audit(self, request, witness, *, complete):
         root = self._repo_root(request)
         _, manifest_path = self._manifest(root)
-        if complete:
+        # An apply probe (None) must repair interrupted appends before scanning.
+        # A preview (False) never repairs or appends anything.
+        if complete is not False:
             recover_ledger_tail(root, manifest_path)
         matches = [event for event in load_ledger_events(root, manifest_path)
             if event.get('type') == 'revision_provider_journal_supersession'

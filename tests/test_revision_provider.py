@@ -7322,8 +7322,10 @@ class JournalRevisionProviderTest(unittest.TestCase):
         def interrupt(phase):
             if phase == checkpoint:
                 raise RuntimeError('synthetic supersession interruption')
+        target = SYNCWHEEL if checkpoint.startswith('event_payload') else self.backend
+        attribute = 'ledger_io_checkpoint' if target is SYNCWHEEL else 'checkpoint'
         with self.backend.operation_lock(parsed):
-            with mock.patch.object(self.backend, 'checkpoint', side_effect=interrupt):
+            with mock.patch.object(target, attribute, side_effect=interrupt):
                 with self.assertRaisesRegex(RuntimeError, 'supersession interruption'):
                     self.backend.prepare_supersession(parsed, 'successor', 'a' * 64,
                         'Reviewed recovery', apply=True, plan_digest=plan['planDigest'])
@@ -7356,6 +7358,34 @@ class JournalRevisionProviderTest(unittest.TestCase):
 
     def test_prepared_supersession_recovers_successor_checkpoint(self):
         self.assert_supersession_checkpoint_recovery('supersession_successor_prepared')
+
+    def test_prepared_supersession_recovers_partial_audit_json(self):
+        self.assert_supersession_checkpoint_recovery('event_payload_half_written')
+
+    def test_prepared_supersession_recovers_audit_missing_newline(self):
+        self.assert_supersession_checkpoint_recovery('event_payload_written')
+
+    def test_prepared_supersession_rejects_terminated_audit_corruption(self):
+        request, path, _, _ = self.prepare_stale_candidate()
+        parsed = protocol.parse_request(request)
+        plan = self.backend.prepare_supersession(parsed, 'successor', 'a' * 64, 'Reviewed recovery')
+        def interrupt(phase):
+            if phase == 'supersession_intent_recorded':
+                raise RuntimeError('intent interrupted')
+        with mock.patch.object(self.backend, 'checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, 'intent interrupted'):
+                self.backend.prepare_supersession(parsed, 'successor', 'a' * 64,
+                    'Reviewed recovery', apply=True, plan_digest=plan['planDigest'])
+        segment = SYNCWHEEL.next_ledger_segment_path(self.root, self.root / '.syncwheel/manifest.json')
+        segment.parent.mkdir(parents=True, exist_ok=True)
+        with segment.open('ab') as output:
+            output.write(b'{broken}\n')
+        frozen = segment.read_bytes()
+        with self.assertRaises(SYNCWHEEL.SyncwheelError):
+            self.backend.prepare_supersession(parsed, 'successor', 'a' * 64,
+                'Reviewed recovery', apply=True, plan_digest=plan['planDigest'])
+        self.assertEqual(segment.read_bytes(), frozen)
+        self.assertFalse((path.parent / 'successor.json').exists())
 
     def test_prepared_supersession_apply_rejects_stale_plan_without_writing(self):
         request, journal_path, original, _ = self.prepare_stale_candidate()
