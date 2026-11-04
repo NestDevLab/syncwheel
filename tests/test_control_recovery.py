@@ -437,6 +437,69 @@ class ControlReplayTest(unittest.TestCase):
                     identity_version=plan['controlIdentity'])
         self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
 
+    def test_default_identity_cannot_hide_an_explicit_intent_before_cas(self):
+        self.interrupt_recovery('intent_saved')
+        ignore = self.f.repo / '.gitignore'
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        def foreign_edit(stage):
+            if stage == 'intent_saved':
+                ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=foreign_edit):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                    # Deliberately use the public API defaults, not identity3.
+                    self.module.restore_control_manifest_after_integration_rebuild(
+                        self.f.repo, self.path, self.expected, self.f.git('rev-parse', 'HEAD'), 'recovery')
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
+
+    def test_new_parent_noop_cannot_hide_an_explicit_pending_intent(self):
+        self.interrupt_recovery('checkout_aligned')
+        head = self.f.git('rev-parse', 'HEAD')
+        before = self.module.control_recovery_observation(self.f.repo)
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                self.module.restore_control_manifest_after_integration_rebuild(
+                    self.f.repo, self.path, self.expected, head, 'recovery')
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+
+    def test_preview_never_repairs_an_incomplete_ledger_tail(self):
+        self.interrupt_recovery('checkout_aligned')
+        directory = self.module.ledger_events_dir(self.f.repo, self.path)
+        segment = sorted(directory.glob('*.jsonl'))[-1]
+        baseline = segment.read_bytes()
+        def metadata():
+            return {p.relative_to(directory.parent).as_posix(): p.read_bytes()
+                    for p in directory.parent.rglob('*') if p.is_file()}
+        for tail in (b'{"broken":', b'{"complete":"missing delimiter"}'):
+            with self.subTest(tail=tail):
+                segment.write_bytes(baseline + tail)
+                before = metadata()
+                observation = self.module.control_recovery_observation(self.f.repo)
+                result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+                self.assertIn('incomplete ledger tail', result.stderr)
+                # No tail repair, delimiter append, new lock or checkpoint.
+                self.assertEqual(metadata(), before)
+                self.assertEqual(self.module.control_recovery_observation(self.f.repo), observation)
+
+    def test_different_identity_manifest_or_mode_cannot_hide_explicit_intent(self):
+        plan = self.interrupt_recovery('intent_saved')
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        altered = json.loads(json.dumps(self.expected))
+        altered['defaults']['base_branch'] = 'independent-candidate'
+        local = {**self.expected, 'syncwheel_tracking': 'local-only'}
+        for manifest, identity in ((self.expected, 1), (altered, 3), (local, 2)):
+            with self.subTest(identity=identity, tracking=manifest['syncwheel_tracking']):
+                with self.module.manifest_write_transaction(self.f.repo, self.path):
+                    with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                        self.module.restore_control_manifest_after_integration_rebuild(
+                            self.f.repo, self.path, manifest, plan['controlReplayTip'],
+                            'recovery', identity_version=identity)
+                self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+                self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
+
     def read_state_json(self, repo, commit, *_args):
         # Real Git object reads isolate provenance from the unchanged schema parser.
         return json.loads(self.f.git('show', f'{commit}:.syncwheel/coordination-state.json'))

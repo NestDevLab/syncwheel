@@ -218,6 +218,8 @@ it before alignment, receipts or metadata writes, including when the control CAS
 already succeeded. They do not execute the requested new operation. The guarded
 control object uses a distinct deterministic identity so older consumers reject
 it rather than applying their automatic recovery rules.
+The persistence entrypoint checks pending explicit intents before selecting any
+object identity, parent, no-op or local-only path; caller defaults cannot hide one.
 
 Obtain a fresh `manifest recover-control --from-backup BACKUP` plan to continue.
 It verifies the original pending object/parent and the same backup proof, and
@@ -228,6 +230,8 @@ does not waive those refusals. An interruption before checkout alignment may
 leave a staged manifest, which this bounded command deliberately refuses rather
 than repairing automatically. Inspect that retained state under the existing
 supervised recovery procedure before replanning. No implicit restart is certified.
+Preview reads the ledger strictly without repairing or truncating it. An
+incomplete tail is retained and reported for explicit ledger recovery first.
 
 ### Empty integration-only desk steps
 
