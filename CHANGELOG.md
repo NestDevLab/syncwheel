@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.46.19 - 2026-11-04
+
+- Preserve tracked control manifests through normalized ephemeral integration replay. Add plan-first native recovery of verified interrupted local control persistence, retaining product trees and concurrent-edit guards.
+- Bind remote coordination reads to the observed immutable commit instead of clone-global `FETCH_HEAD`, preserving state identity during concurrent fetches.
+
 ## 0.46.18 - 2026-11-03
 
 - Scope `stack resolve-integration` preflight to its selected stack, preserving unrelated retained captured worktrees while continuing to block recovery-required lanes belonging to the selected stack.
