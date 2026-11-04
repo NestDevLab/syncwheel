@@ -5818,9 +5818,10 @@ def require_ignored_ledger_paths(repo_root, paths):
 
 def append_ledger_event(
     repo_root, event_type, payload, manifest_path=None, idempotency_key=None,
+    *, preserve_exclusions=False,
 ):
     transaction = active_manifest_write_transaction_for_repo(repo_root)
-    preserve_ignore = transaction is not None and transaction.get('preserveGitignore') is True
+    preserve_ignore = preserve_exclusions or (transaction is not None and transaction.get('preserveGitignore') is True)
     if preserve_ignore:
         require_ignored_ledger_paths(repo_root, [
             ledger_root(repo_root, manifest_path) / 'ledger.lock',
@@ -34277,7 +34278,8 @@ class SyncwheelRevisionBackend:
 class JournalRevisionBackend(SyncwheelRevisionBackend):
     """Local exact-path revisioning; publication is a separate journal operation."""
 
-    def plan_prepared_supersession(self, request, successor_id, receipt_digest, reason):
+    def plan_prepared_supersession(self, request, successor_id, receipt_digest, reason,
+                                  *, _original_journal=None):
         """Observe a fresh, explicit intent without weakening the original lease."""
         module = self.provider
         if (not module.OPERATION_ID.fullmatch(successor_id)
@@ -34285,7 +34287,8 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
                 or not module.HEX_64.fullmatch(receipt_digest)
                 or not reason.strip()):
             self._fail('supersession requires a distinct successor ID, receipt digest and reason')
-        journal = module._assert_matching_journal(request, self.load_journal(request))
+        journal = module._assert_matching_journal(request,
+            self.load_journal(request) if _original_journal is None else _original_journal)
         if (journal.get('repositoryMode') != 'journal'
                 or journal.get('phase') != 'prepared'
                 or not journal.get('candidateProductCommitSha')
@@ -34300,6 +34303,9 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
                 or manifest_digest(manifest) != journal['observedManifestDigest']
                 or get_current_branch(root) != journal['integrationBranch']):
             self._fail('supersession refuses changed manifest or journal branch')
+        _, manifest_path = self._manifest(root)
+        require_ignored_ledger_paths(root, [ledger_root(root, manifest_path) / 'ledger.lock',
+            ledger_checkpoint_path(root, manifest_path), ledger_events_dir(root, manifest_path) / '000001.jsonl'])
         parent = journal['operationParentHead']
         candidate = journal['candidateProductCommitSha']
         objects = journal['productPathObjects']
@@ -34351,6 +34357,93 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
                 '--format=%(refname) %(objectname) %(symref)').stdout.encode()).hexdigest()}
         return {**plan, 'planDigest': hashlib.sha256(json.dumps(plan,
             sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+
+    def prepare_supersession(self, request, successor_id, receipt_digest, reason,
+                             *, apply=False, plan_digest=None):
+        """Record one immutable decision, then prepare a separate ordinary operation.
+
+        The consumer must hold its own mutation lock and validate its frozen runtime
+        receipt. This provider method never commits, reruns a handler or deletes the
+        original journal. The repository provider lock serializes both journal writes.
+        """
+        journal = self.provider._assert_matching_journal(request, self.load_journal(request))
+        witness = journal.get('supersession')
+        if witness:
+            plan = witness['plan']
+            binding = {key: value for key, value in plan.items() if key != 'planDigest'}
+            link = {'operationId': request.operation_id, 'planDigest': plan['planDigest'],
+                    'receiptDigest': receipt_digest, 'candidate': journal['candidateProductCommitSha']}
+            if (canonical_json_digest(binding) != plan['planDigest']
+                    or plan['originalOperationId'] != request.operation_id
+                    or plan['originalIntentDigest'] != request.plan_digest
+                    or witness['link'] != link):
+                self._fail('supersession witness does not match original intent')
+            if (plan['successorRequest']['operationId'] != successor_id
+                    or plan['originalReceiptDigest'] != receipt_digest
+                    or plan['successorRequest']['reason'] != reason
+                    or (apply and plan_digest != plan['planDigest'])):
+                self._fail('supersession is already bound to a different decision')
+            original = {key: value for key, value in journal.items() if key != 'supersession'}
+            if hashlib.sha256(json.dumps(original, sort_keys=True,
+                    separators=(',', ':')).encode()).hexdigest() != plan['originalJournalDigest']:
+                self._fail('supersession original journal changed after decision')
+            successor = self.provider.parse_request({**plan['successorRequest'], 'action': 'preflight'})
+            existing = self.load_journal(successor)
+            if existing is not None:
+                self.provider._assert_matching_journal(successor, existing)
+                if existing.get('supersedes') != witness['link']:
+                    self._fail('supersession successor link does not match its decision')
+                self._prepared_supersession_audit(request, witness, complete=apply)
+                return {**plan, 'status': 'prepared', 'resumed': True}
+            # Crash after intent persistence: do not adopt changed leases on restart.
+            fresh = self.plan_prepared_supersession(request, successor_id,
+                receipt_digest, reason, _original_journal=original)
+            if fresh != plan:
+                changed = sorted(key for key in fresh if fresh.get(key) != plan.get(key))
+                self._fail('supersession leases changed after intent persistence: ' + ', '.join(changed))
+        else:
+            plan = self.plan_prepared_supersession(request, successor_id, receipt_digest, reason)
+            if not apply:
+                return plan
+            if plan_digest != plan['planDigest']:
+                self._fail('supersession requires the exact reviewed plan digest')
+            successor = self.provider.parse_request({**plan['successorRequest'], 'action': 'preflight'})
+            link = {'operationId': request.operation_id, 'planDigest': plan['planDigest'],
+                    'receiptDigest': receipt_digest, 'candidate': plan['originalCandidate']}
+            witness = {'plan': plan, 'link': link}
+        if not apply:
+            return plan
+        self._prepared_supersession_audit(request, witness, complete=None)
+        observation = self.preflight(successor)
+        if not journal.get('supersession'):
+            journal['supersession'] = witness
+            self.save_journal(request, journal)
+            self.checkpoint('supersession_intent_recorded')
+        self._prepared_supersession_audit(request, witness, complete=True)
+        prepared = self.provider._new_journal(successor, observation)
+        prepared['supersedes'] = witness['link']
+        self.save_journal(successor, prepared)
+        self.checkpoint('supersession_successor_prepared')
+        return {**plan, 'status': 'prepared', 'resumed': False}
+
+    def _prepared_supersession_audit(self, request, witness, *, complete):
+        root = self._repo_root(request)
+        _, manifest_path = self._manifest(root)
+        if complete:
+            recover_ledger_tail(root, manifest_path)
+        matches = [event for event in load_ledger_events(root, manifest_path)
+            if event.get('type') == 'revision_provider_journal_supersession'
+            and (event.get('payload') or {}).get('plan', {}).get('originalOperationId')
+                == request.operation_id]
+        if matches and (len(matches) != 1 or matches[0].get('payload') != witness):
+            self._fail('supersession audit collision')
+        if not matches:
+            if complete is False:
+                self._fail('supersession audit incomplete; resume explicit preparation')
+            if complete:
+                append_ledger_event(root, 'revision_provider_journal_supersession', witness, manifest_path,
+                                    preserve_exclusions=True)
+                self.checkpoint('supersession_audited')
 
     def _head_policy(self, repo_root, request, head):
         config_path = '.agentwheel/config.json'
@@ -34596,6 +34689,31 @@ def command_revision_provider_resolve_prepared(args):
     return 0
 
 
+def command_revision_provider_supersede_prepared(args):
+    import syncwheel_revision_provider as provider_module
+    backend = JournalRevisionBackend(provider_module)
+    try:
+        root = resolve_repo_root(args.repo)
+        if not provider_module.OPERATION_ID.fullmatch(args.operation_id):
+            raise SyncwheelError('invalid revision-provider operation ID')
+        path = git_common_dir(root) / 'syncwheel' / 'revision-provider' / f'{args.operation_id}.json'
+        journal = json.loads(path.read_text())
+        intent = {key: value for key, value in journal['request'].items()
+                  if key != 'expectedManifestDigest' or value is not None}
+        request = provider_module.parse_request({**intent, 'action': 'recover'})
+        if request.operation_id != args.operation_id or request.repository_root != str(root):
+            raise SyncwheelError('prepared operation does not belong to this repository')
+        with backend.operation_lock(request):
+            result = backend.prepare_supersession(request, args.successor_id,
+                args.receipt_digest, args.reason, apply=args.apply, plan_digest=args.plan_digest)
+    except (OSError, ValueError, KeyError, TypeError, SyncwheelError,
+            provider_module.RevisionProviderError) as exc:
+        print(json.dumps({'ok': False, 'error': str(exc)}))
+        return 2
+    print(json.dumps({'ok': True, **result}, sort_keys=True))
+    return 0
+
+
 def command_revision_provider(args):
     try:
         import syncwheel_revision_provider as provider_module
@@ -34747,6 +34865,16 @@ def build_parser():
     resolve_prepared_p.add_argument('--plan-digest')
     resolve_prepared_p.add_argument('--apply', action='store_true')
     resolve_prepared_p.set_defaults(func=command_revision_provider_resolve_prepared)
+    supersede_prepared_p = revision_provider_sub.add_parser('supersede-prepared',
+        help='plan or prepare an audit-linked successor for an unpublished journal candidate')
+    supersede_prepared_p.add_argument('-r', '--repo')
+    supersede_prepared_p.add_argument('operation_id')
+    supersede_prepared_p.add_argument('--successor-id', required=True)
+    supersede_prepared_p.add_argument('--receipt-digest', required=True)
+    supersede_prepared_p.add_argument('--reason', required=True)
+    supersede_prepared_p.add_argument('--plan-digest')
+    supersede_prepared_p.add_argument('--apply', action='store_true')
+    supersede_prepared_p.set_defaults(func=command_revision_provider_supersede_prepared)
 
     repo_p = sub.add_parser('repo', aliases=['r'], help='manage repo aliases')
     repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
@@ -36089,6 +36217,7 @@ def entrypoint_behavior_table():
     # inside the backend, after request and lease validation have completed.
     register((command_revision_provider,), mutates='always', manifest_mutates='internal')
     register((command_revision_provider_resolve_prepared,), mutates='apply', manifest_mutates='internal')
+    register((command_revision_provider_supersede_prepared,), mutates='apply', manifest_mutates='internal')
     register((
         command_repo_add,
         command_repo_set_manifest,
