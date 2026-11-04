@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.20 - 2026-11-04
+
+- Keep targeted stack publication limited to its selected branch, claims and coordination state. Control-manifest persistence no longer implicitly publishes integration product changes; bootstrap requires an explicit integration publication. Preserve exact landed-operation recovery and narrow unlanded legacy intents before retrying.
+
 ## 0.46.19 - 2026-11-04
 
 - Preserve tracked control manifests through normalized ephemeral integration replay. Add plan-first native recovery of verified interrupted local control persistence, retaining product trees and concurrent-edit guards.

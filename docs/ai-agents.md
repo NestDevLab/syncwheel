@@ -102,6 +102,14 @@ proof. Treat `coordination.claims: advisory` as a migration state, inspect
 the dry-run reports zero unclaimed owned refs. Backfill with `--apply --reason`
 never replaces a claim owned by another coordination domain.
 
+Targeted `stack push` changes only its selected stack branch and the corresponding
+claim/state refs. Control-manifest persistence is local housekeeping, even when the
+integration branch is also the canonical product branch. Publish or bootstrap
+integration explicitly with `int push`; a stack push never grants that authority.
+Its dry run lists the same source refs that execution may publish. A legacy pending
+intent with extra refs is completed only from exact landing evidence; if it never
+landed, it is abandoned and replaced with a stack-only intent.
+
 Every coordinated remote mutation must have a fsynced caller intent and stable
 operation token. On retry, exact token-bearing claim/state evidence is adopted;
 do not repeat the push. Create propagates its `stack_create_intent` token into

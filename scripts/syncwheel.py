@@ -99,6 +99,7 @@ COORDINATION_CLAIM_FILE = 'claim.json'
 COORDINATION_CLAIM_PREFIX = 'syncwheel/claim/'
 COORDINATION_CLAIM_MODES = {'advisory', 'required'}
 EXPECTED_COORDINATION_STATE_UNSET = object()
+VERIFIED_STACK_PUBLICATION_RECOVERY = object()
 COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
 COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
 COORDINATION_LEASE_SECONDS = 5 * 60
@@ -16072,6 +16073,27 @@ def pending_coordination_publication_after_resolution(
     return pending_coordination_publication(repo_root, manifest_path, fingerprint)
 
 
+def stack_publication_source_refs(manifest, scope):
+    """A stack publisher owns its branch, never the integration projection."""
+    if not str(scope).startswith('stack:'):
+        return None
+    stack = require_stack(manifest, scope.partition(':')[2])
+    if stack['branch'] == manifest['integration']['branch']:
+        raise SyncwheelError('stack publication cannot target the integration branch; use syncwheel int push')
+    return {f"refs/heads/{stack['branch']}"}
+
+
+def require_stack_publication_refs(manifest, scope, changed_refs):
+    allowed = stack_publication_source_refs(manifest, scope)
+    unexpected = set(changed_refs) - allowed if allowed is not None else set()
+    if unexpected:
+        raise SyncwheelError(
+            'stack publication cannot publish unrelated source refs: '
+            + ', '.join(sorted(unexpected))
+            + '; publish integration explicitly with syncwheel int push'
+        )
+
+
 def begin_coordination_publication(
     repo_root,
     manifest,
@@ -16105,7 +16127,40 @@ def begin_coordination_publication(
             repo_root, manifest, manifest_path, fingerprint
         )
         if existing:
-            return {**existing, 'retry': True}
+            allowed = stack_publication_source_refs(manifest, scope)
+            extra = set(existing['changed_refs']) - allowed if allowed is not None else set()
+            if not extra:
+                return {**existing, 'retry': True}
+            observed = read_remote_coordination_state(
+                repo_root, config, fetch=True, local_manifest_version=manifest['version']
+            )
+            if coordinated_operation_landed(
+                repo_root, config, observed, existing, claims_fallback=True
+            ):
+                # This in-memory result is bound to the exact pending intent.
+                # It never enters a fresh publication's state-only proof path.
+                return {
+                    **existing, 'retry': True,
+                    VERIFIED_STACK_PUBLICATION_RECOVERY: {
+                        'status': 'already_published',
+                        'state_tip': observed['tip'],
+                        'recovered': True,
+                    },
+                }
+            append_ledger_event(
+                repo_root, 'coordination_publish_abandoned',
+                {
+                    'operation_token': existing['operation_token'],
+                    'fingerprint': existing['fingerprint'],
+                    'scope': existing['scope'],
+                    'reason': 'not_landed',
+                    'status': 'not_landed',
+                    'coordination_state': observed['tip'],
+                    'owner': existing.get('owner'),
+                },
+                manifest_path,
+            )
+        require_stack_publication_refs(manifest, scope, changed_refs)
         observed = read_remote_coordination_state(
             repo_root, config, fetch=True, local_manifest_version=manifest['version']
         )
@@ -16247,9 +16302,10 @@ def coordinated_publish_cycle(
                     )
                 manifest = recovered_source
     changed_refs = dict(changed_refs)
+    stack_scope = stack_publication_source_refs(manifest, scope) is not None
     publication_manifest = publication_manifest or manifest
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
-    if recovery_state.get('recovered'):
+    if recovery_state.get('recovered') and not stack_scope:
         changed_refs[integration_ref] = ref_tip(
             repo_root, manifest['integration']['branch']
         )
@@ -16267,6 +16323,7 @@ def coordinated_publish_cycle(
     ).get(integration_ref) is not None
     if (
         not dry_run
+        and not stack_scope
         and integration_tip
         and not integration_ref_published
         and not integration_control_matches_selected(repo_root, manifest, integration_tip)
@@ -16358,6 +16415,7 @@ def coordinated_publish_cycle(
             'state_tip': expected['tip'],
             'recovered': True,
         }
+    require_stack_publication_refs(manifest, scope, changed_refs)
     if (
         expected_coordination_state_tip is not EXPECTED_COORDINATION_STATE_UNSET
         and expected['tip'] != expected_coordination_state_tip
@@ -16376,6 +16434,11 @@ def coordinated_publish_cycle(
     observation_refs = list(dict.fromkeys([*managed, *claim_refs.values()]))
     full_observation = remote_ref_tips(repo_root, config['remote'], observation_refs)
     if full_observation.get(integration_ref) is None and integration_ref not in changed_refs:
+        if stack_scope:
+            raise SyncwheelError(
+                'stack publication requires an existing published integration ref; '
+                'bootstrap it explicitly with syncwheel int push'
+            )
         if not integration_tip:
             raise SyncwheelError(
                 'cannot bootstrap coordination state without a local integration tip'
@@ -16397,6 +16460,19 @@ def coordinated_publish_cycle(
         observation_refs = list(dict.fromkeys([*managed, *claim_refs.values()]))
         full_observation = remote_ref_tips(repo_root, config['remote'], observation_refs)
     observed_refs = {ref: full_observation.get(ref) for ref in managed}
+    if stack_scope and expected.get('state') is None:
+        try:
+            coordination_state_control_manifest(
+                repo_root,
+                {'manifest': coordination_manifest_snapshot(manifest, repo_root),
+                 'managed_refs': observed_refs},
+                config['remote'],
+            )
+        except SyncwheelError as exc:
+            raise SyncwheelError(
+                'stack publication requires published integration control metadata; '
+                'bootstrap it explicitly with syncwheel int push'
+            ) from exc
     observed_claims = {
         source_ref: full_observation.get(claim_ref)
         for source_ref, claim_ref in claim_refs.items()
@@ -16508,6 +16584,7 @@ def coordinated_publish_cycle(
         f"--force-with-lease={ref}:{expected_tips.get(ref) or ''}"
         for ref in sorted(lease_refs)
     ]
+    require_stack_publication_refs(manifest, scope, changed_refs)
     refspecs = [f'{changed_refs[ref]}:{ref}' for ref in sorted(changed_refs)]
     refspecs.extend(
         f'{claim_commits[source_ref]}:{claim_refs[source_ref]}'
@@ -27704,24 +27781,12 @@ def command_stack_push(args):
                 reason=f"publish {stack['id']} control manifest",
                 command='syncwheel stack push',
             )
-        # Keep the incidental control-manifest ref out of the fingerprint so a
-        # retry still matches the pending intent even when housekeeping only
-        # needed it on the first attempt.
-        identity_changed_refs = {
+        # Control persistence is local housekeeping, not publication authority
+        # over the integration projection or any other stack.
+        changed_refs = {
             f"refs/heads/{stack['branch']}": ref_tip(repo_root, stack['branch'])
         }
-        changed_refs = dict(identity_changed_refs)
         try:
-            verified_control_tip = (
-                unpublished_local_integration_control_tip(
-                    repo_root, manifest, manifest_path
-                )
-                if not args.dry_run else None
-            )
-            if verified_control_tip:
-                changed_refs[
-                    f"refs/heads/{manifest['integration']['branch']}"
-                ] = verified_control_tip
             publication_operation = (
                 None if args.dry_run else begin_coordination_publication(
                     repo_root,
@@ -27730,30 +27795,32 @@ def command_stack_push(args):
                     changed_refs,
                     f"stack:{stack['id']}",
                     'partial',
-                    identity_changed_refs=identity_changed_refs,
+                    identity_changed_refs=changed_refs,
                 )
             )
             if publication_operation:
                 changed_refs = publication_operation['changed_refs']
             verify_retained_captured_worktrees(repo_root, manifest, args)
-            result = coordinated_publish(
-                repo_root,
-                manifest,
-                manifest_path,
-                changed_refs,
-                f"stack:{stack['id']}",
-                'partial',
-                dry_run=args.dry_run,
-                remedy_stack=stack['id'],
-                expected_coordination_state_tip=(
-                    publication_operation['expected_coordination_state_tip']
-                    if publication_operation else EXPECTED_COORDINATION_STATE_UNSET
-                ),
-                operation_token=(
-                    publication_operation['operation_token']
-                    if publication_operation else None
-                ),
-            )
+            result = (publication_operation or {}).get(VERIFIED_STACK_PUBLICATION_RECOVERY)
+            if result is None:
+                result = coordinated_publish(
+                    repo_root,
+                    manifest,
+                    manifest_path,
+                    changed_refs,
+                    f"stack:{stack['id']}",
+                    'partial',
+                    dry_run=args.dry_run,
+                    remedy_stack=stack['id'],
+                    expected_coordination_state_tip=(
+                        publication_operation['expected_coordination_state_tip']
+                        if publication_operation else EXPECTED_COORDINATION_STATE_UNSET
+                    ),
+                    operation_token=(
+                        publication_operation['operation_token']
+                        if publication_operation else None
+                    ),
+                )
         except SyncwheelError as exc:
             failure = coordinated_publish_command_failure(
                 repo_root, config, exc, f"stack push {stack['id']}"
