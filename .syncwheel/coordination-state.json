@@ -1,10 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "6c00936b1a3da12eabc0a77d3bfd871150aaf5b7",
-    "refs/heads/pr/ephemeral-control-replay": "2b9df6178894021bf60bfa588661698936495394"
+    "refs/heads/main-integration": "f33b1818e3cb2189f06bdc782fd3ccfe01af1540",
+    "refs/heads/pr/ephemeral-control-replay": "61cb60f74e63aba1d3286ae761a3c3d27f33115c"
   },
   "claims": {
-    "refs/heads/main-integration": "2a2b2fbfb4d77da736ecd38181610d970a2d6d69",
+    "refs/heads/main-integration": "b7c8cd2651f314553fd91dd4d448b06f63a57cdd",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -14,7 +14,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
-    "refs/heads/pr/ephemeral-control-replay": "9f0389fdcc49b99ee14e4d91c27b4d4298912243",
+    "refs/heads/pr/ephemeral-control-replay": "24436e50f1f115110b185051823f270223436be2",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
@@ -102,11 +102,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T00:17:32+00:00",
+  "created_at": "2026-11-04T06:45:57+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "6c00936b1a3da12eabc0a77d3bfd871150aaf5b7",
+    "refs/heads/main-integration": "f33b1818e3cb2189f06bdc782fd3ccfe01af1540",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -122,7 +122,7 @@
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
-    "refs/heads/pr/ephemeral-control-replay": "2b9df6178894021bf60bfa588661698936495394",
+    "refs/heads/pr/ephemeral-control-replay": "61cb60f74e63aba1d3286ae761a3c3d27f33115c",
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fixture-cli-tests": "45095862a6316f4733bbbc5b4fcb0a01c2406fa3",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
@@ -278,7 +278,9 @@
           "50252f3fa006a4a250b42c6d581fce21f435e93c",
           "ca7a18582b8aa689f3c7fed2f0850d23e4a2c62e",
           "ae48fa40b0b79c38505ff7de5c1a8b8eacd82b3e",
-          "2b9df6178894021bf60bfa588661698936495394"
+          "2b9df6178894021bf60bfa588661698936495394",
+          "5a6dbc82ce938f3cb80d4d71fdb81fbb06bc39c8",
+          "61cb60f74e63aba1d3286ae761a3c3d27f33115c"
         ],
         "id": "ephemeral-control-replay",
         "integration_branch": "main-integration",
@@ -287,11 +289,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "e345bf92542fd817781be2568c12c1ebf0ad26954faf9db88e0a8a4435d81436",
-  "operation_token": "25b13718-74e5-4b26-9e6d-f009efcfd95b",
-  "parent_state": "9afd6c442582222e2e0688b9edc3016ce973e464",
+  "manifest_digest": "baec76e023fd6c87c7391c7a2b923721d9588da5c99be3b843e0773986bb0e5c",
+  "operation_token": "95bb8d3f-886d-4030-9e54-dff2c7073d19",
+  "parent_state": "53db72524d1917177fa19e9c4a5879a650d5655e",
   "projection_status": "partial",
-  "publication_id": "6111d903-b373-404c-bcf8-27a8dffcf3f8",
+  "publication_id": "c82726f1-a017-4d7e-bd06-af2c00d21f6c",
   "publication_scope": "stack:ephemeral-control-replay",
   "schema_version": 2,
   "syncwheel_version": "0.46.19",
