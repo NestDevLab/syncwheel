@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -31,49 +31,16 @@
   "integration": {
     "base": "origin/main",
     "branch": "main-integration",
-    "stacks": [
-      "ephemeral-control-replay"
-    ],
+    "stacks": [],
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
-  "stacks": [
-    {
-      "base": "origin/main",
-      "branch": "pr/ephemeral-control-replay",
-      "commits": [
-        "255415d8a292802d4bdc41889c3f843418bcab91",
-        "c59920ed99f2a02b3f2d3f353b711569fd18f3f2",
-        "e299d93e40b4c5e0ff26181809c3e16686deee16",
-        "50252f3fa006a4a250b42c6d581fce21f435e93c",
-        "ca7a18582b8aa689f3c7fed2f0850d23e4a2c62e",
-        "ae48fa40b0b79c38505ff7de5c1a8b8eacd82b3e",
-        "2b9df6178894021bf60bfa588661698936495394",
-        "5a6dbc82ce938f3cb80d4d71fdb81fbb06bc39c8",
-        "61cb60f74e63aba1d3286ae761a3c3d27f33115c",
-        "e6a1bc747b3f0dfc01c243dedbcbb9bcaddca313",
-        "be7facbbdd962d8390610bca7c942481e81c8098",
-        "e332a630c2d22bd3ab22aeac99c67ade3d9fc67d",
-        "64970983fd7fc0eb93a50770d952c14e07ff5480"
-      ],
-      "id": "ephemeral-control-replay",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Preserve tracked control metadata across ephemeral integration replay and provide verified native recovery"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    }
-  ],
+  "stacks": [],
   "syncwheel_tracking": "git-tracked",
   "syncwheel_worktree_root": "var/syncwheel",
   "version": 2
