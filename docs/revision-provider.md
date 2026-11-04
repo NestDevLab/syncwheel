@@ -552,6 +552,48 @@ responses. Once a candidate commit is prepared its parent is fixed; a later HEAD
 move requires a fresh operation. This adds no wire fields and requires a consumer
 that verifies the same path-scoped parent rule.
 
+### Explicit prepared-journal supersession
+
+A prepared journal candidate whose parent has become stale cannot be implicitly
+reparented or released. An operator can instead preview an explicitly linked,
+fresh operation:
+
+```bash
+syncwheel revision-provider supersede-prepared ORIGINAL_ID \
+  --successor-id NEW_ID --receipt-digest ORIGINAL_RECEIPT_SHA256 \
+  --reason "Reviewed recovery of an unpublished journal candidate"
+# Review the returned bindings, then repeat the same command with:
+# --plan-digest EXACT_PLAN_DIGEST --apply
+```
+
+Preview does not change journals, refs, index, worktree or ledger. The plan binds
+the original request, journal and unpublished candidate; consumer receipt digest;
+successor identity; current HEAD, branch, index, config and manifest; exact product
+objects; and all observed unrelated dirty files. The successor retains the exact
+declared before/after hashes but has its own current parent and reviewed reason.
+Changed or reverted operation paths, modes, symlinks, published candidates,
+manifest/branch changes and mutation/provider-policy changes are refused. Ordinary
+configuration pins may differ only through this explicit fresh intent; they never
+widen the old operation's lease.
+
+Apply records one immutable supersession witness, an append-only audit event and
+a separate prepared provider journal. It does **not** finalize, publish, install,
+rerun a runtime handler, delete the original journal or replace its candidate.
+Ignored ledger metadata must already be configured: audit writing never repairs
+exclusions or edits `.gitignore`. Interruptions between the witness, audit and
+successor preparation resume idempotently with the same IDs, reason and digest.
+Changed inputs and competing decisions fail closed.
+
+The consumer must validate its original commit-pending receipt and resolved runtime
+evidence before apply, freeze that evidence, and create a linked successor receipt
+with the fresh request. Run ordinary provider recovery for that successor and
+verify its exact-path commit independently against the **new** parent. Only then
+may the consumer mark the original receipt superseded, with a durable link to the
+verified successor. A prepared provider link is not proof of consumer completion.
+Reused runtime evidence is historical; it does not claim a new runtime execution
+or current installation health. Do not submit the new commit as success for the
+original immutable request.
+
 
 ### Explicit resolution of a prepared draft projection
 
