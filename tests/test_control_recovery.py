@@ -468,13 +468,37 @@ class ControlReplayTest(unittest.TestCase):
         self.interrupt_recovery('checkout_aligned')
         directory = self.module.ledger_events_dir(self.f.repo, self.path)
         segment = sorted(directory.glob('*.jsonl'))[-1]
-        segment.write_bytes(segment.read_bytes() + b'{"broken":')
-        before = segment.read_bytes()
-        observation = self.module.control_recovery_observation(self.f.repo)
-        result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
-        self.assertIn('incomplete ledger tail', result.stderr)
-        self.assertEqual(segment.read_bytes(), before)
-        self.assertEqual(self.module.control_recovery_observation(self.f.repo), observation)
+        baseline = segment.read_bytes()
+        def metadata():
+            return {p.relative_to(directory.parent).as_posix(): p.read_bytes()
+                    for p in directory.parent.rglob('*') if p.is_file()}
+        for tail in (b'{"broken":', b'{"complete":"missing delimiter"}'):
+            with self.subTest(tail=tail):
+                segment.write_bytes(baseline + tail)
+                before = metadata()
+                observation = self.module.control_recovery_observation(self.f.repo)
+                result = self.f.run_cli('manifest', 'recover-control', '--from-backup', self.backup, expected=2)
+                self.assertIn('incomplete ledger tail', result.stderr)
+                # No tail repair, delimiter append, new lock or checkpoint.
+                self.assertEqual(metadata(), before)
+                self.assertEqual(self.module.control_recovery_observation(self.f.repo), observation)
+
+    def test_different_identity_manifest_or_mode_cannot_hide_explicit_intent(self):
+        plan = self.interrupt_recovery('intent_saved')
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        altered = json.loads(json.dumps(self.expected))
+        altered['defaults']['base_branch'] = 'independent-candidate'
+        local = {**self.expected, 'syncwheel_tracking': 'local-only'}
+        for manifest, identity in ((self.expected, 1), (altered, 3), (local, 2)):
+            with self.subTest(identity=identity, tracking=manifest['syncwheel_tracking']):
+                with self.module.manifest_write_transaction(self.f.repo, self.path):
+                    with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                        self.module.restore_control_manifest_after_integration_rebuild(
+                            self.f.repo, self.path, manifest, plan['controlReplayTip'],
+                            'recovery', identity_version=identity)
+                self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+                self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
 
     def read_state_json(self, repo, commit, *_args):
         # Real Git object reads isolate provenance from the unchanged schema parser.
