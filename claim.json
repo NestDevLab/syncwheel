@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/syncwheel/draft/prepared-journal-recovery"
   ],
-  "claimed_at": "2026-11-04T08:28:38+00:00",
+  "claimed_at": "2026-11-04T09:07:01+00:00",
   "coordination_id": "default",
-  "operation_token": "6fc85a86-52ce-445e-ae55-ef4930a5dbe2",
-  "publication_scope": "create:prepared-journal-recovery",
+  "operation_token": "38daf5fc-ab2a-48b0-a812-e6af185542ec",
+  "publication_scope": "stack:prepared-journal-recovery",
   "source_ref": "refs/heads/syncwheel/draft/prepared-journal-recovery",
-  "syncwheel_version": "0.46.18"
+  "syncwheel_version": "0.46.20"
 }
