@@ -195,6 +195,123 @@ class ControlReplayTest(unittest.TestCase):
                     self.module.command_manifest_recover_control(args)
         self.assertEqual(self.f.read_manifest()['stacks'], [])
 
+    def prepare_managed_ignore_rewrite(self):
+        self.prepare(interrupted=True)
+        path = self.f.repo / '.gitignore'
+        text, _ = self.module.replace_managed_block(
+            path.read_text(), self.module.SYNCWHEEL_GITIGNORE_MARKER,
+            self.module.SYNCWHEEL_GITIGNORE_END_MARKER,
+            self.module.syncwheel_gitignore_patterns(
+                self.module.syncwheel_worktree_root(self.expected)),
+            self.module.all_syncwheel_managed_patterns(
+                self.module.syncwheel_worktree_root(self.expected)),
+        )
+        path.write_text(text)
+        return path
+
+    def recovery_args(self, plan):
+        return SimpleNamespace(repo=str(self.f.repo), manifest=None, personal=None,
+                               from_backup=self.backup, apply=True, reason='reviewed recovery',
+                               plan_digest=plan['planDigest'])
+
+    def test_recovery_cas_preserves_managed_ignore_without_staging_it(self):
+        ignore = self.prepare_managed_ignore_rewrite()
+        before = ignore.read_bytes()
+        head = self.f.git('rev-parse', 'HEAD')
+        plan = self.plan()
+        self.assertFalse(plan['commitManagedIgnore'])
+        self.assertTrue(plan['preservedManagedIgnore'])
+        self.apply(plan)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD^'), head)
+        self.assertEqual(self.f.git('diff', '--name-only', 'HEAD^', 'HEAD'),
+                         '.syncwheel/manifest.json')
+        self.assertEqual(ignore.read_bytes(), before)
+        self.assertEqual(self.f.git('diff', '--cached', '--name-only'), '')
+        self.assertEqual(self.f.tracked_status(), 'M .gitignore')
+        again = self.plan()
+        self.assertTrue(again['alreadyRestored'])
+        restored = self.f.git('rev-parse', 'HEAD')
+        self.apply(again)
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), restored)
+
+    def test_recovery_refuses_late_ignore_edit_before_cas(self):
+        ignore = self.prepare_managed_ignore_rewrite()
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        head = self.f.git('rev-parse', 'HEAD')
+        index = self.f.git('write-tree')
+        def edit(stage):
+            if stage == 'intent_saved':
+                ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=edit):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
+                    self.module.command_manifest_recover_control(self.recovery_args(plan))
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.f.git('write-tree'), index)
+        self.assertIn('foreign-generated/', ignore.read_text())
+        self.assertEqual(self.f.read_manifest()['stacks'], [])
+        self.assertEqual(self.module.pending_control_manifest_intents(
+            self.module.load_control_manifest_events(self.f.repo, self.path)), [])
+
+    def test_recovery_refuses_late_product_commit_before_save(self):
+        self.prepare(interrupted=True)
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        observed = []
+        def commit(stage):
+            if stage == 'intent_saved':
+                (self.f.repo / 'gamma.txt').write_text('concurrent product\n')
+                self.f.git('add', 'gamma.txt')
+                self.f.git('commit', '-qm', 'test: concurrent product writer')
+                observed.append(self.f.git('rev-parse', 'HEAD'))
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=commit):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
+                    self.module.command_manifest_recover_control(self.recovery_args(plan))
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), observed[0])
+        self.assertEqual((self.f.repo / 'gamma.txt').read_text(), 'concurrent product\n')
+        self.assertEqual(self.f.read_manifest()['stacks'], [])
+        self.assertEqual(self.f.tracked_status(), '')
+
+    def test_recovery_parent_cas_refuses_commit_after_last_guard(self):
+        self.prepare(interrupted=True)
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        real_git = self.module.git
+        observed = []
+        def concurrent_commit(repo, *args, **kwargs):
+            if args[:2] == ('update-ref', 'refs/heads/main') and not observed:
+                (self.f.repo / 'gamma.txt').write_text('late concurrent product\n')
+                self.f.git('add', 'gamma.txt')
+                self.f.git('commit', '-qm', 'test: advance at ref CAS')
+                observed.append(self.f.git('rev-parse', 'HEAD'))
+            return real_git(repo, *args, **kwargs)
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with mock.patch.object(self.module, 'git', side_effect=concurrent_commit):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'ref changed before its CAS'):
+                    self.module.command_manifest_recover_control(self.recovery_args(plan))
+        self.assertEqual(self.f.git('rev-parse', 'HEAD'), observed[0])
+        self.assertEqual(self.f.read_manifest()['stacks'], [])
+        self.assertEqual(self.f.tracked_status(), '')
+
+    def test_recovery_never_captures_ignore_edit_after_last_guard(self):
+        ignore = self.prepare_managed_ignore_rewrite()
+        plan, _ = self.module.control_recovery_plan(self.f.repo, self.path, self.backup)
+        real_git = self.module.git
+        edited = []
+        def concurrent_edit(repo, *args, **kwargs):
+            if args[:2] == ('update-ref', 'refs/heads/main') and not edited:
+                ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
+                edited.append(True)
+            return real_git(repo, *args, **kwargs)
+        with self.module.manifest_write_transaction(self.f.repo, self.path):
+            with mock.patch.object(self.module, 'git', side_effect=concurrent_edit):
+                with self.assertRaisesRegex(self.module.SyncwheelError, 'changed after control publication'):
+                    self.module.command_manifest_recover_control(self.recovery_args(plan))
+        self.assertIn('foreign-generated/', ignore.read_text())
+        self.assertNotIn('foreign-generated/', self.f.git('show', 'HEAD:.gitignore'))
+        self.assertEqual(self.f.git('diff', '--cached', '--name-only'), '')
+        self.assertEqual(self.f.git('diff', '--name-only', 'HEAD^', 'HEAD'),
+                         '.syncwheel/manifest.json')
+
     def prepare_state_remote(self):
         self.f.git('switch', '-qc', 'syncwheel/state/default')
         state_path = self.f.repo / '.syncwheel/coordination-state.json'
