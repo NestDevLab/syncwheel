@@ -45,7 +45,7 @@
   "stacks": [
     {
       "id": "prepared-journal-recovery",
-      "branch": "syncwheel/draft/prepared-journal-recovery",
+      "branch": "pr/prepared-journal-recovery",
       "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
@@ -57,9 +57,9 @@
         "4afbab5b8671d013c5dbb9fe5cc8885451bf80ac",
         "51d878f1357de0667a77f1b7b23c79c394b8559f"
       ],
-      "state": "draft",
+      "state": "published",
       "publication": {
-        "enabled": false
+        "enabled": true
       },
       "meta": {
         "purpose": "Audit linked supersession of unpublished prepared journal operations"
