@@ -1,7 +1,10 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/main-integration": "0ddba57477516f921031188f55cfc46a21597792",
+    "refs/heads/pr/ephemeral-control-replay": "ae48fa40b0b79c38505ff7de5c1a8b8eacd82b3e"
+  },
   "claims": {
-    "refs/heads/main-integration": "879f4f7e63685d177179608c87eb73e59ab3de92",
+    "refs/heads/main-integration": "3b33fff28a520063e219ea5d8cc1dab829327064",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -11,6 +14,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
+    "refs/heads/pr/ephemeral-control-replay": "e6d5c5e3bb83ba0cc783ccf598babd1c77d2f540",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
@@ -98,11 +102,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-03T23:09:58+00:00",
+  "created_at": "2026-11-04T00:05:10+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "f88d94a6a1e3f162c8cae9297bad8a6980b4fc9e",
+    "refs/heads/main-integration": "0ddba57477516f921031188f55cfc46a21597792",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -118,6 +122,7 @@
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
+    "refs/heads/pr/ephemeral-control-replay": "ae48fa40b0b79c38505ff7de5c1a8b8eacd82b3e",
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fixture-cli-tests": "45095862a6316f4733bbbc5b4fcb0a01c2406fa3",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
@@ -248,7 +253,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "ephemeral-control-replay"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -256,15 +263,35 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/ephemeral-control-replay",
+        "commits": [
+          "0415fded7ddc221d50ec7f3a2e937ad3775d187f",
+          "c59920ed99f2a02b3f2d3f353b711569fd18f3f2",
+          "e299d93e40b4c5e0ff26181809c3e16686deee16",
+          "50252f3fa006a4a250b42c6d581fce21f435e93c",
+          "b3d843b4668bf6c5197dfcbd1e07d4eb207ef262",
+          "1aa2b3eab8501582a851de230651851dd5d0b402"
+        ],
+        "id": "ephemeral-control-replay",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
-  "manifest_digest": "2642c337301bc119fbcf2ca9af3481e1fe944f5f6bef5f729e09f2dc2edf2429",
-  "operation_token": "454a273b-41db-442f-880e-da26a15618d3",
-  "parent_state": "b047966d269b969330f411481e38442488deb54a",
+  "manifest_digest": "1556d9ef09153665727ad92e9cd67a5f7c7abc875db0cd2baf3945d6d7f52a05",
+  "operation_token": "3ce6fbe0-fdee-4dea-bf61-9d2c05b0f293",
+  "parent_state": "9c884fcfee257f05339c98f1c22b632370007e38",
   "projection_status": "partial",
-  "publication_id": "51856046-fb42-45e7-baa1-8610fdcbe762",
-  "publication_scope": "close:scoped-integration-resolution",
+  "publication_id": "947f4a71-f586-46ed-b516-8ee6682c255e",
+  "publication_scope": "stack:ephemeral-control-replay",
   "schema_version": 2,
   "syncwheel_version": "0.46.18",
   "tombstones": [
