@@ -679,6 +679,9 @@ Practical meaning:
 - `stack push` and `int push` are targeted publication commands. On active
   version 2 or 3 manifests they publish a partial atomic state snapshot; legacy
   manifests retain the direct Git push wrapper and its optional arguments.
+  `stack push` publishes only the selected stack branch plus its coordination claim/state;
+  local control-manifest persistence never authorizes publishing the integration branch.
+  Bootstrap or publish integration explicitly with `int push`.
 - `reconcile` is the preferred multi-device maintenance entrypoint: it compares
   manifest ownership, stack branches, integration, and remote tips; reports a
   dry-run plan by default; and can rebuild, update manifest SHAs, and push when
