@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/prepared-journal-recovery"
   ],
-  "claimed_at": "2026-11-04T09:07:13+00:00",
+  "claimed_at": "2026-11-04T09:07:36+00:00",
   "coordination_id": "default",
-  "operation_token": "ee91da26-8caa-48f9-a635-d3814c89e2a8",
-  "publication_scope": "promote:prepared-journal-recovery",
+  "operation_token": "096eef56-dcc8-4f53-a27e-99685737073a",
+  "publication_scope": "stack:prepared-journal-recovery",
   "source_ref": "refs/heads/pr/prepared-journal-recovery",
   "syncwheel_version": "0.46.20"
 }
