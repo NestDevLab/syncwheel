@@ -1,10 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "b11c6447bdd5b52e10f26e2a11767a889413af06",
+    "refs/heads/main-integration": "6c00936b1a3da12eabc0a77d3bfd871150aaf5b7",
     "refs/heads/pr/ephemeral-control-replay": "2b9df6178894021bf60bfa588661698936495394"
   },
   "claims": {
-    "refs/heads/main-integration": "0c4bd3085e99ac0d5a580b20a93cba078c6a3617",
+    "refs/heads/main-integration": "2a2b2fbfb4d77da736ecd38181610d970a2d6d69",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -14,7 +14,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
-    "refs/heads/pr/ephemeral-control-replay": "af59fca9ffbb10a8c298e7380f23f9fc91280ef4",
+    "refs/heads/pr/ephemeral-control-replay": "9f0389fdcc49b99ee14e4d91c27b4d4298912243",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
@@ -102,11 +102,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T00:09:50+00:00",
+  "created_at": "2026-11-04T00:17:32+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "b11c6447bdd5b52e10f26e2a11767a889413af06",
+    "refs/heads/main-integration": "6c00936b1a3da12eabc0a77d3bfd871150aaf5b7",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -272,13 +272,13 @@
         },
         "branch": "pr/ephemeral-control-replay",
         "commits": [
-          "0415fded7ddc221d50ec7f3a2e937ad3775d187f",
+          "255415d8a292802d4bdc41889c3f843418bcab91",
           "c59920ed99f2a02b3f2d3f353b711569fd18f3f2",
           "e299d93e40b4c5e0ff26181809c3e16686deee16",
           "50252f3fa006a4a250b42c6d581fce21f435e93c",
-          "b3d843b4668bf6c5197dfcbd1e07d4eb207ef262",
-          "1aa2b3eab8501582a851de230651851dd5d0b402",
-          "482ad8d8964ef5f83cddf788e6556205f73755a8"
+          "ca7a18582b8aa689f3c7fed2f0850d23e4a2c62e",
+          "ae48fa40b0b79c38505ff7de5c1a8b8eacd82b3e",
+          "2b9df6178894021bf60bfa588661698936495394"
         ],
         "id": "ephemeral-control-replay",
         "integration_branch": "main-integration",
@@ -287,11 +287,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "9b9ffb6d4df6fc6be05c37d070438e1357994c6cf120d1416c7645ad1e4d1401",
-  "operation_token": "4414d37d-8c93-4630-81d9-5bc9c2c7f1e5",
-  "parent_state": "ade48543ce2026a7f60bd502854bc30a08043490",
+  "manifest_digest": "e345bf92542fd817781be2568c12c1ebf0ad26954faf9db88e0a8a4435d81436",
+  "operation_token": "25b13718-74e5-4b26-9e6d-f009efcfd95b",
+  "parent_state": "9afd6c442582222e2e0688b9edc3016ce973e464",
   "projection_status": "partial",
-  "publication_id": "4ba269e5-bb92-4426-abc2-62ff05f0011c",
+  "publication_id": "6111d903-b373-404c-bcf8-27a8dffcf3f8",
   "publication_scope": "stack:ephemeral-control-replay",
   "schema_version": 2,
   "syncwheel_version": "0.46.19",
