@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -37,9 +37,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -52,7 +52,8 @@
         "e299d93e40b4c5e0ff26181809c3e16686deee16",
         "50252f3fa006a4a250b42c6d581fce21f435e93c",
         "b3d843b4668bf6c5197dfcbd1e07d4eb207ef262",
-        "1aa2b3eab8501582a851de230651851dd5d0b402"
+        "1aa2b3eab8501582a851de230651851dd5d0b402",
+        "482ad8d8964ef5f83cddf788e6556205f73755a8"
       ],
       "id": "ephemeral-control-replay",
       "integration_branch": "main-integration",
