@@ -6655,6 +6655,27 @@ def restore_control_manifest_after_integration_rebuild(
 ):
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
+        # Check every explicit pending operation BEFORE deriving an object from
+        # caller defaults (or taking the local-only/no-op paths). A different
+        # identity/parent must not make the existing intent invisible.
+        explicit = [event['payload'] for event in pending_control_manifest_intents(
+            load_control_manifest_events(repo_root, manifest_path)
+        ) if explicit_control_recovery_intent(event['payload'])]
+        if explicit:
+            transaction = active_manifest_write_transaction(manifest_path)
+            intent = explicit[0]
+            if (len(explicit) != 1 or transaction is None
+                    or transaction.get('explicitControlRecoveryOperation') != intent['operation_id']
+                    or transaction.get('preserveGitignore') is not True
+                    or command != 'syncwheel manifest recover-control'
+                    or operation_id != intent['operation_id']
+                    or branch != intent['integration_branch']
+                    or replay_tip != intent['replay_tip']
+                    or identity_version != intent.get('control_identity', CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION)
+                    or manifest_digest(manifest) != intent['expected_manifest_digest']
+                    or preserved_ignore is None or pre_cas_check is None
+                    or not persist_source):
+                raise SyncwheelError(explicit_control_recovery_refusal())
         if control_manifest_stays_untracked(manifest):
             return persist_local_only_control_manifest(
                 repo_root,
@@ -29927,7 +29948,9 @@ def explicit_control_recovery_refusal():
 
 
 def control_recovery_pending(repo_root, manifest_path):
-    pending = pending_control_manifest_intents(load_control_manifest_events(repo_root, manifest_path))
+    # A preview must not acquire a write lock, repair/truncate a ledger tail or
+    # create metadata. Incomplete input is held for explicit ledger recovery.
+    pending = pending_control_manifest_intents(load_ledger_events(repo_root, manifest_path))
     if not pending:
         return None
     if len(pending) != 1 or not explicit_control_recovery_intent(pending[0]['payload']):
