@@ -5802,10 +5802,29 @@ def refuse_duplicate_terminal_publication_event(state, event_type, payload):
     )
 
 
+def require_ignored_ledger_paths(repo_root, paths):
+    """Verify frozen recovery metadata without rewriting exclusion files."""
+    relatives = [repo_relative_path(repo_root, path) for path in paths]
+    if not all(relatives) or git(repo_root, 'ls-files', '--stage', '--', *relatives).stdout:
+        raise SyncwheelError('control recovery requires untracked, already ignored ledger metadata')
+    ignored = git(repo_root, 'check-ignore', '--no-index', '-z', '--stdin',
+                  input_text='\0'.join(relatives) + '\0', check=False)
+    if ignored.returncode != 0 or set(ignored.stdout.strip('\0').split('\0')) != set(relatives):
+        raise SyncwheelError('control recovery requires untracked, already ignored ledger metadata')
+
+
 def append_ledger_event(
     repo_root, event_type, payload, manifest_path=None, idempotency_key=None,
 ):
-    if not is_external_manifest_path(repo_root, manifest_path):
+    transaction = active_manifest_write_transaction_for_repo(repo_root)
+    preserve_ignore = transaction is not None and transaction.get('preserveGitignore') is True
+    if preserve_ignore:
+        require_ignored_ledger_paths(repo_root, [
+            ledger_root(repo_root, manifest_path) / 'ledger.lock',
+            ledger_checkpoint_path(repo_root, manifest_path),
+            ledger_events_dir(repo_root, manifest_path) / '000001.jsonl',
+        ])
+    elif not is_external_manifest_path(repo_root, manifest_path):
         tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
         ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
     require_manifest_transaction_current(
@@ -5844,6 +5863,8 @@ def append_ledger_event(
         if idempotency_key is not None:
             event['idempotency_key'] = idempotency_key
         path = next_ledger_segment_path(repo_root, manifest_path)
+        if preserve_ignore:
+            require_ignored_ledger_paths(repo_root, [path])
         existed = path.exists()
         encoded = json.dumps(event, sort_keys=True).encode('utf-8')
         descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
@@ -29974,15 +29995,26 @@ def command_manifest_recover_control(args):
                 raise SyncwheelError('control recovery inputs changed before apply')
         control_recovery_checkpoint()
         require_frozen_source()
-        if not plan['alreadyRestored']:
-            restore_control_manifest_after_integration_rebuild(
-                repo_root, manifest_path, desired, plan['observation']['head'],
-                'control-recovery', reason=args.reason,
-                command='syncwheel manifest recover-control',
-                preserved_ignore=(plan['observation']['paths']['.gitignore']
-                                  if plan['preservedManagedIgnore'] else None),
-                pre_cas_check=require_frozen_source,
-            )
+        transaction = active_manifest_write_transaction(manifest_path)
+        if transaction is None:
+            raise SyncwheelError('control recovery requires its native manifest transaction')
+        previous = transaction.get('preserveGitignore')
+        transaction['preserveGitignore'] = True
+        try:
+            if not plan['alreadyRestored']:
+                restore_control_manifest_after_integration_rebuild(
+                    repo_root, manifest_path, desired, plan['observation']['head'],
+                    'control-recovery', reason=args.reason,
+                    command='syncwheel manifest recover-control',
+                    preserved_ignore=(plan['observation']['paths']['.gitignore']
+                                      if plan['preservedManagedIgnore'] else None),
+                    pre_cas_check=require_frozen_source,
+                )
+        finally:
+            if previous is None:
+                transaction.pop('preserveGitignore', None)
+            else:
+                transaction['preserveGitignore'] = previous
         # The isolated control CAS owns the manifest. Never let transaction exit
         # stage a preserved or late-edited ignore file through the ordinary writer.
         transaction = active_manifest_write_transaction(manifest_path)
