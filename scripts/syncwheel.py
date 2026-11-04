@@ -6622,6 +6622,7 @@ def restore_control_manifest_after_integration_rebuild(
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
     operation_id=None, persist_source=True, source_lease_out=None,
     identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
+    preserved_ignore=None, pre_cas_check=None,
 ):
     branch = manifest['integration']['branch']
     with control_manifest_branch_lock(repo_root, branch):
@@ -6650,6 +6651,8 @@ def restore_control_manifest_after_integration_rebuild(
             persist_source=persist_source,
             source_lease_out=source_lease_out,
             identity_version=identity_version,
+            preserved_ignore=preserved_ignore,
+            pre_cas_check=pre_cas_check,
         )
 
 
@@ -8189,6 +8192,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     reason='restore_control_manifest_after_integration_rebuild', command='reconcile',
     operation_id=None, persist_source=True, source_lease_out=None,
     identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
+    preserved_ignore=None, pre_cas_check=None,
 ):
     """Publish an isolated manifest-only commit above a rebuilt integration tip.
 
@@ -8254,7 +8258,15 @@ def _restore_control_manifest_after_integration_rebuild_locked(
             )
             if integration_worktree else None
         )
-        if obstruction is not None and obstruction['paths']:
+        ignore_is_preserved = bool(
+            obstruction is not None
+            and obstruction['paths'] == ['.gitignore']
+            and not obstruction['index_diverged']
+            and not obstruction['manifest_diverged']
+            and preserved_ignore is not None
+            and checkout_path_fingerprint(integration_worktree, '.gitignore') == preserved_ignore
+        )
+        if obstruction is not None and obstruction['paths'] and not ignore_is_preserved:
             raise SyncwheelError(control_manifest_obstruction_refusal(
                 obstruction,
                 pending_intent['payload']['command'] if pending_intent else command,
@@ -8323,6 +8335,15 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         control_manifest_io_checkpoint('intent_saved')
     # The object has already been checked above.  This one-shot CAS protects a
     # concurrent integration writer without ever involving hooks or the index.
+    if pre_cas_check is not None:
+        try:
+            pre_cas_check()
+        except SyncwheelError:
+            abandon_control_manifest_intent(
+                repo_root, manifest_path, intent, ref_tip(repo_root, integration_ref),
+                'recovery_source_changed_before_cas',
+            )
+            raise
     require_manifest_transaction_current(manifest_path)
     if current_tip == replay_tip:
         moved = git(
@@ -29919,12 +29940,16 @@ def control_recovery_plan(repo_root, manifest_path, backup_ref):
         raise SyncwheelError('control recovery replay does not reproduce the current product tree')
     if control_recovery_observation(repo_root) != before:
         raise SyncwheelError('control recovery inputs changed during proof')
+    control_commit = materialize_control_manifest_commit(repo_root, desired, before['head'])
+    if control_recovery_observation(repo_root) != before:
+        raise SyncwheelError('control recovery inputs changed during object preparation')
     plan = {
         'schemaVersion': 1, 'kind': 'controlManifestRecoveryPlan',
         'backupRef': backup_ref, 'backupCommit': source, 'observation': before,
         'replayCommit': replay, 'manifestDigestBefore': manifest_digest(current),
-        'manifestDigestAfter': manifest_digest(desired), 'commitManagedIgnore': ignore_changed,
-        'alreadyRestored': manifest_digest(current) == manifest_digest(desired) and not ignore_changed,
+        'manifestDigestAfter': manifest_digest(desired), 'commitManagedIgnore': False,
+        'preservedManagedIgnore': ignore_changed, 'expectedControlCommit': control_commit,
+        'alreadyRestored': control_commit == before['head'],
     }
     plan['planDigest'] = canonical_json_digest(plan)
     return plan, desired
@@ -29944,16 +29969,43 @@ def command_manifest_recover_control(args):
             raise SyncwheelError('control recovery apply requires --reason')
         if not args.plan_digest or args.plan_digest != plan['planDigest']:
             raise SyncwheelError('control recovery requires the exact current --plan-digest')
+        def require_frozen_source():
+            if control_recovery_observation(repo_root) != plan['observation']:
+                raise SyncwheelError('control recovery inputs changed before apply')
         control_recovery_checkpoint()
-        if control_recovery_observation(repo_root) != plan['observation']:
-            raise SyncwheelError('control recovery inputs changed before apply')
+        require_frozen_source()
         if not plan['alreadyRestored']:
-            save_manifest_with_ledger(
-                repo_root, manifest_path, desired, args.reason,
-                {'command': 'syncwheel manifest recover-control', 'recoveryPlan': plan},
+            restore_control_manifest_after_integration_rebuild(
+                repo_root, manifest_path, desired, plan['observation']['head'],
+                'control-recovery', reason=args.reason,
+                command='syncwheel manifest recover-control',
+                preserved_ignore=(plan['observation']['paths']['.gitignore']
+                                  if plan['preservedManagedIgnore'] else None),
+                pre_cas_check=require_frozen_source,
             )
-            if plan['commitManagedIgnore']:
-                active_manifest_write_transaction(manifest_path)['gitignoreWritten'] = True
+        # The isolated control CAS owns the manifest. Never let transaction exit
+        # stage a preserved or late-edited ignore file through the ordinary writer.
+        transaction = active_manifest_write_transaction(manifest_path)
+        if transaction is not None:
+            transaction['manifestWritten'] = False
+            transaction['gitignoreWritten'] = False
+        observed = control_recovery_observation(repo_root)
+        expected_refs = plan['observation']['refs'].replace(
+            f"refs/heads/{plan['observation']['branch']} {plan['observation']['head']}\n",
+            f"refs/heads/{plan['observation']['branch']} {plan['expectedControlCommit']}\n",
+        )
+        if (observed['head'] != plan['expectedControlCommit']
+                or observed['branch'] != plan['observation']['branch']
+                or observed['refs'] != expected_refs
+                or observed['indexTree'] != ref_tree(repo_root, plan['expectedControlCommit'])
+                or observed['status'] != plan['observation']['status']
+                or observed['paths']['.gitignore'] != plan['observation']['paths']['.gitignore']
+                or regular_checkout_path_bytes(repo_root, '.syncwheel/manifest.json')
+                   != canonical_manifest_file_text(desired).encode()):
+            raise SyncwheelError(
+                'control recovery inputs changed after control publication; '
+                'concurrent state preserved; inspect the control receipt before recovery'
+            )
     print(json.dumps({**plan, 'applied': bool(args.apply)}, indent=2))
     return 0
 

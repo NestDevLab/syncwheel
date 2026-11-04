@@ -179,7 +179,7 @@ directory is printed at startup.
 
 An ephemeral replay may reset a checked-out integration branch to a tree carrying
 an older tracked manifest. The normal persistence checkpoint accepts only the
-exact manifest bytes proved by that replay, including manifests with omitted
+manifest content proved by that replay, including manifests with omitted
 defaults; an independent checkout edit still fails closed.
 
 For a legacy interruption without a persistence intent, inspect the native backup
@@ -194,14 +194,23 @@ Apply that exact plan with `--apply --plan-digest DIGEST --reason "Restore revie
 The command requires the canonical git-tracked delivery manifest, a native backup
 for the same integration branch, and an independently reproduced product tree.
 Active-active coordination, edited manifests, staged/unrelated work and unrelated
-ignore changes are refused. Only the tracked manifest and a proved native managed
-ignore rewrite can be committed; product commits, source branches, private local
-policy, recovery refs and foreign worktrees are preserved. Replan on drift; never
+ignore changes are refused. The plan pins a manifest-only control object to the
+reviewed integration parent. Publication reuses the existing expected-tip CAS,
+durable control intent and guarded checkout alignment; it never stages late file
+contents through an ordinary metadata commit. A proved native managed-ignore
+rewrite is preserved as unstaged work, not included in this recovery commit.
+Acquire that owned rewrite separately through the normal scoped native authoring
+procedure. Product commits, source branches, private local policy, recovery refs
+and foreign worktrees are preserved. Replan on drift; never
 use a manual reset, manifest edit or a bypass of the transaction guard.
 
 Recovery does not publish or attest validation. Verify the restored recipes and
 source ownership, then run the normal integration checks and exact-head delivery
 plan. An already restored input is a no-op under a freshly observed plan.
+Changes observed after the control CAS are held with an error and the existing
+control receipt for inspection. Concurrent content remains in the checkout;
+this is not a claim that the whole recovery completed or permission for a blind
+retry, automatic rollback, or unattended recovery.
 
 ### Empty integration-only desk steps
 
