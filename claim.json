@@ -3,9 +3,9 @@
     "refs/heads/main-integration",
     "refs/heads/pr/ephemeral-control-replay"
   ],
-  "claimed_at": "2026-11-04T07:32:17+00:00",
+  "claimed_at": "2026-11-04T07:54:08+00:00",
   "coordination_id": "default",
-  "operation_token": "1900162d-da39-42c2-ba48-a3aea7c7bad9",
+  "operation_token": "b7da5a9b-c1a1-47e6-9c86-ffad2273080d",
   "publication_scope": "stack:ephemeral-control-replay",
   "source_ref": "refs/heads/pr/ephemeral-control-replay",
   "syncwheel_version": "0.46.19"
