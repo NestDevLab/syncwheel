@@ -49,7 +49,7 @@
     "refs/heads/pr/partial-intent-desired-refs": "d13d5ad39b31c06b96c9414c0c41d2f6000bccc8",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
-    "refs/heads/pr/prepared-journal-recovery": "ad320fc767b6c819c67532f86e51031ee094d2b6",
+    "refs/heads/pr/prepared-journal-recovery": "39cb38a595e95a68c3f45d91d2f3ed387b911861",
     "refs/heads/pr/preserve-closed-history-status": "87140b1ef4be55f2cf2565ba58705a8c10830476",
     "refs/heads/pr/preserve-control-divergence": "d0ae5e11976a4b0fabf7861e371dcc1d78b86fb7",
     "refs/heads/pr/preserve-published-ancestry": "5af5cae2f629cae4b40733440490bcd4c5f13637",
@@ -104,7 +104,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T09:07:13+00:00",
+  "created_at": "2026-11-04T09:07:36+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -291,11 +291,11 @@
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "ee91da26-8caa-48f9-a635-d3814c89e2a8",
-  "parent_state": "9cba4a952801eb648c62e17b4f6e2e44ff5d1051",
+  "operation_token": "096eef56-dcc8-4f53-a27e-99685737073a",
+  "parent_state": "6d734a39430a4996ea2001be73b7db3cb520b91f",
   "projection_status": "partial",
-  "publication_id": "4d18e526-b119-4f3b-9e19-cb59016695ef",
-  "publication_scope": "promote:prepared-journal-recovery",
+  "publication_id": "608282e9-8ef0-462d-9e8a-4fc9eea3271a",
+  "publication_scope": "stack:prepared-journal-recovery",
   "schema_version": 2,
   "syncwheel_version": "0.46.20",
   "tombstones": [
