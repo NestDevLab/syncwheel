@@ -1,8 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "f33b1818e3cb2189f06bdc782fd3ccfe01af1540",
-    "refs/heads/pr/ephemeral-control-replay": "61cb60f74e63aba1d3286ae761a3c3d27f33115c"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "b7c8cd2651f314553fd91dd4d448b06f63a57cdd",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -26,6 +23,7 @@
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
+    "refs/heads/pr/interrupted-replay-recovery": "a14a481b70503c8808d24ab1625c115d24b9a7d9",
     "refs/heads/pr/journal-guard-readiness": "e421e352281844a42e0bbc2ae7fdd4a72d84f446",
     "refs/heads/pr/journal-operations": "4be329dde1c6874ad6d4bbadc6ff4e3e48826d1a",
     "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
@@ -102,7 +100,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T06:45:57+00:00",
+  "created_at": "2026-11-04T07:26:01+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -137,6 +135,7 @@
     "refs/heads/pr/implicit-gc-scope": "b9b613c8d079afc20e05e30771f07e88c1936db7",
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
+    "refs/heads/pr/interrupted-replay-recovery": null,
     "refs/heads/pr/journal-guard-readiness": "7e098aad3cb47680aba486af6475bdaa706de8ff",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-operations": "df881e8d83fa074d7589ee7137e7130143e2e108",
@@ -290,13 +289,13 @@
     "version": 2
   },
   "manifest_digest": "baec76e023fd6c87c7391c7a2b923721d9588da5c99be3b843e0773986bb0e5c",
-  "operation_token": "95bb8d3f-886d-4030-9e54-dff2c7073d19",
-  "parent_state": "53db72524d1917177fa19e9c4a5879a650d5655e",
+  "operation_token": "c18f37bf-813e-4810-b2d4-57f3d43e3c32",
+  "parent_state": "36cffb4a0db49446a34e5e740eca530d00c07acc",
   "projection_status": "partial",
-  "publication_id": "c82726f1-a017-4d7e-bd06-af2c00d21f6c",
-  "publication_scope": "stack:ephemeral-control-replay",
+  "publication_id": "2eff6921-6e1d-4389-8d8b-e01b39617b2c",
+  "publication_scope": "close:interrupted-replay-recovery",
   "schema_version": 2,
-  "syncwheel_version": "0.46.19",
+  "syncwheel_version": "0.46.18",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1257,6 +1256,18 @@
       "ref": "refs/heads/pr/scoped-integration-resolution",
       "remote_tip": null,
       "stack": "scoped-integration-resolution"
+    },
+    {
+      "archive": {
+        "planDigest": "4e1a74b9615b196ed806e8afb8d39e07381798c125403e139b84dd91e9ecc646",
+        "retentionDays": 30
+      },
+      "branch": "pr/interrupted-replay-recovery",
+      "closed_at": "2026-11-04T07:25:59+00:00",
+      "reason": "archived",
+      "ref": "refs/heads/pr/interrupted-replay-recovery",
+      "remote_tip": null,
+      "stack": "interrupted-replay-recovery"
     }
   ]
 }
