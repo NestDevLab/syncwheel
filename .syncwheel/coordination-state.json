@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/syncwheel/draft/prepared-journal-recovery": "51d878f1357de0667a77f1b7b23c79c394b8559f"
+    "refs/heads/pr/prepared-journal-recovery": "51d878f1357de0667a77f1b7b23c79c394b8559f"
   },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
@@ -49,6 +49,7 @@
     "refs/heads/pr/partial-intent-desired-refs": "d13d5ad39b31c06b96c9414c0c41d2f6000bccc8",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
     "refs/heads/pr/pr-base-live-tip": "17881eb8ba79c72a1f2ee8451bc55c452b9d0461",
+    "refs/heads/pr/prepared-journal-recovery": "ad320fc767b6c819c67532f86e51031ee094d2b6",
     "refs/heads/pr/preserve-closed-history-status": "87140b1ef4be55f2cf2565ba58705a8c10830476",
     "refs/heads/pr/preserve-control-divergence": "d0ae5e11976a4b0fabf7861e371dcc1d78b86fb7",
     "refs/heads/pr/preserve-published-ancestry": "5af5cae2f629cae4b40733440490bcd4c5f13637",
@@ -90,7 +91,7 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/o3-history-proof": "b62d96f3c05e90775581ec1f281c7517a9cc976b",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
-    "refs/heads/syncwheel/draft/prepared-journal-recovery": "7152173d3d65c3ce0bae03489f29b4177df8b7f2",
+    "refs/heads/syncwheel/draft/prepared-journal-recovery": "9ab0f62f7515a638d463fadec994b3c69c01a485",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
     "refs/heads/syncwheel/draft/read-only-git-auth": "4e2c48d32e0c997bfa17d6f5ef0d88b9894f5dcb",
     "refs/heads/syncwheel/draft/recover-semantic-lease": "639d7df77b81df7b420b878dcd1433dabc6fc670",
@@ -103,7 +104,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T09:07:01+00:00",
+  "created_at": "2026-11-04T09:07:13+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -164,6 +165,7 @@
     "refs/heads/pr/partial-intent-desired-refs": "2e68fd634f7009b3a4056b19fb4468cd64b7c5f5",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
     "refs/heads/pr/pr-base-live-tip": "5c2d057a6a4812988f610e1ce4ceef7ee1af4be0",
+    "refs/heads/pr/prepared-journal-recovery": "51d878f1357de0667a77f1b7b23c79c394b8559f",
     "refs/heads/pr/preserve-closed-history-status": "b9977ef2c803b35f45b06da31372ce1b2561bac4",
     "refs/heads/pr/preserve-control-divergence": null,
     "refs/heads/pr/preserve-published-ancestry": "c2dd1ecc6c84b032245dc75ba684971ff1e00396",
@@ -273,7 +275,7 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "syncwheel/draft/prepared-journal-recovery",
+        "branch": "pr/prepared-journal-recovery",
         "commits": [
           "c862379fac232e0d6faee3816f1d11c6b6f72ae9",
           "5f1b6577d172b0b942a50c3921b652f456329bc1",
@@ -283,18 +285,17 @@
         ],
         "id": "prepared-journal-recovery",
         "integration_branch": "main-integration",
-        "state": "draft",
         "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "38daf5fc-ab2a-48b0-a812-e6af185542ec",
-  "parent_state": "b5ef40ef6432f870fb8acfabc0735b8c8d8ec26c",
+  "operation_token": "ee91da26-8caa-48f9-a635-d3814c89e2a8",
+  "parent_state": "9cba4a952801eb648c62e17b4f6e2e44ff5d1051",
   "projection_status": "partial",
-  "publication_id": "1f230b24-93b8-4c98-b403-60f887c749e0",
-  "publication_scope": "stack:prepared-journal-recovery",
+  "publication_id": "4d18e526-b119-4f3b-9e19-cb59016695ef",
+  "publication_scope": "promote:prepared-journal-recovery",
   "schema_version": 2,
   "syncwheel_version": "0.46.20",
   "tombstones": [
@@ -1277,6 +1278,14 @@
       "ref": "refs/heads/pr/ephemeral-control-replay",
       "remote_tip": null,
       "stack": "ephemeral-control-replay"
+    },
+    {
+      "branch": "syncwheel/draft/prepared-journal-recovery",
+      "closed_at": "2026-11-04T09:07:09+00:00",
+      "reason": "promoted",
+      "ref": "refs/heads/syncwheel/draft/prepared-journal-recovery",
+      "remote_tip": "51d878f1357de0667a77f1b7b23c79c394b8559f",
+      "stack": "prepared-journal-recovery"
     }
   ]
 }
