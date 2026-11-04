@@ -3,10 +3,10 @@
     "refs/heads/main-integration",
     "refs/heads/pr/ephemeral-control-replay"
   ],
-  "claimed_at": "2026-11-04T00:05:10+00:00",
+  "claimed_at": "2026-11-04T00:09:50+00:00",
   "coordination_id": "default",
-  "operation_token": "3ce6fbe0-fdee-4dea-bf61-9d2c05b0f293",
+  "operation_token": "4414d37d-8c93-4630-81d9-5bc9c2c7f1e5",
   "publication_scope": "stack:ephemeral-control-replay",
   "source_ref": "refs/heads/pr/ephemeral-control-replay",
-  "syncwheel_version": "0.46.18"
+  "syncwheel_version": "0.46.19"
 }
