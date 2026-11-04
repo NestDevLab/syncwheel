@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.21 - 2026-11-04
+
+- Add explicit, plan-first preparation of audit-linked successors for unpublished prepared journal operations. Preserve original intent and candidate evidence, refuse stale leases and policy widening, and recover interrupted audit writes without editing exclusions or rerunning runtime handlers. Consumer verification remains required before receipt supersession.
+
 ## 0.46.20 - 2026-11-04
 
 - Keep targeted stack publication limited to its selected branch, claims and coordination state. Control-manifest persistence no longer implicitly publishes integration product changes; bootstrap requires an explicit integration publication. Preserve exact landed-operation recovery and narrow unlanded legacy intents before retrying.
