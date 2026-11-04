@@ -212,6 +212,23 @@ control receipt for inspection. Concurrent content remains in the checkout;
 this is not a claim that the whole recovery completed or permission for a blind
 retry, automatic rollback, or unattended recovery.
 
+An interrupted explicit recovery is quarantined in its durable intent. Ordinary
+manifest writers, integration commands and direct persistence consumers refuse
+it before alignment, receipts or metadata writes, including when the control CAS
+already succeeded. They do not execute the requested new operation. The guarded
+control object uses a distinct deterministic identity so older consumers reject
+it rather than applying their automatic recovery rules.
+
+Obtain a fresh `manifest recover-control --from-backup BACKUP` plan to continue.
+It verifies the original pending object/parent and the same backup proof, and
+includes the pending intent in its digest. Explicit apply may finish that exact
+operation without adding another commit. Foreign ignore edits, product commits,
+staged input or an altered proposal remain held for their owner; a fresh plan
+does not waive those refusals. An interruption before checkout alignment may
+leave a staged manifest, which this bounded command deliberately refuses rather
+than repairing automatically. Inspect that retained state under the existing
+supervised recovery procedure before replanning. No implicit restart is certified.
+
 ### Empty integration-only desk steps
 
 A stopped integration-only cherry-pick can be reviewed through the ordinary

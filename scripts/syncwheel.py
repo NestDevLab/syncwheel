@@ -145,9 +145,11 @@ CONTROL_MANIFEST_GIT_IDENTITY_ENV = {
     'GIT_COMMITTER_EMAIL': 'control@syncwheel.invalid',
 }
 CONTROL_MANIFEST_IDENTITY_VERSION = 2
+CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION = 3
 CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION = 1
 CONTROL_MANIFEST_IDENTITY_VERSIONS = (
     CONTROL_MANIFEST_IDENTITY_VERSION, CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
+    CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION,
 )
 DEFAULT_COORDINATION_GC = {
     'worktree_grace_days': 7,
@@ -6051,7 +6053,11 @@ def materialize_control_manifest_commit(
             return parent
         commit = git(
             repo_root, 'commit-tree', tree, '-p', parent,
-            '-m', 'chore: restore Syncwheel control manifest',
+            # A different object makes older consumers fail their deterministic
+            # object check instead of resuming this explicit-plan-only operation.
+            '-m', ('chore: restore guarded Syncwheel control manifest'
+                   if identity_version == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
+                   else 'chore: restore Syncwheel control manifest'),
             env=control_manifest_commit_env(repo_root, parent, identity_version),
         ).stdout.strip()
     finally:
@@ -6118,6 +6124,8 @@ def control_manifest_intent_payload(
         'replay_tip': replay_tip,
         'expected_control_commit': control_commit,
         'control_identity': identity_version,
+        **({'recovery_policy': 'explicit-plan-only'}
+           if identity_version == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION else {}),
         'replay_mode': replay_mode,
         'actor': control_manifest_actor(repo_root),
         'reason': reason,
@@ -6496,7 +6504,7 @@ def control_manifest_obstruction_warning(obstruction, command):
 
 def align_control_manifest_worktree(
     repo_root, manifest, replay_tip, control_commit, expected_digest,
-    obstruction_state=None,
+    obstruction_state=None, preserve_ignore=False,
 ):
     """Align index/worktree to the control tree without ever moving its branch ref."""
     branch = manifest['integration']['branch']
@@ -6526,7 +6534,7 @@ def align_control_manifest_worktree(
         repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
     )
     manifest_file_aligned = False
-    if obstruction is None:
+    if obstruction is None and not preserve_ignore:
         # read-tree updates only this worktree's index and files. Unlike reset it
         # cannot move the checked-out branch ref and therefore cannot undo a CAS.
         git(
@@ -6539,14 +6547,14 @@ def align_control_manifest_worktree(
         # rather than stall: align the control manifest alone and leave every
         # other path in the checkout to its owner. A checkout carrying a
         # different manifest proposal keeps that file too.
-        if not obstruction['manifest_diverged']:
+        if obstruction is None or not obstruction['manifest_diverged']:
             git(
                 repo_root, '-C', str(integration_worktree),
                 'checkout', control_commit, '--',
                 control_manifest_relative_path(repo_root),
             )
             manifest_file_aligned = True
-        if obstruction_state is not None:
+        if obstruction_state is not None and obstruction is not None:
             obstruction_state.update(obstruction)
     observed_after = ref_tip(repo_root, integration_ref)
     if observed_after != control_commit:
@@ -8260,6 +8268,11 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         manifest['integration']['branch'],
         operation_id=operation_id,
     )
+    if pending_intent is not None and explicit_control_recovery_intent(pending_intent['payload']):
+        transaction = active_manifest_write_transaction(manifest_path)
+        if (transaction is None or transaction.get('explicitControlRecoveryOperation')
+                != pending_intent['payload']['operation_id']):
+            raise SyncwheelError(explicit_control_recovery_refusal())
     if current_tip == control_commit and pending_intent is None:
         # A completed local operation is an idempotent retry. A deterministic
         # control commit with no local intent belongs to some other operation
@@ -8404,6 +8417,7 @@ def _restore_control_manifest_after_integration_rebuild_locked(
         integration_worktree = align_control_manifest_worktree(
             repo_root, manifest, replay_tip, control_commit, expected_digest,
             obstruction_state=alignment_obstruction,
+            preserve_ignore=preserved_ignore is not None,
         )
     except ControlManifestAlignmentDrift as exc:
         abandon_control_manifest_intent(
@@ -8587,6 +8601,10 @@ def recover_incomplete_control_manifest_persistence(
                 current, _ = load_manifest(repo_root, manifest_path)
                 return current or manifest
             intent = pending[0]['payload']
+            # A scoped recovery grant never survives as permission for an
+            # unrelated command. This refusal precedes alignment and ledger writes.
+            if explicit_control_recovery_intent(intent):
+                raise SyncwheelError(explicit_control_recovery_refusal())
             if intent.get('version') == 2:
                 committed = manifest_from_tree(
                     repo_root, intent['expected_control_commit'], integration_manifest_path(repo_root)
@@ -29894,6 +29912,29 @@ def compare_manifests(left, right):
     }
 
 
+def explicit_control_recovery_intent(intent):
+    # Also quarantine older, unscoped recover-control intents. They must not
+    # silently regain the ordinary metadata writer on a newer client either.
+    return (intent.get('command') == 'syncwheel manifest recover-control'
+            or intent.get('control_identity') == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
+            or intent.get('recovery_policy') == 'explicit-plan-only')
+
+
+def explicit_control_recovery_refusal():
+    return ('interrupted explicit control recovery is quarantined; requested command '
+            'was not executed. Preserve the checkout and obtain a fresh '
+            'manifest recover-control --from-backup BACKUP plan before explicit apply')
+
+
+def control_recovery_pending(repo_root, manifest_path):
+    pending = pending_control_manifest_intents(load_control_manifest_events(repo_root, manifest_path))
+    if not pending:
+        return None
+    if len(pending) != 1 or not explicit_control_recovery_intent(pending[0]['payload']):
+        raise SyncwheelError('control recovery refuses unrelated or ambiguous pending intents')
+    return pending[0]['payload']
+
+
 def control_recovery_observation(repo_root):
     paths = {
         path: checkout_path_observation(repo_root, path)['fingerprint']
@@ -29961,16 +30002,30 @@ def control_recovery_plan(repo_root, manifest_path, backup_ref):
         raise SyncwheelError('control recovery replay does not reproduce the current product tree')
     if control_recovery_observation(repo_root) != before:
         raise SyncwheelError('control recovery inputs changed during proof')
-    control_commit = materialize_control_manifest_commit(repo_root, desired, before['head'])
+    pending = control_recovery_pending(repo_root, manifest_path)
+    replay_tip = pending['replay_tip'] if pending else before['head']
+    identity_version = (pending.get('control_identity', CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION)
+                        if pending else CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION)
+    control_commit = materialize_control_manifest_commit(repo_root, desired, replay_tip, identity_version)
+    if pending and (
+        pending.get('command') != 'syncwheel manifest recover-control'
+        or pending.get('integration_branch') != branch
+        or pending.get('expected_manifest_digest') != manifest_digest(desired)
+        or pending.get('expected_control_commit') != control_commit
+        or before['head'] not in {replay_tip, control_commit}
+    ):
+        raise SyncwheelError('control recovery pending intent differs from the explicit backup proof')
     if control_recovery_observation(repo_root) != before:
         raise SyncwheelError('control recovery inputs changed during object preparation')
     plan = {
-        'schemaVersion': 1, 'kind': 'controlManifestRecoveryPlan',
+        'schemaVersion': 2, 'kind': 'controlManifestRecoveryPlan',
         'backupRef': backup_ref, 'backupCommit': source, 'observation': before,
         'replayCommit': replay, 'manifestDigestBefore': manifest_digest(current),
         'manifestDigestAfter': manifest_digest(desired), 'commitManagedIgnore': False,
         'preservedManagedIgnore': ignore_changed, 'expectedControlCommit': control_commit,
         'alreadyRestored': control_commit == before['head'],
+        'pendingIntent': pending, 'controlReplayTip': replay_tip,
+        'controlIdentity': identity_version,
     }
     plan['planDigest'] = canonical_json_digest(plan)
     return plan, desired
@@ -29995,19 +30050,26 @@ def command_manifest_recover_control(args):
                 raise SyncwheelError('control recovery inputs changed before apply')
         control_recovery_checkpoint()
         require_frozen_source()
+        if control_recovery_pending(repo_root, manifest_path) != plan['pendingIntent']:
+            raise SyncwheelError('control recovery pending intent changed before apply')
         transaction = active_manifest_write_transaction(manifest_path)
         if transaction is None:
             raise SyncwheelError('control recovery requires its native manifest transaction')
         previous = transaction.get('preserveGitignore')
+        previous_operation = transaction.get('explicitControlRecoveryOperation')
         transaction['preserveGitignore'] = True
+        pending = plan['pendingIntent']
+        if pending:
+            transaction['explicitControlRecoveryOperation'] = pending['operation_id']
         try:
-            if not plan['alreadyRestored']:
+            if not plan['alreadyRestored'] or pending:
                 restore_control_manifest_after_integration_rebuild(
-                    repo_root, manifest_path, desired, plan['observation']['head'],
+                    repo_root, manifest_path, desired, plan['controlReplayTip'],
                     'control-recovery', reason=args.reason,
                     command='syncwheel manifest recover-control',
-                    preserved_ignore=(plan['observation']['paths']['.gitignore']
-                                      if plan['preservedManagedIgnore'] else None),
+                    operation_id=pending['operation_id'] if pending else None,
+                    identity_version=plan['controlIdentity'],
+                    preserved_ignore=plan['observation']['paths']['.gitignore'],
                     pre_cas_check=require_frozen_source,
                 )
         finally:
@@ -30015,6 +30077,10 @@ def command_manifest_recover_control(args):
                 transaction.pop('preserveGitignore', None)
             else:
                 transaction['preserveGitignore'] = previous
+            if previous_operation is None:
+                transaction.pop('explicitControlRecoveryOperation', None)
+            else:
+                transaction['explicitControlRecoveryOperation'] = previous_operation
         # The isolated control CAS owns the manifest. Never let transaction exit
         # stage a preserved or late-edited ignore file through the ordinary writer.
         transaction = active_manifest_write_transaction(manifest_path)
@@ -36382,6 +36448,10 @@ CONTROL_MANIFEST_RECOVERY_ENTRYPOINTS = {
 def recover_control_manifest_before_command(args):
     """Run FC4 recovery before an entrypoint can require its manifest source."""
     if not hasattr(args, 'repo') or bool(getattr(args, 'dry_run', False)):
+        return None
+    if args.func == command_manifest_recover_control:
+        # Only this command's fresh exact plan may authorize a quarantined
+        # continuation. A preview remains read-only, including its ledger.
         return None
     entrypoint = args.func in CONTROL_MANIFEST_RECOVERY_ENTRYPOINTS
     if not entrypoint and not manifest_mutation_requested(args):
