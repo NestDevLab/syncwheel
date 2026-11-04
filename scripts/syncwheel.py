@@ -6658,9 +6658,7 @@ def restore_control_manifest_after_integration_rebuild(
         # Check every explicit pending operation BEFORE deriving an object from
         # caller defaults (or taking the local-only/no-op paths). A different
         # identity/parent must not make the existing intent invisible.
-        explicit = [event['payload'] for event in pending_control_manifest_intents(
-            load_control_manifest_events(repo_root, manifest_path)
-        ) if explicit_control_recovery_intent(event['payload'])]
+        explicit = pending_explicit_control_recoveries(repo_root, manifest_path)
         if explicit:
             transaction = active_manifest_write_transaction(manifest_path)
             intent = explicit[0]
@@ -8581,6 +8579,8 @@ def recover_incomplete_control_manifest_persistence(
     # points at the ordinary replay tip and even when replay removed the source.
     events = load_control_manifest_events(repo_root, manifest_path)
     branch = ((manifest or {}).get('integration') or {}).get('branch')
+    if pending_explicit_control_recoveries(repo_root, manifest_path):
+        raise SyncwheelError(explicit_control_recovery_refusal())
     all_pending = pending_control_manifest_intents(events)
     pending = (
         all_pending
@@ -29945,6 +29945,23 @@ def explicit_control_recovery_refusal():
     return ('interrupted explicit control recovery is quarantined; requested command '
             'was not executed. Preserve the checkout and obtain a fresh '
             'manifest recover-control --from-backup BACKUP plan before explicit apply')
+
+
+def pending_explicit_control_recoveries(repo_root, manifest_path):
+    # An alternate/personal control source cannot hide a canonical operation
+    # that protects this repository's integration checkout. De-duplicate ledger
+    # locations, not caller-selected candidate objects or operation identities.
+    seen = set()
+    explicit = []
+    for source in (integration_manifest_path(repo_root), manifest_path):
+        location = ledger_root(repo_root, source).resolve()
+        if location in seen:
+            continue
+        seen.add(location)
+        explicit.extend(event['payload'] for event in pending_control_manifest_intents(
+            load_control_manifest_events(repo_root, source)
+        ) if explicit_control_recovery_intent(event['payload']))
+    return explicit
 
 
 def control_recovery_pending(repo_root, manifest_path):
