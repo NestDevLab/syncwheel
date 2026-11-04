@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/syncwheel/draft/prepared-journal-recovery": "ebe133d97c0e56b8ce18d1a9a7b9305d5d5fead4"
+  },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -88,6 +90,7 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "ab0bf71612cb869fa8c85ae658116f9a63b82720",
     "refs/heads/syncwheel/draft/o3-history-proof": "b62d96f3c05e90775581ec1f281c7517a9cc976b",
     "refs/heads/syncwheel/draft/pr-checks-none": "d193ce07953034247db4908ada370fcb1b7ed255",
+    "refs/heads/syncwheel/draft/prepared-journal-recovery": "a3d69bc9257d899218c4f12fcc0158dc2df98de8",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "deaa1da4416802d2626d7353f8426d30d560fd22",
     "refs/heads/syncwheel/draft/read-only-git-auth": "4e2c48d32e0c997bfa17d6f5ef0d88b9894f5dcb",
     "refs/heads/syncwheel/draft/recover-semantic-lease": "639d7df77b81df7b420b878dcd1433dabc6fc670",
@@ -100,7 +103,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T08:07:55+00:00",
+  "created_at": "2026-11-04T08:28:38+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -214,6 +217,7 @@
     "refs/heads/syncwheel/draft/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
     "refs/heads/syncwheel/draft/o3-history-proof": "c2d98634abc3644096ec1b02c418971297df8e28",
     "refs/heads/syncwheel/draft/pr-checks-none": "1cd80e4bb2117ef2c2d0df1b19a775e9d5b68e68",
+    "refs/heads/syncwheel/draft/prepared-journal-recovery": "ebe133d97c0e56b8ce18d1a9a7b9305d5d5fead4",
     "refs/heads/syncwheel/draft/promote-recovery-adoption": "47576d23feeaaa056886dc9367ae80a4528e5a9a",
     "refs/heads/syncwheel/draft/read-only-git-auth": "dffccd1eab3b9e248dbdcb3057011f21ef3941ac",
     "refs/heads/syncwheel/draft/reconcile-replay-mode-args": "4ba52d1901d4bc7057221409c82d3238ed0eb6b1",
@@ -252,7 +256,9 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [],
+      "stacks": [
+        "prepared-journal-recovery"
+      ],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -260,17 +266,31 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [],
+    "stacks": [
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "syncwheel/draft/prepared-journal-recovery",
+        "commits": [],
+        "id": "prepared-journal-recovery",
+        "integration_branch": "main-integration",
+        "state": "draft",
+        "target_branch": "main"
+      }
+    ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "5cb57787-7532-44f7-98c8-f48365a07246",
-  "parent_state": "5a8facc8584711184a8ea2ec0e24c0cecc16aa24",
+  "operation_token": "6fc85a86-52ce-445e-ae55-ef4930a5dbe2",
+  "parent_state": "b962a569d9194076fb02de5a3b57826a8fd03e28",
   "projection_status": "partial",
-  "publication_id": "a8cc9dce-004d-498a-a21b-9755be2eca79",
-  "publication_scope": "close:ephemeral-control-replay",
+  "publication_id": "672728f9-20af-4585-93f3-f2388ca10b30",
+  "publication_scope": "create:prepared-journal-recovery",
   "schema_version": 2,
-  "syncwheel_version": "0.46.19",
+  "syncwheel_version": "0.46.18",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
