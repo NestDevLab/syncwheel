@@ -34277,6 +34277,81 @@ class SyncwheelRevisionBackend:
 class JournalRevisionBackend(SyncwheelRevisionBackend):
     """Local exact-path revisioning; publication is a separate journal operation."""
 
+    def plan_prepared_supersession(self, request, successor_id, receipt_digest, reason):
+        """Observe a fresh, explicit intent without weakening the original lease."""
+        module = self.provider
+        if (not module.OPERATION_ID.fullmatch(successor_id)
+                or successor_id == request.operation_id
+                or not module.HEX_64.fullmatch(receipt_digest)
+                or not reason.strip()):
+            self._fail('supersession requires a distinct successor ID, receipt digest and reason')
+        journal = module._assert_matching_journal(request, self.load_journal(request))
+        if (journal.get('repositoryMode') != 'journal'
+                or journal.get('phase') != 'prepared'
+                or not journal.get('candidateProductCommitSha')
+                or any(journal.get(key) for key in ('productCommitSha', 'controlCommitSha',
+                    'draftStackId', 'draftBranch', 'draftTipSha'))
+                or journal.get('supersession')
+                or request.no_commit or not request.paths):
+            self._fail('supersession requires an unpublished prepared journal candidate')
+        root = self._repo_root(request)
+        manifest, _ = self._manifest(root)
+        if (manifest.get('repository_mode') != 'journal'
+                or manifest_digest(manifest) != journal['observedManifestDigest']
+                or get_current_branch(root) != journal['integrationBranch']):
+            self._fail('supersession refuses changed manifest or journal branch')
+        parent = journal['operationParentHead']
+        candidate = journal['candidateProductCommitSha']
+        objects = journal['productPathObjects']
+        if set(objects) != {item.path for item in request.paths}:
+            self._fail('supersession candidate does not cover the original exact paths')
+        self._verify_candidate_object(root, candidate, journal['candidateProductTreeSha'], parent, objects)
+        self._verify_worktree_objects(root, objects)
+        for item in request.paths:
+            if objects[item.path]['sha256'] != item.after_sha256:
+                self._fail('supersession candidate differs from original intent')
+        if git(root, 'for-each-ref', '--contains', candidate, '--format=%(refname)').stdout.strip():
+            self._fail('supersession refuses a candidate reachable from an existing ref')
+        head = ref_tip(root, 'HEAD')
+        if head == parent or git(root, 'merge-base', '--is-ancestor', parent, head, check=False).returncode:
+            self._fail('supersession requires descendant HEAD advancement')
+        protected = {item.path for item in request.paths}
+        for commit in rev_list(root, f'{parent}..{head}'):
+            changed = set(git(root, 'diff-tree', '--root', '-m', '--no-renames',
+                              '--no-commit-id', '--name-only', '-r', '-z', commit).stdout.split('\0'))
+            if changed & protected:
+                self._fail('supersession refuses intervening changes to operation paths')
+        def policy_at(revision):
+            raw = git(root, 'show', f'{revision}:.agentwheel/config.json', check=False)
+            return json.loads(raw.stdout).get('mutationPolicy') if raw.returncode == 0 else None
+        if policy_at(request.expected_head) != policy_at(head):
+            self._fail('supersession refuses changed mutation/provider policy')
+        successor = module.parse_request({**request.intent_json(), 'action': 'preflight',
+            'operationId': successor_id, 'expectedHead': head,
+            'expectedManifestDigest': manifest_digest(manifest), 'reason': reason})
+        if self.load_journal(successor) is not None:
+            self._fail('supersession successor already has a provider journal')
+        for item in request.paths:
+            if self._tree_entry(root, parent, item.path) != self._tree_entry(root, head, item.path):
+                self._fail('supersession original before-object changed')
+        self.preflight(successor)
+        index = self._index_observation(root)
+        plan = {'schemaVersion': 1, 'kind': 'preparedJournalSupersessionPlan',
+            'originalOperationId': request.operation_id, 'originalIntentDigest': request.plan_digest,
+            'originalJournalDigest': hashlib.sha256(json.dumps(journal, sort_keys=True,
+                separators=(',', ':')).encode()).hexdigest(),
+            'originalReceiptDigest': receipt_digest, 'originalCandidate': candidate,
+            'originalParent': parent, 'successorRequest': successor.intent_json(),
+            'currentHead': head, 'branch': get_current_branch(root),
+            'manifestDigest': manifest_digest(manifest),
+            'configSha256': self._file_sha256(root, '.agentwheel/config.json'),
+            'indexSha256': index.sha256, 'indexSemantic': index.semantic, 'pathObjects': objects,
+            'dirtyBaseline': self._dirty_snapshot(root, self._dirty_paths(root)),
+            'refsDigest': hashlib.sha256(git(root, 'for-each-ref',
+                '--format=%(refname) %(objectname) %(symref)').stdout.encode()).hexdigest()}
+        return {**plan, 'planDigest': hashlib.sha256(json.dumps(plan,
+            sort_keys=True, separators=(',', ':')).encode()).hexdigest()}
+
     def _head_policy(self, repo_root, request, head):
         config_path = '.agentwheel/config.json'
         # Read policy from the operation's trusted starting revision. A dirty

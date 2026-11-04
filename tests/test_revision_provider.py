@@ -7233,6 +7233,85 @@ class JournalRevisionProviderTest(unittest.TestCase):
         self.call(request, 'preflight')
         return request
 
+    def prepare_stale_candidate(self):
+        request = self.prepare()
+        def interrupt(phase):
+            if phase == 'product_objects_prepared':
+                raise RuntimeError('synthetic prepared interruption')
+        with mock.patch.object(self.backend, 'checkpoint', side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, 'prepared interruption'):
+                self.call(request, 'finalize')
+        journal_path = self.fixture.provider_journal_root() / (request['operationId'] + '.json')
+        original = journal_path.read_bytes()
+        candidate = json.loads(original)['candidateProductCommitSha']
+        config = self.root / '.agentwheel/config.json'
+        config.parent.mkdir(exist_ok=True)
+        config.write_text(json.dumps({'packages': [{'name': 'synthetic-new-pin'}]}))
+        self.fixture.git('add', '.agentwheel/config.json')
+        self.fixture.git('commit', '-qm', 'Independent configuration update')
+        (self.root / 'unrelated.txt').write_text('another writer\n')
+        return request, journal_path, original, candidate
+
+    def test_stale_prepared_parent_never_implicitly_reparents_or_releases(self):
+        request, journal_path, original, candidate = self.prepare_stale_candidate()
+        head = self.fixture.git('rev-parse', 'HEAD')
+        index = self.fixture.git('write-tree')
+        for action in ('preflight', 'recover', 'release'):
+            with self.subTest(action=action):
+                with self.assertRaisesRegex(protocol.RevisionProviderError,
+                                            'HEAD changed after commit preparation'):
+                    self.call(request, action)
+                self.assertEqual(journal_path.read_bytes(), original)
+                self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), head)
+                self.assertEqual(self.fixture.git('write-tree'), index)
+                self.assertEqual((self.root / 'feature.txt').read_text(), 'feature\n')
+                self.assertEqual((self.root / 'unrelated.txt').read_text(), 'another writer\n')
+                self.assertEqual(self.fixture.git('rev-parse', candidate + '^'), request['expectedHead'])
+
+    def test_prepared_supersession_preview_is_read_only_and_binds_fresh_intent(self):
+        request, journal_path, original, candidate = self.prepare_stale_candidate()
+        parsed = protocol.parse_request(request)
+        head = self.fixture.git('rev-parse', 'HEAD')
+        index = self.fixture.git('write-tree')
+        plan = self.backend.plan_prepared_supersession(parsed, 'successor', 'a' * 64, 'Reviewed recovery')
+        self.assertEqual(plan['originalCandidate'], candidate)
+        self.assertEqual(plan['originalReceiptDigest'], 'a' * 64)
+        self.assertEqual(plan['successorRequest']['expectedHead'], head)
+        self.assertEqual(plan['successorRequest']['paths'], request['paths'])
+        self.assertEqual(journal_path.read_bytes(), original)
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.fixture.git('write-tree'), index)
+        self.assertFalse((journal_path.parent / 'successor.json').exists())
+        (self.root / 'unrelated.txt').write_text('changed by its writer\n')
+        changed = self.backend.plan_prepared_supersession(parsed, 'successor', 'a' * 64, 'Reviewed recovery')
+        self.assertNotEqual(plan['planDigest'], changed['planDigest'])
+
+    def test_prepared_supersession_refuses_payload_or_mode_drift(self):
+        request, _, _, _ = self.prepare_stale_candidate()
+        parsed = protocol.parse_request(request)
+        target = self.root / 'feature.txt'
+        for content, mode in [('different\n', 0o644), ('feature\n', 0o755)]:
+            with self.subTest(content=content, mode=mode):
+                target.write_text(content)
+                target.chmod(mode)
+                with self.assertRaisesRegex(protocol.RevisionProviderError, 'bytes or mode changed'):
+                    self.backend.plan_prepared_supersession(parsed, 'successor', 'a' * 64, 'Reviewed recovery')
+
+    def test_prepared_supersession_refuses_published_candidate(self):
+        request, _, _, candidate = self.prepare_stale_candidate()
+        self.fixture.git('branch', 'published-candidate', candidate)
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'reachable'):
+            self.backend.plan_prepared_supersession(protocol.parse_request(request), 'successor', 'a' * 64, 'Reviewed recovery')
+
+    def test_prepared_supersession_refuses_policy_widening(self):
+        request, _, _, _ = self.prepare_stale_candidate()
+        config = self.root / '.agentwheel/config.json'
+        config.write_text(json.dumps({'mutationPolicy': {'reason': 'optional'}}))
+        self.fixture.git('add', '.agentwheel/config.json')
+        self.fixture.git('commit', '-qm', 'Change mutation policy')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, 'changed mutation/provider policy'):
+            self.backend.plan_prepared_supersession(protocol.parse_request(request), 'successor', 'a' * 64, 'Reviewed recovery')
+
     def test_cli_route_ignores_unrelated_dirty_and_remote_publication(self):
         (self.root / 'unrelated.txt').write_text('other session\n')
         request = self.fixture.request('check')
