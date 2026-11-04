@@ -1,0 +1,11 @@
+{
+  "changed_refs": [],
+  "claimed_at": "2026-11-04T07:26:01+00:00",
+  "closed": true,
+  "coordination_id": "default",
+  "operation_token": "c18f37bf-813e-4810-b2d4-57f3d43e3c32",
+  "publication_scope": "close:interrupted-replay-recovery",
+  "reason": "archived",
+  "source_ref": "refs/heads/pr/interrupted-replay-recovery",
+  "syncwheel_version": "0.46.18"
+}
