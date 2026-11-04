@@ -7246,7 +7246,9 @@ class JournalRevisionProviderTest(unittest.TestCase):
         candidate = json.loads(original)['candidateProductCommitSha']
         config = self.root / '.agentwheel/config.json'
         config.parent.mkdir(exist_ok=True)
-        config.write_text(json.dumps({'packages': [{'name': 'synthetic-new-pin'}]}))
+        value = json.loads(config.read_text()) if config.exists() else {}
+        value['packages'] = [{'name': 'synthetic-new-pin'}]
+        config.write_text(json.dumps(value))
         self.fixture.git('add', '.agentwheel/config.json')
         self.fixture.git('commit', '-qm', 'Independent configuration update')
         (self.root / 'unrelated.txt').write_text('another writer\n')
@@ -7447,6 +7449,49 @@ class JournalRevisionProviderTest(unittest.TestCase):
         successor = json.loads((path.parent / 'successor.json').read_text())
         self.assertEqual(successor['request']['expectedHead'], head)
         self.assertEqual(successor['supersedes']['operationId'], request['operationId'])
+
+    def test_prepared_supersession_does_not_adopt_racing_observations(self):
+        for checkpoint in ('supersession_before_final_preflight', 'supersession_before_successor_write'):
+            for drift in ('config', 'unrelated', 'path-scoped-head'):
+                with self.subTest(checkpoint=checkpoint, drift=drift):
+                    case = JournalRevisionProviderTest()
+                    case.setUp()
+                    try:
+                        config = case.root / '.agentwheel/config.json'
+                        if drift == 'path-scoped-head':
+                            config.parent.mkdir(exist_ok=True)
+                            config.write_text(json.dumps({'mutationPolicy': {'revisioning': {
+                                'provider': {'headLease': 'path-scoped'}}}}))
+                            case.fixture.git('add', '.agentwheel/config.json')
+                            case.fixture.git('commit', '-qm', 'Configure path-scoped lease')
+                        request, path, original, _ = case.prepare_stale_candidate()
+                        parsed = protocol.parse_request(request)
+                        plan = case.backend.prepare_supersession(parsed, 'successor', 'a' * 64, 'Reviewed recovery')
+                        fired = False
+                        def race(phase):
+                            nonlocal fired
+                            if phase != checkpoint or fired:
+                                return
+                            fired = True
+                            if drift == 'config':
+                                config.write_text(json.dumps({'packages': [{'name': 'unreviewed-pin'}]}))
+                            elif drift == 'unrelated':
+                                (case.root / 'unrelated.txt').write_text('concurrent writer\n')
+                            else:
+                                (case.root / 'other.txt').write_text('concurrent descendant\n')
+                                case.fixture.git('add', 'other.txt')
+                                case.fixture.git('commit', '-qm', 'Concurrent disjoint parent')
+                        with case.backend.operation_lock(parsed), mock.patch.object(case.backend, 'checkpoint', side_effect=race):
+                            with self.assertRaisesRegex(protocol.RevisionProviderError, 'supersession final'):
+                                case.backend.prepare_supersession(parsed, 'successor', 'a' * 64,
+                                    'Reviewed recovery', apply=True, plan_digest=plan['planDigest'])
+                        self.assertTrue(fired)
+                        self.assertFalse((path.parent / 'successor.json').exists())
+                        preserved = json.loads(path.read_text())
+                        preserved.pop('supersession', None)
+                        self.assertEqual(preserved, json.loads(original))
+                    finally:
+                        case.doCleanups()
 
     def test_cli_route_ignores_unrelated_dirty_and_remote_publication(self):
         (self.root / 'unrelated.txt').write_text('other session\n')

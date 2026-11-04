@@ -34414,12 +34414,28 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
         if not apply:
             return plan
         self._prepared_supersession_audit(request, witness, complete=None)
+        self.checkpoint('supersession_before_final_preflight')
         observation = self.preflight(successor)
+        if (observation['operationParentHead'] != plan['currentHead']
+                or observation['baselineIndexSha256'] != plan['indexSha256']
+                or observation['baselineIndexSemantic'] != plan['indexSemantic']
+                or observation['observedManifestDigest'] != plan['manifestDigest']
+                or observation['integrationBranch'] != plan['branch']):
+            self._fail('supersession final preparation differs from reviewed observation')
+        original = {key: value for key, value in journal.items() if key != 'supersession'}
+        def require_frozen_preparation():
+            fresh = self.plan_prepared_supersession(request, successor_id,
+                receipt_digest, reason, _original_journal=original)
+            if fresh != plan:
+                self._fail('supersession final leases differ from reviewed plan')
+        require_frozen_preparation()
         if not journal.get('supersession'):
             journal['supersession'] = witness
             self.save_journal(request, journal)
             self.checkpoint('supersession_intent_recorded')
         self._prepared_supersession_audit(request, witness, complete=True)
+        self.checkpoint('supersession_before_successor_write')
+        require_frozen_preparation()
         prepared = self.provider._new_journal(successor, observation)
         prepared['supersedes'] = witness['link']
         self.save_journal(successor, prepared)
