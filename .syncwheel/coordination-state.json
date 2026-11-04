@@ -1,10 +1,10 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "a89492c33dcad2a1c0e6ed7fef6412c9126bcc03",
-    "refs/heads/pr/ephemeral-control-replay": "e6a1bc747b3f0dfc01c243dedbcbb9bcaddca313"
+    "refs/heads/main-integration": "8cabf10128cd79ad9a22d5e54eb23d0539686e39",
+    "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480"
   },
   "claims": {
-    "refs/heads/main-integration": "ce07b78ab63e22c83632c22693d95630c7912d10",
+    "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
     "refs/heads/pr/balance-test-shards": "192fcc858752b58102f2351cbe203110fdc290f9",
     "refs/heads/pr/checks-none-policy": "0f821bb037646461fb46ca29675676aa4dbceb70",
@@ -14,7 +14,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
-    "refs/heads/pr/ephemeral-control-replay": "598b7cd6d0cce6efa5834f6a0fe5dbe73cf09eee",
+    "refs/heads/pr/ephemeral-control-replay": "990d45f70e473bd1b08787ad329c969d5554927c",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
@@ -103,11 +103,11 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T07:32:17+00:00",
+  "created_at": "2026-11-04T07:54:09+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
-    "refs/heads/main-integration": "a89492c33dcad2a1c0e6ed7fef6412c9126bcc03",
+    "refs/heads/main-integration": "8cabf10128cd79ad9a22d5e54eb23d0539686e39",
     "refs/heads/pr/abandoned-history-reconciliation": "6bc253124ec511f9b933e2a956c8c520b8bac58b",
     "refs/heads/pr/agentwheel-revision-provider": "04bdaae17296d5715ab8cf3fd9213da69075842b",
     "refs/heads/pr/balance-test-shards": "30aa29af6e85d6fb2ed60364e0dde3c858cd3a78",
@@ -123,7 +123,7 @@
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
-    "refs/heads/pr/ephemeral-control-replay": "e6a1bc747b3f0dfc01c243dedbcbb9bcaddca313",
+    "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480",
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fixture-cli-tests": "45095862a6316f4733bbbc5b4fcb0a01c2406fa3",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
@@ -283,7 +283,10 @@
           "2b9df6178894021bf60bfa588661698936495394",
           "5a6dbc82ce938f3cb80d4d71fdb81fbb06bc39c8",
           "61cb60f74e63aba1d3286ae761a3c3d27f33115c",
-          "e6a1bc747b3f0dfc01c243dedbcbb9bcaddca313"
+          "e6a1bc747b3f0dfc01c243dedbcbb9bcaddca313",
+          "be7facbbdd962d8390610bca7c942481e81c8098",
+          "e332a630c2d22bd3ab22aeac99c67ade3d9fc67d",
+          "64970983fd7fc0eb93a50770d952c14e07ff5480"
         ],
         "id": "ephemeral-control-replay",
         "integration_branch": "main-integration",
@@ -292,11 +295,11 @@
     ],
     "version": 2
   },
-  "manifest_digest": "d859ec13ca0fdfabc42d19951444a235986a16d3ba608e6feba5e296ced32c09",
-  "operation_token": "1900162d-da39-42c2-ba48-a3aea7c7bad9",
-  "parent_state": "a32a9189ae5e8ef63ea7dfa67ede990c2c2b4ef8",
+  "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
+  "operation_token": "b7da5a9b-c1a1-47e6-9c86-ffad2273080d",
+  "parent_state": "4ae47e56aca0d0f5323d512866f8903637a08e35",
   "projection_status": "partial",
-  "publication_id": "d5dd9ea9-9639-45f6-9b08-3e386f677020",
+  "publication_id": "e70a1f8e-8180-4a30-a07b-07d4d98764e4",
   "publication_scope": "stack:ephemeral-control-replay",
   "schema_version": 2,
   "syncwheel_version": "0.46.19",
