@@ -32,8 +32,7 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "ephemeral-control-replay",
-      "interrupted-replay-recovery"
+      "ephemeral-control-replay"
     ],
     "strategy": "cherry-pick"
   },
@@ -69,26 +68,6 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
-    },
-    {
-      "id": "interrupted-replay-recovery",
-      "branch": "pr/interrupted-replay-recovery",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "868be23d7ac55ef822cf5dd0e3ab9d0ac23a973b",
-        "d4ae7e1ab012c499496af04eb309d273a117c20a",
-        "2f4d0c7af6e39b4a6ac6fd2baebd3ff85b02ad64"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Recover retained interrupted integration replay without rewriting checkout files"
-      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
