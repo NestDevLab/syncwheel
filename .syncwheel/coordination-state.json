@@ -1,8 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/main-integration": "8cabf10128cd79ad9a22d5e54eb23d0539686e39",
-    "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -14,7 +11,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
-    "refs/heads/pr/ephemeral-control-replay": "990d45f70e473bd1b08787ad329c969d5554927c",
+    "refs/heads/pr/ephemeral-control-replay": "d7de8ccf7413c689c6d51c583e14b2861135cf91",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
@@ -103,7 +100,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-04T07:54:09+00:00",
+  "created_at": "2026-11-04T08:07:55+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -255,9 +252,7 @@
         "role": "canonical"
       },
       "branch": "main-integration",
-      "stacks": [
-        "ephemeral-control-replay"
-      ],
+      "stacks": [],
       "strategy": "cherry-pick"
     },
     "landing": {
@@ -265,42 +260,15 @@
       "mode": "disabled",
       "strategy": "merge"
     },
-    "stacks": [
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/ephemeral-control-replay",
-        "commits": [
-          "255415d8a292802d4bdc41889c3f843418bcab91",
-          "c59920ed99f2a02b3f2d3f353b711569fd18f3f2",
-          "e299d93e40b4c5e0ff26181809c3e16686deee16",
-          "50252f3fa006a4a250b42c6d581fce21f435e93c",
-          "ca7a18582b8aa689f3c7fed2f0850d23e4a2c62e",
-          "ae48fa40b0b79c38505ff7de5c1a8b8eacd82b3e",
-          "2b9df6178894021bf60bfa588661698936495394",
-          "5a6dbc82ce938f3cb80d4d71fdb81fbb06bc39c8",
-          "61cb60f74e63aba1d3286ae761a3c3d27f33115c",
-          "e6a1bc747b3f0dfc01c243dedbcbb9bcaddca313",
-          "be7facbbdd962d8390610bca7c942481e81c8098",
-          "e332a630c2d22bd3ab22aeac99c67ade3d9fc67d",
-          "64970983fd7fc0eb93a50770d952c14e07ff5480"
-        ],
-        "id": "ephemeral-control-replay",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      }
-    ],
+    "stacks": [],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "b7da5a9b-c1a1-47e6-9c86-ffad2273080d",
-  "parent_state": "4ae47e56aca0d0f5323d512866f8903637a08e35",
+  "operation_token": "5cb57787-7532-44f7-98c8-f48365a07246",
+  "parent_state": "5a8facc8584711184a8ea2ec0e24c0cecc16aa24",
   "projection_status": "partial",
-  "publication_id": "e70a1f8e-8180-4a30-a07b-07d4d98764e4",
-  "publication_scope": "stack:ephemeral-control-replay",
+  "publication_id": "a8cc9dce-004d-498a-a21b-9755be2eca79",
+  "publication_scope": "close:ephemeral-control-replay",
   "schema_version": 2,
   "syncwheel_version": "0.46.19",
   "tombstones": [
@@ -1275,6 +1243,14 @@
       "ref": "refs/heads/pr/interrupted-replay-recovery",
       "remote_tip": null,
       "stack": "interrupted-replay-recovery"
+    },
+    {
+      "branch": "pr/ephemeral-control-replay",
+      "closed_at": "2026-11-04T08:07:52+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/ephemeral-control-replay",
+      "remote_tip": null,
+      "stack": "ephemeral-control-replay"
     }
   ]
 }
