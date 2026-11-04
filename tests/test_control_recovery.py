@@ -500,6 +500,36 @@ class ControlReplayTest(unittest.TestCase):
                 self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
                 self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
 
+    def alternate_manifest(self):
+        path = self.f.tmp / 'independent-control.json'
+        path.write_text(self.module.canonical_manifest_file_text(self.expected))
+        return path
+
+    def test_alternate_manifest_cannot_hide_pending_recovery_from_direct_restore(self):
+        plan = self.interrupt_recovery('intent_saved')
+        alternate = self.alternate_manifest()
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        with self.module.manifest_write_transaction(self.f.repo, alternate):
+            with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
+                self.module.restore_control_manifest_after_integration_rebuild(
+                    self.f.repo, alternate, self.expected, plan['controlReplayTip'], 'recovery')
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, alternate), [])
+
+    def test_alternate_manifest_cli_cannot_replay_around_canonical_pending_recovery(self):
+        self.interrupt_recovery('checkout_aligned')
+        alternate = self.alternate_manifest()
+        before = self.module.control_recovery_observation(self.f.repo)
+        ledger = self.module.load_control_manifest_events(self.f.repo, self.path)
+        result = self.f.run_cli('int', 'rebuild', '--manifest', str(alternate),
+                               '--replay-mode', 'ephemeral', '--reason', 'independent replay', expected=2)
+        self.assertIn('quarantined', result.stderr)
+        self.assertEqual(self.module.control_recovery_observation(self.f.repo), before)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, self.path), ledger)
+        self.assertEqual(self.module.load_control_manifest_events(self.f.repo, alternate), [])
+
     def read_state_json(self, repo, commit, *_args):
         # Real Git object reads isolate provenance from the unchanged schema parser.
         return json.loads(self.f.git('show', f'{commit}:.syncwheel/coordination-state.json'))

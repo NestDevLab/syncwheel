@@ -220,6 +220,8 @@ control object uses a distinct deterministic identity so older consumers reject
 it rather than applying their automatic recovery rules.
 The persistence entrypoint checks pending explicit intents before selecting any
 object identity, parent, no-op or local-only path; caller defaults cannot hide one.
+Selecting an alternate or personal manifest also cannot hide a canonical pending
+explicit recovery: both ledger locations are checked before persistence or replay.
 
 Obtain a fresh `manifest recover-control --from-backup BACKUP` plan to continue.
 It verifies the original pending object/parent and the same backup proof, and
