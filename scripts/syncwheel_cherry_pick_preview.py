@@ -238,6 +238,46 @@ def _append_resolution(before, source_after, current, witness):
     return before[0], after
 
 
+def decode_replay_manifest(manifest_bytes):
+    """Public reader facade; retain every field while validating recipe shape."""
+    try:
+        manifest = json.loads(manifest_bytes, object_pairs_hook=_unique)
+        stacks = manifest["stacks"]
+        if manifest["integration"]["strategy"] != "cherry-pick":
+            raise PreviewError("unsupported integration strategy")
+        if set(manifest["integration"]) - {"base", "branch", "stacks", "strategy"}:
+            raise PreviewError("unsupported integration options")
+        ids = [s["id"] for s in stacks]
+        if not ids or len(set(ids)) != len(ids) or manifest["integration"]["stacks"] != ids:
+            raise PreviewError("omitted, reordered or duplicate stack accounting")
+        for stack in stacks:
+            allowed = {"id", "branch", "base", "target_remote", "target_branch",
+                       "integration_branch", "commits", "state", "publication", "meta"}
+            if set(stack) - allowed or stack.get("state", "published") != "published":
+                raise PreviewError("unsupported alternate stack recipe")
+        return manifest
+    except PreviewError:
+        raise
+    except (KeyError, TypeError, ValueError, UnicodeError, AttributeError) as exc:
+        raise PreviewError("malformed replay manifest") from exc
+
+
+def validate_object_closure(objects, object_format, commits):
+    """Public reader facade for the existing grammar/tree subset, without IO."""
+    store = _Objects(objects, object_format)
+    for oid in commits:
+        store.files(store.commit(oid)[0])
+
+
+def read_commit_file(objects, object_format, commit, path):
+    """Read a regular control file from already verified in-memory objects."""
+    store = _Objects(objects, object_format)
+    value = store.files(store.commit(commit)[0]).get(path)
+    if value is None or value[0] != "100644":
+        raise PreviewError("missing or unsupported regular commit file")
+    return value[1]
+
+
 def preview(frozen, observed, objects, witnesses):
     """Compute a deterministic report without any filesystem or subprocess API.
 
@@ -255,16 +295,8 @@ def preview(frozen, observed, objects, witnesses):
         manifest_bytes = _decode(frozen["backupManifest"])
         if hashlib.sha256(manifest_bytes).hexdigest() != frozen["backupManifestSha256"]:
             raise PreviewError("backup manifest digest mismatch")
-        manifest = json.loads(manifest_bytes, object_pairs_hook=_unique)
+        manifest = decode_replay_manifest(manifest_bytes)
         stacks = manifest["stacks"]
-        order = manifest["integration"]["stacks"]
-        if manifest["integration"]["strategy"] != "cherry-pick":
-            raise PreviewError("unsupported integration strategy")
-        if set(manifest["integration"]) - {"base", "branch", "stacks", "strategy"}:
-            raise PreviewError("unsupported integration options")
-        ids = [s["id"] for s in stacks]
-        if not ids or len(set(ids)) != len(ids) or order != ids:
-            raise PreviewError("omitted, reordered or duplicate stack accounting")
         pins = frozen["sourcePins"]
         if len({s["branch"] for s in stacks}) != len(stacks) or set(pins) != {s["branch"] for s in stacks}:
             raise PreviewError("incomplete source pin accounting")
@@ -277,10 +309,6 @@ def preview(frozen, observed, objects, witnesses):
         initial = store.files(store.commit(frozen["base"])[0])
         result, accounting, used = dict(initial), [], set()
         for stack in stacks:
-            allowed = {"id", "branch", "base", "target_remote", "target_branch",
-                       "integration_branch", "commits", "state", "publication", "meta"}
-            if set(stack) - allowed or stack.get("state", "published") != "published":
-                raise PreviewError("unsupported alternate stack recipe")
             commits = stack["commits"]
             if not commits or len(set(commits)) != len(commits) or pins[stack["branch"]] != commits[-1]:
                 raise PreviewError("empty/duplicate commit list or source pin drift")
