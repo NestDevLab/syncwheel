@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -64,13 +65,85 @@ class Repository:
         self.directory.cleanup()
 
 
+def transport_fixture(repo, helper_root):
+    """Deliberate local setup; helper only writes a marker and exits, no network."""
+    helper = helper_root / "git-remote-preview-probe"
+    marker = helper_root / "helper-started"
+    helper.write_text("#!" + sys.executable + "\nfrom pathlib import Path\n" +
+                      "Path(" + repr(str(marker)) + ").write_text('started')\nraise SystemExit(1)\n")
+    helper.chmod(0o755)
+    repo.git("config", "core.repositoryformatversion", "1")
+    repo.git("config", "extensions.partialClone", "origin")
+    repo.git("config", "remote.origin.promisor", "true")
+    repo.git("config", "remote.origin.url", "preview-probe::generic")
+    repo.git("config", "protocol.preview-probe.allow", "always")
+    oid = next(oid for oid, item in repo.fixture.objects.items()
+               if item["type"] == "blob" and base64.b64decode(item["data"]) == b"base\n")
+    (repo.root / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
+    return oid, marker
+
+
+def qualify_local_backend():
+    """Real process evidence, generated outside the reader and target repository.
+
+    A successful test probe is not independent production approval. No receipt is
+    shipped as a default allowlist; callers own provenance and approval.
+    """
+    executable = str(Path(shutil.which("git")).resolve())
+    observer = shutil.which("strace")
+    if observer is None:
+        raise AssertionError("direct process observer unavailable; backend unqualified")
+    repo = Repository()
+    try:
+        with tempfile.TemporaryDirectory(prefix="reader-probe-observer-") as directory:
+            root = Path(directory)
+            oid, marker = transport_fixture(repo, root)
+            traces = []
+            digest = hashlib.sha256(Path(executable).read_bytes()).hexdigest()
+            for disabled in [False, True]:
+                trace = root / ("disabled.trace" if disabled else "control.trace")
+                environment = dict(os.environ, GIT_NO_LAZY_FETCH=str(int(disabled)),
+                                   GIT_OPTIONAL_LOCKS="0", GIT_NO_REPLACE_OBJECTS="1",
+                                   GIT_TRACE2="0", GIT_TRACE2_EVENT="0", GIT_TRACE2_PERF="0",
+                                   GIT_TERMINAL_PROMPT="0", LC_ALL="C")
+                environment["PATH"] = str(root) + os.pathsep + environment["PATH"]
+                if disabled:
+                    marker.unlink()
+                    before = repo.snapshot()
+                result = subprocess.run([observer, "-f", "-qq", "-s", "8192", "-e",
+                                         "trace=execve,connect", "-o", str(trace), executable,
+                                         "--no-pager", "-C", str(repo.root), "cat-file", "--batch-check"],
+                                        input=oid.encode() + b"\n", capture_output=True,
+                                        env=environment, timeout=20)
+                if result.returncode != 0:
+                    raise AssertionError("process probe failed: " + result.stderr.decode())
+                traces.append(base64.b64encode(trace.read_bytes()).decode("ascii"))
+                if not disabled and not marker.exists():
+                    raise AssertionError("positive control did not start local transport helper")
+                if disabled and (marker.exists() or before != repo.snapshot()):
+                    raise AssertionError("flag-on backend attempted transport or changed repository")
+            receipt = {"schema": "syncwheel.git-backend-probe.v1", "executableSha256": digest,
+                       "controlTrace": traces[0], "disabledTrace": traces[1],
+                       "controlHelperStarted": True, "disabledHelperStarted": False,
+                       "repositoryUnchanged": True}
+            reader._qualified_backend(receipt)
+            return receipt
+    finally:
+        repo.close()
+
+
 class ReaderTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.qualification = qualify_local_backend()
+
     def setUp(self):
         self.repo = Repository()
         self.addCleanup(self.repo.close)
 
     def read(self, **kwargs):
-        return reader.read_snapshot(self.repo.root, "refs/heads/backup", **kwargs)
+        return reader.read_snapshot(self.repo.root, "refs/heads/backup",
+                                    qualification=self.qualification, **kwargs)
 
     def test_native_reader_to_pure_preserves_all_29_ordered_stacks(self):
         self.repo.close()
@@ -131,7 +204,7 @@ class ReaderTests(unittest.TestCase):
             self.read(expected=frozen)
 
     def test_missing_objects_and_acquisition_bounds_reject(self):
-        for kwargs in [{"max_objects": 1}, {"max_bytes": 1}]:
+        for kwargs in [{"max_objects": 1}, {"max_bytes": 1}, {"max_tree_entries": 1}]:
             with self.subTest(kwargs=kwargs), self.assertRaises(reader.ReaderError):
                 self.read(**kwargs)
         oid = next(oid for oid, item in self.repo.fixture.objects.items()
@@ -199,34 +272,55 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(before, self.repo.snapshot())
         self.assertTrue(all(not path.exists() for path in paths))
 
-    def test_lazy_fetch_stays_disabled_if_fixture_view_changes_after_first_sample(self):
+    def test_unqualified_or_drifted_backend_rejects_before_any_git_command(self):
+        for qualification in [None, {}, dict(self.qualification, executableSha256="0" * 64),
+                              dict(self.qualification, disabledTrace=self.qualification["controlTrace"]),
+                              dict(self.qualification, controlTrace=self.qualification["disabledTrace"])]:
+            with self.subTest(qualification=qualification is None), \
+                    mock.patch("subprocess.run", side_effect=AssertionError("Git must not start")), \
+                    self.assertRaises(reader.ReaderError):
+                reader.read_snapshot(self.repo.root, "backup", qualification=qualification)
+
+    def test_lazy_fetch_race_observes_zero_fetch_helper_or_connection_attempts(self):
         original = reader._Reader.snapshot
-        injected = []
+        run = subprocess.run
+        injected, traces = [], []
+        with tempfile.TemporaryDirectory(prefix="reader-race-observer-") as directory:
+            observer_root = Path(directory)
 
-        def changing(instance):
-            result = original(instance)
-            if not injected:
-                # External fixture-writer change is intentionally outside the supported
-                # cooperative read scope. Probe the no-lazy-fetch defense independently.
-                self.repo.git("config", "core.repositoryformatversion", "1")
-                self.repo.git("config", "extensions.partialClone", "origin")
-                self.repo.git("config", "remote.origin.promisor", "true")
-                self.repo.git("config", "remote.origin.url", str(self.repo.root / "absent-remote"))
-                oid = next(oid for oid, item in self.repo.fixture.objects.items()
-                           if item["type"] == "blob" and base64.b64decode(item["data"]) == b"base\n")
-                (self.repo.root / ".git" / "objects" / oid[:2] / oid[2:]).unlink()
-                injected.append(self.repo.snapshot())
-            return result
+            def changing(instance):
+                result = original(instance)
+                if not injected:
+                    transport_fixture(self.repo, observer_root)
+                    injected.append(self.repo.snapshot())
+                return result
 
-        with mock.patch.object(reader._Reader, "snapshot", changing), self.assertRaises(reader.ReaderError):
-            self.read()
-        self.assertEqual(injected[0], self.repo.snapshot())
+            def observed(command, **kwargs):
+                # Instrument ONLY reader commands; fixture setup mutations use
+                # literal git without --no-pager and remain outside this evidence.
+                if len(command) > 1 and command[1] == "--no-pager":
+                    trace = observer_root / ("read-" + str(len(traces)) + ".trace")
+                    traces.append(trace)
+                    command = [shutil.which("strace"), "-f", "-qq", "-s", "8192", "-e",
+                               "trace=execve,connect", "-o", str(trace), *command]
+                return run(command, **kwargs)
+
+            with mock.patch.object(reader._Reader, "snapshot", changing), \
+                    mock.patch("subprocess.run", observed), self.assertRaises(reader.ReaderError):
+                self.read()
+            self.assertEqual(injected[0], self.repo.snapshot())
+            self.assertTrue(traces)
+            combined = "\n".join(path.read_text() for path in traces)
+            self.assertIn('"--batch-check"', combined)
+            for token in ['"fetch"', 'git-remote-', 'connect(']:
+                self.assertNotIn(token, combined)
+            self.assertFalse((observer_root / "helper-started").exists())
 
     def test_tags_ambiguous_names_and_selected_symbolic_refs_reject(self):
         self.repo.git("update-ref", "refs/tags/backup", self.repo.fixture.frozen["backup"])
         for selector in ["backup", "refs/tags/backup", "HEAD~1"]:
             with self.subTest(selector=selector), self.assertRaises(reader.ReaderError):
-                reader.read_snapshot(self.repo.root, selector)
+                reader.read_snapshot(self.repo.root, selector, qualification=self.qualification)
         self.repo.git("symbolic-ref", "refs/heads/source-0", "refs/heads/base")
         with self.assertRaises(reader.ReaderError):
             self.read()

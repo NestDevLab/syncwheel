@@ -4,10 +4,12 @@ Supports an ordinary local, non-bare primary worktree with local complete object
 Linked worktrees, shallow/grafted/replaced/alternate/promisor views, custom Git
 environment routing/tracing and unknown repository extensions are rejected.
 Only builtin config/ref/object read commands run, with optional locks and Trace2
-output disabled, no pager, no replacements and no lazy fetch. Git >= 2.43 with
-GIT_NO_LAZY_FETCH support is required; the defensive promisor-race test qualifies
-the local backend, not all future Git implementations. No index/worktree cleanliness claim
-is made, and no status/index-refresh, fetch, cleanup or recovery command exists.
+output disabled, no pager, no replacements and no lazy fetch. There is NO version
+allowlist. A caller-supplied backend qualification, bound to executable bytes and
+containing direct process-observer evidence, is mandatory before Git starts.
+The reader checks evidence consistency, NOT its authenticity: obtaining and
+independently approving that evidence is a trusted-caller responsibility. No
+index/worktree cleanliness claim is made, and no status/index-refresh, fetch, cleanup or recovery command exists.
 
 Two equal observations detect sampled drift; they do NOT provide an atomic
 snapshot, exclude ABA, or protect against arbitrary concurrent/adversarial writers.
@@ -22,6 +24,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 
 from syncwheel_cherry_pick_preview import (
@@ -42,18 +45,56 @@ def _digest(value):
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
+def _qualified_backend(qualification):
+    """Validate a trusted caller's local probe evidence; never run a probe here.
+
+    Evidence is not signed/authenticated. This is not authorization to run an
+    arbitrary executable: the caller must trust the executable and observer.
+    Control must reach a local remote helper; flag-on must attempt no fetch,
+    helper or connection. The evidence covers that probe, not arbitrary Git code.
+    """
+    required = {"schema", "executableSha256", "controlTrace", "disabledTrace",
+                "controlHelperStarted", "disabledHelperStarted", "repositoryUnchanged"}
+    if not isinstance(qualification, dict) or set(qualification) != required:
+        raise ReaderError("explicit backend qualification required; no version qualifies automatically")
+    if (qualification["schema"] != "syncwheel.git-backend-probe.v1" or
+            qualification["controlHelperStarted"] is not True or
+            qualification["disabledHelperStarted"] is not False or
+            qualification["repositoryUnchanged"] is not True):
+        raise ReaderError("unsupported or unsuccessful backend qualification")
+    executable = Path(shutil.which("git") or "").resolve(strict=True)
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    if qualification["executableSha256"] != digest:
+        raise ReaderError("backend executable qualification drift")
+    control, disabled = (base64.b64decode(qualification[k], validate=True).decode("utf-8")
+                         for k in ["controlTrace", "disabledTrace"])
+    # Probe trace format: strace -f -e trace=execve,connect -s 8192.
+    for trace in [control, disabled]:
+        if ('execve(' + json.dumps(str(executable))) not in trace or '"--batch-check"' not in trace:
+            raise ReaderError("missing direct backend observer evidence")
+    if ('"fetch"' not in control or 'git-remote-preview-probe' not in control or
+            'connect(' in control or any(token in disabled for token in
+                                       ['"fetch"', 'git-remote-', 'connect('])):
+        raise ReaderError("backend probe lacks control or attempted forbidden transport")
+    return executable, digest
+
+
 class _Reader:
-    def __init__(self, repository, max_objects, max_bytes):
-        if max_objects < 1 or max_bytes < 1:
+    def __init__(self, repository, max_objects, max_bytes, max_tree_entries, qualification):
+        if max_objects < 1 or max_bytes < 1 or max_tree_entries < 1:
             raise ReaderError("positive acquisition bounds required")
         self.root = Path(repository).resolve(strict=True)
         self.max_objects, self.max_bytes = max_objects, max_bytes
         self.objects, self.raw, self.commits = {}, {}, set()
         self.total = 0
+        self.tree_entries = 0
+        self.max_tree_entries = max_tree_entries
         allowed = {"GIT_PAGER", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_OPTIONAL_LOCKS",
                    "GIT_NO_LAZY_FETCH", "GIT_NO_REPLACE_OBJECTS", "GIT_TERMINAL_PROMPT"}
         if any(key.startswith("GIT_") and key not in allowed for key in os.environ):
             raise ReaderError("unsupported Git environment view or trace output")
+        self.executable, self.executable_digest = _qualified_backend(qualification)
+        self.qualification_digest = _digest(qualification)
         self.environment = dict(os.environ)
         self.environment.update(GIT_OPTIONAL_LOCKS="0", GIT_NO_LAZY_FETCH="1",
                                 GIT_NO_REPLACE_OBJECTS="1", GIT_TERMINAL_PROMPT="0",
@@ -64,7 +105,9 @@ class _Reader:
             raise ReaderError("ordinary non-bare primary worktree required")
 
     def git(self, *args, data=None, allowed=(0,)):
-        result = subprocess.run(["git", "--no-pager", "-C", str(self.root), *args],
+        if hashlib.sha256(self.executable.read_bytes()).hexdigest() != self.executable_digest:
+            raise ReaderError("backend executable changed between observations")
+        result = subprocess.run([str(self.executable), "--no-pager", "-C", str(self.root), *args],
                                 input=data, capture_output=True, env=self.environment,
                                 timeout=20)
         if result.returncode not in allowed or result.stderr:
@@ -84,9 +127,6 @@ class _Reader:
         if any((gitdir / "objects" / "pack").glob("*.promisor")):
             raise ReaderError("promisor object view unsupported")
         version = self.git("--version").decode().strip()
-        match = re.fullmatch(r"git version ([0-9]+)\.([0-9]+)(?:\.[0-9]+)?", version)
-        if match is None or tuple(map(int, match.groups())) < (2, 43):
-            raise ReaderError("unqualified Git backend version")
         actual = Path(self.git("rev-parse", "--absolute-git-dir").decode().strip()).resolve()
         top = Path(self.git("rev-parse", "--show-toplevel").decode().strip()).resolve()
         if actual != gitdir or top != self.root:
@@ -134,7 +174,9 @@ class _Reader:
         for name, path in [("root", self.root), ("git", gitdir), ("objects", gitdir / "objects")]:
             stat = path.stat()
             identity[name] = [stat.st_dev, stat.st_ino]
-        return {"gitVersion": version, "objectFormat": algorithm, "refs": refs,
+        return {"gitVersion": version, "backendSha256": self.executable_digest,
+                "qualificationDigest": self.qualification_digest,
+                "objectFormat": algorithm, "refs": refs,
                 "head": {"oid": head, "symbolic": symbolic},
                 "viewConfig": entries, "identity": identity}
 
@@ -211,6 +253,9 @@ class _Reader:
         width = 20 if algorithm == "sha1" else 32
         cursor = 0
         while cursor < len(data):
+            self.tree_entries += 1
+            if self.tree_entries > self.max_tree_entries:
+                raise ReaderError("tree entry expansion bound exceeded")
             space, zero = data.find(b" ", cursor), data.find(b"\0", cursor)
             if space < cursor or zero < space or zero + 1 + width > len(data):
                 raise ReaderError("malformed tree references")
@@ -240,14 +285,15 @@ class _Reader:
 
 
 def read_snapshot(repository, backup_ref, *, expected=None,
-                  max_objects=100_000, max_bytes=64 * 1024 * 1024):
+                  max_objects=100_000, max_bytes=64 * 1024 * 1024,
+                  max_tree_entries=100_000, qualification=None):
     """Acquire an immutable-object envelope; expected is a prior whole envelope.
 
     No real recovery or atomicity is implied. Bounds limit accepted output, not
     arbitrary hostile subprocess allocation. Native command failures stop the read.
     """
     try:
-        reader = _Reader(repository, max_objects, max_bytes)
+        reader = _Reader(repository, max_objects, max_bytes, max_tree_entries, qualification)
         before = reader.snapshot()
         algorithm = before["objectFormat"]
         backup = reader.resolve(backup_ref, before)
@@ -290,7 +336,10 @@ def read_snapshot(repository, backup_ref, *, expected=None,
                                     "sampleDigest": _digest(before),
                                     "scope": "local immutable objects and sampled refs/views; no atomicity/ABA guarantee",
                                     "workingTreeIndexObserved": False,
-                                    "maxObjects": max_objects, "maxBytes": max_bytes}}
+                                    "maxObjects": max_objects, "maxBytes": max_bytes,
+                                    "maxTreeEntries": max_tree_entries,
+                                    "backendQualificationDigest": reader.qualification_digest,
+                                    "backendSha256": reader.executable_digest}}
         envelope["readDigest"] = _digest(envelope)
         if expected is not None and _canonical(expected) != _canonical(envelope):
             raise ReaderError("expected envelope drift")
