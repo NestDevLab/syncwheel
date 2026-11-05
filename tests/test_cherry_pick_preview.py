@@ -87,6 +87,84 @@ class Fixture:
 
 
 class PurePreviewTests(unittest.TestCase):
+    def test_commit_header_grammar_rejects_hash_valid_unsupported_objects(self):
+        f = Fixture()
+        tree = f.tree({"guide.txt": b"base\n"}).encode()
+        tree_line = b"tree " + tree
+        parent_line = b"parent " + f.frozen["base"].encode()
+        author = b"author Example <example@example.invalid> 1700000000 +0000"
+        committer = b"committer Example <example@example.invalid> 1700000000 +0000"
+        valid = [tree_line, parent_line, author, committer]
+        invalid = {
+            "missing author": [tree_line, parent_line, committer],
+            "missing committer": [tree_line, parent_line, author],
+            "missing both identities": [tree_line, parent_line],
+            "tree is not first": [author, tree_line, parent_line, committer],
+            "identity order": [tree_line, parent_line, committer, author],
+            "late parent": [tree_line, author, parent_line, committer],
+            "duplicate tree": [tree_line, tree_line, parent_line, author, committer],
+            "duplicate author": [tree_line, parent_line, author, author, committer],
+            "duplicate parent": [tree_line, parent_line, parent_line, author, committer],
+            "extension": valid + [b"encoding UTF-8"],
+            "space continuation": valid + [b" continuation"],
+            "tab continuation": valid + [b"\tcontinuation"],
+            "signature continuation": valid + [b"gpgsig signature", b" continued"],
+            "short tree OID": [b"tree abc", parent_line, author, committer],
+            "timezone minute": [tree_line, parent_line, author.replace(b"+0000", b"+0060"), committer],
+            "noncanonical epoch": [tree_line, parent_line, author.replace(b"1700000000", b"01700000000"), committer],
+        }
+        for name, headers in invalid.items():
+            with self.subTest(name=name):
+                oid = f.object("commit", b"\n".join(headers) + b"\n\nmessage\n")
+                with self.assertRaises(module.PreviewError):
+                    module._Objects(f.objects, "sha1").commit(oid)
+        for separator in [b"\r", b"\r\n", b"\v", b"\f", b"\x85", b"\x1c", b"\x00"]:
+            with self.subTest(separator=separator):
+                raw = separator.join(valid[:2]) + b"\n" + b"\n".join(valid[2:]) + b"\n\nmessage\n"
+                oid = f.object("commit", raw)
+                with self.assertRaises(module.PreviewError):
+                    module._Objects(f.objects, "sha1").commit(oid)
+        oid = f.object("commit", b"\n".join(valid) + b"\n\nopaque message\r\v\f\n continuation\n")
+        self.assertEqual(module._Objects(f.objects, "sha1").commit(oid),
+                         (tree.decode(), [f.frozen["base"]]))
+
+    def test_preview_rejects_hash_valid_source_without_author(self):
+        f = Fixture()
+        stack = f.manifest["stacks"][0]
+        original = base64.b64decode(f.objects[stack["commits"][0]]["data"])
+        raw = b"\n".join(line for line in original.split(b"\n") if not line.startswith(b"author "))
+        oid = f.object("commit", raw)
+        stack["commits"] = [oid]
+        manifest = json.dumps(f.manifest).encode()
+        f.frozen.update(sourcePins={s["branch"]: s["commits"][-1] for s in f.manifest["stacks"]},
+                        backupManifest=b64(manifest), backupManifestSha256=hashlib.sha256(manifest).hexdigest(),
+                        backup=f.commit({".syncwheel/manifest.json": manifest}, f.frozen["base"]))
+        with self.assertRaises(module.PreviewError):
+            f.plan()
+
+    def test_representable_trees_round_trip_and_empty_subtrees_reject(self):
+        f = Fixture()
+        for files in [{}, {"guide.txt": b"base\n", "nested/name.txt": b"\x00\xff\n"}]:
+            with self.subTest(files=list(files)):
+                tree = f.tree(files)
+                store = module._Objects(f.objects, "sha1")
+                flattened = store.files(tree)
+                self.assertEqual(store.tree_oid(flattened), tree)
+                self.assertEqual({p: data for p, (_, data) in flattened.items()}, files)
+        empty = f.object("tree", b"")
+        child = f.object("tree", b"40000 empty\0" + bytes.fromhex(empty))
+        mixed = f.object("tree", b"40000 empty\0" + bytes.fromhex(empty)
+                         + b"100644 file.txt\0" + bytes.fromhex(f.object("blob", b"data\n")))
+        nested = f.object("tree", b"40000 nested\0" + bytes.fromhex(child))
+        for tree in [child, mixed, nested]:
+            with self.subTest(tree=tree), self.assertRaises(module.PreviewError):
+                module._Objects(f.objects, "sha1").files(tree)
+        f.frozen["base"] = f.object("commit", b"tree " + child.encode()
+                                   + b"\nauthor Example <example@example.invalid> 1700000000 +0000\n"
+                                   + b"committer Example <example@example.invalid> 1700000000 +0000\n\nfixture\n")
+        with self.assertRaises(module.PreviewError):
+            f.plan()
+
     def test_all_stacks_accounted_and_all_opaque_inputs_bound(self):
         f = Fixture(count=29)
         report = f.plan()

@@ -8,6 +8,9 @@ Supported: all declared stacks selected in their declared order; single-parent
 source commits; canonical regular-file trees with unchanged paths/modes; exact
 preimage replacement. File creation/deletion, renames, symlinks, submodules, empty
 commits, alternate integration recipes and implicit content merges are rejected.
+Empty root trees round-trip; empty directory entries are rejected rather than
+silently flattened. Commit headers use the explicit LF-only grammar in commit();
+extension/continuation headers are outside this subset.
 An overlapping append needs an explicit byte-preserving witness. That result is
 an approved-resolution candidate, NEVER a claim of automatic Git merge parity.
 The reported tree is a replay product, not a recovery authorization or commit.
@@ -16,6 +19,7 @@ The reported tree is a replay product, not a recovery authorization or commit.
 import base64
 import hashlib
 import json
+import re
 from pathlib import PurePosixPath
 
 
@@ -91,20 +95,61 @@ class _Objects:
         return data
 
     def commit(self, oid):
+        """Accept tree, parent*, author, committer, blank line, opaque message.
+
+        Headers use LF only and lowercase full-width OIDs. Extensions and all
+        continuation headers are unsupported. Identities require a nonempty UTF-8
+        name, ASCII email, canonical nonnegative signed-64-bit epoch and HHMM zone
+        with hour <= 23 and minute <= 59. Message bytes are not header syntax.
+        """
         data = self.read(oid, "commit")
         if b"\n\n" not in data:
             raise PreviewError("invalid commit headers")
-        headers = data.split(b"\n\n", 1)[0].splitlines()
-        trees = [h[5:].decode("ascii") for h in headers if h.startswith(b"tree ")]
-        parents = [h[7:].decode("ascii") for h in headers if h.startswith(b"parent ")]
-        if len(trees) != 1:
-            raise PreviewError("commit requires exactly one tree")
-        return trees[0], parents
+        raw = data.split(b"\n\n", 1)[0]
+        if any((value < 32 and value != 10) or value == 127 for value in raw):
+            raise PreviewError("unsupported commit header separator/control byte")
+        headers = raw.split(b"\n")
+        if any(line.startswith((b" ", b"\t")) for line in headers):
+            raise PreviewError("commit header continuations are unsupported")
+        oid_pattern = rb"[0-9a-f]{" + str(self.width * 2).encode() + rb"}"
+
+        def object_header(line, name):
+            prefix = name + b" "
+            if not line.startswith(prefix) or re.fullmatch(oid_pattern, line[len(prefix):]) is None:
+                raise PreviewError("unsupported commit object header/order")
+            return line[len(prefix):].decode("ascii")
+
+        tree = object_header(headers[0], b"tree")
+        position, parents = 1, []
+        while position < len(headers) and headers[position].startswith(b"parent "):
+            parents.append(object_header(headers[position], b"parent"))
+            position += 1
+        if len(parents) != len(set(parents)) or len(headers) != position + 2:
+            raise PreviewError("missing, duplicate or unsupported commit headers")
+        for label in [b"author", b"committer"]:
+            line = headers[position]
+            pattern = (label + rb" ([^<>\x00-\x1f\x7f]+) <([^<>\x00-\x20\x7f]+)> "
+                       rb"(0|[1-9][0-9]*) ([+-])([0-9]{2})([0-9]{2})")
+            match = re.fullmatch(pattern, line)
+            if match is None:
+                raise PreviewError("missing or unsupported commit identity/order")
+            name, email, epoch, _, hour, minute = match.groups()
+            try:
+                name.decode("utf-8")
+                email.decode("ascii")
+            except UnicodeError as exc:
+                raise PreviewError("unsupported commit identity encoding") from exc
+            if name != name.strip(b" ") or int(epoch) > 2**63 - 1 or int(hour) > 23 or int(minute) > 59:
+                raise PreviewError("unsupported commit identity value")
+            position += 1
+        return tree, parents
 
     def files(self, tree, prefix="", ancestry=()):
         if tree in ancestry:
             raise PreviewError("recursive tree")
         data = self.read(tree, "tree")
+        if prefix and not data:
+            raise PreviewError("empty directory entries are unsupported")
         result, cursor, names, order = {}, 0, set(), []
         while cursor < len(data):
             space = data.find(b" ", cursor)
@@ -131,6 +176,8 @@ class _Objects:
                 raise PreviewError("unsupported file mode")
         if order != sorted(order):
             raise PreviewError("noncanonical tree ordering")
+        if not prefix and self.tree_oid(result) != tree:
+            raise PreviewError("tree cannot round-trip without information loss")
         return result
 
     def tree_oid(self, files):
