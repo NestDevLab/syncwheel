@@ -33,7 +33,8 @@
     "branch": "main-integration",
     "stacks": [
       "prepared-journal-recovery",
-      "selective-coordination-projection"
+      "selective-coordination-projection",
+      "concurrency-guidance"
     ],
     "strategy": "cherry-pick"
   },
@@ -80,6 +81,24 @@
       },
       "meta": {
         "purpose": "Publish one additive stack while retaining unrelated local proposals"
+      }
+    },
+    {
+      "id": "concurrency-guidance",
+      "branch": "pr/concurrency-guidance",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "793f9f580a5a5970fac9a42c3702adfddc815bba"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Clarify independent lane authoring and bounded shared-state holds"
       }
     }
   ],
