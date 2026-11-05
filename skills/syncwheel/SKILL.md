@@ -14,6 +14,26 @@ described in a manifest; Syncwheel reconciles Git to match it. Plain manual
 `git`/worktree surgery is the exception path, used only when Syncwheel is
 unavailable, blocked, or cannot express the needed recovery.
 
+## Concurrent authoring and bounded holds
+
+Multiple agents may author concurrently in separate owned governed lanes in the
+same repository. Another active session alone is not a reason to stop. The same
+relative path in separate worktrees is not a repository-wide path lock: edit only
+your own copy and index, and coordinate overlapping patches before integration or
+publication. Never modify another lane's physical files, index or branch.
+
+Serialize only mutations of shared integration/test projections, control metadata,
+refs or CAS state, for bounded windows. Name each hold's protected state, owner,
+reason and release condition. A primary recovery hold must not become an indefinite
+repository-wide authoring ban: independently qualify and explicitly release the
+permitted lane-open, authoring, capture and publication scope. Native open/capture
+may change refs or control bound by a pending operation even for disjoint files;
+if isolation is unsafe, identify that exact limitation and its responsible owner.
+
+Preserve recovery invariants and existing guards. Urgency is no exception; never
+bypass classifiers, configuration, guards or manifests, use the shared primary for
+authoring, or evade a hold with unmanaged worktrees, another clone or `--full`.
+
 ## Ratified working rules (read this first)
 
 These four are ratified operating rules (MGT-0206), not suggestions. A real incident
