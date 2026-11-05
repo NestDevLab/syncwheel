@@ -19,10 +19,10 @@ from test_cherry_pick_preview import Fixture
 
 
 class Repository:
-    def __init__(self):
+    def __init__(self, count=2):
         self.directory = tempfile.TemporaryDirectory(prefix="reader-object-fixture-")
         self.root = Path(self.directory.name)
-        self.fixture = Fixture(count=2)
+        self.fixture = Fixture(count=count)
         self.git("init", "--quiet")
         self.emit()
         self.git("update-ref", "refs/heads/base", self.fixture.frozen["base"])
@@ -71,6 +71,19 @@ class ReaderTests(unittest.TestCase):
 
     def read(self, **kwargs):
         return reader.read_snapshot(self.repo.root, "refs/heads/backup", **kwargs)
+
+    def test_native_reader_to_pure_preserves_all_29_ordered_stacks(self):
+        self.repo.close()
+        self.repo = Repository(count=29)
+        self.addCleanup(self.repo.close)
+        envelope = self.read()
+        manifest = json.loads(base64.b64decode(envelope["frozen"]["backupManifest"]))
+        self.assertEqual(manifest, self.repo.fixture.manifest)
+        self.assertEqual(envelope["frozen"]["sourcePins"], self.repo.fixture.frozen["sourcePins"])
+        plan = pure.preview(envelope["frozen"], envelope["observed"], envelope["objects"], {})
+        self.assertEqual(plan["stackCount"], 29)
+        self.assertEqual([row["id"] for row in plan["accounting"]], manifest["integration"]["stacks"])
+        self.assertEqual(len(plan["changes"]), 29)
 
     def test_positive_preserves_manifest_fields_pins_objects_and_every_native_path(self):
         before = self.repo.snapshot()
