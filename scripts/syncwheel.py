@@ -13976,7 +13976,11 @@ def coordination_compose_stack_plan(
         'expectedRemoteManifestDigest': latest['state']['manifest_digest'],
         'localProposalDigest': manifest_digest(manifest),
         'composedSnapshot': merged_snapshot,
-        'proposedManifestDigest': manifest_digest(proposed_manifest),
+        'proposedManifestDigest': manifest_digest(
+            retain_local_compose_stacks(
+                manifest, proposed_manifest, composition['localRetainedStacks']
+            )
+        ),
         'integrationManifestDigest': latest_digest['control_manifest_digest'],
         'stack': stack_id,
         'sourceRef': source_ref,
@@ -13995,6 +13999,7 @@ def coordination_compose_stack_plan(
         'projectionStatus': 'partial',
         'integrationMutation': False,
         'localAddedStacks': composition['localAddedStacks'],
+        'localRetainedStacks': composition['localRetainedStacks'],
         'remoteAddedStacks': composition['remoteAddedStacks'],
         'status': status,
     }
@@ -14138,7 +14143,9 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         save_manifest_with_ledger(
             repo_root,
             manifest_path,
-            proposed_manifest,
+            retain_local_compose_stacks(
+                observed_manifest, proposed_manifest, plan['localRetainedStacks']
+            ),
             'coordination_compose_stack',
             {
                 'plan_digest': supplied_digest,
@@ -14746,19 +14753,24 @@ def additive_coordination_snapshot_delta(base, candidate, side):
         raise SyncwheelError(f'coordination compose {side} proposal has ambiguous stack ordering')
     base_members = list(base.get('integration', {}).get('stacks') or [])
     candidate_members = list(candidate.get('integration', {}).get('stacks') or [])
-    if candidate_members != [*base_members, *added]:
+    # legacy local drafts are stacks without integration membership
+    appended = (
+        [stack_id for stack_id in added if stack_id in candidate_members]
+        if side == 'local' else added
+    )
+    if candidate_members != [*base_members, *appended]:
         raise SyncwheelError(
             f'coordination compose {side} integration membership must append exactly its new stacks'
         )
-    return {'added': added}
+    return {'added': added, 'members': appended}
 
 
 def compose_additive_coordination_snapshots(base, local, remote, requested_stack):
     local_delta = additive_coordination_snapshot_delta(base, local, 'local')
     remote_delta = additive_coordination_snapshot_delta(base, remote, 'remote')
-    if local_delta['added'] != [requested_stack]:
+    if requested_stack not in local_delta['members']:
         raise SyncwheelError(
-            'coordination compose local proposal must add exactly the requested stack'
+            'coordination compose local proposal must add the requested stack'
         )
     local_map = stack_snapshot_map(local)
     remote_map = stack_snapshot_map(remote)
@@ -14773,7 +14785,7 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
     merged = json.loads(json.dumps(base))
     merged_map = stack_snapshot_map(merged)
     ordered_additions = []
-    for source, added in ((remote_map, remote_delta['added']), (local_map, local_delta['added'])):
+    for source, added in ((remote_map, remote_delta['added']), (local_map, [requested_stack])):
         for stack_id in added:
             if stack_id not in merged_map:
                 merged_map[stack_id] = json.loads(json.dumps(source[stack_id]))
@@ -14786,15 +14798,32 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
         *list(base.get('integration', {}).get('stacks') or []),
         *ordered_additions,
     ]
-    branches = [stack['branch'] for stack in merged['stacks']]
+    retained = [stack_id for stack_id in local_delta['added'] if stack_id not in merged_map]
+    branches = [
+        *(stack['branch'] for stack in merged['stacks']),
+        *(local_map[stack_id]['branch'] for stack_id in retained),
+    ]
     if len(branches) != len(set(branches)):
         raise SyncwheelError('coordination compose stack branch ownership is ambiguous')
     validate_coordination_snapshot_refs(merged)
     return {
         'merged': merged,
-        'localAddedStacks': local_delta['added'],
+        'localAddedStacks': [requested_stack],
+        'localRetainedStacks': retained,
         'remoteAddedStacks': remote_delta['added'],
     }
+
+
+def retain_local_compose_stacks(local_manifest, composed_manifest, retained):
+    """Put unpublished local stacks back after adopting a composed snapshot."""
+    adopted = json.loads(json.dumps(composed_manifest))
+    local_stacks = stack_snapshot_map(local_manifest)
+    local_members = (local_manifest.get('integration') or {}).get('stacks') or []
+    for stack_id in retained:
+        adopted['stacks'].append(json.loads(json.dumps(local_stacks[stack_id])))
+        if stack_id in local_members:
+            adopted['integration']['stacks'].append(stack_id)
+    return adopted
 
 
 def apply_coordination_snapshot(manifest, snapshot):
@@ -15378,8 +15407,7 @@ def validate_coordination_publication_base(
             )
         elif remedy_stack and expected.get('tip') and state.get('manifest_digest'):
             remedy = (
-                f'; publish or close {", ".join(missing_added_refs)} first. '
-                'Then coordinate the remaining local proposal with:\n  '
+                f'; to publish only {remedy_stack} and keep the other local stacks unpublished, run:\n  '
                 f'syncwheel coordination compose --stack {remedy_stack} '
                 f'--known-base-state {expected["tip"]} '
                 f'--known-base-snapshot-digest {state["manifest_digest"]}'
