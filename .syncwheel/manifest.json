@@ -33,7 +33,6 @@
     "branch": "main-integration",
     "stacks": [
       "prepared-journal-recovery",
-      "rebuild-stale-candidate",
       "selective-coordination-projection",
       "concurrency-guidance",
       "pure-cherry-preview",
@@ -68,24 +67,6 @@
       },
       "meta": {
         "purpose": "Audit linked supersession of unpublished prepared journal operations"
-      }
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/rebuild-stale-candidate",
-      "commits": [
-        "e883fb806ad2b1ed6ba068ca75b9b903a9ad552c"
-      ],
-      "id": "rebuild-stale-candidate",
-      "integration_branch": "main-integration",
-      "target_branch": "main",
-      "target_remote": "origin",
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Rebuild a prepared journal commit when an unrelated writer advances HEAD"
       }
     },
     {
