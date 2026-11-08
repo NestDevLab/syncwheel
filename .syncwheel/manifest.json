@@ -35,7 +35,8 @@
       "prepared-journal-recovery",
       "selective-coordination-projection",
       "concurrency-guidance",
-      "pure-cherry-preview"
+      "pure-cherry-preview",
+      "int-git-multi-ref"
     ],
     "strategy": "cherry-pick"
   },
@@ -122,6 +123,24 @@
       },
       "meta": {
         "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
+      }
+    },
+    {
+      "id": "int-git-multi-ref",
+      "branch": "pr/int-git-multi-ref",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "405af617c91c5d638b6f071d7d681845558ef7bc"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "int git finishes multi-commit and paused operations on the primary"
       }
     }
   ],
