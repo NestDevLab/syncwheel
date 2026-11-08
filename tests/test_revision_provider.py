@@ -7305,6 +7305,105 @@ class JournalRevisionProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(protocol.RevisionProviderError, 'overlaps'):
             self.call(request, 'preflight')
 
+    def enable_path_scoped_lease(self):
+        config = self.root / '.agentwheel/config.json'
+        config.parent.mkdir()
+        config.write_text(json.dumps({'mutationPolicy': {'revisioning': {'provider': {'headLease': 'path-scoped'}}}}))
+        self.fixture.git('add', '.agentwheel/config.json')
+        self.fixture.git('commit', '-qm', 'Configure path-scoped lease')
+
+    def commit_other_file(self, name):
+        (self.root / name).write_text('independent\n')
+        self.fixture.git('add', name)
+        self.fixture.git('commit', '-qm', f'Independent {name}')
+        return self.fixture.git('rev-parse', 'HEAD')
+
+    def backend_running_once_at(self, phase, action):
+        test = self
+        pending = [action]
+
+        class Racing(SYNCWHEEL.JournalRevisionBackend):
+            def checkpoint(self, name):
+                if name == phase and pending:
+                    pending.pop()(test)
+                return super().checkpoint(name)
+
+        return Racing(protocol)
+
+    def finalize_with(self, backend, request):
+        return protocol.handle_request(backend, protocol.parse_request({**request, 'action': 'finalize'}))
+
+    def killed_at(self, phase, request):
+        def die(_test):
+            raise RuntimeError('killed mid finalize')
+
+        with self.assertRaisesRegex(RuntimeError, 'killed'):
+            self.finalize_with(self.backend_running_once_at(phase, die), request)
+
+    def assert_feature_committed_on(self, head, response):
+        self.assertEqual(response['status'], 'verified')
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD^'), head)
+        self.assertEqual(self.fixture.git('show', 'HEAD:feature.txt'), 'feature')
+        self.assertEqual(self.fixture.git('diff', '--cached', '--name-only'), '')
+
+    def assert_recover_refused(self, request, message):
+        before = self.fixture.git('rev-parse', 'HEAD')
+        with self.assertRaisesRegex(protocol.RevisionProviderError, message):
+            self.call(request, 'recover')
+        self.assertEqual(self.fixture.git('rev-parse', 'HEAD'), before)
+
+    def test_disjoint_advance_during_finalize_rebuilds_the_candidate(self):
+        self.enable_path_scoped_lease()
+        request = self.prepare()
+        heads = []
+        response = self.finalize_with(
+            self.backend_running_once_at(
+                'product_objects_prepared',
+                lambda test: heads.append(test.commit_other_file('other.txt')),
+            ),
+            request,
+        )
+        self.assert_feature_committed_on(heads[0], response)
+
+    def test_stranded_candidate_recovers_after_disjoint_advance(self):
+        self.enable_path_scoped_lease()
+        request = self.prepare()
+        self.killed_at('product_objects_prepared', request)
+        head = self.commit_other_file('other.txt')
+        self.assertEqual(self.call(request, 'preflight')['status'], 'prepared')
+        self.assert_feature_committed_on(head, self.call(request, 'recover'))
+
+    def test_stale_candidate_rebuild_refuses_overlapping_advance(self):
+        self.enable_path_scoped_lease()
+        request = self.prepare()
+        self.killed_at('product_objects_prepared', request)
+        (self.root / 'feature.txt').write_text('theirs\n')
+        self.fixture.git('add', 'feature.txt')
+        self.fixture.git('commit', '-qm', 'Overlapping edit')
+        (self.root / 'feature.txt').write_text('feature\n')
+        self.assert_recover_refused(request, 'overlaps')
+
+    def test_stale_candidate_rebuild_refuses_changed_worktree_bytes(self):
+        self.enable_path_scoped_lease()
+        request = self.prepare()
+        self.killed_at('product_objects_prepared', request)
+        self.commit_other_file('other.txt')
+        (self.root / 'feature.txt').write_text('edited later\n')
+        self.assert_recover_refused(request, '.')
+
+    def test_published_candidate_is_not_rebuilt_after_advance(self):
+        self.enable_path_scoped_lease()
+        request = self.prepare()
+        self.killed_at('integration_product_cas', request)
+        self.commit_other_file('other.txt')
+        self.assert_recover_refused(request, 'overlaps')
+
+    def test_exact_lease_still_refuses_advance_after_preparation(self):
+        request = self.prepare()
+        self.killed_at('product_objects_prepared', request)
+        self.commit_other_file('other.txt')
+        self.assert_recover_refused(request, 'HEAD lease')
+
     def test_policy_cannot_be_widened_by_later_config_commit(self):
         request = self.fixture.request('preflight')
         config = self.root / '.agentwheel/config.json'
