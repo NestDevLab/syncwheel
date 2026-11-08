@@ -1,0 +1,11 @@
+{
+  "changed_refs": [],
+  "claimed_at": "2026-11-08T10:18:18+00:00",
+  "closed": true,
+  "coordination_id": "default",
+  "operation_token": "a2739f39-c6e1-4156-81e3-229b278a0a8d",
+  "publication_scope": "close:int-git-multi-ref",
+  "reason": "delivered by squash in PR 139",
+  "source_ref": "refs/heads/pr/int-git-multi-ref",
+  "syncwheel_version": "0.46.23"
+}
