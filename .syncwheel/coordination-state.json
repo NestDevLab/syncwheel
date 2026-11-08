@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/rebuild-stale-candidate": "e883fb806ad2b1ed6ba068ca75b9b903a9ad552c"
+    "refs/heads/pr/journal-candidate-rebuild": "49a52e285287e65c8f6ab920991fcef7f6470a98"
   },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
@@ -26,6 +26,7 @@
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/interrupted-replay-recovery": "a14a481b70503c8808d24ab1625c115d24b9a7d9",
+    "refs/heads/pr/journal-candidate-rebuild": "64c9f3fceb457d537e3ff05807720ba3b6b0beed",
     "refs/heads/pr/journal-guard-readiness": "e421e352281844a42e0bbc2ae7fdd4a72d84f446",
     "refs/heads/pr/journal-operations": "4be329dde1c6874ad6d4bbadc6ff4e3e48826d1a",
     "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
@@ -105,7 +106,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-08T09:53:03+00:00",
+  "created_at": "2026-11-08T09:59:23+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -141,6 +142,7 @@
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/interrupted-replay-recovery": null,
+    "refs/heads/pr/journal-candidate-rebuild": "49a52e285287e65c8f6ab920991fcef7f6470a98",
     "refs/heads/pr/journal-guard-readiness": "7e098aad3cb47680aba486af6475bdaa706de8ff",
     "refs/heads/pr/journal-mode": "c78cae12ab3964f15026050e3738e8f59d6a8b16",
     "refs/heads/pr/journal-operations": "df881e8d83fa074d7589ee7137e7130143e2e108",
@@ -262,7 +264,8 @@
       "branch": "main-integration",
       "stacks": [
         "prepared-journal-recovery",
-        "rebuild-stale-candidate"
+        "rebuild-stale-candidate",
+        "journal-candidate-rebuild"
       ],
       "strategy": "cherry-pick"
     },
@@ -303,16 +306,30 @@
         "id": "rebuild-stale-candidate",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/journal-candidate-rebuild",
+        "commits": [
+          "49a52e285287e65c8f6ab920991fcef7f6470a98"
+        ],
+        "id": "journal-candidate-rebuild",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "d69b49d5-7d6c-4594-bd25-0d64cd753f13",
-  "parent_state": "412fb1674834fcac2a6128c7240059e9b8d7967e",
+  "operation_token": "b31a7bb5-b9b1-4a03-8e01-9c5bd4293840",
+  "parent_state": "77ebc9f354a1cae0ea65c4762dccc5ea87030b89",
   "projection_status": "partial",
-  "publication_id": "45e6c215-c28f-4def-8238-c92fa439746f",
-  "publication_scope": "compose-stack:rebuild-stale-candidate",
+  "publication_id": "fbc4232c-46a9-459f-961a-b3afdc312be7",
+  "publication_scope": "compose-stack:journal-candidate-rebuild",
   "schema_version": 2,
   "syncwheel_version": "0.46.22",
   "tombstones": [
