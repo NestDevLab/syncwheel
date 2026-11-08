@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/rebuild-stale-candidate"
+  ],
+  "claimed_at": "2026-11-08T09:53:03+00:00",
+  "coordination_id": "default",
+  "operation_token": "d69b49d5-7d6c-4594-bd25-0d64cd753f13",
+  "publication_scope": "compose-stack:rebuild-stale-candidate",
+  "source_ref": "refs/heads/pr/rebuild-stale-candidate",
+  "syncwheel_version": "0.46.22"
+}
