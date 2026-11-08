@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "backup_keep": 2,
+      "worktree_grace_days": 7,
       "backup_retention_days": 30,
-      "worktree_grace_days": 7
+      "backup_keep": 2
     }
   },
   "defaults": {
@@ -34,7 +34,6 @@
     "stacks": [
       "prepared-journal-recovery",
       "rebuild-stale-candidate",
-      "journal-candidate-rebuild",
       "selective-coordination-projection",
       "concurrency-guidance",
       "pure-cherry-preview",
@@ -87,24 +86,6 @@
       },
       "meta": {
         "purpose": "Rebuild a prepared journal commit when an unrelated writer advances HEAD"
-      }
-    },
-    {
-      "id": "journal-candidate-rebuild",
-      "branch": "pr/journal-candidate-rebuild",
-      "base": "origin/main",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "49a52e285287e65c8f6ab920991fcef7f6470a98"
-      ],
-      "target_remote": "origin",
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Rebuild a prepared journal commit when a disjoint commit advances HEAD"
       }
     },
     {
