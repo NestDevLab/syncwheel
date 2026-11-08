@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/journal-candidate-rebuild"
+  ],
+  "claimed_at": "2026-11-08T09:59:23+00:00",
+  "coordination_id": "default",
+  "operation_token": "b31a7bb5-b9b1-4a03-8e01-9c5bd4293840",
+  "publication_scope": "compose-stack:journal-candidate-rebuild",
+  "source_ref": "refs/heads/pr/journal-candidate-rebuild",
+  "syncwheel_version": "0.46.22"
+}
