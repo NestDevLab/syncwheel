@@ -34438,14 +34438,12 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
         allowed = {journal['operationParentHead'], journal.get('candidateProductCommitSha')}
         if current not in allowed:
             # Before object preparation a disjoint writer may advance HEAD.
-            if journal['phase'] != 'prepared' or journal.get('candidateProductCommitSha'):
+            if journal['phase'] != 'prepared':
                 self._fail('journal HEAD changed after commit preparation')
+            if journal.get('candidateProductCommitSha'):
+                raise self.provider.JournalHeadAdvanced('journal HEAD changed after commit preparation')
             self._head_policy(root, request, current)
-            if not self._index_is_clean(root):
-                self._fail('journal HEAD advancement requires a clean index')
-            journal['operationParentHead'] = current
-            index = self._index_observation(root)
-            journal.update(baselineIndexSha256=index.sha256, baselineIndexSemantic=index.semantic)
+            self._adopt_advanced_head(root, journal, current)
             self.save_journal(request, journal)
         hooks = managed_push_guard_policy(root, manifest)
         if hooks.get('required') and not hooks.get('ready') and not hooks.get('disabled'):
@@ -34453,6 +34451,29 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
         self._assert_no_ref_transaction_locks(root, {
             f"refs/heads/{journal['integrationBranch']}": None,
         })
+
+    def _adopt_advanced_head(self, root, journal, current):
+        if not self._index_is_clean(root):
+            self._fail('journal HEAD advancement requires a clean index')
+        journal['operationParentHead'] = current
+        index = self._index_observation(root)
+        journal.update(baselineIndexSha256=index.sha256, baselineIndexSemantic=index.semantic)
+
+    def rebuild_stale_candidate(self, request, journal):
+        candidate = journal.get('candidateProductCommitSha')
+        if journal['phase'] != 'prepared' or not candidate:
+            return
+        root = self._repo_root(request)
+        current = ref_tip(root, 'HEAD')
+        if current in {journal['operationParentHead'], candidate}:
+            return
+        self._head_policy(root, request, current)
+        # the rebuilt commit must carry the bytes the operation already verified
+        self._verify_worktree_objects(root, journal['productPathObjects'])
+        self._adopt_advanced_head(root, journal, current)
+        journal.update(candidateProductCommitSha=None, candidateProductTreeSha=None,
+                       productPathObjects=None, productHooksValidated=False)
+        self.save_journal(request, journal)
 
     def verify_after_paths(self, request):
         self._observe_journal(request)
@@ -34492,8 +34513,10 @@ class JournalRevisionBackend(SyncwheelRevisionBackend):
         current = ref_tip(root, 'HEAD')
         if current == commit:
             return commit
-        if current != expected_parent or not self._index_is_clean(root):
-            self._fail('journal publication HEAD or index lease lost')
+        if current != expected_parent:
+            raise self.provider.JournalHeadAdvanced('journal publication HEAD lease lost')
+        if not self._index_is_clean(root):
+            self._fail('journal publication index lease lost')
         self._assert_index_lease(root, request, journal, 'baseline', 'journal publication')
         ref = f"refs/heads/{journal['integrationBranch']}"
         self._cas_ref_with_leases(root, ref, commit,

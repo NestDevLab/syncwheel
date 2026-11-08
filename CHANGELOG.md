@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.23 - 2026-11-08
+
+- Rebuild a journal repository's prepared commit when an unrelated writer advances HEAD before it is published, in finalize and in recover, instead of refusing forever and leaving the operation's paths dirty. A path-scoped lease is still required. Overlapping commits, an exact lease, or worktree bytes changed since preparation stay refused.
+
 ## 0.46.22 - 2026-11-08
 
 - Let `coordination compose --stack <id>` publish only that stack when other local stacks are still unpublished. They stay in the local manifest and out of the published snapshot, and the guard that refuses `stack push` now names this command as the way through.
