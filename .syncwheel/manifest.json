@@ -36,7 +36,8 @@
       "selective-coordination-projection",
       "concurrency-guidance",
       "pure-cherry-preview",
-      "int-git-multi-ref"
+      "int-git-multi-ref",
+      "compose-update-published"
     ],
     "strategy": "cherry-pick"
   },
@@ -143,6 +144,24 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "compose-update-published",
+      "branch": "pr/compose-update-published",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "a08bfd297dc36ee79591aca54e5b6cb7cbf72b7f"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Let compose fast-forward a published stack beside unpublished local stacks"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
