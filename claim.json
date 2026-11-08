@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/compose-update-published"
-  ],
-  "claimed_at": "2026-11-08T10:16:31+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-08T10:29:47+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "d815de5c-253f-4e47-b732-32a0bc5a3a03",
-  "publication_scope": "compose-stack:compose-update-published",
+  "operation_token": "ff9fd9d9-a14d-4ab4-85ec-75eee1c4bce3",
+  "publication_scope": "close:compose-update-published",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/compose-update-published",
-  "syncwheel_version": "0.46.23"
+  "syncwheel_version": "0.46.24"
 }
