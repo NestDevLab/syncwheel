@@ -33,7 +33,6 @@
     "branch": "main-integration",
     "stacks": [
       "prepared-journal-recovery",
-      "compose-update-published",
       "selective-coordination-projection",
       "concurrency-guidance",
       "pure-cherry-preview"
@@ -67,24 +66,6 @@
       },
       "meta": {
         "purpose": "Audit linked supersession of unpublished prepared journal operations"
-      }
-    },
-    {
-      "id": "compose-update-published",
-      "branch": "pr/compose-update-published",
-      "base": "origin/main",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "a08bfd297dc36ee79591aca54e5b6cb7cbf72b7f"
-      ],
-      "target_remote": "origin",
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Let compose fast-forward a published stack beside unpublished local stacks"
       }
     },
     {
