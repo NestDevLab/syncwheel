@@ -2438,6 +2438,124 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertIn('stable syncwheel CLI failed to execute', result.stderr)
         self.assertIn('syncwheel hooks install --apply', result.stderr)
 
+    def _cherry_source(self):
+        path = self.temp_root / 'cherry-source'
+        subprocess.run(
+            ['git', 'worktree', 'add', '-q', '-b', 'cherry-source', str(path), 'main-integration'],
+            cwd=self.repo, env=self._clean_env(), check=True,
+        )
+        return path
+
+    def _side_commits(self, source, *changes):
+        commits = []
+        for name, content in changes:
+            (source / name).write_text(content)
+            subprocess.run(['git', 'add', name], cwd=source, env=self._clean_env(), check=True)
+            subprocess.run(
+                ['git', 'commit', '-qm', f'side {name}'], cwd=source, env=self._clean_env(), check=True,
+            )
+            commits.append(subprocess.check_output(
+                ['git', 'rev-parse', 'HEAD'], cwd=source, text=True,
+            ).strip())
+        return commits
+
+    def _commit_on_integration(self, name, content):
+        (self.repo / name).write_text(content)
+        subprocess.run(['git', 'add', name], cwd=self.repo, check=True)
+        subprocess.run(
+            ['git', 'commit', '-qm', f'integration {name}'], cwd=self.repo,
+            env=self._syncwheel_authorized_env(), check=True,
+        )
+
+    def _reusable_authorizations(self):
+        directory = syncwheel.ref_auth_dir(self.repo)
+        files = directory.iterdir() if directory.exists() else ()
+        return [path for path in files if json.loads(path.read_text()).get('reusable')]
+
+    def _assert_int_git_left_no_authorization(self):
+        self.assertEqual(self._reusable_authorizations(), [])
+
+    def test_int_git_lands_every_commit_of_a_multi_commit_cherry_pick(self):
+        self._install_and_branch('main-integration')
+        commits = self._side_commits(
+            self._cherry_source(), ('a', 'a\n'), ('b', 'b\n'), ('c', 'c\n'),
+        )
+        before = self._rev('main-integration')
+
+        result = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', 'cherry-pick', *commits)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            subprocess.check_output(
+                ['git', 'rev-list', '--count', f'{before}..main-integration'], cwd=self.repo, text=True
+            ).strip(),
+            '3',
+        )
+        self.assertFalse((self.repo / '.git' / 'sequencer').exists())
+        self._assert_int_git_left_no_authorization()
+
+    def test_int_git_resumes_an_interrupted_cherry_pick_on_the_primary(self):
+        self._install_and_branch('main-integration')
+        source = self._cherry_source()
+        self._commit_on_integration('seed', 'integration\n')
+        clean, conflicting, following = self._side_commits(
+            source, ('a', 'a\n'), ('seed', 'side\n'), ('b', 'b\n'),
+        )
+
+        paused = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'cherry-pick', clean, conflicting, following,
+        )
+        self.assertNotEqual(paused.returncode, 0)
+        self.assertTrue((self.repo / '.git' / 'CHERRY_PICK_HEAD').exists())
+        (self.repo / 'seed').write_text('resolved\n')
+        subprocess.run(['git', 'add', 'seed'], cwd=self.repo, check=True)
+        blocked = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', 'reset', '--hard')
+        self.assertEqual(blocked.returncode, 2)
+        self.assertIn('syncwheel int git -- cherry-pick --continue', blocked.stderr)
+
+        environment_editor = self.hook_env.get('GIT_EDITOR')
+        self.hook_env['GIT_EDITOR'] = 'false'
+        try:
+            resumed = self.run_syncwheel(
+                'int', 'git', '--repo', str(self.repo), '--', 'cherry-pick', '--continue',
+            )
+        finally:
+            if environment_editor is None:
+                self.hook_env.pop('GIT_EDITOR', None)
+            else:
+                self.hook_env['GIT_EDITOR'] = environment_editor
+
+        self.assertEqual(resumed.returncode, 0, resumed.stderr)
+        self.assertFalse((self.repo / '.git' / 'CHERRY_PICK_HEAD').exists())
+        self.assertFalse((self.repo / '.git' / 'sequencer').exists())
+        self.assertEqual((self.repo / 'b').read_text(), 'b\n')
+        self.assertEqual((self.repo / 'seed').read_text(), 'resolved\n')
+        self._assert_int_git_left_no_authorization()
+
+    def test_int_git_refuses_unrelated_mutation_during_an_interrupted_cherry_pick(self):
+        self._install_and_branch('main-integration')
+        source = self._cherry_source()
+        self._commit_on_integration('seed', 'integration\n')
+        [conflicting] = self._side_commits(source, ('seed', 'side\n'))
+        paused = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'cherry-pick', conflicting,
+        )
+        self.assertNotEqual(paused.returncode, 0)
+        head = self._rev('HEAD')
+
+        for arguments in (['reset', '--hard'], ['cherry-pick', conflicting], ['revert', '--continue']):
+            refused = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', *arguments)
+            self.assertEqual(refused.returncode, 2, arguments)
+            self.assertEqual(self._rev('HEAD'), head)
+        self.assertTrue((self.repo / '.git' / 'CHERRY_PICK_HEAD').exists())
+
+    def test_reusable_authorization_never_reaches_a_plain_git_command(self):
+        self._install_and_branch('main-integration')
+        commits = self._side_commits(self._cherry_source(), ('a', 'a\n'), ('b', 'b\n'))
+        refused = self._run_git('cherry-pick', *commits)
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn('refusing unauthorized primary integration ref move', refused.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

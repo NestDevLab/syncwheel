@@ -207,6 +207,7 @@ MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'
 SYNCWHEEL_OWNS_REF_MOVES = False
 SYNCWHEEL_REF_AUTH_REPO = None
 SYNCWHEEL_REF_AUTH_TTL_SECONDS = 30
+SYNCWHEEL_REF_AUTH_OPERATION_TTL_SECONDS = 3600
 FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.name=Syncwheel',
@@ -1102,7 +1103,7 @@ def process_start_identity(pid):
     return f'ps:{started}' if started else None
 
 
-def authorize_ref_move(repo_root):
+def authorize_ref_move(repo_root, reusable=False):
     directory = ref_auth_dir(repo_root)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
     nonce = uuid.uuid4().hex + uuid.uuid4().hex
@@ -1114,9 +1115,12 @@ def authorize_ref_move(repo_root):
         'nonce': nonce,
         'pid': pid,
         'pidStart': pid_start,
-        'expiresAt': time.time() + SYNCWHEEL_REF_AUTH_TTL_SECONDS,
+        'expiresAt': time.time() + (
+            SYNCWHEEL_REF_AUTH_OPERATION_TTL_SECONDS if reusable else SYNCWHEEL_REF_AUTH_TTL_SECONDS
+        ),
         'remaining': ['pre-commit', 'reference-transaction'],
         'operation': 'syncwheel',
+        'reusable': reusable,
     }
     path = directory / nonce
     atomic_write_private_json(path, payload)
@@ -1124,8 +1128,8 @@ def authorize_ref_move(repo_root):
 
 
 @contextlib.contextmanager
-def ref_move_authorization(repo_root):
-    nonce = authorize_ref_move(repo_root)
+def ref_move_authorization(repo_root, reusable=False):
+    nonce = authorize_ref_move(repo_root, reusable=reusable)
     try:
         yield nonce
     finally:
@@ -1152,6 +1156,8 @@ def ref_move_authorized(repo_root, event):
             or event not in payload['remaining']
         ):
             return False
+        if payload.get('reusable'):
+            return True
         payload['remaining'].remove(event)
         if payload['remaining']:
             atomic_write_private_json(path, payload)
@@ -9331,6 +9337,12 @@ def primary_checkout_remedy_commands(manifest, stack_id=None, repo_root=None):
     """Name capture and queue commands without guessing ownership of primary changes."""
     if manifest.get('repository_mode') == 'journal':
         return ['syncwheel journal snapshot --apply', 'syncwheel journal publish --apply']
+    operation = interrupted_git_operation(repo_root) if repo_root is not None else None
+    if operation:
+        return [
+            f'syncwheel int git -- {operation} --continue',
+            f'syncwheel int git -- {operation} --abort',
+        ]
     if (
         manifest_is_local_only(manifest)
         and repo_root is not None
@@ -29933,7 +29945,16 @@ def command_int_git(args):
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('int git requires git arguments after --')
-    result = run(['git', *git_args], cwd=worktree, check=False)
+    if git_passthrough_mutation_requested(git_args):
+        # One passthrough can land many commits (cherry-pick, rebase, am), so the
+        # authorization lasts for this process. Output is captured: no editor can open.
+        with ref_move_authorization(repo_root, reusable=True) as authorization:
+            result = run(
+                ['git', *git_args], cwd=worktree, check=False, authorize=False,
+                env={MANAGED_REF_MOVE_AUTH_ENV: authorization, 'GIT_EDITOR': 'true'},
+            )
+    else:
+        result = run(['git', *git_args], cwd=worktree, check=False)
     if result.stdout:
         print(result.stdout, end='')
     if result.stderr:
@@ -36236,6 +36257,37 @@ def git_passthrough_mutation_requested(git_args):
     return command not in read_only
 
 
+def interrupted_git_operation(repo_root):
+    git_dir = Path(git(repo_root, 'rev-parse', '--absolute-git-dir').stdout.strip())
+    if (git_dir / 'rebase-merge').exists() or (git_dir / 'rebase-apply' / 'rebasing').exists():
+        return 'rebase'
+    if (git_dir / 'rebase-apply').exists():
+        return 'am'
+    if (git_dir / 'CHERRY_PICK_HEAD').exists():
+        return 'cherry-pick'
+    if (git_dir / 'REVERT_HEAD').exists():
+        return 'revert'
+    # Between picks the sequencer has no *_HEAD marker, only its todo list.
+    todo = git_dir / 'sequencer' / 'todo'
+    if todo.exists():
+        steps = [line.split()[0] for line in todo.read_text().splitlines() if line.strip()]
+        return {'pick': 'cherry-pick', 'p': 'cherry-pick', 'revert': 'revert'}.get(
+            steps[0] if steps else None
+        )
+    if (git_dir / 'MERGE_HEAD').exists():
+        return 'merge'
+    return None
+
+
+def git_resume_requested(git_args, operation):
+    return (
+        operation is not None
+        and len(git_args) == 2
+        and git_args[0] == operation
+        and git_args[1] in {'--continue', '--abort', '--skip', '--quit'}
+    )
+
+
 def primary_checkout_preflight(args):
     if not hasattr(args, 'repo') or args.func in {
         command_hooks_guard,
@@ -36265,6 +36317,11 @@ def primary_checkout_preflight(args):
         and not primary_guard_remedy_requested(args)
         and not managed_push_guard_policy(primary_root, manifest)['disabled']
     ):
+        # A paused operation owns the dirty index, so finishing it is never unrelated work.
+        if args.func == command_int_git and git_resume_requested(
+            args.git_args, interrupted_git_operation(primary_root)
+        ):
+            return
         # These commands own manifest/ref metadata or an explicit absorb patch;
         # they do not rewrite unrelated primary product paths. Commands that
         # rebuild or align the integration checkout retain the global guard.
