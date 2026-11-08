@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
-    }
+      "worktree_grace_days": 7
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -41,9 +41,9 @@
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -104,12 +104,8 @@
       "target_remote": "origin"
     },
     {
-      "id": "pure-cherry-preview",
-      "branch": "pr/pure-cherry-preview",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/pure-cherry-preview",
       "commits": [
         "ef101ae69b6ed2913f56935d5e2dfc90fbfb8dd8",
         "3010bceac5bc05bfecafc4d330afb8fe88fe8fe3",
@@ -117,32 +113,36 @@
         "a6251251b641b5a846a3488d88f7343dcba696fb",
         "a0002301e2dce04e03c57df0c4c7be8725e66393"
       ],
-      "state": "published",
+      "id": "pure-cherry-preview",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     },
     {
-      "id": "int-git-multi-ref",
-      "branch": "pr/int-git-multi-ref",
       "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/int-git-multi-ref",
       "commits": [
         "405af617c91c5d638b6f071d7d681845558ef7bc",
         "8c9e3da55321166e4e6d4011f1e30d6db5cdd17e"
       ],
-      "state": "published",
+      "id": "int-git-multi-ref",
+      "integration_branch": "main-integration",
+      "meta": {
+        "purpose": "int git finishes multi-commit and paused operations on the primary"
+      },
       "publication": {
         "enabled": true
       },
-      "meta": {
-        "purpose": "int git finishes multi-commit and paused operations on the primary"
-      }
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
     }
   ],
   "syncwheel_tracking": "git-tracked",
