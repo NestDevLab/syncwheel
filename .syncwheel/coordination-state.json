@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/compose-update-published": "a08bfd297dc36ee79591aca54e5b6cb7cbf72b7f"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -26,6 +24,7 @@
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
+    "refs/heads/pr/int-git-multi-ref": "feacb00a9a1d19d9fe1f6eef420fafe28d386137",
     "refs/heads/pr/interrupted-replay-recovery": "a14a481b70503c8808d24ab1625c115d24b9a7d9",
     "refs/heads/pr/journal-candidate-rebuild": "fbac2548bab01ee0fcc27bcbcf57d72dbc948ac5",
     "refs/heads/pr/journal-guard-readiness": "e421e352281844a42e0bbc2ae7fdd4a72d84f446",
@@ -107,7 +106,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-08T10:16:31+00:00",
+  "created_at": "2026-11-08T10:18:18+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -143,6 +142,7 @@
     "refs/heads/pr/implicit-gc-scope": "b9b613c8d079afc20e05e30771f07e88c1936db7",
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
+    "refs/heads/pr/int-git-multi-ref": null,
     "refs/heads/pr/interrupted-replay-recovery": null,
     "refs/heads/pr/journal-candidate-rebuild": "49a52e285287e65c8f6ab920991fcef7f6470a98",
     "refs/heads/pr/journal-guard-readiness": "7e098aad3cb47680aba486af6475bdaa706de8ff",
@@ -312,11 +312,11 @@
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "d815de5c-253f-4e47-b732-32a0bc5a3a03",
-  "parent_state": "071dc58eb2cbde86800128a1db2ea1b5406ff599",
+  "operation_token": "a2739f39-c6e1-4156-81e3-229b278a0a8d",
+  "parent_state": "fb8dd7f1ad1ad442bf685fa967e00d7323be226d",
   "projection_status": "partial",
-  "publication_id": "88cc6887-11b8-4907-a561-9581b28266a7",
-  "publication_scope": "compose-stack:compose-update-published",
+  "publication_id": "e5312ab6-6741-4e76-a4d9-40b0f2c87a35",
+  "publication_scope": "close:int-git-multi-ref",
   "schema_version": 2,
   "syncwheel_version": "0.46.23",
   "tombstones": [
@@ -1323,6 +1323,14 @@
       "ref": "refs/heads/pr/rebuild-stale-candidate",
       "remote_tip": null,
       "stack": "rebuild-stale-candidate"
+    },
+    {
+      "branch": "pr/int-git-multi-ref",
+      "closed_at": "2026-11-08T10:18:15+00:00",
+      "reason": "delivered by squash in PR 139",
+      "ref": "refs/heads/pr/int-git-multi-ref",
+      "remote_tip": null,
+      "stack": "int-git-multi-ref"
     }
   ]
 }
