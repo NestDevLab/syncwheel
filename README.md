@@ -290,8 +290,9 @@ syncwheel coordination compose \
 syncwheel coordination compose --apply --plan-file compose-plan.json
 ```
 
-Compose accepts only one local additive stack and additive remote stacks from
-the exact known base. Existing records, shared defaults, integration strategy,
+Compose publishes only the requested local stack, beside additive remote stacks
+from the exact known base. Other unpublished local stacks stay in the local
+manifest and out of the published snapshot. Existing records, shared defaults, integration strategy,
 and membership order must be unchanged. Apply rederives the complete plan,
 then atomically publishes only the new stack ref and an append-only partial
 state child under exact leases. The integration ref is observed but never

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.22 - 2026-11-08
+
+- Let `coordination compose --stack <id>` publish only that stack when other local stacks are still unpublished. They stay in the local manifest and out of the published snapshot, and the guard that refuses `stack push` now names this command as the way through.
+
 ## 0.46.21 - 2026-11-08
 
 - Let `int git` land every ref move of a multi-commit operation such as a cherry-pick range, instead of refusing the second commit and leaving the primary paused.

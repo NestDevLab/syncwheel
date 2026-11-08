@@ -5242,7 +5242,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             f"--known-base-snapshot-digest {known_state['manifest_digest']}"
         )
         self.assertIn(command, failure.stderr)
-        self.assertIn('publish or close second first', failure.stderr)
+        self.assertIn('publish only first and keep the other local stacks', failure.stderr)
 
     def test_close_leaves_another_unpublished_addition_local(self):
         origin = self.create_remote('close-compose-remedy')
@@ -7172,6 +7172,112 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         persisted, _ = module.load_manifest(fixture['repo'], fixture['manifest_path'])
         self.assertEqual([stack['id'] for stack in persisted['stacks']], ['orphan', 'new-stack'])
+
+    def add_unpublished_sibling(self, fixture, stack_id, member):
+        repo = fixture['repo']
+        module = fixture['module']
+        tip = self.commit_on_branch(repo, f'pr/{stack_id}', f'{stack_id}.txt')
+        manifest, manifest_path = module.load_manifest(repo)
+        sibling = json.loads(json.dumps(module.require_stack(manifest, 'new-stack')))
+        sibling.update({'id': stack_id, 'branch': f'pr/{stack_id}', 'commits': [tip]})
+        manifest['stacks'].append(sibling)
+        if member:
+            manifest['integration']['stacks'].append(stack_id)
+        module.save_manifest(manifest_path, manifest)
+        return module.load_manifest(repo)
+
+    def test_compose_publishes_only_the_requested_stack_beside_other_local_stacks(self):
+        fixture = self.prepare_additive_compose('compose-siblings', plan=False)
+        module = fixture['module']
+        repo = fixture['repo']
+        self.add_unpublished_sibling(fixture, 'member-sibling', member=True)
+        manifest, manifest_path = self.add_unpublished_sibling(
+            fixture, 'legacy-sibling', member=False
+        )
+
+        plan, _, _ = module.coordination_compose_stack_plan(
+            repo,
+            manifest,
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+        self.assertEqual(plan['localAddedStacks'], ['new-stack'])
+        self.assertEqual(plan['localRetainedStacks'], ['member-sibling', 'legacy-sibling'])
+        self.assertEqual(
+            [stack['id'] for stack in plan['composedSnapshot']['stacks']],
+            ['orphan', 'new-stack'],
+        )
+
+        result = module.apply_coordination_compose_stack_plan(
+            repo, manifest, manifest_path, plan
+        )
+
+        self.assertEqual(result['status'], 'composed')
+        _, accepted = self.remote_state(fixture['origin'])
+        self.assertEqual(
+            [stack['id'] for stack in accepted['manifest']['stacks']],
+            ['orphan', 'new-stack'],
+        )
+        self.assertEqual(
+            accepted['changed_refs'], {'refs/heads/pr/new-stack': fixture['new_tip']}
+        )
+        for branch in ('pr/member-sibling', 'pr/legacy-sibling'):
+            self.assertEqual(
+                self.git(repo, 'ls-remote', 'origin', f'refs/heads/{branch}').stdout, ''
+            )
+        persisted, _ = module.load_manifest(repo, manifest_path)
+        self.assertEqual(
+            [stack['id'] for stack in persisted['stacks']],
+            ['orphan', 'new-stack', 'member-sibling', 'legacy-sibling'],
+        )
+        self.assertEqual(
+            persisted['integration']['stacks'],
+            ['orphan', 'new-stack', 'member-sibling'],
+        )
+
+        known_tip, known_state = self.remote_state(fixture['origin'])
+        follow_up, _, _ = module.coordination_compose_stack_plan(
+            repo, persisted, 'member-sibling', known_tip, known_state['manifest_digest']
+        )
+        self.assertEqual(follow_up['localRetainedStacks'], ['legacy-sibling'])
+        module.apply_coordination_compose_stack_plan(repo, persisted, manifest_path, follow_up)
+        self.assertNotEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/member-sibling').stdout, ''
+        )
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/legacy-sibling').stdout, ''
+        )
+
+    def test_guard_remedy_command_runs_with_other_local_stacks(self):
+        origin = self.create_remote('compose-named-remedy')
+        repo = self.clone(origin, 'compose-named-remedy')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        known_tip, known_state = self.remote_state(origin)
+        first_tip = self.commit_on_branch(repo, 'scratch/first', 'first.txt')
+        second_tip = self.commit_on_branch(repo, 'scratch/second', 'second.txt')
+        self.add_legacy_unpublished_draft(repo, 'first', first_tip)
+        self.add_legacy_unpublished_draft(repo, 'second', second_tip)
+        manifest_path = repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['integration']['stacks'].append('first')
+        manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+
+        failure = self.run_cli(repo, 'stack', 'push', 'first', expected=2)
+        command = next(
+            line.strip() for line in failure.stderr.splitlines()
+            if line.strip().startswith('syncwheel coordination compose')
+        )
+        arguments = command.split()[1:]
+        self.assertIn(known_tip, arguments)
+        self.assertIn(known_state['manifest_digest'], arguments)
+
+        planned = json.loads(self.run_cli(repo, *arguments).stdout)
+
+        self.assertEqual(planned['stack'], 'first')
+        self.assertEqual(planned['localRetainedStacks'], ['second'])
+        self.assertEqual(planned['status'], 'publish-required')
 
     def test_compose_is_digest_bound_and_rejects_non_additive_or_drifted_inputs(self):
         fixture = self.prepare_additive_compose('compose-drift')
