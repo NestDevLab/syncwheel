@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/journal-candidate-rebuild": "49a52e285287e65c8f6ab920991fcef7f6470a98"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -26,7 +24,7 @@
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/interrupted-replay-recovery": "a14a481b70503c8808d24ab1625c115d24b9a7d9",
-    "refs/heads/pr/journal-candidate-rebuild": "64c9f3fceb457d537e3ff05807720ba3b6b0beed",
+    "refs/heads/pr/journal-candidate-rebuild": "fbac2548bab01ee0fcc27bcbcf57d72dbc948ac5",
     "refs/heads/pr/journal-guard-readiness": "e421e352281844a42e0bbc2ae7fdd4a72d84f446",
     "refs/heads/pr/journal-operations": "4be329dde1c6874ad6d4bbadc6ff4e3e48826d1a",
     "refs/heads/pr/journal-publish-compact": "67b984ed2daf05bbacf313b3a728d28f52692abc",
@@ -106,7 +104,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-08T09:59:23+00:00",
+  "created_at": "2026-11-08T10:09:45+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -264,8 +262,7 @@
       "branch": "main-integration",
       "stacks": [
         "prepared-journal-recovery",
-        "rebuild-stale-candidate",
-        "journal-candidate-rebuild"
+        "rebuild-stale-candidate"
       ],
       "strategy": "cherry-pick"
     },
@@ -306,32 +303,18 @@
         "id": "rebuild-stale-candidate",
         "integration_branch": "main-integration",
         "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/journal-candidate-rebuild",
-        "commits": [
-          "49a52e285287e65c8f6ab920991fcef7f6470a98"
-        ],
-        "id": "journal-candidate-rebuild",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "b31a7bb5-b9b1-4a03-8e01-9c5bd4293840",
-  "parent_state": "77ebc9f354a1cae0ea65c4762dccc5ea87030b89",
+  "operation_token": "f9a3fd61-1657-4d6e-9de5-e6f7534b10dc",
+  "parent_state": "7ee5735f0d7fb0e98d1718148af1113b8f1b9bab",
   "projection_status": "partial",
-  "publication_id": "fbc4232c-46a9-459f-961a-b3afdc312be7",
-  "publication_scope": "compose-stack:journal-candidate-rebuild",
+  "publication_id": "a24141ee-d67e-449c-bd81-ca0130049c3d",
+  "publication_scope": "close:journal-candidate-rebuild",
   "schema_version": 2,
-  "syncwheel_version": "0.46.22",
+  "syncwheel_version": "0.46.23",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1320,6 +1303,14 @@
       "ref": "refs/heads/syncwheel/draft/prepared-journal-recovery",
       "remote_tip": "51d878f1357de0667a77f1b7b23c79c394b8559f",
       "stack": "prepared-journal-recovery"
+    },
+    {
+      "branch": "pr/journal-candidate-rebuild",
+      "closed_at": "2026-11-08T10:09:41+00:00",
+      "reason": "absorbed",
+      "ref": "refs/heads/pr/journal-candidate-rebuild",
+      "remote_tip": null,
+      "stack": "journal-candidate-rebuild"
     }
   ]
 }
