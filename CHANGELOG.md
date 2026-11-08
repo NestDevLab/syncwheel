@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.46.21 - 2026-11-08
+
+- Let `int git` land every ref move of a multi-commit operation such as a cherry-pick range, instead of refusing the second commit and leaving the primary paused.
+- Allow `int git -- <operation> --continue|--abort|--skip|--quit` on a primary paused by that operation, and name those commands in the refusal. Any other mutation stays refused while the operation is paused.
+
 ## 0.46.20 - 2026-11-04
 
 - Keep targeted stack publication limited to its selected branch, claims and coordination state. Control-manifest persistence no longer implicitly publishes integration product changes; bootstrap requires an explicit integration publication. Preserve exact landed-operation recovery and narrow unlanded legacy intents before retrying.

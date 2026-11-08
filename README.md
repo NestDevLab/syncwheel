@@ -1223,6 +1223,11 @@ plumbing-materialized branches are unaffected. A refusal names `syncwheel worktr
 for work already committed on the primary. Every built-in mutation also refuses to start
 while the primary has tracked changes, naming the same remedies.
 
+`int git` authorizes every ref move of its own Git process, so a cherry-pick range or rebase
+lands completely. If such an operation pauses on the primary, finish it with
+`syncwheel int git -- <operation> --continue` (or `--abort`, `--skip`, `--quit`); any other
+mutation stays refused until the operation ends.
+
 For `git-tracked` repositories the bundle is required by default. Every normal
 repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
 `status`, checks and converges the bundle before continuing. Initialization and a
