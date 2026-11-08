@@ -338,6 +338,7 @@ The safest default is:
 - begin routine implementation, dependency installation, builds, and tests on integration
 - create a desk only to resolve a conflict or validate a non-empty materialized stack
   when integration cannot safely run it
+- an integration branch that is already checked out gets a detached desk, so the primary never moves during review
 
 `stack rebuild` and `int rebuild` leave no worktree behind by default. Their
 `auto` replay mode uses Git plumbing where Git supports it (2.38 or newer) and a

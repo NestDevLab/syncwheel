@@ -10420,9 +10420,9 @@ sys.exit(module.main())
         self.assertEqual(module.ref_tip(peer, selected['integration']['branch']), final)
         self.assertFalse(module.load_control_manifest_events(peer, peer_path))
 
-    def merge_stack_conflict_desk_fixture(self, name):
+    def merge_stack_conflict_desk_fixture(self, name, strategy='merge-stacks'):
         fixture = self.a14_published_tip_reuse_fixture(
-            name, integration_strategy='merge-stacks',
+            name, integration_strategy=strategy,
         )
         self.a14_checkout_published_integration(fixture)
         upstream = self.clone(fixture['origin'], name + '-upstream')
@@ -10435,6 +10435,49 @@ sys.exit(module.main())
         fixture['filename'] = filename
         fixture['desk'] = self.tmp / (name + '-desk')
         return fixture
+
+    def test_cherry_pick_desk_resolves_conflict_while_integration_is_checked_out(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-cherry-pick', strategy='cherry-pick')
+        repo, desk = fixture['follower'], fixture['desk']
+        module = fixture['module']
+        before = self.a14_source_snapshot(fixture)
+        source = module.ref_tip(repo, fixture['manifest']['stacks'][0]['branch'])
+        failure = self.run_cli(
+            repo, 'int', 'rebuild', '--replay-mode', 'desk',
+            '--worktree', str(desk), '--reason', 'review replay conflict', expected=2,
+        )
+        self.assertIn('resolution desk:', failure.stderr)
+        self.assertEqual(self.a14_source_snapshot(fixture), before)
+        self.assertTrue(self.git(desk, 'diff', '--name-only', '--diff-filter=U').stdout)
+        (desk / fixture['filename']).write_text('reviewed resolution\n')
+        self.git(desk, 'add', fixture['filename'])
+        self.run_cli(repo, 'stack', 'resolve-integration', 's1', '--worktree', str(desk))
+        self.run_cli(
+            repo, 'int', 'rebuild', '--replay-mode', 'desk',
+            '--worktree', str(desk), '--reason', 'apply reviewed resolution',
+        )
+        manifest, _ = module.load_manifest(repo)
+        self.assertIn('integration_commits', manifest['stacks'][0])
+        self.assertEqual(module.ref_tip(repo, manifest['stacks'][0]['branch']), source)
+        self.assertTrue(module.branch_contains(repo, manifest['integration']['branch'], before['integration']))
+        self.assertEqual((repo / fixture['filename']).read_text(), 'reviewed resolution\n')
+        self.run_cli(repo, 'validate')
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'ephemeral', '--reason', 'repeat resolved replay')
+        self.assertEqual((repo / fixture['filename']).read_text(), 'reviewed resolution\n')
+
+    def test_cherry_pick_desk_keeps_a_secondary_integration_checkout_as_desk(self):
+        fixture = self.merge_stack_conflict_desk_fixture('desk-secondary', strategy='cherry-pick')
+        repo, module = fixture['follower'], fixture['module']
+        branch = fixture['manifest']['integration']['branch']
+        self.git(repo, 'switch', '-q', '--detach')
+        secondary = self.tmp / 'desk-secondary-checkout'
+        self.git(repo, 'worktree', 'add', '-q', str(secondary), branch)
+        args = SimpleNamespace(worktree=None)
+        self.assertFalse(module.integration_desk_is_detached(repo, fixture['manifest'], args))
+        args = SimpleNamespace(worktree=str(secondary))
+        self.assertFalse(module.integration_desk_is_detached(repo, fixture['manifest'], args))
+        args = SimpleNamespace(worktree=str(self.tmp / 'desk-secondary-new'))
+        self.assertTrue(module.integration_desk_is_detached(repo, fixture['manifest'], args))
 
     def test_merge_stack_desk_resolves_published_conflict_without_rewriting_source(self):
         for resolution in ('upstream version\n', 'reviewed resolution\n'):

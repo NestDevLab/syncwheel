@@ -103,7 +103,8 @@ with `--replay-mode desk` to obtain a checkout for resolution. Plumbing requires
 its target branch not to be checked out, so it cannot leave an existing desk out
 of sync with the updated ref.
 
-For `merge-stacks` integration, an explicit `int rebuild --replay-mode desk`
+For `merge-stacks` integration, and for `cherry-pick` integration whose branch
+is already checked out, an explicit `int rebuild --replay-mode desk`
 prepares a detached resolution desk before automatic ancestry reconciliation.
 It never resets the primary or rewrites source branches. An existing destination
 is refused unless it is the same recorded desk. On conflict, resolve and stage
