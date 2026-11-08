@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/journal-candidate-rebuild"
-  ],
-  "claimed_at": "2026-11-08T09:59:23+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-08T10:09:44+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "b31a7bb5-b9b1-4a03-8e01-9c5bd4293840",
-  "publication_scope": "compose-stack:journal-candidate-rebuild",
+  "operation_token": "f9a3fd61-1657-4d6e-9de5-e6f7534b10dc",
+  "publication_scope": "close:journal-candidate-rebuild",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/journal-candidate-rebuild",
-  "syncwheel_version": "0.46.22"
+  "syncwheel_version": "0.46.23"
 }
