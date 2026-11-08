@@ -37,7 +37,8 @@
       "selective-coordination-projection",
       "concurrency-guidance",
       "pure-cherry-preview",
-      "int-git-multi-ref"
+      "int-git-multi-ref",
+      "journal-candidate-rebuild"
     ],
     "strategy": "cherry-pick"
   },
@@ -163,6 +164,24 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "journal-candidate-rebuild",
+      "branch": "pr/journal-candidate-rebuild",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "49a52e285287e65c8f6ab920991fcef7f6470a98"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Rebuild a prepared journal commit when a disjoint commit advances HEAD"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
