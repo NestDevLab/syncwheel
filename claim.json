@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/int-desk-cherry-pick"
-  ],
-  "claimed_at": "2026-11-08T14:02:52+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-08T14:14:25+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "036f7789-c4c1-4f74-936f-b3ba209baa9c",
-  "publication_scope": "compose-stack:int-desk-cherry-pick",
+  "operation_token": "bf63d64b-87b1-429c-a702-bbb4fded9387",
+  "publication_scope": "close:int-desk-cherry-pick",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/int-desk-cherry-pick",
-  "syncwheel_version": "0.46.24"
+  "syncwheel_version": "0.46.25"
 }
