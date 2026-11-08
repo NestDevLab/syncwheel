@@ -7249,6 +7249,115 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/legacy-sibling').stdout, ''
         )
 
+    def publish_new_stack_beside_sibling(self, name):
+        fixture = self.prepare_additive_compose(name, plan=False)
+        self.add_unpublished_sibling(fixture, 'sibling', member=True)
+        manifest, manifest_path = fixture['module'].load_manifest(fixture['repo'])
+        plan, _, _ = fixture['module'].coordination_compose_stack_plan(
+            fixture['repo'],
+            manifest,
+            'new-stack',
+            fixture['base_tip'],
+            fixture['base_state']['manifest_digest'],
+        )
+        fixture['module'].apply_coordination_compose_stack_plan(
+            fixture['repo'], manifest, manifest_path, plan
+        )
+        known_tip, known_state = self.remote_state(fixture['origin'])
+        return fixture, known_tip, known_state, manifest_path
+
+    def commit_review_fix(self, fixture, manifest_path, start='pr/new-stack'):
+        repo = fixture['repo']
+        previous = self.git(repo, 'branch', '--show-current').stdout.strip()
+        self.git(repo, 'switch', '-q', '-C', 'scratch/review-fix', start)
+        (repo / 'review-fix.txt').write_text('review fix\n')
+        self.git(repo, 'add', 'review-fix.txt')
+        self.git(repo, 'commit', '-q', '-m', 'fix: review comment')
+        tip = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(repo, 'switch', '-q', previous)
+        self.git(repo, 'branch', '-f', 'pr/new-stack', tip)
+        module = fixture['module']
+        manifest, _ = module.load_manifest(repo)
+        module.require_stack(manifest, 'new-stack')['commits'].append(tip)
+        module.save_manifest(manifest_path, manifest)
+        return tip, module.load_manifest(repo)[0]
+
+    def test_compose_updates_a_published_stack_beside_other_local_stacks(self):
+        fixture, known_tip, known_state, manifest_path = self.publish_new_stack_beside_sibling(
+            'compose-update'
+        )
+        module = fixture['module']
+        repo = fixture['repo']
+        fix_tip, manifest = self.commit_review_fix(fixture, manifest_path)
+
+        plan, _, _ = module.coordination_compose_stack_plan(
+            repo, manifest, 'new-stack', known_tip, known_state['manifest_digest']
+        )
+        self.assertEqual(plan['expectedRemoteSourceTip'], fixture['new_tip'])
+        self.assertEqual(plan['localAddedStacks'], [])
+        self.assertEqual(plan['localRetainedStacks'], ['sibling'])
+
+        module.apply_coordination_compose_stack_plan(repo, manifest, manifest_path, plan)
+
+        _, accepted = self.remote_state(fixture['origin'])
+        self.assertEqual(accepted['changed_refs'], {'refs/heads/pr/new-stack': fix_tip})
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/sibling').stdout, ''
+        )
+        persisted, _ = module.load_manifest(repo)
+        self.assertEqual(
+            module.require_stack(persisted, 'new-stack')['commits'][-1], fix_tip
+        )
+        self.assertIn('sibling', [stack['id'] for stack in persisted['stacks']])
+
+    def test_compose_update_refuses_a_rewrite_of_the_published_branch(self):
+        fixture, known_tip, known_state, manifest_path = self.publish_new_stack_beside_sibling(
+            'compose-update-rewrite'
+        )
+        module = fixture['module']
+        _, manifest = self.commit_review_fix(fixture, manifest_path, start='origin/main')
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'not a safe successor|STOP'):
+            plan, _, _ = module.coordination_compose_stack_plan(
+                fixture['repo'], manifest, 'new-stack', known_tip, known_state['manifest_digest']
+            )
+            module.apply_coordination_compose_stack_plan(
+                fixture['repo'], manifest, manifest_path, plan
+            )
+        self.assertIn(
+            fixture['new_tip'],
+            self.git(fixture['repo'], 'ls-remote', 'origin', 'refs/heads/pr/new-stack').stdout,
+        )
+
+    def test_compose_update_refuses_another_changed_published_stack(self):
+        fixture, known_tip, known_state, manifest_path = self.publish_new_stack_beside_sibling(
+            'compose-update-other'
+        )
+        module = fixture['module']
+        _, manifest = self.commit_review_fix(fixture, manifest_path)
+        module.require_stack(manifest, 'orphan')['commits'] = [fixture['new_tip']]
+
+        with self.assertRaisesRegex(module.SyncwheelError, "not additive.*orphan"):
+            module.coordination_compose_stack_plan(
+                fixture['repo'], manifest, 'new-stack', known_tip, known_state['manifest_digest']
+            )
+
+    def test_compose_update_refuses_a_renamed_branch(self):
+        fixture, known_tip, known_state, manifest_path = self.publish_new_stack_beside_sibling(
+            'compose-update-rename'
+        )
+        module = fixture['module']
+        _, manifest = self.commit_review_fix(fixture, manifest_path)
+        module.require_stack(manifest, 'new-stack')['branch'] = 'pr/renamed'
+
+        with self.assertRaisesRegex(module.SyncwheelError, 'only change the commits'):
+            module.compose_additive_coordination_snapshots(
+                known_state['manifest'],
+                module.coordination_manifest_snapshot(manifest, fixture['repo']),
+                known_state['manifest'],
+                'new-stack',
+            )
+
     def test_guard_remedy_command_runs_with_other_local_stacks(self):
         origin = self.create_remote('compose-named-remedy')
         repo = self.clone(origin, 'compose-named-remedy')

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.24 - 2026-11-08
+
+- Let `coordination compose` publish new commits on an already published stack while other local stacks stay unpublished. Only fast-forward commit changes to the named stack are accepted; rewrites, renamed branches, and changes to any other published stack are still refused.
+
 ## 0.46.23 - 2026-11-08
 
 - Rebuild a journal repository's prepared commit when an unrelated writer advances HEAD before it is published, in finalize and in recover, instead of refusing forever and leaving the operation's paths dirty. A path-scoped lease is still required. Overlapping commits, an exact lease, or worktree bytes changed since preparation stay refused.
