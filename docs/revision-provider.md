@@ -535,6 +535,12 @@ entries. The durable phases are `prepared → product_committed → verified`.
 branch CAS and before index alignment. `release` may discard a prepared receipt
 only while its product commit has not advanced the branch.
 
+Under a path-scoped lease, a disjoint commit that advances HEAD after preparation
+clears the unpublished candidate, and finalize or recover rebuilds it on the new
+HEAD. Overlapping commits, an exact lease, and worktree bytes that differ from the
+prepared objects stay refused. An already published candidate is an overlap, so it
+is never committed twice.
+
 The successful response has `productCommitSha == resultingHead`, the entire
 draft/control tuple null, and literal `published: false`. The provider never
 publishes. Use `journal publish --committed-only` and its scheduled equivalent

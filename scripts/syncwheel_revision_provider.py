@@ -19,6 +19,7 @@ PROTOCOL_VERSION = 1
 PROVIDER_ID = "syncwheel"
 SUPPORTED_ACTIONS = frozenset({"check", "preflight", "finalize", "recover", "release"})
 MUTATING_ACTIONS = frozenset({"finalize", "recover"})
+JOURNAL_HEAD_RACE_RETRIES = 3
 PHASES = (
     "prepared",
     "product_committed",
@@ -52,6 +53,10 @@ ERROR_UTF16_LIMIT = 4095
 
 class RevisionProviderError(Exception):
     """A bounded, user-actionable provider rejection."""
+
+
+class JournalHeadAdvanced(RevisionProviderError):
+    """Another writer moved the journal branch under an unpublished candidate."""
 
 
 def _utf16_length(value: str) -> int:
@@ -219,6 +224,10 @@ class RevisionBackend(Protocol):
     ) -> None: ...
 
     def verify_recovery_gate(
+        self, request: RevisionRequest, journal: dict[str, Any]
+    ) -> None: ...
+
+    def rebuild_stale_candidate(
         self, request: RevisionRequest, journal: dict[str, Any]
     ) -> None: ...
 
@@ -643,6 +652,16 @@ def _persist_phase(
 
 
 def _advance_journal(backend, request, journal):
+    for _ in range(JOURNAL_HEAD_RACE_RETRIES):
+        try:
+            return _advance_journal_once(backend, request, journal)
+        except JournalHeadAdvanced:
+            continue
+    return _advance_journal_once(backend, request, journal)
+
+
+def _advance_journal_once(backend, request, journal):
+    backend.rebuild_stale_candidate(request, journal)
     backend.verify_recovery_gate(request, journal)
     backend.recover_owned_index_lock(request, journal)
     if journal["phase"] == "verified":
@@ -877,6 +896,8 @@ def handle_request(backend: RevisionBackend, request: RevisionRequest) -> dict[s
                 existing = _assert_matching_journal(request, existing)
                 if existing["phase"] == "expired":
                     raise RevisionProviderError(_expired_message(request, existing))
+                if existing.get("repositoryMode") == "journal":
+                    backend.rebuild_stale_candidate(request, existing)
                 backend.verify_recovery_gate(request, existing)
                 return _base_response(
                     request.action, request.operation_id, True, "prepared"

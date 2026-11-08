@@ -1398,7 +1398,9 @@ applying. Commit the resulting manifest with an exact-path journal snapshot.
 
 Journal repositories also support the [revision provider](docs/revision-provider.md#journal-route)
 for local operation commits; use committed-only publication to publish those
-commits without collecting another writer's unfinished files.
+commits without collecting another writer's unfinished files. Under a
+path-scoped HEAD lease, a prepared commit that an unrelated writer overtakes is
+rebuilt on the new HEAD, so the operation can still finalize or recover.
 
 Several clones may write to the same journal. `journal pull` fetches the
 journal branch, reports `aligned`, `ahead`, or `behind`, and stops on
