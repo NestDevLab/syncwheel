@@ -54,7 +54,7 @@
     "refs/heads/pr/preserve-published-ancestry": "5af5cae2f629cae4b40733440490bcd4c5f13637",
     "refs/heads/pr/promote-recovery-adoption": "923fc28592dc5186a1ef7e59eb9142081c8609b8",
     "refs/heads/pr/read-only-git-auth": "8214480681f3a822f5d3c158defbeba29a5ad631",
-    "refs/heads/pr/rebuild-stale-candidate": "07232d7f763936b2d163cf14c0b7d936d78de759",
+    "refs/heads/pr/rebuild-stale-candidate": "bc0e6350947e04bc97f64153828d17fc6b74796a",
     "refs/heads/pr/recover-semantic-lease": "6c91ea1a41630a2452c364fa4377fc41d3c6ac1b",
     "refs/heads/pr/resolve-prepared-projection": "a25f5f266fdc7d1f51643ff5ec3f1a460a032c55",
     "refs/heads/pr/revision-index-semantic-lease": "2ec37387b91e3b217c219d14855fec1ec97d8493",
@@ -104,7 +104,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-08T10:09:45+00:00",
+  "created_at": "2026-11-08T10:10:06+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -261,8 +261,7 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "prepared-journal-recovery",
-        "rebuild-stale-candidate"
+        "prepared-journal-recovery"
       ],
       "strategy": "cherry-pick"
     },
@@ -289,30 +288,16 @@
         "id": "prepared-journal-recovery",
         "integration_branch": "main-integration",
         "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
-        "branch": "pr/rebuild-stale-candidate",
-        "commits": [
-          "e883fb806ad2b1ed6ba068ca75b9b903a9ad552c"
-        ],
-        "id": "rebuild-stale-candidate",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "f9a3fd61-1657-4d6e-9de5-e6f7534b10dc",
-  "parent_state": "7ee5735f0d7fb0e98d1718148af1113b8f1b9bab",
+  "operation_token": "ecd72b55-1538-4e49-902f-5fa643aa4732",
+  "parent_state": "947661f201f2bf901bc4b98b2432904791f80d20",
   "projection_status": "partial",
-  "publication_id": "a24141ee-d67e-449c-bd81-ca0130049c3d",
-  "publication_scope": "close:journal-candidate-rebuild",
+  "publication_id": "b179b4ac-2114-4492-b2ec-9f8c73b7c3b7",
+  "publication_scope": "close:rebuild-stale-candidate",
   "schema_version": 2,
   "syncwheel_version": "0.46.23",
   "tombstones": [
@@ -1311,6 +1296,14 @@
       "ref": "refs/heads/pr/journal-candidate-rebuild",
       "remote_tip": null,
       "stack": "journal-candidate-rebuild"
+    },
+    {
+      "branch": "pr/rebuild-stale-candidate",
+      "closed_at": "2026-11-08T10:10:03+00:00",
+      "reason": "abandoned",
+      "ref": "refs/heads/pr/rebuild-stale-candidate",
+      "remote_tip": null,
+      "stack": "rebuild-stale-candidate"
     }
   ]
 }
