@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/int-desk-cherry-pick": "7a2efb339b75ec9d79c410ed58d18f791100ac68"
+  },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -24,6 +26,7 @@
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
+    "refs/heads/pr/int-desk-cherry-pick": "68995b5f794b7b3eacd261a27326b7ae710625bd",
     "refs/heads/pr/int-git-multi-ref": "feacb00a9a1d19d9fe1f6eef420fafe28d386137",
     "refs/heads/pr/interrupted-replay-recovery": "a14a481b70503c8808d24ab1625c115d24b9a7d9",
     "refs/heads/pr/journal-candidate-rebuild": "fbac2548bab01ee0fcc27bcbcf57d72dbc948ac5",
@@ -106,7 +109,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-08T10:29:47+00:00",
+  "created_at": "2026-11-08T14:02:52+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -142,6 +145,7 @@
     "refs/heads/pr/implicit-gc-scope": "b9b613c8d079afc20e05e30771f07e88c1936db7",
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
+    "refs/heads/pr/int-desk-cherry-pick": "7a2efb339b75ec9d79c410ed58d18f791100ac68",
     "refs/heads/pr/int-git-multi-ref": null,
     "refs/heads/pr/interrupted-replay-recovery": null,
     "refs/heads/pr/journal-candidate-rebuild": "49a52e285287e65c8f6ab920991fcef7f6470a98",
@@ -265,7 +269,8 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "prepared-journal-recovery"
+        "prepared-journal-recovery",
+        "int-desk-cherry-pick"
       ],
       "strategy": "cherry-pick"
     },
@@ -292,16 +297,30 @@
         "id": "prepared-journal-recovery",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/int-desk-cherry-pick",
+        "commits": [
+          "7a2efb339b75ec9d79c410ed58d18f791100ac68"
+        ],
+        "id": "int-desk-cherry-pick",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "ff9fd9d9-a14d-4ab4-85ec-75eee1c4bce3",
-  "parent_state": "e9d9d8ea764718602bd96f6344dfe970265b0289",
+  "operation_token": "036f7789-c4c1-4f74-936f-b3ba209baa9c",
+  "parent_state": "fd895ed66a0800e47a5378872e600ef2ec6c3395",
   "projection_status": "partial",
-  "publication_id": "41c4247c-92bc-4eef-a05f-f5c471f3c213",
-  "publication_scope": "close:compose-update-published",
+  "publication_id": "f75dc04c-6c2c-4c77-8f68-f76b7c802167",
+  "publication_scope": "compose-stack:int-desk-cherry-pick",
   "schema_version": 2,
   "syncwheel_version": "0.46.24",
   "tombstones": [
