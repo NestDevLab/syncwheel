@@ -293,8 +293,10 @@ syncwheel coordination compose --apply --plan-file compose-plan.json
 Compose publishes only the requested local stack, beside additive remote stacks
 from the exact known base. Other unpublished local stacks stay in the local
 manifest and out of the published snapshot. Existing records, shared defaults, integration strategy,
-and membership order must be unchanged. Apply rederives the complete plan,
-then atomically publishes only the new stack ref and an append-only partial
+and membership order must be unchanged. A stack that is already published may
+also be named, to fast-forward its branch to new commits; nothing else about it
+can change. Apply rederives the complete plan,
+then atomically publishes only the requested stack ref and an append-only partial
 state child under exact leases. The integration ref is observed but never
 updated; unmapped integration commits remain unmapped diagnostics. If remote
 publication succeeds but local manifest adoption fails, replan produces an

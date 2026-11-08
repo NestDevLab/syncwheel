@@ -13929,7 +13929,9 @@ def coordination_compose_stack_plan(
         raise SyncwheelError('coordination compose requested stack has no exact local source tip')
     claimed_refs = list(dict.fromkeys([*latest['state']['managed_refs'], source_ref]))
     require_exclusive_coordination_ownership(repo_root, config, claimed_refs)
-    observed_refs = remote_ref_tips(repo_root, config['remote'], claimed_refs)
+    observed_refs = remote_ref_tips(
+        repo_root, config['remote'], [*claimed_refs, coordination_claim_ref(source_ref)]
+    )
     drifted = {
         ref: (tip, observed_refs.get(ref))
         for ref, tip in latest['state']['managed_refs'].items()
@@ -13944,7 +13946,10 @@ def coordination_compose_stack_plan(
             raise SyncwheelError('coordination compose remote composed state has a different source tip')
         status = 'adopt-only'
     else:
-        if remote_source_tip is not None:
+        if (
+            remote_source_tip is not None
+            and remote_source_tip != latest['state']['managed_refs'].get(source_ref)
+        ):
             raise SyncwheelError('coordination compose refuses to adopt an existing unowned source ref')
         status = 'publish-required'
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
@@ -14720,8 +14725,8 @@ def coordination_state_chain_contains(repo_root, coordination_id, base_tip, late
     return True
 
 
-def additive_coordination_snapshot_delta(base, candidate, side):
-    """Accept only stack additions and their ordered integration membership."""
+def additive_coordination_snapshot_delta(base, candidate, side, updated_stack=None):
+    """Accept stack additions, their integration membership, and one named stack's new commits."""
     base_contract = json.loads(json.dumps(base))
     candidate_contract = json.loads(json.dumps(candidate))
     base_contract.pop('stacks', None)
@@ -14737,7 +14742,7 @@ def additive_coordination_snapshot_delta(base, candidate, side):
     removed = sorted(set(base_stacks) - set(candidate_stacks))
     changed = sorted(
         stack_id for stack_id in set(base_stacks) & set(candidate_stacks)
-        if base_stacks[stack_id] != candidate_stacks[stack_id]
+        if stack_id != updated_stack and base_stacks[stack_id] != candidate_stacks[stack_id]
     )
     if removed or changed:
         raise SyncwheelError(
@@ -14766,14 +14771,24 @@ def additive_coordination_snapshot_delta(base, candidate, side):
 
 
 def compose_additive_coordination_snapshots(base, local, remote, requested_stack):
-    local_delta = additive_coordination_snapshot_delta(base, local, 'local')
+    local_delta = additive_coordination_snapshot_delta(
+        base, local, 'local', updated_stack=requested_stack
+    )
     remote_delta = additive_coordination_snapshot_delta(base, remote, 'remote')
-    if requested_stack not in local_delta['members']:
+    local_map = stack_snapshot_map(local)
+    remote_map = stack_snapshot_map(remote)
+    base_requested = stack_snapshot_map(base).get(requested_stack)
+    if base_requested is None and requested_stack not in local_delta['members']:
         raise SyncwheelError(
             'coordination compose local proposal must add the requested stack'
         )
-    local_map = stack_snapshot_map(local)
-    remote_map = stack_snapshot_map(remote)
+    if base_requested is not None and (
+        {**base_requested, 'commits': None}
+        != {**local_map[requested_stack], 'commits': None}
+    ):
+        raise SyncwheelError(
+            'coordination compose can only change the commits of a published stack'
+        )
     overlap = set(local_delta['added']).intersection(remote_delta['added'])
     conflicting = sorted(
         stack_id for stack_id in overlap if local_map[stack_id] != remote_map[stack_id]
@@ -14791,7 +14806,11 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
                 merged_map[stack_id] = json.loads(json.dumps(source[stack_id]))
                 ordered_additions.append(stack_id)
     merged['stacks'] = [
-        *list(base.get('stacks') or []),
+        *(
+            json.loads(json.dumps(local_map[stack['id']]))
+            if stack['id'] == requested_stack else stack
+            for stack in base.get('stacks') or []
+        ),
         *(merged_map[stack_id] for stack_id in ordered_additions),
     ]
     merged['integration']['stacks'] = [
@@ -14808,7 +14827,7 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
     validate_coordination_snapshot_refs(merged)
     return {
         'merged': merged,
-        'localAddedStacks': [requested_stack],
+        'localAddedStacks': [] if base_requested is not None else [requested_stack],
         'localRetainedStacks': retained,
         'remoteAddedStacks': remote_delta['added'],
     }
