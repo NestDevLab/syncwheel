@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.25 - 2026-11-08
+
+- Make `int rebuild --replay-mode desk` usable for a `cherry-pick` integration whose branch is already checked out, by preparing the same detached resolution desk that `merge-stacks` uses instead of refusing the only path the conflict remedy offers. A secondary checkout of the branch stays the desk.
+
 ## 0.46.24 - 2026-11-08
 
 - Let `coordination compose` publish new commits on an already published stack while other local stacks stay unpublished. Only fast-forward commit changes to the named stack are accepted; rewrites, renamed branches, and changes to any other published stack are still refused.

@@ -29461,8 +29461,9 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
         # The merge result is one reviewed replacement of this stack's contribution.
         # Source commits and the source branch remain untouched.
         read_integration_desk(repo_root, manifest, manifest_path, args.worktree)
-        source_tip = next(item['tip'] for item in receipt['inputs']['replay']['refs']
-                          if item['kind'] == 'merge-stack' and item['id'] == stack['id'])
+        # None for cherry-pick: its inputs pin commits, there's no source ref to bind to
+        source_tip = next((item['tip'] for item in receipt['inputs']['replay']['refs']
+                           if item['kind'] == 'merge-stack' and item['id'] == stack['id']), None)
         if step.get('integration_only'):
             previous = stack_integration_only_commits(stack)
             offset = previous.index(step['argv'][-1])
@@ -29472,9 +29473,10 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
                        if item.get('stack_id') == stack['id']
                        and not item.get('integration_only')]
             stack['integration_commits'] = commits + pending
-            stack['integration_resolution'] = {'source_tip': source_tip}
+            if source_tip:
+                stack['integration_resolution'] = {'source_tip': source_tip}
         context = {'stack': stack['id'], 'commits': commits, 'worktree': str(desk),
-                   'source_tip': source_tip,
+                   'source_tip': source_tip or ref_tip(repo_root, stack['branch']),
                    **({'empty_integration_only': {'commit': step['argv'][-1],
                                                   'head': receipt['head'], 'tree': tree}}
                       if operation.get('empty') else {})}
@@ -29509,6 +29511,19 @@ def integration_desk_has_exact_empty_step(desk, receipt, step):
         and integration_only_replay_is_empty(desk, argv[-1], receipt['head'],
                                               ref_tree(desk, receipt['head']))
     )
+
+
+def integration_desk_is_detached(repo_root, manifest, args):
+    integration = manifest['integration']
+    if integration.get('strategy') == 'merge-stacks':
+        return True
+    existing = find_worktree_for_branch(repo_root, integration['branch'])
+    if not existing:
+        return False
+    # git won't check out the integration branch twice, so that checkout can't be the desk
+    if args.worktree:
+        return Path(args.worktree).resolve() != existing
+    return get_current_branch(repo_root) == integration['branch']
 
 
 def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
@@ -29640,8 +29655,7 @@ def command_int_rebuild(args):
             allow_new_operation=bool(args.reason),
         )
     preflight_control_manifest_digest(repo_root, manifest_path, manifest)
-    if (getattr(args, 'replay_mode', None) == 'desk'
-            and manifest['integration'].get('strategy') == 'merge-stacks'):
+    if getattr(args, 'replay_mode', None) == 'desk' and integration_desk_is_detached(repo_root, manifest, args):
         if args.dry_run:
             desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
                 repo_root, manifest['integration']['branch'], effective_worktree_root(manifest),
