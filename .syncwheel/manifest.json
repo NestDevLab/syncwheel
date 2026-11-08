@@ -35,7 +35,8 @@
       "prepared-journal-recovery",
       "selective-coordination-projection",
       "concurrency-guidance",
-      "pure-cherry-preview"
+      "pure-cherry-preview",
+      "int-desk-cherry-pick"
     ],
     "strategy": "cherry-pick"
   },
@@ -123,6 +124,24 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "int-desk-cherry-pick",
+      "branch": "pr/int-desk-cherry-pick",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "7a2efb339b75ec9d79c410ed58d18f791100ac68"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Make the integration desk reachable when the integration branch is checked out"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
