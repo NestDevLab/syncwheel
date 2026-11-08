@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "backup_keep": 2,
+      "worktree_grace_days": 7,
       "backup_retention_days": 30,
-      "worktree_grace_days": 7
+      "backup_keep": 2
     }
   },
   "defaults": {
@@ -36,8 +36,7 @@
       "compose-update-published",
       "selective-coordination-projection",
       "concurrency-guidance",
-      "pure-cherry-preview",
-      "int-git-multi-ref"
+      "pure-cherry-preview"
     ],
     "strategy": "cherry-pick"
   },
@@ -136,25 +135,6 @@
       "integration_branch": "main-integration",
       "meta": {
         "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/int-git-multi-ref",
-      "commits": [
-        "405af617c91c5d638b6f071d7d681845558ef7bc",
-        "8c9e3da55321166e4e6d4011f1e30d6db5cdd17e"
-      ],
-      "id": "int-git-multi-ref",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "int git finishes multi-commit and paused operations on the primary"
       },
       "publication": {
         "enabled": true
