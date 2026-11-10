@@ -85,6 +85,59 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    syncwheel ledger show
    ```
 
+### The shared integration branch is staging, not storage
+
+Each session authors in its own lane. Durable work lives on lanes, stack branches, and the remote.
+The shared integration branch only assembles stacks for testing, like a staging environment, so any
+session may refresh it without touching work held in another session's lane or stack.
+
+The branch is whatever `manifest.integration.branch` names. That is usually `main-integration`, but
+some repositories name it `main`, and the role is the same: a local `main` declared there is still
+the staging copy. It is not pushed, and delivery still goes through a PR.
+
+When the local integration branch has diverged from the remote branch of the same name, realign it
+without asking. The realignment is local, pushes nothing, rewrites no published history, and keeps a
+backup ref, so it is not `destructive_rewrite` and a `human-gated` repository does not reserve it.
+It grants nothing else. If the remote has no branch of that name there is nothing to realign.
+
+Try the native command first, it takes its own backup:
+
+```bash
+syncwheel int align-remote --dry-run
+syncwheel int align-remote
+```
+
+It refuses when the remote does not match the manifest projection or a stack cannot replay onto the
+remote, which is normal after a long divergence. That refusal is not a blocker, and another lane's
+replay conflict is not yours to resolve. Use the manual route:
+
+```bash
+BRANCH=<manifest.integration.branch>; REMOTE=origin/$BRANCH
+git fetch origin "$BRANCH"
+
+# Local-only commits must hold nothing but control metadata: this must print nothing.
+paths=$(git log --format= --name-only "$REMOTE..$BRANCH" | sort -u | grep -v '^\.syncwheel/')
+[ -z "$paths" ] || git diff --stat "$REMOTE" "$BRANCH" -- $paths
+
+git branch "backup/$BRANCH-before-realign-$(date -u +%Y%m%dT%H%M%SZ)" "$BRANCH"
+saved=$(mktemp); cp .syncwheel/manifest.json "$saved"
+syncwheel int git -- reset --keep "$REMOTE"
+
+# git-tracked repositories only; a local-only manifest is untouched by the reset.
+cp "$saved" .syncwheel/manifest.json
+syncwheel int git -- add .syncwheel/manifest.json
+syncwheel int git -- commit -m "chore(syncwheel): reapply manifest after realignment"
+syncwheel validate
+```
+
+The branch ends one commit ahead of the remote, which is expected. Lanes open normally from there.
+
+If the check prints a diff, the branch holds work no stack owns. Move it first with `syncwheel stack
+capture-integration <stack> <commit>`, then realign. `int rebuild` is not a substitute, because it
+drops every commit not mapped to a stack. If the primary checkout is dirty, recover it losslessly
+before starting.
+
+
 ### When something looks wrong
 
 Do not force a push, do not hand-edit `.syncwheel/manifest.json` or the coordination
