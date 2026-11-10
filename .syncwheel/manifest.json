@@ -35,7 +35,8 @@
       "prepared-journal-recovery",
       "selective-coordination-projection",
       "concurrency-guidance",
-      "pure-cherry-preview"
+      "pure-cherry-preview",
+      "skill-staging-rule"
     ],
     "strategy": "cherry-pick"
   },
@@ -123,6 +124,24 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "skill-staging-rule",
+      "branch": "pr/skill-staging-rule",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "0860c34fa3cdd4c8048853ecc6110c7172c87a95"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Document shared integration staging and local refresh authority"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
