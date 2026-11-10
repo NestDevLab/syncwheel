@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/skill-staging-rule"
-  ],
-  "claimed_at": "2026-11-10T17:01:38+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-10T17:28:04+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "edd920f6-08cf-40f7-a55f-29ae1e7c62d6",
-  "publication_scope": "compose-stack:skill-staging-rule",
+  "operation_token": "c5fb6160-1c1e-457f-8fdc-2a6cf4debaa9",
+  "publication_scope": "close:skill-staging-rule",
+  "reason": "absorbed",
   "source_ref": "refs/heads/pr/skill-staging-rule",
   "syncwheel_version": "0.46.25"
 }
