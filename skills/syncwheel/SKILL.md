@@ -114,20 +114,23 @@ yours to resolve. Check that the branch holds nothing of its own. This must prin
 
 ```bash
 BRANCH=<manifest.integration.branch>; REMOTE=origin/$BRANCH
-git fetch origin "$BRANCH"
+git fetch origin "$BRANCH" || exit 1
 paths=$(git log -m --format= --name-only "$REMOTE..$BRANCH" | sort -u | grep -v '^\.syncwheel/')
 [ -z "$paths" ] || git diff --stat "$REMOTE" "$BRANCH" -- $paths
 ```
 
 If it prints a diff, stop here: the branch holds work no stack owns. Capture those commits into their
 owning stack, creating it first if needed, with `syncwheel stack capture-integration <stack>
-<sha-or-range>`, confirm the stack contains them, and rerun the check. If they cannot be captured,
+<sha-or-range>` and confirm the stack contains every one of them. The check keeps printing the same
+files after a capture, so that confirmation is what lets you continue. If they cannot be captured,
 leave the branch as it is and ask. `int rebuild` is not a substitute, because it drops every commit
 not mapped to a stack. If the primary checkout is dirty, recover it losslessly before starting.
 
-When the check is empty, realign:
+Once the check is empty or the capture is confirmed, realign:
 
 ```bash
+set -e
+BRANCH=<manifest.integration.branch>; REMOTE=origin/$BRANCH
 git branch "backup/$BRANCH-before-realign-$(date -u +%Y%m%dT%H%M%SZ)" "$BRANCH"
 saved=$(mktemp); cp .syncwheel/manifest.json "$saved"
 syncwheel int git -- reset --keep "$REMOTE"
