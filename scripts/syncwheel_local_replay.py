@@ -59,6 +59,28 @@ def git_env(extra=None):
     return env
 
 
+def require_ambient_location():
+    require(not any(k.startswith(("GIT_CONFIG", "GIT_OBJECT")) or k in {
+        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    } for k in os.environ), "local replay refuses ambient Git location/configuration overrides")
+
+
+@contextlib.contextmanager
+def sanitized_cli_environment():
+    """The dedicated CLI enters here before repository resolution or other Git."""
+    require_ambient_location()
+    original = os.environ.copy()
+    cleaned = git_env()
+    os.environ.clear()
+    os.environ.update(cleaned)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(original)
+
+
 def git(root, *args, data=None, env=None, allowed=(0,)):
     result = subprocess.run(
         ["git", "-c", "core.fsync=loose-object,index,reference", *args],
@@ -131,16 +153,40 @@ def image(fd, name):
 
 
 def tree(root, commit):
-    result = {}
-    for row in git(root, "ls-tree", "-r", "-z", commit).split(b"\0")[:-1]:
+    result, directories, parents, seen = {}, set(), set(), set()
+    for row in git(root, "ls-tree", "-r", "-t", "-z", commit).split(b"\0")[:-1]:
         meta, raw_path = row.split(b"\t", 1)
         mode, kind, object_id = meta.decode().split()
         path = raw_path.decode("ascii", errors="replace")
-        require(safe_path(path) and mode in {"100644", "100755"} and kind == "blob"
-                and OID.fullmatch(object_id), "local replay supports only regular tracked paths")
+        require(safe_path(path) and OID.fullmatch(object_id) and path not in seen,
+                "local replay found an invalid or duplicate tree path")
+        seen.add(path)
+        require(len(seen) <= MAX_ENTRIES, "local replay tree exceeds the entry limit")
+        if kind == "tree" and mode == "040000":
+            directories.add(path)
+            continue
+        require(mode in {"100644", "100755"} and kind == "blob",
+                "local replay supports only regular tracked paths")
         result[path] = [mode, object_id]
-    require(len(result) <= MAX_ENTRIES, "local replay tree exceeds the entry limit")
+        ancestor = path
+        while "/" in ancestor:
+            ancestor = ancestor.rsplit("/", 1)[0]
+            parents.add(ancestor)
+    require(directories == parents, "local replay cannot preserve empty subtrees through the index")
     return result
+
+
+def require_no_attributes(root, expected):
+    pathlist = b"".join(path.encode("ascii") + b"\0" for path in sorted(expected))
+    require(not git(root, "check-attr", "--all", "-z", "--stdin", data=pathlist),
+            "local replay refuses effective checkout attributes")
+    directories = {""}
+    for path in expected:
+        while "/" in path:
+            path = path.rsplit("/", 1)[0]
+            directories.add(path)
+    require(not any(os.path.lexists(root / path / ".gitattributes") for path in directories),
+            "local replay refuses checkout .gitattributes files")
 
 
 def require_clean_index(root, expected):
@@ -186,22 +232,51 @@ def hook_observation(root, api):
     return digest(hook.read_bytes())
 
 
+def require_local_objects(root, git_dir):
+    objects = git_dir / "objects"
+    require(objects.is_dir() and not objects.is_symlink(),
+            "local replay refuses a symbolic or external object store")
+    for arguments, expected in (
+        (("--absolute-git-dir",), git_dir),
+        (("--path-format=absolute", "--git-common-dir"), git_dir),
+        (("--path-format=absolute", "--git-path", "objects"), objects),
+    ):
+        actual = Path(os.fsdecode(git(root, "rev-parse", *arguments)).rstrip("\n"))
+        require(actual == expected, "local replay requires the exact private Git directory and object store")
+    # Git can follow a symlink at a loose object fan-out, pack or info path.
+    # Check the complete local store without following directory links.
+    def mount_id(fd):
+        for row in Path(f"/proc/self/fdinfo/{fd}").read_text().splitlines():
+            if row.startswith("mnt_id:"):
+                return row.split()[1]
+        raise LocalReplayError("local replay cannot attest the object store mount")
+
+    def walk_error(exc):
+        raise exc
+
+    with directory(git_dir) as fd:
+        expected_mount = mount_id(fd)
+    for parent, directories, files in os.walk(objects, followlinks=False, onerror=walk_error):
+        with directory(parent) as fd:
+            require(mount_id(fd) == expected_mount, "local replay refuses a separately mounted object store")
+        require(not any((Path(parent) / entry).is_symlink() for entry in (*directories, *files)),
+                "local replay refuses a symbolic entry in the object store")
+
+
 def topology(root, api):
     require(sys.platform == "linux" and fcntl is not None,
             "local replay requires the Linux files backend")
-    require(not any(k.startswith(("GIT_CONFIG", "GIT_OBJECT")) or k in {
-        "GIT_DIR", "GIT_COMMON_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_NAMESPACE",
-        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    } for k in os.environ), "local replay refuses ambient Git location/configuration overrides")
+    require_ambient_location()
     git_dir = root / ".git"
     require(git_dir.is_dir() and not git_dir.is_symlink()
             and git(root, "rev-parse", "--show-toplevel").decode().strip() == str(root)
             and git(root, "rev-parse", "--show-object-format").decode().strip() == "sha1"
             and git(root, "rev-parse", "--is-shallow-repository").decode().strip() == "false"
             and not git(root, "config", "--get-regexp",
-                        r"^(extensions\.(partialclone|refstorage)|remote\..*\.promisor|core\.(splitindex|sparsecheckout|worktree|fsmonitor|autocrlf|eol)|index\.sparse|filter\.)$",
+                        r"^(extensions\.(partialclone|refstorage)|remote\..*\.promisor|core\.(splitindex|sparsecheckout|worktree|fsmonitor|autocrlf|eol|attributesfile)|index\.sparse|filter\..+)$",
                         allowed=(0, 1)),
             "local replay requires the primary checkout of a full SHA-1 files repository")
+    require_local_objects(root, git_dir)
     require(not any(os.path.lexists(git_dir / item) for item in (
         "objects/info/alternates", "info/grafts", "info/attributes", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
         "rebase-apply", "rebase-merge", "sequencer",
@@ -270,6 +345,7 @@ def make_plan(root, stack_id, api):
                 f"local replay conflict or unsupported mode change at {path}")
     require(baseline.get(MANIFEST, [None])[0] == "100644",
             "local replay requires a tracked control manifest")
+    require_no_attributes(root, baseline)
     require_clean_index(root, baseline)
     with directory(root) as work, directory(git_dir) as meta:
         # The complete tracked checkout is verified without filters or optional index updates.
@@ -587,6 +663,22 @@ def verify_objects(root, record, api):
 def finish(root, git_dir, operation, record, api, *, recover=False):
     plan = record["plan"]
     with directory(root) as work, directory(git_dir) as meta, directory(operation) as journal:
+        # The durable aligning marker is written before any checkout/index
+        # exchange. A prepared-only intent can be closed without reading the
+        # current branch: release only its exact seed-owned index lock.
+        if recover and (record["state"] == "prepared" or record.get("abortedBeforeAlignment")):
+            paths = RefLease(root, git_dir, plan, None, source=True).locked()
+            require(not any(os.path.lexists(path) for path in [*paths, git_dir / "packed-refs.lock"]),
+                    "local replay found an unowned Git ref lock; no locks were removed")
+            release = owned_index_lock(meta, journal, acquire=False)
+            if record["state"] == "prepared":
+                record.update(state="aborted", abortedBeforeAlignment=True)
+                save_journal(operation, record, api)
+                checkpoint("terminal-recorded")
+            if release and owned_index_lock(meta, journal, acquire=False):
+                os.unlink("index.lock", dir_fd=meta)
+                os.fsync(meta)
+            return record["state"]
         current = head(root, plan["targetRef"])
         require(current in {plan["integrationTip"], record["final"]}, "local replay target advanced; journal retained")
         require(symbolic(root, "HEAD") == plan["targetRef"], "local replay checkout changed; journal retained")
@@ -600,7 +692,8 @@ def finish(root, git_dir, operation, record, api, *, recover=False):
                     os.unlink("index.lock", dir_fd=meta)
                     os.fsync(meta)
             return record["state"]
-        require(record["state"] == "prepared", "invalid local replay journal state")
+        require(record["state"] == ("aligning" if recover else "prepared"),
+                "invalid local replay journal state")
         expected_final = verify_objects(root, record, api)
         owned_index_lock(meta, journal, acquire=True)
         checkpoint("index-lock-owned")
@@ -613,9 +706,13 @@ def finish(root, git_dir, operation, record, api, *, recover=False):
             if not recover:
                 refreshed, _ = make_plan(root, plan["stack"], api)
                 require(refreshed == plan, "local replay preview is stale under the ref and index leases")
+                record["state"] = "aligning"
+                save_journal(operation, record, api)
+                checkpoint("alignment-authorized")
             aligned_files(work, meta, journal, record, forward=forward,
                           replace=not recover or not forward)
             expected = expected_final if forward else tree(root, current)
+            require_no_attributes(root, expected)
             require_clean_index(root, expected)
             checkout(work, expected)
             require(owned_index_lock(meta, journal, acquire=False), "local replay lost the index lock")
@@ -644,6 +741,9 @@ def execute(root, args, api):
     operation = git_dir / "syncwheel-local-replay" / args.plan_digest
     if args.recover:
         require(operation.is_dir(), "local replay has no journal for this digest")
+    else:
+        observed, _ = make_plan(root, args.stack, api)
+        require(observed["planDigest"] == args.plan_digest, "local replay preview is stale")
     with operation_lock(git_dir) as store:
         with api.channel_mutation_lock(root, root / MANIFEST, "local-replay"):
             if args.recover:
@@ -656,7 +756,7 @@ def execute(root, args, api):
             else:
                 for path in store.iterdir():
                     if re.fullmatch(r"[0-9a-f]{64}", path.name):
-                        require(journal_record(path)["state"] != "prepared",
+                        require(journal_record(path)["state"] in {"aborted", "completed"},
                                 "a local replay journal is pending; recover that operation first")
                 require(not api.pending_control_manifest_intents(api.load_ledger_events(root, root / MANIFEST)),
                         "a control manifest operation is pending; local replay will not recover it")
@@ -665,5 +765,8 @@ def execute(root, args, api):
                 operation, record = prepare(root, store, plan, manifest, args.reason, api)
                 checkpoint("journal-prepared")
             state = finish(root, git_dir, operation, record, api, recover=args.recover)
+    after = record["final"] if state == "completed" else plan["integrationTip"]
+    if record.get("abortedBeforeAlignment"):
+        after = None  # No claim about a ref the operation never moved.
     return {"status": state, "stack": args.stack, "planDigest": args.plan_digest,
-            "before": plan["integrationTip"], "after": record["final"] if state == "completed" else plan["integrationTip"]}
+            "before": plan["integrationTip"], "after": after}

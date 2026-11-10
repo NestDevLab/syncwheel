@@ -29638,13 +29638,19 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
 def command_int_replay_local(args):
     # Deliberately enter before generic startup recovery and reaping. The
     # executor owns the only journal, lock, and ref authorization it may use.
-    from syncwheel_local_replay import LocalReplayError, execute
+    try:
+        from syncwheel_local_replay import LocalReplayError, execute, sanitized_cli_environment
+    except ModuleNotFoundError as exc:
+        if exc.name != 'syncwheel_local_replay':
+            raise
+        raise SyncwheelError('int replay-local needs the matching syncwheel_local_replay.py beside the CLI') from exc
 
     if args.personal or args.manifest:
         raise SyncwheelError('local replay requires the primary tracked manifest')
     try:
-        root = Path(resolve_repo_root(args.repo)).resolve()
-        result = execute(root, args, sys.modules[__name__])
+        with sanitized_cli_environment():
+            root = Path(resolve_repo_root(args.repo)).resolve()
+            result = execute(root, args, sys.modules[__name__])
     except (LocalReplayError, OSError) as exc:
         raise SyncwheelError(str(exc)) from exc
     print(json.dumps(result, indent=2, sort_keys=True))

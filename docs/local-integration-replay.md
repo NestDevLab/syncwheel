@@ -21,7 +21,8 @@ custom reference hooks are refused.
 The witness requires identical source-base and integration blobs on every
 changed path. It accepts changes to existing regular files with unchanged modes;
 overlapping content, additions, deletions, links, submodules, partial clones,
-hidden index entries, and control-path edits are refused. It does not infer
+hidden index entries, empty subtrees, effective checkout attributes and filters,
+and control-path edits are refused. It does not infer
 semantic equivalence. The result retains the entire old integration as
 ancestry and keeps all untouched tree entries. A second commit records the
 selected stack's projection without changing the source ref or other stack
@@ -39,7 +40,9 @@ are not governed by Git locks. An unexpected image aborts; exchanged bytes
 remain in the journal. The command never fetches, resets, reaps a lane, pushes,
 or recovers another operation.
 
-Recovery never replays or retries a ref move. With the old tip still current,
+Recovery never replays or retries a ref move. If alignment did not start,
+it can close the intent and release its own index lock even if another writer
+advanced the branch. With alignment started and the old tip still current,
 it restores only journal-owned images. With the new tip current, it verifies
 the already aligned checkout and closes the receipt. If the ref, checkout, or
 journal is inconsistent, it retains evidence and refuses. A full process-group

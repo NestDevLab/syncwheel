@@ -894,7 +894,8 @@ source label with `SYNCWHEEL_UV_TOOL_SOURCE`.
      remains controlled by the parent repository's submodule policy.
 
 4. **Vendored checkout or script**
-   - Copy `scripts/syncwheel.py` into a project.
+   - Copy `scripts/syncwheel.py` into a project. For `int replay-local`, copy
+     the matching `scripts/syncwheel_local_replay.py` alongside it.
    - Fastest for experiments, but updates are manual.
    - `self status` reports `install_kind: script` when no git checkout or uv
      tool environment is detected.

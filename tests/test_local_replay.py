@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import signal
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -212,6 +213,86 @@ class LocalReplayTest(unittest.TestCase):
         self.assertIn("staged bytes changed", self.recover(plan, expected=2))
         self.assertEqual((self.root / "feature.txt").read_text(), "unowned write\n")
         self.assertEqual(self.git("rev-parse", "HEAD"), self.old)
+
+    def test_pre_alignment_ref_advance_does_not_strand_our_index_lock(self):
+        plan = self.cli()
+        old_index = (self.root / ".git/index").read_bytes()
+        old_manifest = (self.root / ".syncwheel/manifest.json").read_bytes()
+        code = """if phase == 'index-lock-owned':
+ old = subprocess.check_output(['git','rev-parse','HEAD'], text=True).strip()
+ tree = subprocess.check_output(['git','rev-parse','HEAD^{tree}'], text=True).strip()
+ new = subprocess.check_output(['git','commit-tree',tree,'-p',old,'-m','Competing advance'], text=True).strip()
+ subprocess.run(['git','update-ref','refs/heads/integration',new,old],check=True)
+"""
+        self.assertIn("CAS lease", self.apply(plan, expected=2, checkpoint_code=code))
+        advanced = self.git("rev-parse", "HEAD")
+        self.assertNotEqual(advanced, self.old)
+        lock = self.root / ".git/index.lock"
+        self.assertTrue(lock.exists())
+        self.assertEqual(self.recover(plan)["status"], "aborted")
+        self.assertIsNone(self.recover(plan)["after"])
+        self.assertFalse(lock.exists())
+        self.assertEqual(self.git("rev-parse", "HEAD"), advanced)
+        self.assertEqual((self.root / ".git/index").read_bytes(), old_index)
+        self.assertEqual((self.root / ".syncwheel/manifest.json").read_bytes(), old_manifest)
+
+    def test_refuses_symbolic_object_store_before_any_object_write(self):
+        plan = self.cli()
+        objects = self.root / ".git/objects"
+        external = self.root.parent / "external-objects"
+        objects.rename(external)
+        objects.symlink_to(external, target_is_directory=True)
+        entries = {str(path.relative_to(external)): path.read_bytes()
+                   for path in external.rglob("*") if path.is_file()}
+        self.assertIn("symbolic or external object store", self.cli(expected=2))
+        self.assertIn("symbolic or external object store", self.apply(plan, expected=2))
+        self.assertEqual({str(path.relative_to(external)): path.read_bytes()
+                          for path in external.rglob("*") if path.is_file()}, entries)
+        self.assertFalse((self.root / ".git/syncwheel-local-replay").exists())
+
+    def test_refuses_empty_subtree_before_checkout(self):
+        plan = self.cli()
+        empty = subprocess.check_output(["git", "mktree"], cwd=self.root, input=b"",
+                                        env=self.env).decode().strip()
+        listing = self.git("ls-tree", "HEAD") + f"\n040000 tree {empty}\tempty\n"
+        tree = subprocess.check_output(["git", "mktree"], cwd=self.root, input=listing,
+                                       text=True, env=self.env).strip()
+        tip = self.git("commit-tree", tree, "-p", self.old, "-m", "Empty subtree")
+        self.git("update-ref", "refs/heads/integration", tip, self.old)
+        self.assertIn("empty subtrees", self.cli(expected=2))
+        self.assertIn("empty subtrees", self.apply(plan, expected=2))
+        self.assertEqual(self.git("rev-parse", "HEAD"), tip)
+        self.assertIn("empty", self.git("ls-tree", "HEAD"))
+
+    def test_refuses_effective_filters_and_untracked_attributes(self):
+        plan = self.cli()
+        self.git("config", "filter.fixture.clean", "exit 71")
+        self.assertIn("full SHA-1 files repository", self.apply(plan, expected=2))
+        self.git("config", "--unset", "filter.fixture.clean")
+        self.file(".gitattributes", "feature.txt text eol=crlf\n")
+        self.assertIn("effective checkout attributes", self.apply(plan, expected=2))
+        self.assertEqual(self.git("rev-parse", "HEAD"), self.old)
+        self.assertEqual((self.root / "feature.txt").read_text(), "old feature\n")
+        self.assertFalse((self.root / ".git/syncwheel-local-replay").exists())
+
+    def test_preview_scrubs_trace_before_first_git(self):
+        trace = self.root.parent / "ambient-trace"
+        self.env["GIT_TRACE"] = str(trace)
+        self.assertEqual(self.cli()["kind"], "localIntegrationReplayPlan")
+        self.assertFalse(trace.exists())
+
+    def test_vendored_cli_requires_matching_companion_only_for_replay(self):
+        vendor = self.root.parent / "vendor"
+        vendor.mkdir()
+        cli = shutil.copy2(CLI, vendor)
+        command = [sys.executable, cli, "int", "replay-local", "feature", "--repo", str(self.root)]
+        result = subprocess.run(command, env=self.env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("matching syncwheel_local_replay.py", result.stderr)
+        shutil.copy2(CLI.with_name("syncwheel_local_replay.py"), vendor)
+        result = subprocess.run(command, env=self.env, cwd=self.root, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["kind"], "localIntegrationReplayPlan")
 
     def test_group_crash_during_prepare_preserves_native_lock(self):
         plan = self.cli()
