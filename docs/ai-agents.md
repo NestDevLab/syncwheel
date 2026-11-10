@@ -290,6 +290,7 @@ syncwheel repo authority status
 
 - `human-gated` (or no block at all): ask before commit, push, PR, and merge, as
   the repository's own instructions require.
+- Neither mode reserves refreshing the local shared integration branch: it is staging, not storage. See "The shared integration branch is staging, not storage" in the Syncwheel skill.
 - `ai-managed`: the repository's configured Syncwheel pipeline runs unattended.
   The manifest defines the pipeline (stacks, PRs, landing, channels, or journal
   publish); `authority` only says whether you may run it without a human at
