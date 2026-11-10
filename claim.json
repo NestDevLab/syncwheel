@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/skill-staging-rule"
   ],
-  "claimed_at": "2026-11-10T16:53:05+00:00",
+  "claimed_at": "2026-11-10T16:55:11+00:00",
   "coordination_id": "default",
-  "operation_token": "a5e2837b-606c-4bb6-b00c-c5303e106b73",
+  "operation_token": "0f352c74-9487-41a9-acf3-95c98c4f4bd1",
   "publication_scope": "compose-stack:skill-staging-rule",
   "source_ref": "refs/heads/pr/skill-staging-rule",
   "syncwheel_version": "0.46.25"
