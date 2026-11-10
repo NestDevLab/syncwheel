@@ -113,8 +113,8 @@ normal after a long divergence, that is not a blocker and another lane's replay 
 yours to resolve. Check that the branch holds nothing of its own. This must print nothing:
 
 ```bash
-BRANCH=<manifest.integration.branch>; REMOTE=origin/$BRANCH
-git fetch origin "$BRANCH" || exit 1
+BRANCH=<manifest.integration.branch>; PUB=<manifest.defaults.publication_remote>; REMOTE=$PUB/$BRANCH
+git fetch "$PUB" "$BRANCH" || exit 1
 paths=$(git log -m --format= --name-only "$REMOTE..$BRANCH" | sort -u | grep -v '^\.syncwheel/')
 [ -z "$paths" ] || git diff --stat "$REMOTE" "$BRANCH" -- $paths
 ```
@@ -130,7 +130,7 @@ Once the check is empty or the capture is confirmed, realign:
 
 ```bash
 set -e
-BRANCH=<manifest.integration.branch>; REMOTE=origin/$BRANCH
+BRANCH=<manifest.integration.branch>; PUB=<manifest.defaults.publication_remote>; REMOTE=$PUB/$BRANCH
 git branch "backup/$BRANCH-before-realign-$(date -u +%Y%m%dT%H%M%SZ)" "$BRANCH"
 saved=$(mktemp); cp .syncwheel/manifest.json "$saved"
 syncwheel int git -- reset --keep "$REMOTE"
