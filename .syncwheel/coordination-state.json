@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/skill-staging-rule": "769101b18bc9979f1b25cb4c75eb1066086dbeb2"
+  },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -66,6 +68,7 @@
     "refs/heads/pr/scoped-integration-resolution": "3bad2de14f60dd123005c9f69f8c4d546fe5bfe1",
     "refs/heads/pr/scoped-stack-add": "a13fd09b3f3bb0a122784232b7ac4035f53de5c1",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
+    "refs/heads/pr/skill-staging-rule": "dbdca41b24d443681605c4ec99c6f2abafc91024",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
     "refs/heads/pr/stack-target": "19372a7c1f48091a1cc0ef397c00acf380b766c4",
     "refs/heads/pr/worktree-release-dirty-primary": "da4db739f3e9a23bcfac37b4f9dffcb9f1a4c7b9",
@@ -107,7 +110,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-08T14:14:26+00:00",
+  "created_at": "2026-11-10T16:48:45+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -193,6 +196,7 @@
     "refs/heads/pr/scoped-integration-resolution": "257cc025e05a570e4a97111df5b2b109004896b0",
     "refs/heads/pr/scoped-stack-add": "74561e7e4f4b17eb5a7097b76e6bc8767b9bf2ea",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
+    "refs/heads/pr/skill-staging-rule": "769101b18bc9979f1b25cb4c75eb1066086dbeb2",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
     "refs/heads/pr/stack-target": "6f1fc012199cfe8d2d70d68d21ec4089f29759b8",
     "refs/heads/pr/tree-equivalent-state-cas": "4431d0a3a4a20d0ab0893b3a95ede0ea2d5f74ec",
@@ -267,7 +271,8 @@
       },
       "branch": "main-integration",
       "stacks": [
-        "prepared-journal-recovery"
+        "prepared-journal-recovery",
+        "skill-staging-rule"
       ],
       "strategy": "cherry-pick"
     },
@@ -294,16 +299,30 @@
         "id": "prepared-journal-recovery",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/skill-staging-rule",
+        "commits": [
+          "0860c34fa3cdd4c8048853ecc6110c7172c87a95"
+        ],
+        "id": "skill-staging-rule",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "bf63d64b-87b1-429c-a702-bbb4fded9387",
-  "parent_state": "ca7c4603b71e4a8af568d505ad4d319d13679d6f",
+  "operation_token": "f77c2bf2-b465-4638-b701-afefd374db80",
+  "parent_state": "19efec2ebda32296aa4f5de406fefa12ce08a188",
   "projection_status": "partial",
-  "publication_id": "2c3dee4c-3b38-4aae-95fe-751111549dff",
-  "publication_scope": "close:int-desk-cherry-pick",
+  "publication_id": "fd112c51-578c-41d1-aa65-c5a91ddc4c10",
+  "publication_scope": "compose-stack:skill-staging-rule",
   "schema_version": 2,
   "syncwheel_version": "0.46.25",
   "tombstones": [
