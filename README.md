@@ -3,7 +3,10 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.19`
+Current version: `0.46.26`
+
+For a narrow, local-only integration delta with exact source ownership, see
+[witnessed local replay](docs/local-integration-replay.md).
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay

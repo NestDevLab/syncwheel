@@ -19,7 +19,7 @@ syncwheel = "syncwheel:main"
 syncwheel-github = "syncwheel_github:main"
 
 [tool.setuptools]
-py-modules = ["syncwheel", "syncwheel_revision_provider", "syncwheel_github"]
+py-modules = ["syncwheel", "syncwheel_revision_provider", "syncwheel_github", "syncwheel_local_replay"]
 package-dir = {"" = "scripts"}
 
 [tool.setuptools.dynamic]

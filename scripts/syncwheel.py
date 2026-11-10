@@ -29635,6 +29635,22 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
     return result
 
 
+def command_int_replay_local(args):
+    # Deliberately enter before generic startup recovery and reaping. The
+    # executor owns the only journal, lock, and ref authorization it may use.
+    from syncwheel_local_replay import LocalReplayError, execute
+
+    if args.personal or args.manifest:
+        raise SyncwheelError('local replay requires the primary tracked manifest')
+    try:
+        root = Path(resolve_repo_root(args.repo)).resolve()
+        result = execute(root, args, sys.modules[__name__])
+    except (LocalReplayError, OSError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -35673,6 +35689,17 @@ def build_parser():
     )
     int_rebuild_p.set_defaults(func=command_int_rebuild)
 
+    int_local_p = int_sub.add_parser(
+        'replay-local', parents=[common], help='plan or adopt a witnessed local integration delta',
+    )
+    int_local_p.add_argument('stack')
+    int_local_p.add_argument('--plan-digest')
+    int_local_p.add_argument('--reason')
+    int_local_mode = int_local_p.add_mutually_exclusive_group()
+    int_local_mode.add_argument('--apply', action='store_true')
+    int_local_mode.add_argument('--recover', action='store_true')
+    int_local_p.set_defaults(func=command_int_replay_local)
+
     int_push_p = int_sub.add_parser('push', parents=[common])
     add_push_args(int_push_p)
     int_push_p.set_defaults(func=command_int_push)
@@ -36220,6 +36247,7 @@ def entrypoint_behavior_table():
         mutates='schedule-apply', manifest_mutates='internal',
     )
     register((command_stack_git, command_int_git), mutates='git-passthrough')
+    register((command_int_replay_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
     register(
         (SyncwheelRevisionBackend.ensure_stack_owned,),
         manifest_mutates='internal',
@@ -36293,6 +36321,8 @@ def mutation_rule_requested(rule, args):
         return True
     if rule == 'apply':
         return bool(getattr(args, 'apply', False))
+    if rule == 'apply-or-recover':
+        return bool(getattr(args, 'apply', False) or getattr(args, 'recover', False))
     if rule == 'execute':
         return not bool(getattr(args, 'dry_run', False))
     if rule == 'update-manifest':
@@ -36799,6 +36829,14 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
+    if args.func == command_int_replay_local:
+        try:
+            if passthrough:
+                raise SyncwheelError('local replay does not accept Git passthrough')
+            return args.func(args)
+        except SyncwheelError as exc:
+            print(f'error: {exc}', file=sys.stderr)
+            return 2
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
     guard_callback = args.func in {
