@@ -107,18 +107,27 @@ syncwheel int align-remote --dry-run
 syncwheel int align-remote
 ```
 
-It refuses when the remote does not match the manifest projection or a stack cannot replay onto the
-remote, which is normal after a long divergence. That refusal is not a blocker, and another lane's
-replay conflict is not yours to resolve. Use the manual route:
+If it refuses because of the checkout or a dirty tree, fix that and rerun. If it refuses because the
+remote does not match the manifest projection or a stack cannot replay onto the remote, which is
+normal after a long divergence, that is not a blocker and another lane's replay conflict is not
+yours to resolve. Check that the branch holds nothing of its own. This must print nothing:
 
 ```bash
 BRANCH=<manifest.integration.branch>; REMOTE=origin/$BRANCH
 git fetch origin "$BRANCH"
-
-# Local-only commits must hold nothing but control metadata: this must print nothing.
-paths=$(git log --format= --name-only "$REMOTE..$BRANCH" | sort -u | grep -v '^\.syncwheel/')
+paths=$(git log -m --format= --name-only "$REMOTE..$BRANCH" | sort -u | grep -v '^\.syncwheel/')
 [ -z "$paths" ] || git diff --stat "$REMOTE" "$BRANCH" -- $paths
+```
 
+If it prints a diff, stop here: the branch holds work no stack owns. Capture those commits into their
+owning stack, creating it first if needed, with `syncwheel stack capture-integration <stack>
+<sha-or-range>`, confirm the stack contains them, and rerun the check. If they cannot be captured,
+leave the branch as it is and ask. `int rebuild` is not a substitute, because it drops every commit
+not mapped to a stack. If the primary checkout is dirty, recover it losslessly before starting.
+
+When the check is empty, realign:
+
+```bash
 git branch "backup/$BRANCH-before-realign-$(date -u +%Y%m%dT%H%M%SZ)" "$BRANCH"
 saved=$(mktemp); cp .syncwheel/manifest.json "$saved"
 syncwheel int git -- reset --keep "$REMOTE"
@@ -126,16 +135,12 @@ syncwheel int git -- reset --keep "$REMOTE"
 # git-tracked repositories only; a local-only manifest is untouched by the reset.
 cp "$saved" .syncwheel/manifest.json
 syncwheel int git -- add .syncwheel/manifest.json
-syncwheel int git -- commit -m "chore(syncwheel): reapply manifest after realignment"
+git diff --cached --quiet || syncwheel int git -- commit -m "chore(syncwheel): reapply manifest after realignment"
 syncwheel validate
 ```
 
-The branch ends one commit ahead of the remote, which is expected. Lanes open normally from there.
-
-If the check prints a diff, the branch holds work no stack owns. Move it first with `syncwheel stack
-capture-integration <stack> <commit>`, then realign. `int rebuild` is not a substitute, because it
-drops every commit not mapped to a stack. If the primary checkout is dirty, recover it losslessly
-before starting.
+The branch ends level with the remote, or one commit ahead when the manifest differs. Lanes open
+normally from there.
 
 
 ### When something looks wrong
@@ -638,6 +643,7 @@ leads to (deployment channels, install, restart) and must be listed on its own.
 `destructive_rewrite`, external sends, money, and work outside the named scope
 stay gated whatever the block says. Missing block means `human-gated`. Never
 set or widen this policy yourself.
+Refreshing the local shared integration branch is not covered by these gates; see "The shared integration branch is staging, not storage".
 
 ### `git-tracked` → commit the manifest
 
