@@ -26169,6 +26169,13 @@ def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
 def command_stack_create(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    preserve_lanes = bool(getattr(args, 'preserve_lanes', False))
+    if preserve_lanes and args.draft:
+        raise SyncwheelError('--preserve-lanes declares local metadata only; omit --draft')
+    if manifest.get('syncwheel_tracking') == SYNCWHEEL_TRACKING_GIT_TRACKED and primary_guard_path(repo_root).exists():
+        guard = require_primary_guard(repo_root)
+        if guard['enabled'] and not primary_checkout_state(repo_root, manifest)['compliant']:
+            raise SyncwheelError('primary checkout guard requires the declared integration branch before a tracked stack declaration')
     if args.draft and coordination_is_active(manifest):
         create_remote = coordination_config(manifest)['remote']
         if not coordination_remote_is_reachable(repo_root, create_remote):
@@ -26177,7 +26184,11 @@ def command_stack_create(args):
                 'restore remote access, then retry:\n  '
                 f'{draft_create_retry_command(args)}'
             )
-    complete_pending_promote_intents(repo_root, manifest, manifest_path)
+    if preserve_lanes:
+        if pending_coordination_publications(repo_root, manifest_path) or pending_control_manifest_intents(load_ledger_events(repo_root, manifest_path)):
+            raise SyncwheelError('local declaration refuses pending operations; resolve them with their owners first')
+    else:
+        complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stacks = stack_map(manifest)
     if args.stack in stacks:
         existing = stacks[args.stack]
@@ -26383,12 +26394,13 @@ def command_stack_create(args):
             'actor': governed_worktree_owner(),
         },
     )
-    capture_governed_worktrees_for_stack(
-        repo_root,
-        manifest,
-        args.stack,
-        manifest_path=manifest_path,
-    )
+    if not preserve_lanes:
+        capture_governed_worktrees_for_stack(
+            repo_root,
+            manifest,
+            args.stack,
+            manifest_path=manifest_path,
+        )
     print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
     if coordination_result:
         print(f"  coordination state: {coordination_result['status']}")
@@ -35478,6 +35490,10 @@ def build_parser():
     stack_create_p.add_argument(
         '--depends-on', action='append', default=[],
         help='declare one prerequisite stack; may be repeated',
+    )
+    stack_create_p.add_argument(
+        '--preserve-lanes', action='store_true',
+        help='declare local metadata without lane capture/recovery or remote publication; refuse pending operations',
     )
     stack_create_p.add_argument(
         '--draft',

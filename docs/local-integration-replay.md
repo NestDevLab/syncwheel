@@ -104,3 +104,13 @@ held, even if the ref is absent; the same ref is never automatically created
 again after an intent, including under a new plan digest. A present exact ref
 without a pending intent can be inspected without writing it or inferring who
 created it. There is no automatic deletion, rewrite, resend or publication.
+
+For a shared delivery clone, `stack create <stack> <commits> --base <base>
+--preserve-lanes` only declares local metadata. It never captures, recovers or
+reaps any lane and never publishes a draft. Pending control or publication
+operations are refused instead of recovered. A configured primary-branch guard
+is checked before stack-creation control writes, so a wrong primary cannot leave
+a newly staged declaration behind after a late pre-commit refusal. Normal
+tracking, authority, global metadata locking and branch/lane collision guards
+still apply. This flag neither repairs existing staged state nor authorizes a
+push; publication and exact source materialization remain separate operations.

@@ -6,6 +6,7 @@ import os
 import signal
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -5266,6 +5267,66 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual((path / 'foreign-ignored.bin').read_bytes(), value)
         self.assertEqual(self.git(repo, 'worktree', 'list', '--porcelain').stdout, before)
         self.assertEqual(module.ref_tip(repo, branch), source)
+
+    def test_local_declaration_preserves_foreign_dirty_locked_lane_without_recovery(self):
+        origin = self.create_remote('local-declaration-foreign')
+        repo = self.clone(origin, 'local-declaration-foreign')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        opened = json.loads(self.run_cli(repo, 'worktree', 'open', 'foreign', '--json').stdout)
+        lane = Path(opened['lane']['path'])
+        (lane / 'foreign.txt').write_bytes(b'foreign untracked\x00')
+        self.git(repo, 'worktree', 'lock', str(lane), '--reason', 'fixture foreign lock')
+        source = self.commit_on_branch(repo, 'scratch/local-declaration', 'owned.txt')
+        registry = repo / '.git/syncwheel/governed-worktrees.json'
+        before, head = registry.read_bytes(), self.git(lane, 'rev-parse', 'HEAD').stdout
+        module = self.load_module()
+        argv = ['syncwheel', 'stack', 'create', 'local-declaration', source, '--repo', str(repo), '--preserve-lanes']
+        with mock.patch('sys.argv', argv), mock.patch.object(module, 'capture_governed_worktrees_for_stack', side_effect=AssertionError('capture forbidden')), mock.patch.object(module, 'complete_pending_promote_intents', side_effect=AssertionError('promotion recovery forbidden')):
+            self.assertEqual(module.main(), 0)
+        self.assertEqual(registry.read_bytes(), before)
+        self.assertEqual((lane / 'foreign.txt').read_bytes(), b'foreign untracked\x00')
+        self.assertEqual(self.git(lane, 'rev-parse', 'HEAD').stdout, head)
+        self.assertIn('locked', self.git(repo, 'worktree', 'list', '--porcelain').stdout)
+        self.git(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/pr/local-declaration', expected=1)
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/local-declaration').stdout, '')
+
+    def test_local_declaration_refuses_pending_foreign_publication_without_recovery(self):
+        origin = self.create_remote('local-declaration-pending')
+        repo = self.clone(origin, 'local-declaration-pending')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'scratch/local-pending', 'owned.txt')
+        module = self.load_module()
+        manifest = (repo / '.syncwheel/manifest.json').read_bytes()
+        index = (repo / '.git/index').read_bytes()
+        argv = ['syncwheel', 'stack', 'create', 'local-pending', source, '--repo', str(repo), '--preserve-lanes']
+        error = io.StringIO()
+        with mock.patch('sys.argv', argv), mock.patch.object(module, 'pending_coordination_publications', return_value=[{'scope': 'promote:foreign'}]), mock.patch.object(module, 'complete_pending_promote_intents', side_effect=AssertionError('recovery forbidden')), contextlib.redirect_stderr(error):
+            self.assertEqual(module.main(), 2)
+        self.assertIn('refuses pending operations', error.getvalue())
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), manifest)
+        self.assertEqual((repo / '.git/index').read_bytes(), index)
+
+    def test_guarded_stack_creation_refuses_wrong_primary_before_control_writes(self):
+        origin = self.create_remote('stack-create-wrong-primary')
+        repo = self.clone(origin, 'stack-create-wrong-primary')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'scratch/wrong-primary', 'owned.txt')
+        # Use an immutable fixture CLI with an absolute interpreter, like an installed entry point.
+        fixture_cli = self.bin_dir / 'syncwheel'
+        fixture_cli.unlink()
+        shutil.copy2(CLI, fixture_cli)
+        fixture_cli.write_text('#!' + sys.executable + '\n' + CLI.read_text().split('\n', 1)[1])
+        self.run_cli(repo, 'hooks', 'install', '--apply')
+        self.run_cli(repo, 'stack', 'create', 'allowed', source, '--preserve-lanes')
+        self.git(repo, 'branch', 'wrong-primary', 'HEAD')
+        self.git(repo, 'symbolic-ref', 'HEAD', 'refs/heads/wrong-primary')
+        manifest = (repo / '.syncwheel/manifest.json').read_bytes()
+        index = (repo / '.git/index').read_bytes()
+        self.run_cli(repo, 'stack', 'create', 'refused', source, expected=2)
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), manifest)
+        self.assertEqual((repo / '.git/index').read_bytes(), index)
+        self.assertEqual(self.git(repo, 'branch', '--show-current').stdout.strip(), 'wrong-primary')
 
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
