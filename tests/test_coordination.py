@@ -5328,6 +5328,27 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual((repo / '.git/index').read_bytes(), index)
         self.assertEqual(self.git(repo, 'branch', '--show-current').stdout.strip(), 'wrong-primary')
 
+    def test_stack_creation_preserves_control_when_guard_target_drifts_from_manifest(self):
+        origin = self.create_remote('stack-create-guard-target-drift')
+        repo = self.clone(origin, 'stack-create-guard-target-drift')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'scratch/guard-target-drift', 'owned.txt')
+        fixture_cli = self.bin_dir / 'syncwheel'
+        fixture_cli.unlink();shutil.copy2(CLI, fixture_cli)
+        fixture_cli.write_text('#!' + sys.executable + '\n' + CLI.read_text().split('\n', 1)[1])
+        self.run_cli(repo, 'hooks', 'install', '--apply')
+        module = self.load_module()
+        guard_path = module.primary_guard_path(repo)
+        guard = json.loads(guard_path.read_text());guard['integrationBranch'] = 'different-guard-target'
+        guard_path.write_text(json.dumps(guard) + '\n')
+        manifest = (repo / '.syncwheel/manifest.json').read_bytes()
+        index = (repo / '.git/index').read_bytes()
+        guard_bytes = guard_path.read_bytes()
+        self.run_cli(repo, 'stack', 'create', 'refused-drift', source, '--preserve-lanes', expected=2)
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), manifest)
+        self.assertEqual((repo / '.git/index').read_bytes(), index)
+        self.assertEqual(guard_path.read_bytes(), guard_bytes)
+
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
         repo = self.clone(origin, 'disabled-draft')

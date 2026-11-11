@@ -26174,8 +26174,9 @@ def command_stack_create(args):
         raise SyncwheelError('--preserve-lanes declares local metadata only; omit --draft')
     if manifest.get('syncwheel_tracking') == SYNCWHEEL_TRACKING_GIT_TRACKED and primary_guard_path(repo_root).exists():
         guard = require_primary_guard(repo_root)
-        if guard['enabled'] and not primary_checkout_state(repo_root, manifest)['compliant']:
-            raise SyncwheelError('primary checkout guard requires the declared integration branch before a tracked stack declaration')
+        primary = primary_checkout_state(repo_root, manifest)
+        if guard['enabled'] and (not primary['compliant'] or primary['branch'] != guard['integrationBranch']):
+            raise SyncwheelError('primary checkout and configured guard must match before a tracked stack declaration')
     if args.draft and coordination_is_active(manifest):
         create_remote = coordination_config(manifest)['remote']
         if not coordination_remote_is_reachable(repo_root, create_remote):

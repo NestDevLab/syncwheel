@@ -109,8 +109,9 @@ For a shared delivery clone, `stack create <stack> <commits> --base <base>
 --preserve-lanes` only declares local metadata. It never captures, recovers or
 reaps any lane and never publishes a draft. Pending control or publication
 operations are refused instead of recovered. A configured primary-branch guard
-is checked before stack-creation control writes, so a wrong primary cannot leave
-a newly staged declaration behind after a late pre-commit refusal. Normal
+and its configured branch are checked against the primary before stack-creation
+control writes. An initially wrong primary or mismatched guard is refused before
+staging a declaration; the guard is never retargeted by this operation. Normal
 tracking, authority, global metadata locking and branch/lane collision guards
 still apply. This flag neither repairs existing staged state nor authorizes a
 push; publication and exact source materialization remain separate operations.
