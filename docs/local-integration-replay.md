@@ -115,3 +115,20 @@ staging a declaration; the guard is never retargeted by this operation. Normal
 tracking, authority, global metadata locking and branch/lane collision guards
 still apply. This flag neither repairs existing staged state nor authorizes a
 push; publication and exact source materialization remain separate operations.
+
+The declaration requires a clean primary, Linux/files/SHA-1 topology and explicit
+source-change authority. It prepares a manifest-only commit and alternate index
+in a private journal, then holds the real index lock and native HEAD/branch
+leases across both checkout alignment and the control-ref CAS. A switch before
+those leases is detected before manifest/index writes; switches and normal Git
+ref writers are excluded while alignment is authorized. The `created` message
+is emitted only after the control commit and receipt have completed. Direct
+filesystem/configuration writers must remain exclusive, as for local replay.
+
+`stack recover-declaration --plan-digest <digest>` inspects only that journal.
+Add `--apply --reason <reason>` to restore its exact pre-commit images or verify
+an already committed result. It never moves a ref, retries a creation, removes
+unknown Git locks, recovers another operation or reaps a lane. A foreign image,
+ref/HEAD drift or foreign index lock is held. The original manifest/index bytes
+remain in the journal. This recovery applies only to the new declaration
+journal, not to historical staged manifests left by an older command.

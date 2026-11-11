@@ -358,6 +358,7 @@ with module.coordination_publication_lock(Path(repo_path)):
     def load_module(self):
         spec = importlib.util.spec_from_file_location('syncwheel_coordination_under_test', CLI)
         module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
         spec.loader.exec_module(module)
         return module
 
@@ -5269,18 +5270,14 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(module.ref_tip(repo, branch), source)
 
     def test_local_declaration_preserves_foreign_dirty_locked_lane_without_recovery(self):
-        origin = self.create_remote('local-declaration-foreign')
-        repo = self.clone(origin, 'local-declaration-foreign')
-        self.init_coordinated(repo)
+        repo, source, module, _ = self.declaration_fixture('local-declaration-foreign')
         self.run_cli(repo, 'int', 'push')
         opened = json.loads(self.run_cli(repo, 'worktree', 'open', 'foreign', '--json').stdout)
         lane = Path(opened['lane']['path'])
         (lane / 'foreign.txt').write_bytes(b'foreign untracked\x00')
         self.git(repo, 'worktree', 'lock', str(lane), '--reason', 'fixture foreign lock')
-        source = self.commit_on_branch(repo, 'scratch/local-declaration', 'owned.txt')
         registry = repo / '.git/syncwheel/governed-worktrees.json'
         before, head = registry.read_bytes(), self.git(lane, 'rev-parse', 'HEAD').stdout
-        module = self.load_module()
         argv = ['syncwheel', 'stack', 'create', 'local-declaration', source, '--repo', str(repo), '--preserve-lanes']
         with mock.patch('sys.argv', argv), mock.patch.object(module, 'capture_governed_worktrees_for_stack', side_effect=AssertionError('capture forbidden')), mock.patch.object(module, 'complete_pending_promote_intents', side_effect=AssertionError('promotion recovery forbidden')):
             self.assertEqual(module.main(), 0)
@@ -5311,6 +5308,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         origin = self.create_remote('stack-create-wrong-primary')
         repo = self.clone(origin, 'stack-create-wrong-primary')
         self.init_coordinated(repo)
+        self.run_cli(repo, 'repo', 'authority', 'set', 'ai-managed', '--allow', 'source_change', '--apply')
         source = self.commit_on_branch(repo, 'scratch/wrong-primary', 'owned.txt')
         # Use an immutable fixture CLI with an absolute interpreter, like an installed entry point.
         fixture_cli = self.bin_dir / 'syncwheel'
@@ -5348,6 +5346,137 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), manifest)
         self.assertEqual((repo / '.git/index').read_bytes(), index)
         self.assertEqual(guard_path.read_bytes(), guard_bytes)
+
+    def declaration_fixture(self, name):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'repo', 'authority', 'set', 'ai-managed', '--allow', 'source_change', '--apply')
+        source = self.commit_on_branch(repo, 'scratch/' + name, 'owned.txt')
+        fixture_cli = self.bin_dir / 'syncwheel'
+        fixture_cli.unlink(); shutil.copy2(CLI, fixture_cli)
+        fixture_cli.write_text('#!' + sys.executable + '\n' + CLI.read_text().split('\n', 1)[1])
+        self.run_cli(repo, 'hooks', 'install', '--apply')
+        sys.path.insert(0, str(CLI.parent))
+        self.addCleanup(sys.path.remove, str(CLI.parent))
+        import syncwheel_local_replay as backend
+        return repo, source, self.load_module(), backend
+
+    def test_local_declaration_refuses_a_switch_after_preflight_without_staging(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-early-switch')
+        self.git(repo, 'branch', 'concurrent', 'HEAD')
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        original = module.pending_coordination_publications
+        def drift(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.git(repo, 'switch', 'concurrent', expected=1)
+            return result
+        output = io.StringIO()
+        argv = ['syncwheel', 'stack', 'create', 'early-switch', source, '--repo', str(repo), '--preserve-lanes']
+        with mock.patch('sys.argv', argv), mock.patch.object(module, 'pending_coordination_publications', side_effect=drift), contextlib.redirect_stdout(output):
+            self.assertEqual(module.main(), 2)
+        self.assertEqual(self.git(repo, 'branch', '--show-current').stdout.strip(), 'concurrent')
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), before[0])
+        self.assertEqual((repo / '.git/index').read_bytes(), before[1])
+        self.assertNotIn(': created ', output.getvalue())
+        self.git(repo, 'rev-parse', '--verify', '--quiet', 'refs/heads/pr/early-switch', expected=1)
+
+    def test_local_declaration_holds_git_writers_until_its_control_receipt(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-leased-switch')
+        self.git(repo, 'branch', 'concurrent', 'HEAD')
+        old = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        calls = []
+        def competing_writer(phase):
+            if phase in {'declaration-ref-prepared', 'checkout-file-aligned', 'index-aligned'}:
+                switch = subprocess.run(['git', 'switch', 'concurrent'], cwd=repo, text=True, capture_output=True)
+                self.assertNotEqual(switch.returncode, 0)
+                self.assertEqual(self.git(repo, 'branch', '--show-current').stdout.strip(), 'integration/shared')
+                moved = subprocess.run(['git', 'update-ref', 'refs/heads/integration/shared', source, old], cwd=repo, text=True, capture_output=True)
+                self.assertNotEqual(moved.returncode, 0)
+                calls.append(phase)
+        argv = ['syncwheel', 'stack', 'create', 'leased-switch', source, '--repo', str(repo), '--preserve-lanes']
+        output = io.StringIO()
+        with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=competing_writer), contextlib.redirect_stdout(output):
+            self.assertEqual(module.main(), 0)
+        self.assertEqual(len(calls), 3)
+        self.assertIn(': created ', output.getvalue())
+        self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        self.assertNotEqual(self.git(repo, 'rev-parse', 'HEAD').stdout.strip(), old)
+
+    def test_local_declaration_refuses_a_switch_after_its_last_unlocked_observation(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-late-switch')
+        self.git(repo, 'branch', 'concurrent', 'HEAD')
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        def competing_writer(phase):
+            if phase == 'declaration-before-leases': self.git(repo, 'switch', 'concurrent', expected=1)
+        argv = ['syncwheel', 'stack', 'create', 'late-switch', source, '--repo', str(repo), '--preserve-lanes']
+        output = io.StringIO()
+        with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=competing_writer), contextlib.redirect_stdout(output):
+            self.assertEqual(module.main(), 2)
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), before[0])
+        self.assertEqual((repo / '.git/index').read_bytes(), before[1])
+        self.assertNotIn(': created ', output.getvalue())
+        self.assertFalse((repo / '.git/index.lock').exists())
+
+    def test_local_declaration_recovers_only_its_interrupted_images(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-interrupted')
+        manifest = (repo / '.syncwheel/manifest.json').read_bytes()
+        index = (repo / '.git/index').read_bytes()
+        old = self.git(repo, 'rev-parse', 'HEAD').stdout
+        def interrupted(phase):
+            if phase == 'checkout-file-aligned':
+                raise SystemExit(87)
+        argv = ['syncwheel', 'stack', 'create', 'interrupted', source, '--repo', str(repo), '--preserve-lanes']
+        output = io.StringIO()
+        with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=interrupted), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit): module.main()
+        self.assertNotIn(': created ', output.getvalue())
+        store = repo / '.git/syncwheel-local-declarations'
+        operation = next(p for p in store.iterdir() if p.is_dir())
+        result = json.loads(self.run_cli(repo, 'stack', 'recover-declaration', '--plan-digest', operation.name, '--apply', '--reason', 'synthetic recovery').stdout)
+        self.assertEqual(result['status'], 'aborted')
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), manifest)
+        self.assertEqual((repo / '.git/index').read_bytes(), index)
+        self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, old)
+        self.assertFalse((repo / '.git/index.lock').exists())
+
+    def test_local_declaration_recovers_a_lost_post_commit_receipt(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-lost-receipt')
+        old = self.git(repo, 'rev-parse', 'HEAD').stdout
+        def interrupted(phase):
+            if phase == 'declaration-ref-committed': raise SystemExit(87)
+        argv = ['syncwheel', 'stack', 'create', 'lost-receipt', source, '--repo', str(repo), '--preserve-lanes']
+        output = io.StringIO()
+        with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=interrupted), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit): module.main()
+        self.assertNotIn(': created ', output.getvalue())
+        final = self.git(repo, 'rev-parse', 'HEAD').stdout
+        self.assertNotEqual(final, old)
+        operation = next(p for p in (repo / '.git/syncwheel-local-declarations').iterdir() if p.is_dir())
+        args = ['stack', 'recover-declaration', '--plan-digest', operation.name, '--apply', '--reason', 'synthetic lost receipt']
+        for _ in range(2):
+            self.assertEqual(json.loads(self.run_cli(repo, *args).stdout)['status'], 'completed')
+            self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, final)
+            self.assertEqual(self.git(repo, 'status', '--porcelain').stdout, '')
+        events = module.load_ledger_events(repo)
+        receipts = [event for event in events if event.get('idempotency_key') == 'local-declaration-manifest:' + operation.name]
+        self.assertEqual(len(receipts), 1)
+
+    def test_local_declaration_recovery_preserves_a_foreign_index_lock(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-foreign-lock')
+        def interrupted(phase):
+            if phase == 'checkout-file-aligned': raise SystemExit(87)
+        argv = ['syncwheel', 'stack', 'create', 'foreign-lock', source, '--repo', str(repo), '--preserve-lanes']
+        with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=interrupted):
+            with self.assertRaises(SystemExit): module.main()
+        lock = repo / '.git/index.lock'
+        lock.unlink(); lock.write_bytes(b'foreign writer lock\n')
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        operation = next(p for p in (repo / '.git/syncwheel-local-declarations').iterdir() if p.is_dir())
+        self.run_cli(repo, 'stack', 'recover-declaration', '--plan-digest', operation.name, '--apply', '--reason', 'synthetic foreign lock', expected=2)
+        self.assertEqual(lock.read_bytes(), b'foreign writer lock\n')
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), before[0])
+        self.assertEqual((repo / '.git/index').read_bytes(), before[1])
 
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')

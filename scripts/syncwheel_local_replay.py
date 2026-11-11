@@ -698,7 +698,7 @@ def owned_index_lock(meta, journal, *, acquire):
 
 @contextlib.contextmanager
 def operation_lock(git_dir, store_name="syncwheel-local-replay"):
-    require(store_name in {"syncwheel-local-replay", "syncwheel-local-source"}, "unsupported local operation store")
+    require(store_name in {"syncwheel-local-replay", "syncwheel-local-source", "syncwheel-local-declarations"}, "unsupported local operation store")
     store = git_dir / store_name
     store.mkdir(mode=0o700, exist_ok=True)
     with directory(git_dir) as meta:
@@ -778,9 +778,10 @@ def switch_image(parent, name, journal, slot, before, after, *, forward, replace
 class RefLease:
     """Hold native branch/HEAD locks across checkout adoption."""
 
-    def __init__(self, root, git_dir, plan, current, *, new=None, source=False):
+    def __init__(self, root, git_dir, plan, current, *, new=None, source=False, verification_auth=False):
         self.root, self.git_dir, self.plan, self.current = root, git_dir, plan, current
         self.new, self.source = new, source
+        self.verification_auth = verification_auth
         self.process = None
 
     def locked(self):
@@ -808,7 +809,7 @@ class RefLease:
         require(not any(os.path.lexists(path) for path in [*self.locked(), self.git_dir / "packed-refs.lock"]),
                 "local replay found an unowned Git ref lock; no locks were removed")
         auth = None
-        if self.new and self.plan["referenceHook"]:
+        if (self.new or self.verification_auth) and self.plan["referenceHook"]:
             guard = api.require_primary_guard(self.root)
             require(guard["enabled"] and "refs/heads/" + guard["integrationBranch"] == self.plan["targetRef"],
                     "local replay managed reference hook does not protect the target")
@@ -1250,3 +1251,192 @@ def execute_source_materialization(root, args, api):
                         os.fsync(metadata)
     return {"status": "created", "created": True, "sourceRef": plan["sourceRef"],
             "sourceTip": plan["sourceTip"], "planDigest": plan["planDigest"]}
+
+
+def declaration_observation(root, api):
+    """Observe a clean primary without recovering any other operation."""
+    meta = topology(root, api)
+    manifest, _ = api.load_manifest(root, root / MANIFEST)
+    require(manifest and manifest.get("syncwheel_tracking") == "git-tracked"
+            and manifest.get("repository_mode", "delivery") == "delivery",
+            "local declaration requires the primary tracked delivery manifest")
+    authority = api.manifest_authority(manifest)
+    require(authority["mode"] == api.AUTHORITY_MODE_AI_MANAGED
+            and "source_change" in authority["allow"] and "source_change" not in authority["deny"],
+            "local declaration requires source-change authority")
+    target = "refs/heads/" + manifest["integration"]["branch"]
+    require(SAFE_REF.fullmatch(target) and symbolic(root, "HEAD") == target,
+            "local declaration primary changed before its write lease")
+    if api.primary_guard_path(root).exists():
+        guard = api.require_primary_guard(root)
+        require(not guard["enabled"] or target == "refs/heads/" + guard["integrationBranch"],
+                "local declaration guard and primary differ")
+    tip = head(root, target)
+    expected = tree(root, tip)
+    require(MANIFEST in expected, "local declaration requires a tracked manifest")
+    require_no_attributes(root, expected)
+    require_clean_index(root, expected)
+    with directory(root) as work, directory(meta) as metadata:
+        observed = checkout(work, expected)
+        index = image(metadata, "index")
+    require(symbolic(root, "HEAD") == target and head(root, target) == tip,
+            "local declaration HEAD drifted while observing")
+    return {"targetRef": target, "integrationTip": tip, "index": index,
+            "checkout": observed, "referenceHook": hook_observation(root, api)}, manifest
+
+
+def verify_declaration_record(root, operation, api):
+    record = journal_record(operation)
+    require(record.get("kind") == "localManifestDeclaration"
+            and record.get("state") in {"prepared", "aligning", "completed", "aborted"},
+            "invalid local declaration journal")
+    plan = record["plan"]
+    require(plan["planDigest"] == operation.name
+            and api.canonical_json_digest({k: v for k, v in plan.items() if k != "planDigest"}) == operation.name,
+            "local declaration journal digest differs")
+    before = tree(root, plan["integrationTip"])
+    after = tree(root, record["final"])
+    require(git(root, "rev-list", "--parents", "-n", "1", record["final"]).decode().split()
+            == [record["final"], plan["integrationTip"]]
+            and after == {**before, MANIFEST: after[MANIFEST]},
+            "local declaration journal changes more than the control manifest")
+    encoded = api.canonical_manifest_file_text(plan["manifestAfter"]).encode()
+    require(after[MANIFEST] == ["100644", blob_oid(encoded)]
+            and record["slots"] == {MANIFEST: {"slot": "manifest", "before": plan["checkout"][MANIFEST],
+                    "after": {"sha256": digest(encoded), "mode": plan["checkout"][MANIFEST]["mode"]}}},
+            "local declaration manifest slot differs from its object")
+    return record
+
+
+def finish_declaration(root, operation, record, api, *, recover=False):
+    plan = record["plan"]
+    meta = topology(root, api)
+    current = head(root, plan["targetRef"])
+    require(symbolic(root, "HEAD") == plan["targetRef"]
+            and current in {plan["integrationTip"], record["final"]},
+            "local declaration primary drifted; journal and checkout preserved")
+    require(hook_observation(root, api) == plan["referenceHook"], "local declaration reference hook changed")
+    verify_declaration_record(root, operation, api)
+    with directory(root) as work, directory(meta) as metadata, directory(operation) as journal:
+        if record["state"] in {"completed", "aborted"}:
+            require(recover, "local declaration already has a terminal receipt")
+            expected_tip = record["final"] if record["state"] == "completed" else plan["integrationTip"]
+            require(current == expected_tip, "local declaration terminal ref drifted")
+            require_clean_index(root, tree(root, current)); checkout(work, tree(root, current))
+            # A terminal-record crash may leave our own index lease. Native
+            # ref locks still have no recoverable ownership proof.
+            with RefLease(root, meta, plan, current, verification_auth=True).hold(api):
+                if owned_index_lock(metadata, journal, acquire=False):
+                    os.unlink("index.lock", dir_fd=metadata); os.fsync(metadata)
+            return record["state"]
+        owned_index_lock(metadata, journal, acquire=True)
+        checkpoint("declaration-index-owned")
+        forward = not recover or current == record["final"]
+        lease = RefLease(root, meta, plan, current, new=None if recover else record["final"], verification_auth=True)
+        try:
+            with lease.hold(api):
+                checkpoint("declaration-ref-prepared")
+                if not recover:
+                    observed, _ = declaration_observation(root, api)
+                    require(observed == {k: plan[k] for k in observed},
+                            "local declaration witness drifted under its leases")
+                    record["state"] = "aligning"
+                    save_journal(operation, record, api)
+                aligned_files(work, metadata, journal, record, forward=forward)
+                expected = tree(root, record["final"] if forward else plan["integrationTip"])
+                require_no_attributes(root, expected)
+                require_clean_index(root, expected); checkout(work, expected)
+                lease.check()
+                if not recover:
+                    lease.commit()
+                    checkpoint("declaration-ref-committed")
+                record["state"] = "completed" if forward else "aborted"
+                save_journal(operation, record, api)
+                checkpoint("declaration-terminal-recorded")
+                require(owned_index_lock(metadata, journal, acquire=False), "local declaration lost its index lease")
+                os.unlink("index.lock", dir_fd=metadata); os.fsync(metadata)
+        except Exception:
+            # No alignment was authorized: release only the exact seed-owned
+            # index lease, without restoring any checkout/index/ref bytes.
+            if record["state"] == "prepared":
+                record["state"] = "aborted"
+                save_journal(operation, record, api)
+                if owned_index_lock(metadata, journal, acquire=False):
+                    os.unlink("index.lock", dir_fd=metadata); os.fsync(metadata)
+            raise
+    return record["state"]
+
+
+def apply_manifest_declaration(root, updated, stack_id, api):
+    with sanitized_cli_environment():
+        observation, original = declaration_observation(root, api)
+        proposed = copy.deepcopy(updated)
+        proposed["stacks"] = [s for s in proposed["stacks"] if s["id"] != stack_id]
+        proposed["integration"]["stacks"] = [s for s in proposed["integration"]["stacks"] if s != stack_id]
+        require(proposed == original and stack_id not in api.stack_map(original),
+                "local declaration may only add its selected stack and membership")
+        plan = {**observation, "manifestAfter": updated, "stack": stack_id}
+        plan["planDigest"] = api.canonical_json_digest(plan)
+        with operation_lock(root / ".git", "syncwheel-local-declarations") as store:
+            require(not any(journal_record(p).get("state") not in {"completed", "aborted"}
+                            for p in store.iterdir() if HASH64.fullmatch(p.name)),
+                    "local declaration has an interrupted intent; use stack recover-declaration")
+            operation = store / plan["planDigest"]
+            require(not operation.exists(), "local declaration already has a receipt; inspect it explicitly")
+            with tempfile.TemporaryDirectory(prefix=".prepare-", dir=store) as temporary:
+                stage = Path(temporary)
+                final = api.materialize_control_manifest_commit(root, updated, plan["integrationTip"])
+                encoded = api.canonical_manifest_file_text(updated).encode()
+                create_file(stage, "manifest", encoded, plan["checkout"][MANIFEST]["mode"])
+                create_file(stage, "index-lease", b"", 0o600)
+                git(root, "read-tree", final, env={"GIT_INDEX_FILE": str(stage / "prepared-index")})
+                (stage / "prepared-index").chmod(plan["index"]["mode"])
+                with directory(stage) as fd:
+                    with (stage / "prepared-index").open("rb") as stream: os.fsync(stream.fileno())
+                    index_after = image(fd, "prepared-index")
+                record = {"kind": "localManifestDeclaration", "schemaVersion": 1, "state": "prepared",
+                          "plan": plan, "final": final, "indexAfter": index_after,
+                          "slots": {MANIFEST: {"slot": "manifest", "before": plan["checkout"][MANIFEST],
+                                               "after": {"sha256": digest(encoded), "mode": plan["checkout"][MANIFEST]["mode"]}}}}
+                save_journal(stage, record, api)
+                os.rename(stage, operation)
+                with directory(store) as fd: os.fsync(fd)
+            api.append_ledger_event(root, "local_declaration_intent", {
+                "planDigest": plan["planDigest"], "stack": stack_id, "oldTip": plan["integrationTip"], "newTip": final,
+            }, root / MANIFEST)
+            checkpoint("declaration-before-leases")
+            status = finish_declaration(root, operation, record, api)
+            require(status == "completed", "local declaration did not complete")
+            transaction = api.active_manifest_write_transaction(root / MANIFEST)
+            if transaction is not None:
+                transaction["expectedDigest"] = api.manifest_digest(updated)
+            return {"status": status, "planDigest": plan["planDigest"], "controlCommit": final}
+
+
+def recover_manifest_declaration(root, args, api):
+    meta = topology(root, api)
+    require(type(args.plan_digest) is str and HASH64.fullmatch(args.plan_digest), "recovery requires an exact declaration digest")
+    operation = meta / "syncwheel-local-declarations" / args.plan_digest
+    record = verify_declaration_record(root, operation, api)
+    if not args.apply:
+        return {"status": record["state"], "planDigest": args.plan_digest, "applyRequired": True}
+    require(type(args.reason) is str and 0 < len(args.reason.strip()) <= 512, "declaration recovery requires a bounded reason")
+    manifest, _ = api.load_manifest(root, root / MANIFEST)
+    authority = api.manifest_authority(manifest)
+    require(authority["mode"] == api.AUTHORITY_MODE_AI_MANAGED and "source_change" in authority["allow"]
+            and "source_change" not in authority["deny"], "declaration recovery requires source-change authority")
+    with operation_lock(meta, "syncwheel-local-declarations"):
+        with api.channel_mutation_lock(root, root / MANIFEST, "local-declaration-recovery"):
+            record = verify_declaration_record(root, operation, api)
+            status = finish_declaration(root, operation, record, api, recover=True)
+            api.append_ledger_event(root, "local_declaration_recovered", {
+                "planDigest": args.plan_digest, "stack": record["plan"]["stack"],
+                "status": status, "reason": args.reason,
+            }, root / MANIFEST, idempotency_key="local-declaration-recovered:" + args.plan_digest + ":" + status)
+            if status == "completed":
+                api.append_ledger_event(root, "manifest_saved", api.manifest_event_payload(
+                    root / MANIFEST, record["plan"]["manifestAfter"], "stack_create", {
+                        "stack": record["plan"]["stack"], "recovered": True,
+                        "declaration_receipt": {"planDigest": args.plan_digest, "controlCommit": record["final"], "status": status},
+                    }), root / MANIFEST, idempotency_key="local-declaration-manifest:" + args.plan_digest)
+            return {"status": status, "planDigest": args.plan_digest, "retryAllowed": False}

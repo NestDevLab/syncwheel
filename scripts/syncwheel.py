@@ -26382,19 +26382,27 @@ def command_stack_create(args):
                     f'{exc}\nRetry this exact, idempotent create command after resolving the named condition:\n  '
                     f'{draft_create_retry_command(args)}'
                 ) from exc
-    save_manifest_with_ledger(
-        repo_root,
-        manifest_path,
-        manifest,
-        'stack_create',
-        {
+    creation_context = {
             'stack': args.stack,
             'branch': branch,
             'operation_token': operation_token,
             'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
             'actor': governed_worktree_owner(),
-        },
-    )
+    }
+    if preserve_lanes:
+        if is_external_manifest_path(repo_root, manifest_path) or args.personal:
+            raise SyncwheelError('--preserve-lanes requires the primary tracked manifest')
+        try:
+            from syncwheel_local_replay import LocalReplayError, apply_manifest_declaration
+            creation_context['declaration_receipt'] = apply_manifest_declaration(
+                Path(repo_root).resolve(), manifest, args.stack, sys.modules[__name__],
+            )
+        except (LocalReplayError, OSError) as exc:
+            raise SyncwheelError(str(exc)) from exc
+        append_ledger_event(repo_root, 'manifest_saved',
+                            manifest_event_payload(manifest_path, manifest, 'stack_create', creation_context), manifest_path)
+    else:
+        save_manifest_with_ledger(repo_root, manifest_path, manifest, 'stack_create', creation_context)
     if not preserve_lanes:
         capture_governed_worktrees_for_stack(
             repo_root,
@@ -29637,6 +29645,19 @@ def command_stack_materialize_local(args):
         with sanitized_cli_environment():
             root = Path(resolve_repo_root(args.repo)).resolve()
             result = execute_source_materialization(root, args, sys.modules[__name__])
+    except (LocalReplayError, OSError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def command_stack_recover_declaration(args):
+    from syncwheel_local_replay import LocalReplayError, recover_manifest_declaration, sanitized_cli_environment
+    if args.personal or args.manifest:
+        raise SyncwheelError('declaration recovery requires the primary tracked manifest')
+    try:
+        with sanitized_cli_environment():
+            result = recover_manifest_declaration(Path(resolve_repo_root(args.repo)).resolve(), args, sys.modules[__name__])
     except (LocalReplayError, OSError) as exc:
         raise SyncwheelError(str(exc)) from exc
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -35479,6 +35500,12 @@ def build_parser():
     source_local_mode.add_argument('--recover', action='store_true')
     stack_local_p.set_defaults(func=command_stack_materialize_local)
 
+    stack_declaration_p = stack_sub.add_parser('recover-declaration', parents=[common], help='inspect or recover one journal-owned local declaration')
+    stack_declaration_p.add_argument('--plan-digest', required=True)
+    stack_declaration_p.add_argument('--apply', action='store_true')
+    stack_declaration_p.add_argument('--reason')
+    stack_declaration_p.set_defaults(func=command_stack_recover_declaration)
+
     stack_create_p = stack_sub.add_parser('create', aliases=['new'], parents=[common])
     stack_create_p.add_argument('stack')
     stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
@@ -36278,6 +36305,7 @@ def entrypoint_behavior_table():
     register((command_stack_git, command_int_git), mutates='git-passthrough')
     register((command_int_replay_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
     register((command_stack_materialize_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
+    register((command_stack_recover_declaration,), mutates='apply', manifest_mutates='apply')
     register(
         (SyncwheelRevisionBackend.ensure_stack_owned,),
         manifest_mutates='internal',
@@ -36859,7 +36887,7 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
-    if args.func in {command_int_replay_local, command_stack_materialize_local}:
+    if args.func in {command_int_replay_local, command_stack_materialize_local, command_stack_recover_declaration}:
         try:
             if passthrough:
                 raise SyncwheelError('local replay does not accept Git passthrough')
@@ -36879,6 +36907,11 @@ def main():
         SYNCWHEEL_OWNS_REF_MOVES = True
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
+    optional_lock_setting = os.environ.get('GIT_OPTIONAL_LOCKS')
+    if args.func == command_stack_create:
+        # Preflight reads must not refresh the real index before a declaration
+        # can refuse its branch/guard witness. Explicit mutation locks remain on.
+        os.environ['GIT_OPTIONAL_LOCKS'] = '0'
     try:
         route_stack_add_from_governed_lane(args)
         # A guard callback runs inside a Git process that is mid-operation, so it
@@ -36906,6 +36939,11 @@ def main():
         print(f'error: {exc}', file=sys.stderr)
         return 2
     finally:
+        if args.func == command_stack_create:
+            if optional_lock_setting is None:
+                os.environ.pop('GIT_OPTIONAL_LOCKS', None)
+            else:
+                os.environ['GIT_OPTIONAL_LOCKS'] = optional_lock_setting
         if SYNCWHEEL_REF_AUTH_REPO:
             clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
         SYNCWHEEL_REF_AUTH_REPO = None
