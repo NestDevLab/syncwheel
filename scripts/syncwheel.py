@@ -26434,19 +26434,16 @@ def cleanup_interrupted_draft_materialization(
             f"{stack['id']}: deterministic create worktree registration does not "
             'belong to the pending stack_create_intent'
         )
-    removed = git(
-        repo_root, 'worktree', 'remove', '--force', str(path), check=False
+    raise SyncwheelError(
+        f"{stack['id']}: legacy temporary create worktree preserved at {path}; "
+        'inspect its tracked, untracked and ignored data before separate native recovery'
     )
-    if removed.returncode != 0:
-        raise SyncwheelError(
-            f"{stack['id']}: could not remove interrupted create worktree {path}"
-        )
 
 
 def materialize_new_stack_branch(
     repo_root, stack, planned_tip=None, operation_token=None
 ):
-    """Create a draft ref with create-only CAS and leave no worktree on failure."""
+    """Create the projected draft ref with create-only CAS, without a checkout."""
     planned_tip = planned_tip or deterministic_stack_replay_tip(
         repo_root, stack['base'], stack['commits']
     )
@@ -26470,30 +26467,11 @@ def materialize_new_stack_branch(
             f"{stack['id']}: draft ref {branch_ref} appeared concurrently; "
             'the existing ref was preserved. Inspect it, then retry with a new stack id.'
         )
-    deterministic_worktree = draft_materialization_worktree(
-        repo_root, operation_token
-    )
-    temporary = (
-        None if deterministic_worktree
-        else tempfile.TemporaryDirectory(prefix='syncwheel-stack-create-')
-    )
-    worktree = deterministic_worktree or Path(temporary.name)
-    try:
-        try:
-            git(repo_root, 'worktree', 'add', str(worktree), stack['branch'])
-            if ref_tip(repo_root, stack['branch']) != planned_tip:
-                raise SyncwheelError(
-                    f"{stack['id']}: materialized draft tip differs from its reviewed projection"
-                )
-        except BaseException:
-            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
-            git(repo_root, 'update-ref', '-d', branch_ref, planned_tip, check=False)
-            raise
-        else:
-            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
-    finally:
-        if temporary:
-            temporary.cleanup()
+    if ref_tip(repo_root, stack['branch']) != planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: draft ref changed after create-only CAS; "
+            'the current ref was preserved for inspection'
+        )
 
 
 def coordination_draft_recovery_ref(stack_id):
@@ -29635,11 +29613,28 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
     return result
 
 
+def command_stack_materialize_local(args):
+    try:
+        from syncwheel_local_replay import LocalReplayError, execute_source_materialization, sanitized_cli_environment
+    except ModuleNotFoundError as exc:
+        raise SyncwheelError('local materialization needs the matching companion module') from exc
+    if args.personal or args.manifest:
+        raise SyncwheelError('local materialization requires the primary tracked manifest')
+    try:
+        with sanitized_cli_environment():
+            root = Path(resolve_repo_root(args.repo)).resolve()
+            result = execute_source_materialization(root, args, sys.modules[__name__])
+    except (LocalReplayError, OSError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_int_replay_local(args):
     # Deliberately enter before generic startup recovery and reaping. The
     # executor owns the only journal, lock, and ref authorization it may use.
     try:
-        from syncwheel_local_replay import LocalReplayError, execute, sanitized_cli_environment
+        from syncwheel_local_replay import LocalReplayError, execute_local_replay, sanitized_cli_environment
     except ModuleNotFoundError as exc:
         if exc.name != 'syncwheel_local_replay':
             raise
@@ -29650,7 +29645,7 @@ def command_int_replay_local(args):
     try:
         with sanitized_cli_environment():
             root = Path(resolve_repo_root(args.repo)).resolve()
-            result = execute(root, args, sys.modules[__name__])
+            result = execute_local_replay(root, args, sys.modules[__name__])
     except (LocalReplayError, OSError) as exc:
         raise SyncwheelError(str(exc)) from exc
     print(json.dumps(result, indent=2, sort_keys=True))
@@ -35460,6 +35455,17 @@ def build_parser():
     stack_show_p.add_argument('stack')
     stack_show_p.set_defaults(func=command_stack_show)
 
+    stack_local_p = stack_sub.add_parser(
+        'materialize-local', parents=[common], help='plan or create a declared exact local source ref without replay or publication',
+    )
+    stack_local_p.add_argument('stack')
+    stack_local_p.add_argument('--plan-digest')
+    stack_local_p.add_argument('--reason')
+    source_local_mode = stack_local_p.add_mutually_exclusive_group()
+    source_local_mode.add_argument('--apply', action='store_true')
+    source_local_mode.add_argument('--recover', action='store_true')
+    stack_local_p.set_defaults(func=command_stack_materialize_local)
+
     stack_create_p = stack_sub.add_parser('create', aliases=['new'], parents=[common])
     stack_create_p.add_argument('stack')
     stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
@@ -36254,6 +36260,7 @@ def entrypoint_behavior_table():
     )
     register((command_stack_git, command_int_git), mutates='git-passthrough')
     register((command_int_replay_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
+    register((command_stack_materialize_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
     register(
         (SyncwheelRevisionBackend.ensure_stack_owned,),
         manifest_mutates='internal',
@@ -36835,7 +36842,7 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
-    if args.func == command_int_replay_local:
+    if args.func in {command_int_replay_local, command_stack_materialize_local}:
         try:
             if passthrough:
                 raise SyncwheelError('local replay does not accept Git passthrough')

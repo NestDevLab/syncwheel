@@ -5173,34 +5173,99 @@ with module.coordination_publication_lock(Path(repo_path)):
             module.command_stack_create(args)
         probe.assert_not_called()
 
-    def test_draft_materialization_failure_rolls_back_branch_and_worktree_for_retry(self):
-        origin = self.create_remote('draft-materialization-rollback')
-        repo = self.clone(origin, 'draft-materialization-rollback')
+    def test_draft_materialization_uses_only_create_cas_without_a_checkout(self):
+        origin = self.create_remote('draft-materialization-no-checkout')
+        repo = self.clone(origin, 'draft-materialization-no-checkout')
         self.init_coordinated(repo)
-        self.run_cli(repo, 'int', 'push')
-        source = self.commit_on_branch(repo, 'scratch/materialization-rollback', 'materialization-rollback.txt')
+        source = self.commit_on_branch(repo, 'scratch/no-checkout', 'no-checkout.txt')
         module = self.load_module()
-        args = self.draft_create_args(repo, 'materialization-rollback', source)
+        manifest, _ = module.load_manifest(repo)
+        stack = {'id': 'no-checkout', 'branch': 'syncwheel/draft/no-checkout',
+                 'base': manifest['defaults']['base_ref'], 'commits': [source]}
+        before = self.git(repo, 'worktree', 'list', '--porcelain').stdout
+        head_before = self.git(repo, 'rev-parse', 'HEAD').stdout
         real_git = module.git
-        injected = False
+        calls = []
 
-        def fail_after_worktree_add(repo_root, *git_args, **kwargs):
-            nonlocal injected
-            result = real_git(repo_root, *git_args, **kwargs)
-            if not injected and git_args[:2] == ('worktree', 'add'):
-                injected = True
-                raise module.SyncwheelError('injected worktree add failure')
+        def recorded(repo_root, *args, **kwargs):
+            calls.append(args)
+            return real_git(repo_root, *args, **kwargs)
+
+        with mock.patch.object(module, 'git', side_effect=recorded):
+            module.materialize_new_stack_branch(repo, stack)
+        self.assertEqual(module.ref_tip(repo, stack['branch']), source)
+        self.assertEqual(self.git(repo, 'worktree', 'list', '--porcelain').stdout, before)
+        self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, head_before)
+        self.assertTrue(any(args[:1] == ('update-ref',) and args[-1] == module.ZERO_OBJECT_ID for args in calls))
+        self.assertFalse(any(args[:1] == ('worktree',) or '--force' in args or '-d' in args for args in calls))
+
+    def test_draft_materialization_preserves_a_ref_advanced_after_creation(self):
+        origin = self.create_remote('draft-materialization-ref-drift')
+        repo = self.clone(origin, 'draft-materialization-ref-drift')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'scratch/ref-drift', 'ref-drift.txt')
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        stack = {'id': 'ref-drift', 'branch': 'syncwheel/draft/ref-drift',
+                 'base': manifest['defaults']['base_ref'], 'commits': [source]}
+        original = module.git
+        foreign = self.git(repo, 'rev-parse', 'origin/main').stdout.strip()
+
+        def advance_after_create(repo_root, *args, **kwargs):
+            result = original(repo_root, *args, **kwargs)
+            if args[:1] == ('update-ref',) and args[-1] == module.ZERO_OBJECT_ID:
+                original(repo_root, 'update-ref', args[1], foreign, source)
             return result
 
-        with mock.patch.object(module, 'git', side_effect=fail_after_worktree_add):
-            with self.assertRaisesRegex(module.SyncwheelError, 'injected worktree add failure'):
-                module.command_stack_create(args)
+        with mock.patch.object(module, 'git', side_effect=advance_after_create):
+            with self.assertRaisesRegex(module.SyncwheelError, 'current ref was preserved'):
+                module.materialize_new_stack_branch(repo, stack)
+        self.assertEqual(module.ref_tip(repo, stack['branch']), foreign)
 
-        branch = 'syncwheel/draft/materialization-rollback'
-        self.git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}', expected=1)
-        self.assertNotIn(branch, self.git(repo, 'worktree', 'list', '--porcelain').stdout)
-        module.command_stack_create(args)
-        self.assertTrue(module.branch_exists(repo, branch))
+    def test_legacy_draft_materialization_cleanup_preserves_dirty_checkout(self):
+        origin = self.create_remote('draft-materialization-dirty-recovery')
+        repo = self.clone(origin, 'draft-materialization-dirty-recovery')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'scratch/dirty-recovery', 'dirty-recovery.txt')
+        module = self.load_module()
+        branch = 'syncwheel/draft/dirty-recovery'
+        self.git(repo, 'branch', branch, source)
+        path = self.tmp / 'interrupted-draft'
+        self.git(repo, 'worktree', 'add', str(path), branch)
+        (path / 'untracked.txt').write_text('concurrent work\n')
+        before = self.git(repo, 'worktree', 'list', '--porcelain').stdout
+        with mock.patch.object(module, 'draft_materialization_worktree', return_value=path):
+            with self.assertRaisesRegex(module.SyncwheelError, 'legacy temporary create worktree preserved'):
+                module.cleanup_interrupted_draft_materialization(
+                    repo, {'id': 'dirty-recovery', 'branch': branch}, source, 'fixture-token')
+        self.assertEqual((path / 'untracked.txt').read_text(), 'concurrent work\n')
+        self.assertEqual(self.git(repo, 'worktree', 'list', '--porcelain').stdout, before)
+        self.assertEqual(module.ref_tip(repo, branch), source)
+
+    def test_legacy_draft_cleanup_preserves_ignored_data_and_clean_registration(self):
+        origin = self.create_remote('draft-materialization-ignored-recovery')
+        repo = self.clone(origin, 'draft-materialization-ignored-recovery')
+        self.init_coordinated(repo)
+        source = self.commit_on_branch(repo, 'scratch/ignored-recovery', 'ignored-recovery.txt')
+        module = self.load_module()
+        branch = 'syncwheel/draft/ignored-recovery'
+        self.git(repo, 'branch', branch, source)
+        path = self.tmp / 'legacy-draft'
+        self.git(repo, 'worktree', 'add', str(path), branch)
+        exclude = repo / '.git' / 'info' / 'exclude'
+        with exclude.open('a') as stream:
+            stream.write('\nforeign-ignored.bin\n')
+        value = b'foreign ignored work\x00'
+        (path / 'foreign-ignored.bin').write_bytes(value)
+        self.assertEqual(self.git(path, 'status', '--porcelain').stdout, '')
+        before = self.git(repo, 'worktree', 'list', '--porcelain').stdout
+        stack = {'id': 'ignored-recovery', 'branch': branch}
+        with mock.patch.object(module, 'draft_materialization_worktree', return_value=path):
+            with self.assertRaisesRegex(module.SyncwheelError, 'legacy temporary create worktree preserved'):
+                module.cleanup_interrupted_draft_materialization(repo, stack, source, 'fixture-token')
+        self.assertEqual((path / 'foreign-ignored.bin').read_bytes(), value)
+        self.assertEqual(self.git(repo, 'worktree', 'list', '--porcelain').stdout, before)
+        self.assertEqual(module.ref_tip(repo, branch), source)
 
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
@@ -8004,7 +8069,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         saved = json.loads((repo / '.syncwheel' / 'manifest.json').read_text())
         self.assertNotIn('recovery-live-ref', [item['id'] for item in saved['stacks']])
 
-    def test_materialization_rollback_survives_systemexit(self):
+    def test_materialization_systemexit_preserves_cas_ref_for_native_retry(self):
         origin = self.create_remote('round5-systemexit')
         repo = self.clone(origin, 'round5-systemexit')
         self.init_coordinated(repo)
@@ -8014,19 +8079,23 @@ with module.coordination_publication_lock(Path(repo_path)):
         args = self.draft_create_args(repo, 'systemexit', source)
         real_git = module.git
 
-        def stop_after_add(repo_root, *git_args, **kwargs):
+        def stop_after_create(repo_root, *git_args, **kwargs):
             result = real_git(repo_root, *git_args, **kwargs)
-            if git_args[:2] == ('worktree', 'add'):
-                raise SystemExit('injected exit')
+            if git_args[:1] == ('update-ref',) and git_args[-1] == module.ZERO_OBJECT_ID:
+                raise SystemExit('injected exit after create-only CAS')
             return result
 
-        with mock.patch.object(module, 'git', side_effect=stop_after_add):
+        with mock.patch.object(module, 'git', side_effect=stop_after_create):
             with self.assertRaises(SystemExit):
                 module.command_stack_create(args)
 
         branch = 'syncwheel/draft/systemexit'
-        self.git(repo, 'rev-parse', '--verify', '--quiet', f'refs/heads/{branch}', expected=1)
+        self.assertEqual(module.ref_tip(repo, branch), source)
         self.assertNotIn(branch, self.git(repo, 'worktree', 'list', '--porcelain').stdout)
+        module.command_stack_create(args)
+        saved, _ = module.load_manifest(repo)
+        self.assertEqual(module.require_stack(saved, 'systemexit')['commits'], [source])
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin', f'refs/heads/{branch}').stdout.split()[0], source)
 
     def test_two_domains_cannot_claim_the_same_source_ref(self):
         origin = self.create_remote('round5-two-domains')

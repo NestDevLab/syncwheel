@@ -21,11 +21,18 @@ except ImportError:  # The backend is intentionally Linux-only.
 
 MANIFEST = ".syncwheel/manifest.json"
 OID = re.compile(r"[0-9a-f]{40}")
+HASH64 = re.compile(r"[0-9a-f]{64}")
 SAFE_REF = re.compile(r"refs/heads/[A-Za-z0-9._/-]+")
 SAFE_PATH = re.compile(r"[A-Za-z0-9._/-]+")
 MAX_ENTRIES = 10000
 MAX_BYTES = 32 * 1024 * 1024
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+class ExportFileHandle(ctypes.Structure):
+    """Linux struct file_handle, with the bounded MAX_HANDLE_SZ payload."""
+    _fields_ = [("handle_bytes", ctypes.c_uint), ("handle_type", ctypes.c_int),
+                ("data", ctypes.c_ubyte * 128)]
 
 
 class LocalReplayError(Exception):
@@ -214,6 +221,146 @@ def checkout(root_fd, expected):
     return observed
 
 
+def addition_roots(baseline, changes):
+    """Group new subtrees at their first absent tracked directory boundary."""
+    directories = set()
+    for path in baseline:
+        parts = path.split("/")
+        directories.update("/".join(parts[:i]) for i in range(1, len(parts)))
+    result = {}
+    for path, change in sorted(changes.items()):
+        if change["before"] is not None:
+            continue
+        parts = path.split("/")
+        missing = next(("/".join(parts[:i]) for i in range(1, len(parts))
+                        if "/".join(parts[:i]) not in directories), None)
+        root = missing or path
+        group = result.setdefault(root, {"kind": "directory" if missing else "file", "paths": []})
+        group["paths"].append(path)
+    return result
+
+
+def added_image(parent, name, kind):
+    """Observe one new inode without following links or accepting special files."""
+    try:
+        info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+    if kind == "file":
+        return image(parent, name)
+    require(kind == "directory" and stat.S_ISDIR(info.st_mode),
+            "local replay addition changed kind")
+    entries, directories = {}, {}
+    total = 0
+
+    def visit(fd, prefix):
+        nonlocal total
+        details = os.fstat(fd)
+        require(details.st_uid == os.geteuid() and stat.S_IMODE(details.st_mode) == 0o755
+                and not os.listxattr(fd), "local replay addition directory changed")
+        directories[prefix] = 0o755
+        with os.scandir(fd) as scan:
+            names = sorted(entry.name for entry in scan)
+        for child in names:
+            relative = f"{prefix}/{child}" if prefix else child
+            require(safe_path(relative) and len(entries) + len(directories) <= MAX_ENTRIES,
+                    "local replay addition exceeds its bounds")
+            item = os.stat(child, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(item.st_mode):
+                with directory(child, fd) as nested:
+                    visit(nested, relative)
+            else:
+                data, permissions = file_image(fd, child)
+                total += len(data)
+                require(total <= 8 * MAX_BYTES, "local replay addition exceeds its byte limit")
+                entries[relative] = {"sha256": digest(data), "mode": permissions}
+
+    with directory(name, parent) as fd:
+        visit(fd, "")
+    return {"kind": "directory", "entries": entries, "directories": directories}
+
+
+def native_handle(parent, name):
+    """Opaque filesystem identity includes generation, unlike reusable inode numbers."""
+    api = getattr(ctypes.CDLL(None, use_errno=True), "name_to_handle_at", None)
+    require(api is not None, "local replay additions require native filesystem handles")
+    api.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
+    api.restype = ctypes.c_int
+    handle = ExportFileHandle()
+    handle.handle_bytes = 128
+    mount_id = ctypes.c_int()
+    # No symlink following and no open_by_handle_at, privilege or fallback.
+    result = api(parent, os.fsencode(name), ctypes.byref(handle), ctypes.byref(mount_id), 0)
+    require(result == 0 and 0 < handle.handle_bytes <= 128 and handle.handle_type >= 0,
+            "local replay additions require supported native filesystem handles")
+    return {"type": handle.handle_type, "value": bytes(handle.data[:handle.handle_bytes]).hex()}
+
+
+def valid_native_handle(value):
+    return (type(value) is dict and set(value) == {"type", "value"}
+            and type(value["type"]) is int and value["type"] >= 0
+            and type(value["value"]) is str and re.fullmatch(r"(?:[0-9a-f]{2}){1,128}", value["value"]) is not None)
+
+
+def added_identity(parent, name, kind):
+    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    result = {"device": info.st_dev, "inode": info.st_ino, "fileHandle": native_handle(parent, name)}
+    if kind == "file":
+        require(stat.S_ISREG(info.st_mode), "local replay addition changed kind")
+        return result
+    require(kind == "directory" and stat.S_ISDIR(info.st_mode), "local replay addition changed kind")
+    descendants = {}
+
+    def visit(fd, prefix):
+        with os.scandir(fd) as scan:
+            names = sorted(entry.name for entry in scan)
+        for child in names:
+            relative = f"{prefix}/{child}" if prefix else child
+            require(safe_path(relative) and len(descendants) < MAX_ENTRIES,
+                    "local replay addition identity exceeds its bounds")
+            item = os.stat(child, dir_fd=fd, follow_symlinks=False)
+            require(item.st_dev == info.st_dev and (stat.S_ISREG(item.st_mode) or stat.S_ISDIR(item.st_mode)),
+                    "local replay addition identity changed kind or filesystem")
+            child_kind = "directory" if stat.S_ISDIR(item.st_mode) else "file"
+            descendants[relative] = {"device": item.st_dev, "inode": item.st_ino, "kind": child_kind,
+                                     "fileHandle": native_handle(fd, child)}
+            if child_kind == "directory":
+                with directory(child, fd) as nested:
+                    opened = os.fstat(nested)
+                    require((opened.st_dev, opened.st_ino) == (item.st_dev, item.st_ino),
+                            "local replay addition inode changed during observation")
+                    visit(nested, relative)
+
+    with directory(name, parent) as fd:
+        opened = os.fstat(fd)
+        require((opened.st_dev, opened.st_ino) == (info.st_dev, info.st_ino),
+                "local replay addition inode changed during observation")
+        visit(fd, "")
+    after = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    require((after.st_dev, after.st_ino) == (info.st_dev, info.st_ino),
+            "local replay addition inode changed during observation")
+    require(native_handle(parent, name) == result["fileHandle"],
+            "local replay addition native identity changed during observation")
+    return {**result, "descendants": descendants}
+
+
+def expected_addition(root, group, entries, repo):
+    images, directories = {}, {"": 0o755}
+    for path in group["paths"]:
+        mode, object_id = entries[path]
+        size = int(git(repo, "cat-file", "-s", object_id).strip())
+        require(0 <= size <= MAX_BYTES, "local replay source blob exceeds its byte limit")
+        data = git(repo, "cat-file", "blob", object_id)
+        item = {"sha256": digest(data), "mode": 0o755 if mode == "100755" else 0o644}
+        if group["kind"] == "file":
+            return item
+        relative = path[len(root) + 1:]
+        images[relative] = item
+        parts = relative.split("/")
+        directories.update(("/".join(parts[:i]), 0o755) for i in range(1, len(parts)))
+    return {"kind": "directory", "entries": images, "directories": directories}
+
+
 def hook_observation(root, api):
     hooks, custom = api.active_hooks_dir(root)
     require(custom is None and not hooks.is_symlink(),
@@ -268,12 +415,19 @@ def topology(root, api):
             "local replay requires the Linux files backend")
     require_ambient_location()
     git_dir = root / ".git"
+    # An explicit files declaration is the supported backend, not an unsupported
+    # extension. Older Git echoes this unknown rev-parse flag; it only supports
+    # files refs, and the separate extension check still rejects reftable.
+    ref_storage = git(root, "config", "--get", "extensions.refStorage", allowed=(0, 1)).strip()
+    ref_format = git(root, "rev-parse", "--show-ref-format").strip()
+    require(ref_storage in {b"", b"files"} and ref_format in {b"files", b"--show-ref-format"},
+            "local replay requires the files reference backend")
     require(git_dir.is_dir() and not git_dir.is_symlink()
             and git(root, "rev-parse", "--show-toplevel").decode().strip() == str(root)
             and git(root, "rev-parse", "--show-object-format").decode().strip() == "sha1"
             and git(root, "rev-parse", "--is-shallow-repository").decode().strip() == "false"
             and not git(root, "config", "--get-regexp",
-                        r"^(extensions\.(partialclone|refstorage)|remote\..*\.promisor|core\.(splitindex|sparsecheckout|worktree|fsmonitor|autocrlf|eol|attributesfile)|index\.sparse|filter\..+)$",
+                        r"^(extensions\.partialclone|remote\..*\.promisor|core\.(splitindex|sparsecheckout|worktree|fsmonitor|autocrlf|eol|attributesfile)|index\.sparse|filter\..+)$",
                         allowed=(0, 1)),
             "local replay requires the primary checkout of a full SHA-1 files repository")
     require_local_objects(root, git_dir)
@@ -334,15 +488,23 @@ def make_plan(root, stack_id, api):
     baseline, original, wanted = tree(root, before), tree(root, base), tree(root, source_tip)
     require(not any(path.rsplit("/", 1)[-1] == ".gitattributes" for path in baseline | original | wanted),
             "local replay refuses checkout attributes and filters")
-    require(original.keys() == wanted.keys(), "local replay refuses source additions and deletions")
-    changes = {path: {"before": original[path], "after": wanted[path]} for path in wanted
-               if original[path] != wanted[path]}
+    require(original.keys() <= wanted.keys(), "local replay refuses source deletions")
+    changes = {path: {"before": original.get(path), "after": wanted[path]} for path in wanted
+               if original.get(path) != wanted[path]}
     require(changes and not any(path.startswith(".syncwheel/") or path in {".gitignore", ".gitattributes"}
                                 for path in changes),
             "local replay requires a nonempty product-only source delta")
     for path, entry in changes.items():
-        require(entry["before"][0] == entry["after"][0] and baseline.get(path) == entry["before"],
+        require((entry["before"] is None or entry["before"][0] == entry["after"][0])
+                and baseline.get(path) == entry["before"],
                 f"local replay conflict or unsupported mode change at {path}")
+    changed_bytes = 0
+    for entry in changes.values():
+        size = int(git(root, "cat-file", "-s", entry["after"][1]).strip())
+        require(0 <= size <= MAX_BYTES, "local replay source blob exceeds its byte limit")
+        changed_bytes += size
+        require(changed_bytes <= 8 * MAX_BYTES, "local replay source delta exceeds its byte limit")
+    additions = addition_roots(baseline, changes)
     require(baseline.get(MANIFEST, [None])[0] == "100644",
             "local replay requires a tracked control manifest")
     require_no_attributes(root, baseline)
@@ -350,7 +512,21 @@ def make_plan(root, stack_id, api):
     with directory(root) as work, directory(git_dir) as meta:
         # The complete tracked checkout is verified without filters or optional index updates.
         verified = checkout(work, baseline)
-        observed = {path: verified[path] for path in sorted({*changes, MANIFEST})}
+        observed = {path: verified[path] for path in sorted({*changes, MANIFEST}) if path in baseline}
+        if additions:
+            # Refuse unsupported filesystems before preparing objects or journals.
+            native_handle(work, ".")
+            native_handle(meta, ".")
+            native_handle(meta, "index")
+        for path in additions:
+            with parent_dir(work, path) as (parent, name):
+                native_handle(parent, ".")
+                try:
+                    os.stat(name, dir_fd=parent, follow_symlinks=False)
+                except FileNotFoundError:
+                    pass
+                else:
+                    raise LocalReplayError("local replay addition collides with existing checkout data")
         committed = json.loads(git(root, "cat-file", "blob", baseline[MANIFEST][1]))
         require(api.normalize_manifest_data(committed, manifest_path) == manifest,
                 "local replay manifest changed during planning")
@@ -361,7 +537,8 @@ def make_plan(root, stack_id, api):
         "sourceRef": source, "sourceTip": source_tip, "sourceBase": base, "commits": commits,
         "manifestDigest": api.manifest_digest(manifest), "index": index,
         "referenceHook": hook_observation(root, api),
-        "witness": {"method": "exact-path-preimages", "paths": changes, "checkout": observed},
+        "witness": {"method": "exact-path-preimages", "paths": changes, "checkout": observed,
+                    "additions": additions},
     }
     require(symbolic(root, "HEAD") == target and head(root, target) == before and head(root, source) == source_tip,
             "local replay refs changed during planning")
@@ -377,7 +554,7 @@ def prepared_objects(root, stage, plan, manifest, api):
     product = tree(root, old)
     for path, value in plan["witness"]["paths"].items():
         mode, blob = value["after"]
-        git(root, "update-index", "--cacheinfo", f"{mode},{blob},{path}", env=env)
+        git(root, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{path}", env=env)
         product[path] = [mode, blob]
 
     date = git(root, "show", "-s", "--format=%ct", old).decode().strip()
@@ -453,6 +630,34 @@ def prepare(root, store, plan, manifest, reason, api):
             create_file(stage, slot, new, before["mode"])
             slots[path] = {"slot": slot, "before": before,
                            "after": {"sha256": digest(new), "mode": before["mode"]}}
+        for number, (path, group) in enumerate(plan["witness"].get("additions", {}).items()):
+            slot = f"addition-{number}"
+            expected = expected_addition(path, group, final_entries, root)
+            if group["kind"] == "file":
+                create_file(stage, slot, git(root, "cat-file", "blob", final_entries[path][1]), expected["mode"])
+            else:
+                subtree = stage / slot
+                subtree.mkdir(mode=0o755)
+                subtree.chmod(0o755)
+                for relative in sorted(expected["directories"], key=lambda p: (p.count("/"), p)):
+                    if relative:
+                        target = subtree / relative
+                        target.mkdir(mode=0o755)
+                        target.chmod(0o755)
+                for relative, wanted_image in expected["entries"].items():
+                    target = subtree / relative
+                    source = path + "/" + relative
+                    create_file(target.parent, target.name,
+                                git(root, "cat-file", "blob", final_entries[source][1]), wanted_image["mode"])
+                for relative in sorted(expected["directories"], reverse=True):
+                    with directory(subtree / relative) as fd:
+                        os.fsync(fd)
+            with directory(stage) as fd:
+                require(added_image(fd, slot, group["kind"]) == expected,
+                        "local replay staged addition differs from source objects")
+                identity = added_identity(fd, slot, group["kind"])
+            slots[path] = {"slot": slot, "kind": group["kind"], "before": None,
+                           "after": expected, "identity": identity}
         create_file(stage, "index-lease", b"", 0o600)
         (stage / "prepared-index").chmod(plan["index"]["mode"])
         with (stage / "prepared-index").open("rb") as stream, directory(stage) as stage_fd:
@@ -492,8 +697,9 @@ def owned_index_lock(meta, journal, *, acquire):
 
 
 @contextlib.contextmanager
-def operation_lock(git_dir):
-    store = git_dir / "syncwheel-local-replay"
+def operation_lock(git_dir, store_name="syncwheel-local-replay"):
+    require(store_name in {"syncwheel-local-replay", "syncwheel-local-source"}, "unsupported local operation store")
+    store = git_dir / store_name
     store.mkdir(mode=0o700, exist_ok=True)
     with directory(git_dir) as meta:
         os.fsync(meta)
@@ -521,6 +727,40 @@ def exchange(first, first_name, second, second_name):
         raise LocalReplayError(f"local replay atomic file exchange failed: {os.strerror(error)}")
     os.fsync(first)
     os.fsync(second)
+
+
+def move_absent(first, first_name, second, second_name):
+    """Atomic no-replace move; a concurrent untracked destination is never overwritten."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(libc, "renameat2", None)
+    require(rename is not None, "local replay requires atomic Linux no-replace rename")
+    if rename(first, os.fsencode(first_name), second, os.fsencode(second_name), 1):
+        error = ctypes.get_errno()
+        raise LocalReplayError(f"local replay no-replace rename failed: {os.strerror(error)}")
+    os.fsync(first)
+    os.fsync(second)
+
+
+def switch_addition(parent, name, journal, spec, *, forward, replace):
+    current = added_image(parent, name, spec["kind"])
+    retained = added_image(journal, spec["slot"], spec["kind"])
+    want, previous = (spec["after"], None) if forward else (None, spec["after"])
+    location = (parent, name) if current is not None else (journal, spec["slot"])
+    require(added_identity(*location, spec["kind"]) == spec["identity"],
+            "local replay addition inode changed or native identity changed; preserving the journal and checkout data")
+    if (current, retained) == (want, previous):
+        return
+    require(replace and (current, retained) == (previous, want),
+            "local replay addition or staged bytes changed; preserving the journal")
+    if forward:
+        move_absent(journal, spec["slot"], parent, name)
+    else:
+        move_absent(parent, name, journal, spec["slot"])
+    destination = (parent, name) if forward else (journal, spec["slot"])
+    require(added_identity(*destination, spec["kind"]) == spec["identity"],
+            "local replay addition inode changed or native identity changed during adoption; journal retained")
+    require((added_image(parent, name, spec["kind"]), added_image(journal, spec["slot"], spec["kind"]))
+            == (want, previous), "local replay addition changed during adoption; journal retained")
 
 
 def switch_image(parent, name, journal, slot, before, after, *, forward, replace=True):
@@ -615,8 +855,12 @@ class RefLease:
 def aligned_files(work, meta, journal, record, *, forward, replace=True):
     for path, spec in record["slots"].items():
         with parent_dir(work, path) as (parent, name):
-            switch_image(parent, name, journal, spec["slot"], spec["before"], spec["after"],
-                         forward=forward, replace=replace)
+            if spec["before"] is None:
+                switch_addition(parent, name, journal, spec, forward=forward, replace=replace)
+                checkpoint("checkout-addition-aligned")
+            else:
+                switch_image(parent, name, journal, spec["slot"], spec["before"], spec["after"],
+                             forward=forward, replace=replace)
         checkpoint("checkout-file-aligned")
     switch_image(meta, "index", journal, "prepared-index", record["plan"]["index"],
                  record["indexAfter"], forward=forward, replace=replace)
@@ -649,7 +893,11 @@ def verify_objects(root, record, api):
     require(api.canonical_manifest_file_text(original) == api.canonical_manifest_file_text(observed),
             "local replay journal control object changes more than selected ownership")
     observed_paths = plan["witness"]["checkout"]
-    require(record["slots"].keys() == observed_paths.keys() == {*witness, MANIFEST},
+    additions = addition_roots(old_tree, witness)
+    require(plan["witness"].get("additions", {}) == additions,
+            "local replay addition roots differ from the source witness")
+    existing = {path for path in witness if path in old_tree} | {MANIFEST}
+    require(record["slots"].keys() == existing | additions.keys() and observed_paths.keys() == existing,
             "local replay journal slots differ from the witness")
     for number, (path, before) in enumerate(sorted(observed_paths.items())):
         slot = record["slots"][path]
@@ -657,6 +905,31 @@ def verify_objects(root, record, api):
         require(slot == {"slot": f"file-{number}", "before": before,
                          "after": {"sha256": digest(contents), "mode": before["mode"]}},
                 "local replay journal has an invalid checkout slot")
+    for number, (path, group) in enumerate(additions.items()):
+        slot = record["slots"][path]
+        identity = slot.get("identity", {})
+        identity_keys = {"device", "inode", "fileHandle"} | ({"descendants"} if group["kind"] == "directory" else set())
+        require(set(identity) == identity_keys
+                and all(type(identity.get(key)) is int and identity[key] >= 0 for key in ("device", "inode"))
+                and identity["inode"] > 0 and valid_native_handle(identity.get("fileHandle")),
+                "local replay addition lacks a valid inode witness")
+        expected_image = expected_addition(path, group, expected, root)
+        if group["kind"] == "directory":
+            descendants = identity["descendants"]
+            required_kinds = {key: "file" for key in expected_image["entries"]}
+            required_kinds.update((key, "directory") for key in expected_image["directories"] if key)
+            require(type(descendants) is dict and descendants.keys() == required_kinds.keys(),
+                    "local replay addition lacks exact descendant inode witnesses")
+            for relative, child_identity in descendants.items():
+                require(type(child_identity) is dict and set(child_identity) == {"device", "inode", "kind", "fileHandle"}
+                        and type(child_identity["device"]) is int and child_identity["device"] == identity["device"]
+                        and type(child_identity["inode"]) is int and child_identity["inode"] > 0
+                        and child_identity["kind"] == required_kinds[relative]
+                        and valid_native_handle(child_identity["fileHandle"]),
+                        "local replay addition has an invalid descendant inode witness")
+        require(slot == {"slot": f"addition-{number}", "kind": group["kind"], "before": None,
+                         "after": expected_image, "identity": identity},
+                "local replay journal has an invalid addition slot")
     return expected
 
 
@@ -729,7 +1002,7 @@ def finish(root, git_dir, operation, record, api, *, recover=False):
         return record["state"]
 
 
-def execute(root, args, api):
+def execute_local_replay(root, args, api):
     git_dir = topology(root, api)
     if not args.apply and not args.recover:
         require(args.plan_digest is None and args.reason is None, "preview does not accept an apply digest or reason")
@@ -770,3 +1043,210 @@ def execute(root, args, api):
         after = None  # No claim about a ref the operation never moved.
     return {"status": state, "stack": args.stack, "planDigest": args.plan_digest,
             "before": plan["integrationTip"], "after": after}
+
+
+def local_source_plan(root, stack_id, api):
+    """Observe an already declared linear source; never project or publish it."""
+    meta = topology(root, api)
+    manifest, _ = api.load_manifest(root, root / MANIFEST)
+    require(manifest and manifest.get("syncwheel_tracking") == "git-tracked"
+            and manifest.get("repository_mode", "delivery") == "delivery",
+            "local materialization requires a tracked delivery manifest")
+    authority = api.manifest_authority(manifest)
+    require(authority["mode"] == api.AUTHORITY_MODE_AI_MANAGED
+            and "source_change" in authority["allow"] and "source_change" not in authority["deny"],
+            "local materialization requires source-change authority")
+    stack = api.require_stack(manifest, stack_id)
+    target = "refs/heads/" + stack["branch"]
+    require(SAFE_REF.fullmatch(target) and target != "refs/heads/" + manifest["integration"]["branch"]
+            and not symbolic(root, target), "local materialization requires a distinct direct source ref")
+    git(root, "check-ref-format", target)
+    require(not any(item.get("branch") == stack["branch"] for item in api.get_worktrees(root)),
+            "local materialization refuses a checked-out target")
+    registry, _ = api.load_governed_worktree_registry(root)
+    require(not any(lane.get("state") != "reaped" and lane.get("branch") == stack["branch"]
+                    for lane in registry["lanes"]), "local materialization refuses a governed lane ref")
+    commits = stack["commits"]
+    require(0 <= len(commits) <= 200 and all(type(pin) is str and OID.fullmatch(pin)
+            for pin in [stack["base"], *commits]), "local materialization requires exact local commit IDs")
+    previous = oid(root, stack["base"] + "^{commit}")
+    for commit in commits:
+        require(git(root, "rev-list", "--parents", "-n", "1", commit).decode().split() == [commit, previous],
+                "local materialization requires an exact linear source sequence")
+        previous = commit
+    current_head = symbolic(root, "HEAD")
+    require(current_head and SAFE_REF.fullmatch(current_head), "local materialization requires a direct branch checkout")
+    current_tip = head(root, current_head)
+    baseline = tree(root, current_tip)
+    require(MANIFEST in baseline, "local materialization requires the tracked primary manifest")
+    require_no_attributes(root, baseline)
+    require_clean_index(root, baseline)
+    with directory(root) as work, directory(meta) as metadata:
+        observed = checkout(work, baseline)
+        index = image(metadata, "index")
+        with parent_dir(work, MANIFEST) as (parent, name):
+            manifest_image = image(parent, name)
+    existing = git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", target, allowed=(0, 1)).decode().strip() or None
+    require(existing in {None, previous}, "local materialization preserves an existing different target")
+    require(not api.pending_control_manifest_intents(api.load_ledger_events(root, root / MANIFEST)),
+            "local materialization refuses a pending control operation")
+    payload = {"schemaVersion": 1, "kind": "localSourceMaterialization", "stack": stack_id,
+               "sourceRef": target, "sourceTip": previous, "sourceBase": stack["base"],
+               "commits": commits, "expectedTargetTip": existing, "headRef": current_head,
+               "headTip": current_tip, "manifest": manifest_image, "index": index,
+               "checkout": observed, "referenceHook": hook_observation(root, api)}
+    require(symbolic(root, "HEAD") == current_head and head(root, current_head) == current_tip,
+            "local materialization HEAD drifted during planning")
+    payload["planDigest"] = api.canonical_json_digest(payload)
+    return payload
+
+
+def create_local_source_ref(root, plan, api, env):
+    """Prepare create-only CAS, then reject dangling aliases while the ref is locked."""
+    with subprocess.Popen(
+        ["git", "-c", "core.fsync=loose-object,index,reference", "update-ref", "--stdin"],
+        cwd=root, env=git_env(env), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, text=True,
+    ) as process:
+        def send(command, expected):
+            process.stdin.write(command + "\n")
+            process.stdin.flush()
+            require(process.stdout.readline().strip() == expected,
+                    "local materialization create-only CAS refused or outcome uncertain")
+        try:
+            send("start", "start: ok")
+            send("option no-deref\ncreate " + plan["sourceRef"] + " " + plan["sourceTip"]
+                 + "\nverify HEAD " + plan["headTip"] + "\nprepare", "prepare: ok")
+            # Old Git represents an unborn symbolic target as a zero OID. Check
+            # its name under the prepared lock before committing, never dereference it.
+            require(not symbolic(root, plan["sourceRef"])
+                    and not os.path.lexists(root / ".git" / plan["sourceRef"]),
+                    "local materialization concurrent ref name preserved")
+            require(symbolic(root, "HEAD") == plan["headRef"]
+                    and head(root, plan["headRef"]) == plan["headTip"]
+                    and all((root / ".git" / (ref + ".lock")).is_file()
+                            for ref in ("HEAD", plan["headRef"], plan["sourceRef"])),
+                    "local materialization HEAD lease drifted")
+            require(local_source_plan(root, plan["stack"], api) == plan,
+                    "local materialization witness drifted under native leases")
+            checkpoint("source-ref-prepared")
+            send("commit", "commit: ok")
+            process.stdin.close()
+            require(process.wait() == 0, "local materialization ref commit outcome uncertain")
+        finally:
+            if process.poll() is None and not process.stdin.closed:
+                process.stdin.close()  # EOF aborts an uncommitted prepared transaction.
+
+
+def source_receipt(operation, stack_id, digest_value, api):
+    record = journal_record(operation)
+    require(type(record) is dict and type(record.get("plan")) is dict
+            and record.get("state") in {"prepared", "held", "completed"}, "invalid local materialization receipt")
+    plan = record["plan"]
+    unsigned = {key: value for key, value in plan.items() if key != "planDigest"}
+    require(record.get("schemaVersion") == 1 and record.get("kind") == "localSourceIntent"
+            and plan.get("kind") == "localSourceMaterialization" and plan.get("stack") == stack_id
+            and plan.get("planDigest") == digest_value == api.canonical_json_digest(unsigned),
+            "local materialization receipt scope mismatch")
+    return record
+
+
+def recover_source_intent(root, args, api, operation):
+    record = source_receipt(operation, args.stack, args.plan_digest, api)
+    plan = record["plan"]
+    # Never infer that an absent ref means the first attempt did not run. A
+    # recovery only releases this seed-owned index lease; it never moves refs.
+    require(not any(os.path.lexists(root / ".git" / (ref + ".lock"))
+                    for ref in ("HEAD", plan["headRef"], plan["sourceRef"])),
+            "local materialization native ref locks remain; locks preserved")
+    released = False
+    with directory(root / ".git") as meta, directory(operation) as journal:
+        if owned_index_lock(meta, journal, acquire=False):
+            os.unlink("index.lock", dir_fd=meta)
+            os.fsync(meta)
+            released = True
+    observed = git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", plan["sourceRef"], allowed=(0, 1)).decode().strip() or None
+    symbolic_target = symbolic(root, plan["sourceRef"])
+    state = "completed" if record["state"] == "completed" and observed == plan["sourceTip"] and not symbolic_target else "held"
+    record["state"] = state
+    save_journal(operation, record, api)
+    return {"status": state, "sourceRef": plan["sourceRef"], "observedTip": observed,
+            "observedSymbolicTarget": symbolic_target or None, "planDigest": args.plan_digest,
+            "retryAllowed": False, "indexLeaseReleased": released}
+
+
+def execute_source_materialization(root, args, api):
+    if args.recover:
+        require(type(args.plan_digest) is str and HASH64.fullmatch(args.plan_digest) and args.reason is None,
+                "local materialization recovery requires only its exact digest")
+        meta = topology(root, api)
+        manifest, _ = api.load_manifest(root, root / MANIFEST)
+        authority = api.manifest_authority(manifest)
+        require(authority["mode"] == api.AUTHORITY_MODE_AI_MANAGED and "source_change" in authority["allow"]
+                and "source_change" not in authority["deny"], "local materialization recovery requires source-change authority")
+        operation = meta / "syncwheel-local-source" / args.plan_digest
+        require(operation.is_dir(), "local materialization has no receipt for this digest")
+        with operation_lock(meta, "syncwheel-local-source"):
+            with api.channel_mutation_lock(root, root / MANIFEST, "local-source-recovery"):
+                return recover_source_intent(root, args, api, operation)
+    plan = local_source_plan(root, args.stack, api)
+    if not args.apply:
+        require(args.plan_digest is None and args.reason is None,
+                "local materialization preview does not accept an apply digest or reason")
+        return plan
+    require(type(args.plan_digest) is str and args.plan_digest == plan["planDigest"]
+            and type(args.reason) is str and 0 < len(args.reason.strip()) <= 512,
+            "local materialization requires the current digest and bounded reason")
+    with operation_lock(root / ".git", "syncwheel-local-source") as store:
+        with api.channel_mutation_lock(root, root / MANIFEST, "local-source-materialization"):
+            require(local_source_plan(root, args.stack, api) == plan, "local materialization plan drifted")
+            prior = []
+            for path in store.iterdir():
+                if HASH64.fullmatch(path.name):
+                    record = journal_record(path)
+                    require(type(record) is dict and type(record.get("plan")) is dict, "invalid local materialization receipt")
+                    record = source_receipt(path, record["plan"].get("stack"), path.name, api)
+                    if record["plan"].get("sourceRef") == plan["sourceRef"]:
+                        prior.append(record)
+            if plan["expectedTargetTip"] is not None:
+                require(not any(record["state"] != "completed" for record in prior),
+                        "local materialization intent requires explicit recovery; no retry")
+                return {"status": "present_exact", "created": False, "ownership": "not_inferred",
+                        "sourceRef": plan["sourceRef"], "sourceTip": plan["sourceTip"], "planDigest": plan["planDigest"]}
+            require(not prior, "local materialization already has a source intent; no automatic re-creation")
+            operation = store / plan["planDigest"]
+            operation.mkdir(mode=0o700)
+            create_file(operation, "index-lease", b"", 0o600)
+            record = {"schemaVersion": 1, "kind": "localSourceIntent", "state": "prepared", "plan": plan, "reason": args.reason}
+            save_journal(operation, record, api)
+            with directory(store) as descriptor:
+                os.fsync(descriptor)
+            api.append_ledger_event(root, "local_source_materialization_intent", {
+                "planDigest": plan["planDigest"], "sourceRef": plan["sourceRef"], "sourceTip": plan["sourceTip"],
+                "expectedTargetTip": None, "reason": args.reason, "manifestWitness": plan["manifest"],
+            }, root / MANIFEST)
+            checkpoint("source-intent-prepared")
+            with directory(root / ".git") as metadata, directory(operation) as journal:
+                owned_index_lock(metadata, journal, acquire=True)
+                token = None
+                try:
+                    checkpoint("source-before-create")
+                    require(local_source_plan(root, args.stack, api) == plan, "local materialization plan drifted before creation")
+                    token = api.authorize_ref_move(root) if plan["referenceHook"] else None
+                    checkpoint("source-create-cas")
+                    create_local_source_ref(root, plan, api, {api.MANAGED_REF_MOVE_AUTH_ENV: token} if token else None)
+                    checkpoint("source-created")
+                    require(head(root, plan["sourceRef"]) == plan["sourceTip"], "local materialization target drifted; current ref preserved")
+                    record["state"] = "completed"
+                    save_journal(operation, record, api)
+                    api.append_ledger_event(root, "local_source_materialization_completed", {
+                        "planDigest": plan["planDigest"], "sourceRef": plan["sourceRef"], "sourceTip": plan["sourceTip"],
+                    }, root / MANIFEST)
+                finally:
+                    if token:
+                        (api.ref_auth_dir(root) / token).unlink(missing_ok=True)
+                    if owned_index_lock(metadata, journal, acquire=False):
+                        os.unlink("index.lock", dir_fd=metadata)
+                        os.fsync(metadata)
+    return {"status": "created", "created": True, "sourceRef": plan["sourceRef"],
+            "sourceTip": plan["sourceTip"], "planDigest": plan["planDigest"]}

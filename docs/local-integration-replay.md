@@ -19,15 +19,18 @@ managed reference hooks must be exact, active, unchained and protect the target;
 custom reference hooks are refused.
 
 The witness requires identical source-base and integration blobs on every
-changed path. It accepts changes to existing regular files with unchanged modes;
-overlapping content, additions, deletions, links, submodules, partial clones,
+changed path. It accepts changes to existing regular files with unchanged modes
+and additions of regular files or new directory subtrees. New roots must be
+absent from the checkout, including untracked and ignored data. Overlapping
+content, deletions, links, submodules, partial clones,
 hidden index entries, empty subtrees, effective checkout attributes and filters,
 and control-path edits are refused. It does not infer
 semantic equivalence. The result retains the entire old integration as
 ancestry and keeps all untouched tree entries. A second commit records the
 selected stack's projection without changing the source ref or other stack
 declarations. This is not a full manifest rebuild, a conflict resolution desk,
-or an assertion that another stack's remote PR has landed.
+or an assertion that another stack's remote PR has landed. Explicit `files`
+reference-backend configuration is supported; reftable is refused.
 
 Apply requires Linux, the Git files ref backend and atomic
 `RENAME_EXCHANGE` across the actual checkout and Git metadata directories. A
@@ -38,7 +41,24 @@ cannot take the index or held ref locks. Use an exclusive direct writer for the
 primary checkout and its metadata: direct filesystem or configuration changes
 are not governed by Git locks. An unexpected image aborts; exchanged bytes
 remain in the journal. The command never fetches, resets, reaps a lane, pushes,
-or recovers another operation.
+or recovers another operation. Additions are prepared under that journal before
+effects and adopted with atomic `RENAME_NOREPLACE`, never a replacing rename.
+An entirely new subtree moves as one unit. Recovery returns it to the journal
+only when its root and every descendant file/directory still match their
+prepared device/inode and native filesystem export-handle witnesses. Handles
+distinguish a deleted/recreated object even when its inode number is reused.
+Additions require Linux `name_to_handle_at` support on the actual checkout and
+journal filesystem; unsupported filesystems fail during read-only preview,
+without a fallback to inode or content hashes. No `open_by_handle_at` or extra
+privilege is used. Changed contents or any identically recreated object are
+held for operator review. Recovery never deletes concurrent checkout
+data. The exclusive-direct-writer prerequisite still applies; Git leases do not
+serialize arbitrary filesystem writers.
+
+The handle contract follows the kernel's [exportable filesystem identity
+interface](https://docs.kernel.org/filesystems/nfs/exporting.html). Old addition
+journals without generation-bearing witnesses are refused; recovery does not
+invent an identity from the current checkout.
 
 Recovery never replays or retries a ref move. If alignment did not start,
 it can close the intent and release its own index lock even if another writer
@@ -50,3 +70,37 @@ kill may leave native Git ref lock files with no ownership proof. Recovery
 reports that obstruction and leaves the locks intact; an operator must establish
 their ownership before any separate repair. The journal stays under the
 repository's private Git metadata.
+
+Draft source refs can be created separately through native `stack create --draft`.
+Materialization projects objects and creates the ref with a zero-old-OID CAS; it
+does not create or remove a checkout. A ref changed immediately after creation
+is preserved and reported. A historical temporary checkout is preserved for separate native recovery;
+this path never removes it, including when ordinary Git status appears clean.
+Ignored data and concurrent writers are not inferred to be disposable. This is
+not a network-free publication command: active coordination still reads and
+publishes its remote state. It does not relax local replay prerequisites.
+
+## Missing local source refs
+
+`syncwheel stack materialize-local <stack>` previews a ref-only operation for an
+already declared exact linear commit sequence, or the exact base of an empty stack. `--apply --plan-digest <digest>
+--reason <reason>` creates only its missing source ref with zero-old-OID CAS.
+It does not project objects, change the manifest/checkout/index, inspect a remote,
+publish, recover other operations, or reap lanes. Active coordination remains
+configured and publication still needs its normal remote-state checks.
+
+The primary tracked manifest, complete clean checkout and index, exact local
+objects, authority, target and reference hook are witnessed and rechecked under
+the shared metadata lock. Source refs checked out anywhere or registered as
+governed lane refs are refused. Direct filesystem writers must be exclusive. An
+intent and persistent index-lease seed are recorded before CAS. Git holds HEAD,
+its branch and the new source ref in the prepared transaction; the seed-owned
+index lock also excludes staging writers. The witness is checked under these
+leases before committing. An interruption after creation leaves the ref intact.
+`stack materialize-local <stack> --recover --plan-digest <digest>` only inspects
+the original receipt and releases its own exact seed-owned index lock. Unknown
+native ref locks or a foreign index lock are preserved. Uncertain outcomes stay
+held, even if the ref is absent; the same ref is never automatically created
+again after an intent, including under a new plan digest. A present exact ref
+without a pending intent can be inspected without writing it or inferring who
+created it. There is no automatic deletion, rewrite, resend or publication.

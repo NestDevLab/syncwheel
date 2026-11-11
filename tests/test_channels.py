@@ -1346,10 +1346,21 @@ class DeploymentChannelTest(unittest.TestCase):
             definitions = {}
             by_simple_name = {}
             imports = {}
+            local_imports = {}
 
             class CallCollector(ast.NodeVisitor):
                 def __init__(self):
                     self.calls = []
+                    self.imports = {}
+
+                def visit_Import(self, node):
+                    for alias in node.names:
+                        self.imports[alias.asname or alias.name.split('.')[0]] = alias.name.split('.')[-1]
+
+                def visit_ImportFrom(self, node):
+                    if node.module:
+                        for alias in node.names:
+                            self.imports[alias.asname or alias.name] = node.module.split('.')[-1]
 
                 def visit_FunctionDef(self, node):
                     return None
@@ -1383,6 +1394,7 @@ class DeploymentChannelTest(unittest.TestCase):
                         calls.visit(statement)
                     key = (self.module_name, qualified_name)
                     definitions[key] = calls.calls
+                    local_imports[key] = calls.imports
                     by_simple_name.setdefault(node.name, set()).add(key)
                     for statement in node.body:
                         if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -1417,19 +1429,20 @@ class DeploymentChannelTest(unittest.TestCase):
             def callees(key):
                 module_name, qualified_name = key
                 class_scope = qualified_name.rpartition('.')[0]
+                aliases = {**imports[module_name], **local_imports[key]}
                 output = set()
                 for kind, root, leaf in definitions[key]:
                     if kind == 'name':
                         output.update(
                             candidate for candidate in by_simple_name.get(leaf, set())
-                            if candidate[0] == module_name
+                            if candidate[0] == module_name or candidate[0] == aliases.get(leaf)
                         )
                     elif root == 'self' and class_scope:
                         candidate = (module_name, f'{class_scope}.{leaf}')
                         if candidate in definitions:
                             output.add(candidate)
-                    elif root in imports[module_name]:
-                        imported_module = imports[module_name][root]
+                    elif root in aliases:
+                        imported_module = aliases[root]
                         output.update(
                             candidate for candidate in by_simple_name.get(leaf, set())
                             if candidate[0] == imported_module
@@ -1444,6 +1457,10 @@ class DeploymentChannelTest(unittest.TestCase):
                 key for key, calls in definitions.items()
                 if any(leaf in saver_names for _kind, _root, leaf in calls)
             }
+            # This backend exchanges the witnessed tracked manifest as part of
+            # the checkout transaction instead of calling save_manifest(). Its
+            # real mutation sink must be reachable from a registered command.
+            direct_savers.update({('syncwheel_local_replay', 'aligned_files')} & definitions.keys())
 
             def reaches_saver(key, trail=()):
                 if key in trail:
@@ -1494,6 +1511,14 @@ class DeploymentChannelTest(unittest.TestCase):
             ('syncwheel_revision_provider', 'UndeclaredManifestSaver.persist'),
             mutant_uncovered,
         )
+        with (mutant_root / 'syncwheel.py').open('a') as handle:
+            handle.write(
+                '\ndef command_unregistered_local_writer(root, args, api):\n'
+                '    from syncwheel_local_replay import execute_local_replay\n'
+                '    return execute_local_replay(root, args, api)\n'
+            )
+        _uncovered, mutant_derived, mutant_registered = analyze(mutant_root)
+        self.assertIn(('syncwheel', 'command_unregistered_local_writer'), mutant_derived - mutant_registered)
         for command in (
             module.command_repo_authority_set,
             module.command_coordination_compose,
