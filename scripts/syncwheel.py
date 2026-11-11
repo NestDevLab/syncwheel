@@ -26399,8 +26399,6 @@ def command_stack_create(args):
             )
         except (LocalReplayError, OSError) as exc:
             raise SyncwheelError(str(exc)) from exc
-        append_ledger_event(repo_root, 'manifest_saved',
-                            manifest_event_payload(manifest_path, manifest, 'stack_create', creation_context), manifest_path)
     else:
         save_manifest_with_ledger(repo_root, manifest_path, manifest, 'stack_create', creation_context)
     if not preserve_lanes:

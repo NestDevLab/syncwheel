@@ -1367,6 +1367,18 @@ def finish_declaration(root, operation, record, api, *, recover=False):
     return record["state"]
 
 
+def append_declaration_receipt(root, operation, record, api):
+    """Normal completion and recovery attest one identical durable operation."""
+    plan = record["plan"]
+    receipt = {"status": "completed", "planDigest": operation.name, "controlCommit": record["final"]}
+    api.append_ledger_event(root, "manifest_saved", api.manifest_event_payload(
+        root / MANIFEST, plan["manifestAfter"], "stack_create", {
+            "stack": plan["stack"], "branch": api.require_stack(plan["manifestAfter"], plan["stack"])["branch"],
+            "actor": record.get("actor", "unknown"), "declaration_receipt": receipt,
+        }), root / MANIFEST, idempotency_key="local-declaration-manifest:" + operation.name)
+    return receipt
+
+
 def apply_manifest_declaration(root, updated, stack_id, api):
     with sanitized_cli_environment():
         observation, original = declaration_observation(root, api)
@@ -1395,6 +1407,7 @@ def apply_manifest_declaration(root, updated, stack_id, api):
                     with (stage / "prepared-index").open("rb") as stream: os.fsync(stream.fileno())
                     index_after = image(fd, "prepared-index")
                 record = {"kind": "localManifestDeclaration", "schemaVersion": 1, "state": "prepared",
+                          "actor": api.governed_worktree_owner(),
                           "plan": plan, "final": final, "indexAfter": index_after,
                           "slots": {MANIFEST: {"slot": "manifest", "before": plan["checkout"][MANIFEST],
                                                "after": {"sha256": digest(encoded), "mode": plan["checkout"][MANIFEST]["mode"]}}}}
@@ -1410,7 +1423,9 @@ def apply_manifest_declaration(root, updated, stack_id, api):
             transaction = api.active_manifest_write_transaction(root / MANIFEST)
             if transaction is not None:
                 transaction["expectedDigest"] = api.manifest_digest(updated)
-            return {"status": status, "planDigest": plan["planDigest"], "controlCommit": final}
+            receipt = append_declaration_receipt(root, operation, record, api)
+            checkpoint("declaration-receipt-appended")
+            return receipt
 
 
 def recover_manifest_declaration(root, args, api):
@@ -1428,15 +1443,14 @@ def recover_manifest_declaration(root, args, api):
     with operation_lock(meta, "syncwheel-local-declarations"):
         with api.channel_mutation_lock(root, root / MANIFEST, "local-declaration-recovery"):
             record = verify_declaration_record(root, operation, api)
+            if "recoveryReason" not in record:
+                record["recoveryReason"] = args.reason
+                save_journal(operation, record, api)
             status = finish_declaration(root, operation, record, api, recover=True)
             api.append_ledger_event(root, "local_declaration_recovered", {
                 "planDigest": args.plan_digest, "stack": record["plan"]["stack"],
-                "status": status, "reason": args.reason,
+                "status": status, "reason": record["recoveryReason"],
             }, root / MANIFEST, idempotency_key="local-declaration-recovered:" + args.plan_digest + ":" + status)
             if status == "completed":
-                api.append_ledger_event(root, "manifest_saved", api.manifest_event_payload(
-                    root / MANIFEST, record["plan"]["manifestAfter"], "stack_create", {
-                        "stack": record["plan"]["stack"], "recovered": True,
-                        "declaration_receipt": {"planDigest": args.plan_digest, "controlCommit": record["final"], "status": status},
-                    }), root / MANIFEST, idempotency_key="local-declaration-manifest:" + args.plan_digest)
+                append_declaration_receipt(root, operation, record, api)
             return {"status": status, "planDigest": args.plan_digest, "retryAllowed": False}

@@ -5478,6 +5478,33 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), before[0])
         self.assertEqual((repo / '.git/index').read_bytes(), before[1])
 
+    def test_local_declaration_receipt_append_crash_never_duplicates_its_manifest_event(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-append-crash')
+        append = module.append_ledger_event
+        def interrupted(repo_root, event_type, payload, *args, **kwargs):
+            result = append(repo_root, event_type, payload, *args, **kwargs)
+            if event_type == 'manifest_saved' and payload.get('context', {}).get('stack') == 'append-crash':
+                raise SystemExit(87)
+            return result
+        argv = ['syncwheel', 'stack', 'create', 'append-crash', source, '--repo', str(repo), '--preserve-lanes']
+        output = io.StringIO()
+        with mock.patch('sys.argv', argv), mock.patch.object(module, 'append_ledger_event', side_effect=interrupted), contextlib.redirect_stdout(output):
+            with self.assertRaises(SystemExit): module.main()
+        self.assertNotIn(': created ', output.getvalue())
+        operation = next(p for p in (repo / '.git/syncwheel-local-declarations').iterdir() if p.is_dir())
+        final = self.git(repo, 'rev-parse', 'HEAD').stdout
+        def receipts():
+            return [e for e in module.load_ledger_events(repo) if e.get('type') == 'manifest_saved'
+                    and e['payload'].get('context', {}).get('stack') == 'append-crash']
+        self.assertEqual(len(receipts()), 1)
+        original = receipts()[0]
+        for reason in ['first recovery', 'second recovery with another reason']:
+            result = json.loads(self.run_cli(repo, 'stack', 'recover-declaration', '--plan-digest', operation.name,
+                                          '--apply', '--reason', reason).stdout)
+            self.assertEqual(result['status'], 'completed')
+            self.assertEqual(receipts(), [original])
+            self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, final)
+
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
         repo = self.clone(origin, 'disabled-draft')

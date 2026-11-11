@@ -132,3 +132,6 @@ unknown Git locks, recovers another operation or reaps a lane. A foreign image,
 ref/HEAD drift or foreign index lock is held. The original manifest/index bytes
 remain in the journal. This recovery applies only to the new declaration
 journal, not to historical staged manifests left by an older command.
+Normal completion and recovery share the same operation key and immutable
+manifest receipt payload, including the original actor. A crash after ledger
+append does not create another `manifest_saved` event on recovery.
