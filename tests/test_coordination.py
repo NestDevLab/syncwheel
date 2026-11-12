@@ -13976,8 +13976,10 @@ sys.exit(module.main())
                             ref, advanced, parent,
                         )
 
+                patched_owner = module
                 if stale == 'merge-stack':
-                    original = module.integration_projection_input_snapshot
+                    patched_owner = module.ProjectionService
+                    original = module.ProjectionService.integration_projection_input_snapshot
 
                     def race_replay_input_snapshot(*args, **kwargs):
                         result = original(*args, **kwargs)
@@ -14009,7 +14011,8 @@ sys.exit(module.main())
                 ])
                 args.dry_run = False
                 with mock.patch.object(
-                    module, patched_name, side_effect=patched_effect,
+                    patched_owner, patched_name, autospec=(stale == 'merge-stack'),
+                    side_effect=patched_effect,
                 ):
                     with self.assertRaisesRegex(
                         module.SyncwheelError, expected_error,

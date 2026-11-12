@@ -161,10 +161,11 @@ assert module.build_parser().parse_args(['status']).func is module.command_statu
                 module.coordination_public_remote_ref_parts(ref, 'base')
 
     def test_domains_do_not_import_the_cli_facade(self):
-        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication', 'revision_backend', 'files', 'provenance', 'stacks', 'manifest_store')
-        for name in modules:
+        package = tomllib.loads((SCRIPTS.parent / 'pyproject.toml').read_text())
+        domains = set(package['tool']['setuptools']['py-modules']) - {'syncwheel', 'syncwheel_cli'}
+        for name in sorted(domains):
             with self.subTest(module=name):
-                tree = ast.parse((SCRIPTS / f'syncwheel_{name}.py').read_text())
+                tree = ast.parse((SCRIPTS / f'{name}.py').read_text())
                 imports = {
                     alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
                     for alias in node.names
