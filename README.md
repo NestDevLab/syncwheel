@@ -689,6 +689,8 @@ Practical meaning:
   `stack push` publishes only the selected stack branch plus its coordination claim/state;
   local control-manifest persistence never authorizes publishing the integration branch.
   Bootstrap or publish integration explicitly with `int push`.
+  With coordination active, `stack push` and `int push` from a secondary worktree refuse before
+  any write unless its control manifest matches the primary checkout's.
 - `reconcile` is the preferred multi-device maintenance entrypoint: it compares
   manifest ownership, stack branches, integration, and remote tips; reports a
   dry-run plan by default; and can rebuild, update manifest SHAs, and push when

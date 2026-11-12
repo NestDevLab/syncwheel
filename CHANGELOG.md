@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.27 - 2026-11-12
+
+- Refuse `stack push` and `int push` from a secondary worktree when coordination is active and its control manifest differs from the primary checkout's. Such a push used to write its older manifest onto the integration branch before the publication guards refused it. The refusal now comes before any write; run either push from the primary checkout.
+
 ## 0.46.26 - 2026-11-12
 
 - Refuse to publish a new managed branch (stack, channel or promotion target) onto a remote branch that already exists but is not managed by the published coordination state. The publication lease used to be the observed tip, so such a branch was silently replaced. An absent branch is still leased as absent.

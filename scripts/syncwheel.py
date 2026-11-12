@@ -36794,6 +36794,42 @@ def execute_parsed_command(args):
     return args.func(args)
 
 
+def lane_stack_push_manifest_refusal(args):
+    """Refuse a lane push whose control manifest differs from the primary's.
+
+    With coordination active, stack push and int push persist their loaded
+    manifest onto the integration branch before the publication guards run, so
+    a lane holding an older manifest would overwrite the shared control state.
+    """
+    commands = {command_stack_push: 'stack push', command_int_push: 'int push'}
+    command = commands.get(args.func)
+    if command is None or not hasattr(args, 'repo'):
+        return None
+    repo_root = resolve_repo_root(args.repo).resolve()
+    worktrees = get_worktrees(repo_root)
+    if not worktrees or not worktrees[0].get('path'):
+        return None
+    primary_root = Path(worktrees[0]['path']).resolve()
+    if primary_root == repo_root:
+        return None
+    manifest_path = resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
+    manifest, _ = load_manifest(repo_root, manifest_path)
+    primary_path = resolve_manifest_path(
+        primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
+    primary_manifest, _ = load_manifest(primary_root, primary_path)
+    if not any(item and coordination_is_active(item) for item in (manifest, primary_manifest)):
+        return None
+    if manifest and primary_manifest and manifest_digest(manifest) == manifest_digest(primary_manifest):
+        return None
+    return (
+        f'{command} from worktree {repo_root} would publish a control manifest that differs '
+        f'from the primary checkout {primary_root}; run syncwheel {command} from the primary checkout'
+    )
+
+
 def route_stack_add_from_governed_lane(args):
     """Use shared control state while resolving revision specs in the author lane."""
     if args.func != command_stack_add or args.manifest or args.personal:
@@ -36844,6 +36880,9 @@ def main():
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
         route_stack_add_from_governed_lane(args)
+        lane_push_refusal = lane_stack_push_manifest_refusal(args)
+        if lane_push_refusal:
+            raise SyncwheelError(lane_push_refusal)
         # A guard callback runs inside a Git process that is mid-operation, so it
         # stays a decision about the incoming refs and skips the workspace-wide
         # preflights: those inspect other worktrees and must not run there.

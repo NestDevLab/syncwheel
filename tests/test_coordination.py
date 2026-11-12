@@ -5346,6 +5346,57 @@ with module.coordination_publication_lock(Path(repo_path)):
             stack_tip,
         )
 
+    def assert_lane_push_with_older_manifest_refuses_before_any_write(self, name, *push):
+        origin = self.create_remote(name)
+        repo = self.clone(origin, name)
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        opened = json.loads(self.run_cli(repo, 'worktree', 'open', 'author', '--json').stdout)
+        lane = Path(opened['lane']['path'])
+        # The primary must sit on a plain metadata commit, not a control commit,
+        # or control recovery refuses the lane before the push reaches its write.
+        shared_tip = self.commit_on_branch(repo, 'scratch/shared', 'shared.txt')
+        self.git(repo, 'branch', 'pr/shared', shared_tip)
+        self.run_cli(repo, 'stack', 'create', 'shared', shared_tip, '--branch', 'pr/shared')
+        self.run_cli(repo, 'stack', 'push', 'shared')
+        self.run_cli(repo, 'stack', 'create', 'primary-draft', '--draft')
+        (lane / 'lane.txt').write_text('lane\n')
+        self.git(lane, 'add', 'lane.txt')
+        self.git(lane, 'commit', '-q', '-m', 'feat: lane work')
+        lane_tip = self.git(lane, 'rev-parse', 'HEAD').stdout.strip()
+        self.git(lane, 'branch', 'pr/lane-work', lane_tip)
+        self.run_cli(lane, 'stack', 'create', 'lane-work', lane_tip, '--branch', 'pr/lane-work')
+        module = self.load_module()
+        integration = module.load_manifest(repo)[0]['integration']['branch']
+        lane_ledger = lane / '.syncwheel' / 'ledger' / 'events'
+
+        def lane_events():
+            return [path.read_text() for path in sorted(lane_ledger.glob('*.jsonl'))]
+
+        integration_before = self.git(repo, 'rev-parse', integration).stdout.strip()
+        primary_manifest_before = (repo / '.syncwheel' / 'manifest.json').read_bytes()
+        remote_state_before = self.remote_state(origin)
+        remote_heads_before = self.git(repo, 'ls-remote', 'origin').stdout
+        lane_events_before = lane_events()
+        result = self.run_cli(lane, *push, expected=2)
+        self.assertIn(f"{' '.join(push[:2])} from worktree", result.stderr)
+        self.assertIn('differs from the primary checkout', result.stderr)
+        self.assertEqual(self.git(repo, 'rev-parse', integration).stdout.strip(), integration_before)
+        self.assertEqual((repo / '.syncwheel' / 'manifest.json').read_bytes(), primary_manifest_before)
+        self.assertEqual(self.remote_state(origin), remote_state_before)
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_heads_before)
+        self.assertEqual(lane_events(), lane_events_before)
+
+    def test_stack_push_from_lane_with_older_manifest_refuses_before_any_write(self):
+        self.assert_lane_push_with_older_manifest_refuses_before_any_write(
+            'lane-stack-push', 'stack', 'push', 'lane-work'
+        )
+
+    def test_int_push_from_lane_with_older_manifest_refuses_before_any_write(self):
+        self.assert_lane_push_with_older_manifest_refuses_before_any_write(
+            'lane-int-push', 'int', 'push'
+        )
+
     def test_publish_allows_an_exact_stack_rebase_after_the_base_advances(self):
         origin = self.create_remote()
         repo = self.clone(origin, 'exact-stack-rebase')
