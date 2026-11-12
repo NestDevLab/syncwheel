@@ -5552,6 +5552,12 @@ with module.coordination_publication_lock(Path(repo_path)):
                 'nonce': nonce, 'pid': pid, 'pidStart': 'foreign-process-epoch',
                 'expiresAt': 0, 'remaining': [], 'operation': 'syncwheel',
             })
+        claimed_nonce = 'd' * 64
+        module.atomic_write_private_json(directory / claimed_nonce, {
+            'nonce': claimed_nonce, 'pid': os.getpid(),
+            'pidStart': module.process_start_identity(os.getpid()),
+            'expiresAt': 0, 'remaining': [], 'operation': 'syncwheel',
+        })
         malformed = directory / 'foreign-malformed'
         malformed.write_text('{invalid')
         stale = time.time() - module.SYNCWHEEL_REF_AUTH_TTL_SECONDS - 5

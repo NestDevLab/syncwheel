@@ -206,6 +206,7 @@ MANAGED_PUSH_AUTH_TTL_SECONDS = 60
 MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'
 SYNCWHEEL_OWNS_REF_MOVES = False
 SYNCWHEEL_REF_AUTH_REPO = None
+SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS = {}
 SYNCWHEEL_REF_AUTH_TTL_SECONDS = 30
 SYNCWHEEL_REF_AUTH_OPERATION_TTL_SECONDS = 3600
 FALLBACK_GIT_IDENTITY_CONFIG = [
@@ -1124,6 +1125,7 @@ def authorize_ref_move(repo_root, reusable=False):
     }
     path = directory / nonce
     atomic_write_private_json(path, payload)
+    SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS.setdefault(str(directory), set()).add(nonce)
     return nonce
 
 
@@ -1133,7 +1135,9 @@ def ref_move_authorization(repo_root, reusable=False):
     try:
         yield nonce
     finally:
-        (ref_auth_dir(repo_root) / nonce).unlink(missing_ok=True)
+        directory = ref_auth_dir(repo_root)
+        (directory / nonce).unlink(missing_ok=True)
+        SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS.get(str(directory), set()).discard(nonce)
 
 
 def ref_move_authorized(repo_root, event):
@@ -1227,9 +1231,10 @@ def clear_ref_authorizations(repo_root, *, only_current_process=False):
     owner_start = process_start_identity(owner_pid)
     now = time.time()
     directory = ref_auth_dir(repo_root)
+    issued = SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS.get(str(directory), set())
     if directory.exists():
         for path in directory.iterdir():
-            if only_current_process and path.is_symlink():
+            if only_current_process and (path.name not in issued or path.is_symlink()):
                 continue
             try:
                 payload = json.loads(path.read_text())
@@ -1253,6 +1258,7 @@ def clear_ref_authorizations(repo_root, *, only_current_process=False):
             if only_current_process:
                 if owned and payload.get('nonce') == path.name:
                     path.unlink(missing_ok=True)
+                    issued.discard(path.name)
                 continue
             current_start = process_start_identity(nonce_pid)
             owner_is_gone = not process_is_alive(nonce_pid)
@@ -1261,6 +1267,7 @@ def clear_ref_authorizations(repo_root, *, only_current_process=False):
             )
             if owned or owner_is_gone or owner_was_recycled:
                 path.unlink(missing_ok=True)
+                issued.discard(path.name)
 
 
 def active_hooks_dir(repo_root):
