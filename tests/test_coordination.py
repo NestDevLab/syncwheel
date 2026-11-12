@@ -13106,6 +13106,12 @@ sys.exit(module.main())
         other = self.mirror_coordinated_clone(
             origin, repo, f'{name}-other', ['integration/shared'],
         )
+        # Establish this fresh fixture clone's namespace before seeding its
+        # synthetic local override. A legacy unbound store is intentionally held.
+        other_manifest, _ = module.load_manifest(other)
+        other_config = module.coordination_config(other_manifest)
+        other_state = module.read_remote_coordination_state(other, other_config)
+        module.record_coordination_state_seen(other, other_config, other_state['tip'])
         record = self.derived_provenance_record(
             self.git(other, 'rev-parse', 'origin/main').stdout.strip()
         )
@@ -13174,6 +13180,44 @@ sys.exit(module.main())
         with self.assertRaisesRegex(module.SyncwheelError, 'governed reconciliation'):
             module.derived_provenance_records(repo, manifest, replacement)
         self.assertEqual(profile.read_bytes(), before[1])
+
+    def test_legacy_provenance_refuses_cold_retarget_and_explicit_snapshot(self):
+        fixture = self.prepare_v3_provenance_divergence('legacy-endpoint-provenance')
+        repo, module = fixture['repo'], fixture['module']
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        observed = module.read_remote_coordination_state(repo, config)
+        profile = module.repo_profile_path(repo)
+        data = json.loads(profile.read_text())
+        data['coordination']['last_seen_state'].pop('endpoint_digest')
+        profile.write_text(json.dumps(data, indent=2) + '\n')
+        other_origin = self.create_remote('legacy-replacement-endpoint')
+        self.git(repo, 'remote', 'set-url', 'origin', str(other_origin))
+        before = (profile.read_bytes(), self.git(repo, 'show-ref').stdout)
+        # Neither a fresh context nor an explicit caller snapshot proves which
+        # endpoint produced the legacy shared profile/tracking state.
+        for explicit in (None, observed['state']):
+            with self.subTest(explicit=explicit is not None):
+                with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+                    contextvars.Context().run(module.derived_provenance_records, repo, manifest, explicit)
+        self.assertEqual((profile.read_bytes(), self.git(repo, 'show-ref').stdout), before)
+        # A clone without a receipt/override may use an explicit snapshot, but
+        # an unbound tracking cache alone never selects historical provenance.
+        data['coordination'].pop('last_seen_state')
+        profile.write_text(json.dumps(data, indent=2) + '\n')
+        config_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
+        self.git(repo, 'update-ref', config_ref, observed['tip'])
+        before = (profile.read_bytes(), self.git(repo, 'show-ref').stdout)
+        self.assertIsNone(contextvars.Context().run(module.local_coordination_provenance_state, repo, manifest))
+        self.assertEqual(contextvars.Context().run(module.derived_provenance_records, repo, manifest, observed['state']), [fixture['record']])
+        self.assertEqual((profile.read_bytes(), self.git(repo, 'show-ref').stdout), before)
+        module.save_derived_provenance_store(repo, {
+            'version': module.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{'paths': fixture['record']['paths'],
+                           'base_commit': None, 'record': fixture['record']}],
+        })
+        with self.assertRaisesRegex(module.SyncwheelError, 'local derived provenance has no endpoint witness'):
+            contextvars.Context().run(module.derived_provenance_records, repo, manifest, observed['state'])
 
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')

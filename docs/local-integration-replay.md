@@ -171,8 +171,11 @@ caches require one endpoint across registered worktrees; divergent endpoints
 are refused before cached tracking or last-seen data is used. New acknowledgments
 bind their last-seen entry to the endpoint digest. A detected endpoint change
 requires governed shared-metadata reconciliation before reusing provenance,
-including when an explicit snapshot was supplied. Legacy cache entries retain
-their unambiguous single-endpoint fallback.
+including when an explicit snapshot was supplied. Legacy last-seen state or local
+overrides without an endpoint witness are held for governed reconciliation;
+current endpoint uniformity does not establish their historical origin. Tracking
+refs alone never select provenance. A fresh clone without local overrides may
+use a newly observed state without adopting its unbound tracking cache.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that

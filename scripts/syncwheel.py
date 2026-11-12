@@ -3270,6 +3270,10 @@ def coordination_provenance_observation(repo_root, config):
     if seen.get('coordination_id') != config['id']:
         seen = {}
     seen_endpoint = seen.get('endpoint_digest')
+    if seen_endpoint is None and seen:
+        raise SyncwheelError('legacy coordination provenance has no endpoint witness; shared metadata requires governed reconciliation')
+    if not seen and load_derived_provenance_store(repo_root)['overrides']:
+        raise SyncwheelError('local derived provenance has no endpoint witness; shared metadata requires governed reconciliation')
     changed_endpoint = (
         any(key[:4] == observation_key[:4] and key != observation_key for key in observations)
         or (seen_endpoint is not None and seen_endpoint != observation_key[-1])
@@ -3286,10 +3290,8 @@ def local_coordination_provenance_state(repo_root, manifest):
         return None
     observed_tip, seen = coordination_provenance_observation(repo_root, config)
     candidates = [observed_tip] if observed_tip else []
-    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
-    remote_tip = ref_tip(repo_root, remote_state_ref)
-    if remote_tip:
-        candidates.append(remote_tip)
+    # Tracking refs have no endpoint provenance of their own. Only an actual
+    # observation or an endpoint-bound acknowledgment can select a state.
     if isinstance(seen.get('state_tip'), str):
         candidates.append(seen['state_tip'])
     candidates = list(dict.fromkeys(candidates))
