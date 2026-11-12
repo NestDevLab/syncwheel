@@ -6090,7 +6090,24 @@ class RevisionProviderPackagingTest(unittest.TestCase):
                 names = set(archive.namelist())
             self.assertIn('syncwheel.py', names)
             self.assertIn('syncwheel_revision_provider.py', names)
-
+            for domain in (
+                'cli', 'contracts', 'coordination', 'errors', 'index', 'journal',
+                'journal_workflow', 'ledger', 'manifest',
+            ):
+                self.assertIn(f'syncwheel_{domain}.py', names)
+            installed = root / 'installed'
+            with zipfile.ZipFile(wheel) as archive:
+                archive.extractall(installed)
+            smoke = subprocess.run(
+                [sys.executable, '-I', '-c',
+                 "import sys; sys.path.insert(0, sys.argv[1]); import syncwheel; "
+                 "sys.argv = ['syncwheel', '--version']; syncwheel.main()",
+                 str(installed)],
+                cwd=root, text=True, capture_output=True,
+            )
+            self.assertEqual(smoke.returncode, 0, smoke.stderr)
+            self.assertEqual(smoke.stdout.strip(),
+                             'syncwheel ' + (REPO_ROOT / 'VERSION').read_text().strip())
 
 class DirtyPathPhaseMarkerTest(unittest.TestCase):
     """Isolate each provider predicate after the preceding phase has passed."""

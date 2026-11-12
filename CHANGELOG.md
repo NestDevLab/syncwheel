@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.26 - 2026-11-12
+
+- Separate manifest schema, CLI grammar, coordination snapshots, journal workflows, ledger projection and Git index decoding into explicit domain modules. Preserve the supported CLI and import facade, patchable I/O operations and package entry points.
+
 ## 0.46.25 - 2026-11-08
 
 - Make `int rebuild --replay-mode desk` usable for a `cherry-pick` integration whose branch is already checked out, by preparing the same detached resolution desk that `merge-stacks` uses instead of refusing the only path the conflict remedy offers. A secondary checkout of the branch stays the desk.
