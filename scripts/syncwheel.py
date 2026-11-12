@@ -3231,14 +3231,33 @@ def derived_provenance_store_lock(repo_root):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def coordination_fetch_endpoint_digest(repo_root, remote):
+    result = git(repo_root, 'remote', 'get-url', remote, check=False)
+    endpoint, _newline, remainder = result.stdout.partition('\n')
+    if result.returncode != 0 or not endpoint or remainder or '\r' in endpoint:
+        raise SyncwheelError('cannot establish the coordination fetch endpoint')
+    scp_url = re.match(r'^(?:[^/@]+@)?[^/:]+:.+', endpoint)
+    if os.path.splitdrive(endpoint)[0] or ('://' not in endpoint and not scp_url):
+        endpoint = str((Path(repo_root) / endpoint).resolve())
+    return hashlib.sha256(endpoint.encode()).hexdigest()
+
+
 def coordination_state_observation_key(repo_root, config):
+    endpoint = coordination_fetch_endpoint_digest(repo_root, config['remote'])
+    for worktree in get_worktrees(repo_root):
+        path = Path(worktree['path'])
+        if not path.is_dir() or coordination_fetch_endpoint_digest(path, config['remote']) != endpoint:
+            raise SyncwheelError('coordination refuses divergent fetch endpoints across registered worktrees')
     return (str(git_common_dir(repo_root).resolve()), config['remote'],
-            config['id'], config['state_branch'])
+            config['id'], config['state_branch'], endpoint)
 
 
-def remember_coordination_state_observation(repo_root, config, tip):
+def remember_coordination_state_observation(repo_root, config, tip, *, expected_key):
+    key = coordination_state_observation_key(repo_root, config)
+    if key != expected_key:
+        raise SyncwheelError('coordination fetch endpoint changed during observation')
     observations = dict(_COORDINATION_STATE_OBSERVATIONS.get() or {})
-    observations[coordination_state_observation_key(repo_root, config)] = tip
+    observations[key] = tip
     _COORDINATION_STATE_OBSERVATIONS.set(observations)
 
 
@@ -3248,17 +3267,28 @@ def local_coordination_provenance_state(repo_root, manifest):
     if not config or config.get('mode') != 'active-active':
         return None
     candidates = []
+    observation_key = coordination_state_observation_key(repo_root, config)
     observations = _COORDINATION_STATE_OBSERVATIONS.get() or {}
-    observed_tip = observations.get(coordination_state_observation_key(repo_root, config))
+    observed_tip = observations.get(observation_key)
     if observed_tip:
         candidates.append(observed_tip)
-    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
-    remote_tip = ref_tip(repo_root, remote_state_ref)
-    if remote_tip:
-        candidates.append(remote_tip)
     _profile, local_coordination = coordination_profile(repo_root)
     seen = local_coordination.get('last_seen_state') or {}
-    if seen.get('coordination_id') == config['id'] and isinstance(seen.get('state_tip'), str):
+    same_domain = seen.get('coordination_id') == config['id']
+    seen_endpoint = seen.get('endpoint_digest') if same_domain else None
+    changed_endpoint = (
+        any(key[:4] == observation_key[:4] and key != observation_key for key in observations)
+        or (seen_endpoint is not None and seen_endpoint != observation_key[-1])
+    )
+    if changed_endpoint and not observed_tip:
+        raise SyncwheelError('coordination provenance requires a fresh observation of the changed endpoint')
+    if not changed_endpoint:
+        remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
+        remote_tip = ref_tip(repo_root, remote_state_ref)
+        if remote_tip:
+            candidates.append(remote_tip)
+    if (same_domain and isinstance(seen.get('state_tip'), str)
+            and (seen_endpoint == observation_key[-1] or (seen_endpoint is None and not changed_endpoint))):
         candidates.append(seen['state_tip'])
     candidates = list(dict.fromkeys(candidates))
     available = [tip for tip in candidates if commit_exists(repo_root, tip)]
@@ -12535,6 +12565,7 @@ def fetch_coordination_state_object(repo_root, remote, tip):
 
 
 def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest_version=None):
+    observation_key = coordination_state_observation_key(repo_root, config)
     state_ref = coordination_state_ref(config)
     tip = remote_ref_tips(repo_root, config['remote'], [state_ref])[state_ref]
     if not tip:
@@ -12562,7 +12593,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
             f"remote coordination manifest version {remote_manifest_version} is incompatible "
             f'with local manifest version {local_manifest_version}; migrate explicitly'
         )
-    remember_coordination_state_observation(repo_root, config, tip)
+    remember_coordination_state_observation(repo_root, config, tip, expected_key=observation_key)
     return {
         'tip': tip,
         'state': state,
@@ -12570,6 +12601,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
 
 
 def read_remote_coordination_states(repo_root, config, *, fetch=True):
+    observation_key = coordination_state_observation_key(repo_root, config)
     result = git(
         repo_root,
         'ls-remote',
@@ -12599,7 +12631,9 @@ def read_remote_coordination_states(repo_root, config, *, fetch=True):
             **config, 'id': item['state']['coordination_id'],
             'state_branch': item['ref'][len('refs/heads/'):],
         }
-        remember_coordination_state_observation(repo_root, observed_config, item['tip'])
+        expected_key = (*observation_key[:2], observed_config['id'],
+                        observed_config['state_branch'], observation_key[-1])
+        remember_coordination_state_observation(repo_root, observed_config, item['tip'], expected_key=expected_key)
     return states
 
 
@@ -14460,6 +14494,7 @@ def record_coordination_state_seen(repo_root, config, state_tip):
     profile, coordination = coordination_profile(repo_root)
     coordination['last_seen_state'] = {
         'coordination_id': config['id'],
+        'endpoint_digest': coordination_state_observation_key(repo_root, config)[-1],
         'state_tip': state_tip,
         'seen_at': iso_utc_now(),
     }

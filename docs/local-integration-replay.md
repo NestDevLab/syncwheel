@@ -166,6 +166,12 @@ context, scoped by Git common directory, remote and coordination domain. Derived
 provenance considers these immutable objects alongside locally cached states.
 Parallel execution contexts keep separate observations. Explicit snapshot
 arguments continue to select their own provenance revision.
+Observation keys also bind the effective fetch endpoint. Shared coordination
+caches require one endpoint across registered worktrees; divergent endpoints
+are refused before cached tracking or last-seen data is used. New acknowledgments
+bind their last-seen entry to the endpoint digest. A detected endpoint change requires
+a fresh observation before reusing provenance. Legacy cache entries retain
+their unambiguous single-endpoint fallback.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that

@@ -13123,6 +13123,54 @@ sys.exit(module.main())
             'module': module, 'record': record,
         }
 
+    def test_provenance_refuses_divergent_worktree_endpoints_and_mismatched_seen_state(self):
+        fixture = self.prepare_v3_provenance_divergence('endpoint-provenance')
+        repo, module = fixture['repo'], fixture['module']
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        observed = module.read_remote_coordination_state(repo, config)
+        if os.name == 'posix':
+            endpoint = module.coordination_fetch_endpoint_digest(repo, 'origin')
+            self.git(repo, 'remote', 'set-url', 'origin', str(fixture['origin']) + ' ')
+            self.assertNotEqual(module.coordination_fetch_endpoint_digest(repo, 'origin'), endpoint)
+            self.git(repo, 'remote', 'set-url', 'origin', str(fixture['origin']))
+        peer = self.tmp / 'endpoint-peer'
+        self.git(repo, 'worktree', 'add', '-q', '-b', 'endpoint-peer', str(peer), 'HEAD')
+        other_origin = self.create_remote('different-endpoint')
+        self.git(repo, 'config', 'extensions.worktreeConfig', 'true')
+        self.git(repo, 'config', '--local', '--unset-all', 'remote.origin.url')
+        self.git(repo, 'config', '--worktree', 'remote.origin.url', str(fixture['origin']))
+        self.git(peer, 'config', '--worktree', 'remote.origin.url', str(other_origin))
+        profile = module.repo_profile_path(repo)
+        before = self.git(repo, 'show-ref').stdout, profile.read_bytes()
+        with self.assertRaisesRegex(module.SyncwheelError, 'divergent fetch endpoints'):
+            module.local_coordination_provenance_state(peer, manifest)
+        # The same refusal protects shared tracking and legacy last_seen data
+        # even when this execution context has no observation at all.
+        with self.assertRaisesRegex(module.SyncwheelError, 'divergent fetch endpoints'):
+            contextvars.Context().run(module.local_coordination_provenance_state, repo, manifest)
+        self.assertEqual((self.git(repo, 'show-ref').stdout, profile.read_bytes()), before)
+        self.git(peer, 'config', '--worktree', 'remote.origin.url', str(fixture['origin']))
+        self.assertEqual(module.local_coordination_provenance_state(peer, manifest), observed['state'])
+        # A later uniform endpoint change must not reuse the prior endpoint's
+        # acknowledged profile or tracking cache without a fresh observation.
+        self.git(repo, 'config', '--worktree', 'remote.origin.url', str(other_origin))
+        self.git(peer, 'config', '--worktree', 'remote.origin.url', str(other_origin))
+        with self.assertRaisesRegex(module.SyncwheelError, 'fresh observation'):
+            module.local_coordination_provenance_state(repo, manifest)
+        with self.assertRaisesRegex(module.SyncwheelError, 'fresh observation'):
+            contextvars.Context().run(module.local_coordination_provenance_state, repo, manifest)
+        replacement = json.loads(json.dumps(observed['state']))
+        replacement.update(parent_state=None, publication_id=str(uuid.uuid4()))
+        replacement['manifest']['integration']['derived_provenance'] = []
+        replacement_tip = module.create_coordination_state_commit(fixture['other'], replacement)
+        refspecs = [f'{tip}:{ref}' for ref, tip in replacement['managed_refs'].items()]
+        self.git(fixture['other'], 'push', str(other_origin), *refspecs,
+                 f'{replacement_tip}:refs/heads/syncwheel/state/default')
+        module.read_remote_coordination_state(repo, config)
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [])
+        self.assertEqual(profile.read_bytes(), before[1])
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']
