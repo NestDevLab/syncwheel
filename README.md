@@ -78,8 +78,9 @@ Default behavior is conservative:
   branches are often rewritten by deterministic rebuilds
 - active-active version 2 or 3 manifests publish managed refs and state together
   with atomic, exact leases; unsupported remotes fail closed
-- a new stack is never published onto a remote branch the coordination state
-  does not manage; an existing unmanaged branch stops the push
+- once coordination state is published, a new managed branch (stack, channel
+  or promotion target) is never published onto an existing remote branch the
+  state does not manage; such a branch stops the push
 - public coordination state uses typed canonical and publication remote roles,
   rejects ambiguous aliases that cannot be normalized safely, and makes a
   reused managed branch immediately supersede its old cleanup tombstone

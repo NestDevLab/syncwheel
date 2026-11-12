@@ -2,7 +2,7 @@
 
 ## 0.46.26 - 2026-11-12
 
-- Refuse to publish a new stack onto a remote branch that already exists but is not managed by the published coordination state. The publication lease used to be the observed tip, so such a branch was silently replaced. An absent branch is still leased as absent.
+- Refuse to publish a new managed branch (stack, channel or promotion target) onto a remote branch that already exists but is not managed by the published coordination state. The publication lease used to be the observed tip, so such a branch was silently replaced. An absent branch is still leased as absent.
 
 ## 0.46.25 - 2026-11-08
 
