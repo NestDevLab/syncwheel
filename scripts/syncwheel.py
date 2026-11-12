@@ -20429,11 +20429,14 @@ def observe_published_integration_tip(repo_root, manifest, *, fetch=True):
     )
     if not remote['tip'] or not remote['state']:
         return None
-    if fetch and ref_tip(repo_root, 'FETCH_HEAD') != remote['tip']:
-        return {'status': 'stale'}
     state = remote['state']
     expected_refs = dict(state.get('managed_refs') or {})
-    observed_refs = remote_ref_tips(repo_root, config['remote'], expected_refs)
+    state_ref = coordination_state_ref(config)
+    refs_to_observe = [*expected_refs, state_ref] if fetch else expected_refs
+    observed = remote_ref_tips(repo_root, config['remote'], refs_to_observe)
+    if fetch and observed.get(state_ref) != remote['tip']:
+        return {'status': 'stale'}
+    observed_refs = {ref: observed.get(ref) for ref in expected_refs}
     if observed_refs != expected_refs:
         return {'status': 'stale'}
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"

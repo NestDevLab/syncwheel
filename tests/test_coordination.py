@@ -7415,6 +7415,32 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.assertRegex(args[-1], r'^[0-9a-f]{40}$')
         self.assertNotIn('refs/remotes/origin/syncwheel/state/other', before[0])
 
+    def test_published_integration_observation_ignores_foreign_fetch_head_and_detects_state_drift(self):
+        fixture = self.prepare_additive_compose('published-state-read', plan=False)
+        repo, module = fixture['repo'], fixture['module']
+        manifest = fixture['manifest']
+        fetch_head = repo / '.git/FETCH_HEAD'
+        fetch_head.unlink(missing_ok=True)
+        current = module.observe_published_integration_tip(repo, manifest)
+        self.assertEqual(current['status'], 'current')
+        self.assertEqual(current['state_tip'], fixture['remote_tip'])
+        self.assertFalse(fetch_head.exists())
+        foreign = b'foreign fetch receipt\n'
+        fetch_head.write_bytes(foreign)
+        self.assertEqual(module.observe_published_integration_tip(repo, manifest)['status'], 'current')
+        self.assertEqual(fetch_head.read_bytes(), foreign)
+        read_state = module.read_remote_coordination_state
+        def advance_after_read(*args, **kwargs):
+            result = read_state(*args, **kwargs)
+            successor = json.loads(json.dumps(result['state']))
+            successor.update(parent_state=result['tip'], publication_id=str(uuid.uuid4()))
+            next_tip = module.create_coordination_state_commit(repo, successor, result['tip'])
+            self.git(repo, 'push', 'origin', f'{next_tip}:refs/heads/syncwheel/state/default')
+            return result
+        with mock.patch.object(module, 'read_remote_coordination_state', side_effect=advance_after_read):
+            self.assertEqual(module.observe_published_integration_tip(repo, manifest)['status'], 'stale')
+        self.assertEqual(fetch_head.read_bytes(), foreign)
+
     def test_compose_plan_preserves_fetch_metadata_and_keeps_cache_valid(self):
         fixture = self.prepare_additive_compose('compose-read-effects', plan=False)
         repo, module = fixture['repo'], fixture['module']

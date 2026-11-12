@@ -158,6 +158,9 @@ They preserve local tracking refs and FETCH_HEAD, including when a remote state
 has moved backwards. All coordination domains remain observable. These reads
 disable tag following, pruning, recursive submodules and automatic maintenance.
 Planning can still populate the shared patch-ID cache through normal validation.
+Published-integration observations recheck the state ref alongside managed refs.
+An absent or unrelated FETCH_HEAD does not determine freshness; a changed remote
+state or managed tip makes the observation stale.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that
