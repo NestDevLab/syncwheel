@@ -17,6 +17,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_journal_workflow` | Snapshot, publish, pull and recovery sequencing | Journal policy; explicit repository I/O port |
 | `syncwheel_ledger` | Event reduction into lifecycle state | Standard library |
 | `syncwheel_index` | Git index decoding and semantic content leases | Standard library |
+| `syncwheel_stacks` | Stack creation, close/archive, draft promotion, rebuild and push commands | Selected manifest inputs; composed coordination/replay/worktree services; explicit Git/control/ledger/projection ports |
 | `syncwheel_revision_backend` | Delivery/journal revision transactions, recovery and index leases | Explicit repository, manifest, ledger, guard and provenance capabilities; domain service factories |
 | `syncwheel_files` | Durable byte writes and directory fsync | Standard library |
 | `syncwheel_provenance` | Derived projection identity data | Shared errors; standard library |
@@ -45,7 +46,7 @@ exceptions, handler replacement, journal reader replacement and Git validation.
 Existing integration suites continue to exercise journal, channel, coordination,
 ledger and index behavior through the supported facade.
 
-This is incremental modularization. Control-manifest persistence and domain command handlers still live in the
+This is incremental modularization. Control-manifest persistence and remaining integration/channel command handlers still live in the
 composition root. Public backend constructors compose the implementation modules
 without changing the revision-provider wire protocol. Future extraction should introduce specific repository operations at
 those boundaries, preserve existing patch points, and run the corresponding

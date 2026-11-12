@@ -1837,14 +1837,13 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     'require_manifest',
                     return_value=(manifest, manifest_path),
                 ), mock.patch.object(
-                    module,
+                    module.StackLifecycle,
                     'complete_pending_promote_intents',
                     side_effect=RuntimeError('stop after recovery gate'),
                 ) as recover:
                     with self.assertRaisesRegex(RuntimeError, 'recovery gate'):
                         command(args)
                 recover.assert_called_once_with(
-                    self.repo,
                     manifest,
                     manifest_path,
                     **expected_kwargs,
@@ -1864,19 +1863,19 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             {'scope': 'promote:feature-b'},
         ]
         with mock.patch.object(
-            module,
+            module.PublicationIntents,
             'pending_coordination_publications',
             return_value=pending,
         ), mock.patch.object(
-            module,
+            module.CoordinationStateReader,
             'read_remote_coordination_state',
             return_value={'tip': 'a' * 40, 'state': {}},
         ), mock.patch.object(
-            module,
+            module.PublicationIntents,
             'coordinated_operation_landed',
             return_value=True,
         ), mock.patch.object(
-            module,
+            module.StackLifecycle,
             'recover_pending_stack_promote',
         ) as recover:
             module.resolve_pending_promote_intents(
@@ -1887,7 +1886,6 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             )
 
         recover.assert_called_once_with(
-            self.repo,
             manifest,
             manifest_path,
             feature_a,
