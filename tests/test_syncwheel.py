@@ -516,7 +516,12 @@ elif lock_state == 'truncated':
             os.kill(os.getpid(), signal.SIGKILL)
         return original_write_all(descriptor, payload)
 
-    module._write_all = kill_during_metadata_write
+    for owner in (
+        module,
+        importlib.import_module('syncwheel_manifest_store'),
+        importlib.import_module('syncwheel_revision_backend'),
+    ):
+        owner._write_all = kill_during_metadata_write
 else:
     raise AssertionError(lock_state)
 
@@ -1813,12 +1818,16 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     return_value=(manifest, manifest_path),
                 ), mock.patch.object(
                     module.StackLifecycle,
-                    'complete_pending_promote_intents',
+                    'complete_pending_promote_intents', autospec=True,
                     side_effect=RuntimeError('stop after recovery gate'),
                 ) as recover:
                     with self.assertRaisesRegex(RuntimeError, 'recovery gate'):
                         command(args)
+                receiver = recover.call_args.args[0]
+                self.assertIsInstance(receiver, module.StackLifecycle)
+                self.assertEqual(receiver.repository.root, self.repo)
                 recover.assert_called_once_with(
+                    receiver,
                     manifest,
                     manifest_path,
                     **expected_kwargs,
@@ -1851,7 +1860,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             return_value=True,
         ), mock.patch.object(
             module.StackLifecycle,
-            'recover_pending_stack_promote',
+            'recover_pending_stack_promote', autospec=True,
         ) as recover:
             module.resolve_pending_promote_intents(
                 self.repo,
@@ -1860,7 +1869,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 only_stacks={'feature-a'},
             )
 
+        receiver = recover.call_args.args[0]
+        self.assertIsInstance(receiver, module.StackLifecycle)
+        self.assertEqual(receiver.repository.root, self.repo)
         recover.assert_called_once_with(
+            receiver,
             manifest,
             manifest_path,
             feature_a,
@@ -2478,9 +2491,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             'enabled': False,
             'candidates': [],
         }
-        module.governed_worktree_diagnostics = lambda *args, **kwargs: {'lanes': []}
 
-        with mock.patch('builtins.print'):
+        with mock.patch.object(
+            module.GovernedWorktrees, 'governed_worktree_diagnostics',
+            autospec=True, return_value={'lanes': []},
+        ), mock.patch('builtins.print'):
             result = module.command_gc(SimpleNamespace(
                 repo=str(self.repo), manifest=None, personal=None,
                 apply=True, fetch=False, json=True,
@@ -3714,19 +3729,19 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        original_append = module.append_ledger_event
+        original_append = module.ManifestStore.append_ledger_event
 
-        def fail_terminal(repo_root, event_type, *args, **kwargs):
+        def fail_terminal(store, repo_root, event_type, *args, **kwargs):
             if event_type == 'governed_worktree_reaped':
                 raise OSError('injected')
-            return original_append(repo_root, event_type, *args, **kwargs)
+            return original_append(store, repo_root, event_type, *args, **kwargs)
 
-        module.append_ledger_event = fail_terminal
-        try:
+        with mock.patch.object(
+            module.ManifestStore, 'append_ledger_event',
+            autospec=True, side_effect=fail_terminal,
+        ):
             with self.assertRaises(OSError):
                 module.reconcile_governed_worktrees(self.repo, self.read_manifest())
-        finally:
-            module.append_ledger_event = original_append
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['pending_reason'], 'ledger_pending')
@@ -3740,23 +3755,23 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        original_append = module.append_ledger_event
+        original_append = module.ManifestStore.append_ledger_event
 
-        def fail_terminal(repo_root, event_type, *args, **kwargs):
+        def fail_terminal(store, repo_root, event_type, *args, **kwargs):
             if event_type == 'governed_worktree_released':
                 raise OSError('injected')
-            return original_append(repo_root, event_type, *args, **kwargs)
+            return original_append(store, repo_root, event_type, *args, **kwargs)
 
-        module.append_ledger_event = fail_terminal
-        try:
+        with mock.patch.object(
+            module.ManifestStore, 'append_ledger_event',
+            autospec=True, side_effect=fail_terminal,
+        ):
             with self.assertRaises(OSError):
                 module.command_worktree_release(SimpleNamespace(
                     repo=str(self.repo), manifest=None, personal=None,
                     lane='release-ledger-retry', reason='original release reason',
                     apply=True, json=True,
                 ))
-        finally:
-            module.append_ledger_event = original_append
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['state'], 'reaped')
@@ -3779,23 +3794,23 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        original_append = module.append_ledger_event
+        original_append = module.ManifestStore.append_ledger_event
 
-        def fail_terminal(repo_root, event_type, *args, **kwargs):
+        def fail_terminal(store, repo_root, event_type, *args, **kwargs):
             if event_type == 'governed_worktree_released':
                 raise OSError('injected')
-            return original_append(repo_root, event_type, *args, **kwargs)
+            return original_append(store, repo_root, event_type, *args, **kwargs)
 
-        module.append_ledger_event = fail_terminal
-        try:
+        with mock.patch.object(
+            module.ManifestStore, 'append_ledger_event',
+            autospec=True, side_effect=fail_terminal,
+        ):
             with self.assertRaises(OSError):
                 module.command_worktree_release(SimpleNamespace(
                     repo=str(self.repo), manifest=None, personal=None,
                     lane='release-ledger-command', reason='same release reason',
                     apply=True, json=True,
                 ))
-        finally:
-            module.append_ledger_event = original_append
 
         released = json.loads(self.run_cli(
             'worktree', 'release', 'release-ledger-command',
@@ -8231,12 +8246,12 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'
         control, _ = module.load_manifest(self.repo, manifest_path)
         parent = self.git('rev-parse', 'HEAD')
-        original_manifest_from_tree = module.manifest_from_tree
+        original_manifest_from_tree = module.ManifestStore.manifest_from_tree
         update_ref_calls = []
         original_git = module.git
 
-        def corrupted_control_object(repo_root, commit, path):
-            observed = original_manifest_from_tree(repo_root, commit, path)
+        def corrupted_control_object(store, repo_root, commit, path):
+            observed = original_manifest_from_tree(store, repo_root, commit, path)
             if commit != parent and observed is not None:
                 observed['integration']['branch'] = 'corrupted-integration'
             return observed
@@ -8247,7 +8262,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             return original_git(repo_root, *args, **kwargs)
 
         with mock.patch.object(
-            module, 'manifest_from_tree', side_effect=corrupted_control_object,
+            module.ManifestStore, 'manifest_from_tree', autospec=True, side_effect=corrupted_control_object,
         ), mock.patch.object(module, 'git', side_effect=observed_git):
             with self.assertRaisesRegex(
                 module.SyncwheelError, 'digest differs in the object prepared',

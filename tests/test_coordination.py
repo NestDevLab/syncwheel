@@ -133,21 +133,21 @@ if checkpoint == 'authorized_push':
     module.run_authorized_push = killed
 elif checkpoint.startswith('ledger_event:'):
     wanted = checkpoint.split(':', 1)[1]
-    original = module.append_ledger_event
-    def killed(repo_root, event_type, payload, manifest_path=None, **kwargs):
-        result = original(repo_root, event_type, payload, manifest_path, **kwargs)
+    original = module.ManifestStore.append_ledger_event
+    def killed(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
+        result = original(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
         if event_type == wanted:
             os.kill(os.getpid(), signal.SIGKILL)
         return result
-    module.append_ledger_event = killed
+    module.ManifestStore.append_ledger_event = killed
 elif checkpoint == 'legacy_authorized_push':
-    original_event = module.append_ledger_event
-    def legacy(repo_root, event_type, payload, manifest_path=None, **kwargs):
+    original_event = module.ManifestStore.append_ledger_event
+    def legacy(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
         if event_type == 'stack_close_intent':
             payload = {key: value for key, value in payload.items() if key != 'actor'}
             payload['expected_coordination_state_tip'] = None
-        return original_event(repo_root, event_type, payload, manifest_path, **kwargs)
-    module.append_ledger_event = legacy
+        return original_event(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
+    module.ManifestStore.append_ledger_event = legacy
     original = module.run_authorized_push
     def killed(repo_root, command, remote, refs, check=True, **kwargs):
         result = original(repo_root, command, remote, refs, check=check, **kwargs)
@@ -156,15 +156,15 @@ elif checkpoint == 'legacy_authorized_push':
         return result
     module.run_authorized_push = killed
 elif checkpoint == 'legacy_close_intent':
-    original = module.append_ledger_event
-    def killed(repo_root, event_type, payload, manifest_path=None, **kwargs):
+    original = module.ManifestStore.append_ledger_event
+    def killed(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
         if event_type != 'stack_close_intent':
-            return original(repo_root, event_type, payload, manifest_path, **kwargs)
+            return original(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
         legacy = {key: value for key, value in payload.items() if key != 'actor'}
         legacy['expected_coordination_state_tip'] = None
-        original(repo_root, event_type, legacy, manifest_path, **kwargs)
+        original(store, repo_root, event_type, legacy, manifest_path, idempotency_key=idempotency_key, **kwargs)
         os.kill(os.getpid(), signal.SIGKILL)
-    module.append_ledger_event = killed
+    module.ManifestStore.append_ledger_event = killed
 elif checkpoint == 'save_manifest':
     original = module.save_manifest
     def killed(manifest_path, manifest):
@@ -173,12 +173,12 @@ elif checkpoint == 'save_manifest':
         return result
     importlib.import_module('syncwheel_manifest_store').save_manifest = killed
 elif checkpoint == 'publish_intent':
-    original = module.begin_coordination_publication
+    original = module.PublicationIntents.begin_coordination_publication
     def killed(*call_args, **call_kwargs):
         result = original(*call_args, **call_kwargs)
         os.kill(os.getpid(), signal.SIGKILL)
         return result
-    module.begin_coordination_publication = killed
+    module.PublicationIntents.begin_coordination_publication = killed
 elif checkpoint == 'worktree_add':
     original = module.git
     def killed(repo_root, *git_args, **kwargs):
@@ -3286,18 +3286,18 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'branch', '-D', 'syncwheel/draft/reused')
         module = self.load_module()
         args = self.draft_create_args(repo, 'reused', first_commit)
-        real_append = module.append_ledger_event
+        real_append = module.ManifestStore.append_ledger_event
 
-        def fail_current_completion(repo_root, event_type, payload, manifest_path=None, **kwargs):
+        def fail_current_completion(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
             if (
                 event_type == 'manifest_saved'
                 and payload.get('reason') == 'stack_create'
                 and (payload.get('context') or {}).get('operation_token')
             ):
                 raise OSError('injected ledger completion failure')
-            return real_append(repo_root, event_type, payload, manifest_path, **kwargs)
+            return real_append(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
 
-        with mock.patch.object(module, 'append_ledger_event', side_effect=fail_current_completion):
+        with mock.patch.object(module.ManifestStore, 'append_ledger_event', autospec=True, side_effect=fail_current_completion):
             with self.assertRaisesRegex(OSError, 'injected ledger completion failure'):
                 module.command_stack_create(args)
 
@@ -4842,8 +4842,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         module = self.load_module()
 
         with mock.patch.object(
-            module,
-            'atomic_push_capability_probe',
+            module.PublicationCoordinator,
+            'atomic_push_capability_probe', autospec=True,
             side_effect=module.SyncwheelError('injected atomic capability failure'),
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'injected atomic capability failure'):
@@ -5167,7 +5167,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 module.command_stack_create(args)
 
         with mock.patch.object(
-            module, 'atomic_push_capability_probe',
+            module.PublicationCoordinator, 'atomic_push_capability_probe', autospec=True,
             side_effect=module.SyncwheelError('capability probe unavailable'),
         ) as probe:
             module.command_stack_create(args)
@@ -7606,7 +7606,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.prepare_compose_adoption_race('compose-adoption-postcheck-race')
         )
         module = fixture['module']
-        original_publish = module.coordinated_publish
+        original_publish = module.PublicationCoordinator.coordinated_publish
         second_tip = None
 
         def publish_peer_before_recovery(*args, **kwargs):
@@ -7621,7 +7621,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             return original_publish(*args, **kwargs)
 
         with mock.patch.object(
-            module, 'coordinated_publish', side_effect=publish_peer_before_recovery
+            module.PublicationCoordinator, 'coordinated_publish', autospec=True, side_effect=publish_peer_before_recovery
         ):
             self.assert_compose_adoption_refusal_is_local_noop(
                 fixture,
@@ -7672,7 +7672,7 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_compose_publisher_is_bound_to_reviewed_state_tip(self):
         fixture = self.prepare_additive_compose('compose-publisher-race')
         module = fixture['module']
-        original_publish = module.coordinated_publish
+        original_publish = module.PublicationCoordinator.coordinated_publish
 
         def publish_competitor_then_continue(*args, **kwargs):
             competitor_kwargs = dict(kwargs)
@@ -7683,8 +7683,8 @@ with module.coordination_publication_lock(Path(repo_path)):
             return original_publish(*args, **kwargs)
 
         with mock.patch.object(
-            module,
-            'coordinated_publish',
+            module.PublicationCoordinator,
+            'coordinated_publish', autospec=True,
             side_effect=publish_competitor_then_continue,
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'remote state changed'):
@@ -9012,7 +9012,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             ['integration/shared', 'pr/race'],
         )
         module = self.load_module()
-        real_begin = module.begin_coordination_publication
+        real_begin = module.PublicationIntents.begin_coordination_publication
         begun = []
 
         def begin_then_lose_the_race(*call_args, **call_kwargs):
@@ -9037,7 +9037,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             command='stack',
         )
         with mock.patch.object(
-            module, 'begin_coordination_publication',
+            module.PublicationIntents, 'begin_coordination_publication', autospec=True,
             side_effect=begin_then_lose_the_race,
         ):
             with self.assertRaisesRegex(
@@ -9238,15 +9238,15 @@ cli, peer, commands, encoded_args = sys.argv[1:]
 spec = importlib.util.spec_from_file_location('syncwheel_race_under_test', cli)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-original = module.append_ledger_event
-def racing(repo_root, event_type, payload, manifest_path=None, **kwargs):
-    result = original(repo_root, event_type, payload, manifest_path, **kwargs)
+original = module.ManifestStore.append_ledger_event
+def racing(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
+    result = original(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
     if event_type == 'stack_close_intent':
         for command in json.loads(commands):
             subprocess.run(['python3', '-m', 'syncwheel', *command], cwd=peer, check=True,
                            capture_output=True)
     return result
-module.append_ledger_event = racing
+module.ManifestStore.append_ledger_event = racing
 sys.argv = [cli, *json.loads(encoded_args)]
 sys.exit(module.main())
 '''
@@ -10954,12 +10954,12 @@ sys.exit(module.main())
         self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
                      '--reason', 'prepare empty capture', expected=2)
         manifest, path = module.load_manifest(repo)
-        original_append = module.append_ledger_event
-        def interrupt_ledger(root, kind, payload, *args, **kwargs):
+        original_append = module.ManifestStore.append_ledger_event
+        def interrupt_ledger(store, root, kind, payload, *args, **kwargs):
             if kind == 'manifest_saved' and payload.get('reason') == 'stack_resolve_integration':
                 raise OSError('interrupted after source save')
-            return original_append(root, kind, payload, *args, **kwargs)
-        with mock.patch.object(module, 'append_ledger_event', side_effect=interrupt_ledger):
+            return original_append(store, root, kind, payload, *args, **kwargs)
+        with mock.patch.object(module.ManifestStore, 'append_ledger_event', autospec=True, side_effect=interrupt_ledger):
             with self.assertRaisesRegex(OSError, 'interrupted after source save'):
                 module.capture_integration_desk(repo, manifest, path, manifest['stacks'][0],
                                                SimpleNamespace(specs=[], empty=False, worktree=str(desk)))
@@ -15137,7 +15137,8 @@ sys.exit(module.main())
             module, 'pending_coordination_publication_for_scope',
             side_effect=record_pending,
         ), mock.patch.object(
-            module, 'coordinated_publish', side_effect=block_publication
+            module.PublicationCoordinator, 'coordinated_publish',
+            autospec=True, side_effect=block_publication
         ):
             try:
                 returncode = args.func(args)

@@ -1344,7 +1344,7 @@ class DeploymentChannelTest(unittest.TestCase):
             self.repo, manifest_path, 'cas-lifecycle'
         ):
             with mock.patch.object(
-                module, 'require_manifest_transaction_current',
+                importlib.import_module('syncwheel_manifest_store'), 'require_manifest_transaction_current',
                 side_effect=bypass_lock_then_check,
             ):
                 with self.assertRaisesRegex(
@@ -1581,7 +1581,7 @@ class DeploymentChannelTest(unittest.TestCase):
             apply=True, plan_digest=plan['planDigest'], operation_id=None,
         )
         with mock.patch.object(
-            module, 'coordinated_publish',
+            module.PublicationCoordinator, 'coordinated_publish', autospec=True,
             side_effect=module.SyncwheelError('simulated atomic publication failure'),
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'simulated atomic'):
@@ -1648,7 +1648,7 @@ class DeploymentChannelTest(unittest.TestCase):
                     plan_digest=plan['planDigest'], operation_id=None,
                 )
                 with mock.patch.object(
-                    module, 'coordinated_publish', side_effect=failure
+                    module.PublicationCoordinator, 'coordinated_publish', autospec=True, side_effect=failure
                 ):
                     with self.assertRaises(module.SyncwheelError):
                         module.command_channel_publish(args)

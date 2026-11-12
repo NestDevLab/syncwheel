@@ -886,7 +886,8 @@ class JournalScopedOperationsTest(unittest.TestCase):
         environment = {'PATH': str(self.stable_cli_dir) + os.pathsep + os.environ['PATH']}
         for function in ('save_manifest', 'install_managed_push_hook', 'append_ledger_event'):
             with self.subTest(function=function), mock.patch.dict(os.environ, environment):
-                real = getattr(module, function)
+                owner = importlib.import_module('syncwheel_manifest_store') if function == 'save_manifest' else module
+                real = getattr(owner, function)
                 injected = []
                 guard, _ = module.inspect_primary_guard(self.repo)
                 def fail_after(*positional, **keywords):
@@ -896,7 +897,7 @@ class JournalScopedOperationsTest(unittest.TestCase):
                         injected.append(True)
                         raise RuntimeError('injected migration interruption')
                     return value
-                with mock.patch.object(module, function, side_effect=fail_after):
+                with mock.patch.object(owner, function, side_effect=fail_after):
                     with self.assertRaisesRegex(RuntimeError, 'injected migration'):
                         module.command_repo_mode_set(args)
                 self.assertEqual(path.read_bytes(), original)

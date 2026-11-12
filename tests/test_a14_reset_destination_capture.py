@@ -24,7 +24,7 @@ def _run_unallowed_dirt_case(case):
     ) = destination_cases._fixture(case, "a14-reset-capture-unallowed")
     remote_before = case.a14_remote_snapshot(fixture)
     clean_at_entry = not case.git(target, "status", "--porcelain").stdout
-    original_capture = syncwheel.checkout_reset_destination_lease
+    original_capture = syncwheel.ProjectionService.checkout_reset_destination_lease
     injected = []
     allowance = []
 
@@ -49,8 +49,8 @@ def _run_unallowed_dirt_case(case):
     stdout = io.StringIO()
     stderr = io.StringIO()
     with mock.patch.object(
-        syncwheel,
-        "checkout_reset_destination_lease",
+        syncwheel.ProjectionService,
+        "checkout_reset_destination_lease", autospec=True,
         side_effect=inject_after_successful_capture,
     ):
         try:
@@ -94,7 +94,7 @@ def _run_allowed_manifest_case(case):
     ) = destination_cases._fixture(case, "a14-reset-capture-allowed")
     remote_before = case.a14_remote_snapshot(fixture)
     clean_at_entry = not case.git(target, "status", "--porcelain").stdout
-    original_capture = syncwheel.checkout_reset_destination_lease
+    original_capture = syncwheel.ProjectionService.checkout_reset_destination_lease
     original_run = syncwheel.run
     injected = []
     allowance = []
@@ -137,8 +137,8 @@ def _run_allowed_manifest_case(case):
     stdout = io.StringIO()
     stderr = io.StringIO()
     with mock.patch.object(
-        syncwheel,
-        "checkout_reset_destination_lease",
+        syncwheel.ProjectionService,
+        "checkout_reset_destination_lease", autospec=True,
         side_effect=inject_allowed_manifest_after_second_capture,
     ), mock.patch.object(syncwheel, "run", side_effect=intercept_reset):
         try:
