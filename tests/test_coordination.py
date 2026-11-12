@@ -13518,6 +13518,51 @@ sys.exit(module.main())
         self.assertEqual(held['reason'], receipt['reason'])
         self.assertEqual(module.load_ledger_events(repo), before)
 
+    def test_binding_reads_retained_registration_when_checkout_is_missing(self):
+        repo, module, profile = self.legacy_binding_fixture('missing-peer-binding')
+        peer = self.tmp / 'missing-peer'
+        self.git(repo, 'worktree', 'add', '-q', '-b', 'missing-peer', str(peer), 'HEAD')
+        (peer / 'retained-wip.bin').write_bytes(b'retained foreign fixture WIP\x00')
+        admin = module.governed_worktree_admin_dir_for_path(repo, peer)
+        retained = self.tmp / 'retained-peer'
+        peer.rename(retained)
+        def observed():
+            return (self.git(repo, 'worktree', 'list', '--porcelain').stdout,
+                    {str(p.relative_to(admin)): p.read_bytes() for p in admin.rglob('*') if p.is_file()},
+                    (retained / 'retained-wip.bin').read_bytes(), profile.read_bytes(),
+                    self.git(repo, 'show-ref').stdout, (repo / '.git/index').read_bytes())
+        before = observed()
+        plan = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty').stdout)
+        self.assertEqual(observed(), before)
+        path = self.tmp / 'missing-peer-plan.json'
+        path.write_text(json.dumps(plan))
+        result = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                       '--apply', '--plan-file', str(path), '--reason', 'verify retained registration').stdout)
+        self.assertTrue(result['bindingUsable'])
+        self.assertEqual(observed(), before)
+        self.assertFalse(peer.exists())
+        self.assertTrue(admin.is_dir())
+
+    def test_missing_checkout_still_refuses_divergent_registered_endpoint(self):
+        origin = self.create_remote('missing-peer-endpoint')
+        repo = self.clone(origin, 'missing-peer-endpoint')
+        self.init_coordinated(repo)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        peer = self.tmp / 'missing-divergent-peer'
+        self.git(repo, 'worktree', 'add', '-q', '-b', 'missing-divergent-peer', str(peer), 'HEAD')
+        other = self.create_remote('missing-peer-other-origin')
+        self.git(repo, 'config', 'extensions.worktreeConfig', 'true')
+        self.git(repo, 'config', '--local', '--unset-all', 'remote.origin.url')
+        self.git(repo, 'config', '--worktree', 'remote.origin.url', str(origin))
+        self.git(peer, 'config', '--worktree', 'remote.origin.url', str(other))
+        self.assertEqual(self.git(peer, 'remote', 'get-url', 'origin').stdout.strip(), str(other))
+        peer.rename(self.tmp / 'retained-divergent-peer')
+        before = self.git(repo, 'worktree', 'list', '--porcelain').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'divergent fetch endpoints'):
+            module.coordination_state_observation_key(repo, module.coordination_config(manifest))
+        self.assertEqual(self.git(repo, 'worktree', 'list', '--porcelain').stdout, before)
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']

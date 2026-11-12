@@ -169,6 +169,8 @@ arguments continue to select their own provenance revision.
 Observation keys also bind the effective fetch endpoint. Shared coordination
 caches require one endpoint across registered worktrees; divergent endpoints
 are refused before cached tracking or last-seen data is used. New acknowledgments
+use Git administrative metadata to observe registered configurations, including
+worktrees whose checkout is absent. The registration remains retained. They
 bind their last-seen entry to the endpoint digest. A detected endpoint change
 requires governed shared-metadata reconciliation before reusing provenance,
 including when an explicit snapshot was supplied. Legacy last-seen state or local

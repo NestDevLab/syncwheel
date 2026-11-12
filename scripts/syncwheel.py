@@ -3231,14 +3231,29 @@ def derived_provenance_store_lock(repo_root):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-def coordination_fetch_endpoint_digest(repo_root, remote):
-    result = git(repo_root, 'remote', 'get-url', remote, check=False)
+def coordination_fetch_endpoint_digest(repo_root, remote, *, worktree=None):
+    location = Path(worktree) if worktree is not None else Path(repo_root)
+    if worktree is None:
+        result = git(repo_root, 'remote', 'get-url', remote, check=False)
+    else:
+        common = git_common_dir(repo_root).resolve()
+        admin = governed_worktree_admin_dir_for_path(repo_root, location)
+        if admin is None and (location.resolve() == common or (location / '.git').resolve() == common):
+            admin = common
+        if admin is None:
+            raise SyncwheelError('cannot establish the registered worktree Git directory')
+        # Administrative metadata retains worktree-specific configuration even
+        # when its checkout is absent. Observing it never prunes registration.
+        result = git(repo_root, '--git-dir', str(admin), 'remote', 'get-url', remote, check=False)
+        current_admin = governed_worktree_admin_dir_for_path(repo_root, location)
+        if admin != common and current_admin != admin:
+            raise SyncwheelError('worktree registration changed during endpoint observation')
     endpoint, _newline, remainder = result.stdout.partition('\n')
     if result.returncode != 0 or not endpoint or remainder or '\r' in endpoint:
         raise SyncwheelError('cannot establish the coordination fetch endpoint')
     scp_url = re.match(r'^(?:[^/@]+@)?[^/:]+:.+', endpoint)
     if os.path.splitdrive(endpoint)[0] or ('://' not in endpoint and not scp_url):
-        endpoint = str((Path(repo_root) / endpoint).resolve())
+        endpoint = str((location / endpoint).resolve())
     return hashlib.sha256(endpoint.encode()).hexdigest()
 
 
@@ -3246,7 +3261,7 @@ def coordination_state_observation_key(repo_root, config):
     endpoint = coordination_fetch_endpoint_digest(repo_root, config['remote'])
     for worktree in get_worktrees(repo_root):
         path = Path(worktree['path'])
-        if not path.is_dir() or coordination_fetch_endpoint_digest(path, config['remote']) != endpoint:
+        if coordination_fetch_endpoint_digest(repo_root, config['remote'], worktree=path) != endpoint:
             raise SyncwheelError('coordination refuses divergent fetch endpoints across registered worktrees')
     return (str(git_common_dir(repo_root).resolve()), config['remote'],
             config['id'], config['state_branch'], endpoint)
