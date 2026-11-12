@@ -1,6 +1,10 @@
 """Compatibility at the CLI/domain boundaries, including isolated file loading."""
 import ast
 import importlib.util
+import json
+import os
+import shutil
+import tomllib
 from pathlib import Path
 import subprocess
 import sys
@@ -38,6 +42,35 @@ assert module.build_parser().parse_args(['status']).func is module.command_statu
                 [sys.executable, '-I', '-c', code, str(SCRIPTS / 'syncwheel.py')],
                 cwd=directory, check=True, capture_output=True, text=True,
             )
+
+    def test_vendored_bundle_runs_without_site_packages_or_pythonpath(self):
+        package = tomllib.loads((SCRIPTS.parent / 'pyproject.toml').read_text())
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bundle = root / 'vendor'
+            bundle.mkdir()
+            for module_name in package['tool']['setuptools']['py-modules']:
+                shutil.copy2(SCRIPTS / f'{module_name}.py', bundle / f'{module_name}.py')
+            shutil.copy2(SCRIPTS.parent / 'VERSION', bundle / 'VERSION')
+            environment = dict(os.environ)
+            environment.pop('PYTHONPATH', None)
+            environment.update({
+                'PATH': '/usr/bin:/bin',
+                'SYNCWHEEL_UPDATE_MODE': 'off',
+                'SYNCWHEEL_UPDATE_STATE_PATH': str(root / 'update-state.json'),
+                'SYNCWHEEL_UPDATE_SETTINGS_PATH': str(root / 'update-settings.json'),
+            })
+            entry = [sys.executable, '-I', '-S', str(bundle / 'syncwheel.py')]
+            version = subprocess.run(entry + ['--version'], cwd=root, env=environment,
+                                     capture_output=True, text=True, check=True)
+            self.assertEqual(version.stdout.strip(),
+                             'syncwheel ' + (bundle / 'VERSION').read_text().strip())
+            status = subprocess.run(entry + ['self', 'status', '--json'], cwd=root,
+                                    env=environment, capture_output=True, text=True, check=True)
+            payload = json.loads(status.stdout)['status']
+            self.assertEqual(payload['install_kind'], 'script')
+            self.assertEqual(payload['current_version'], (bundle / 'VERSION').read_text().strip())
+            self.assertFalse(payload['can_self_update'])
 
     def test_parser_binds_current_facade_handlers(self):
         module = load_facade()
@@ -98,7 +131,7 @@ assert module.build_parser().parse_args(['status']).func is module.command_statu
                 module.coordination_public_remote_ref_parts(ref, 'base')
 
     def test_domains_do_not_import_the_cli_facade(self):
-        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees', 'coordination_state', 'publication_intents')
+        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication')
         for name in modules:
             with self.subTest(module=name):
                 tree = ast.parse((SCRIPTS / f'syncwheel_{name}.py').read_text())

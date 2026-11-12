@@ -195,3 +195,31 @@ def reduce_ledger_state(events):
     for event in events:
         apply_ledger_event(state, event)
     return state
+
+
+def manifest_channel_history_summary(channel):
+    summary = {
+        'id': channel['id'],
+        'branch': channel['branch'],
+        'base': channel['base'],
+        'baseRevision': channel['baseRevision'],
+        'remote': channel['remote'],
+        'lifecycle': channel['lifecycle'],
+        'composition': [
+            {
+                'stack': entry['stack'],
+                'branch': entry['branch'],
+                'stackBase': entry['stackBase'],
+                'stackBaseRevision': entry['stackBaseRevision'],
+                'branchRevision': entry['branchRevision'],
+                'commits': list(entry['commits']),
+                'dependsOn': list(entry.get('dependsOn', [])),
+            }
+            for entry in channel.get('composition', [])
+        ],
+    }
+    if channel.get('expiry'):
+        summary['expiry'] = dict(channel['expiry'])
+    if channel.get('resolution'):
+        summary['resolution'] = dict(channel['resolution'])
+    return summary

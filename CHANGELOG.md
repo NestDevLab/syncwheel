@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Vendored installations now require the complete `syncwheel*.py` sibling module set and `VERSION`, rather than a single copied CLI file. Direct script invocation and manual updates remain available.
 - Separate manifest schema, CLI grammar, coordination snapshots, journal workflows, replay execution, governed worktree lifecycle, ledger projection and Git index decoding into explicit domain modules. Preserve the supported CLI and import facade, patchable I/O operations and package entry points.
 
 ## 0.46.33 - 2026-11-15

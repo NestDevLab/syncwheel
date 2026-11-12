@@ -12,6 +12,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_coordination` | Snapshot validation, portable refs, proposal comparison and composition | Manifest domain; explicit branch validator |
 | `syncwheel_coordination_state` | Immutable remote state, control-manifest integrity and exclusive ownership evidence | Git observations, manifest inputs and state witnesses |
 | `syncwheel_publication_intents` | Intent identity, durable token lifecycle and bounded landing proofs | Git, ledger, state reader and transaction/evidence ports |
+| `syncwheel_publication` | Atomic publication, source leases, snapshots and reconciliation | Composed state, intent and replay services; Git/storage/projection/ledger ports |
 | `syncwheel_journal` | File admission, status decoding, safe content observation | Shared errors; explicit status and reader inputs |
 | `syncwheel_journal_workflow` | Snapshot, publish, pull and recovery sequencing | Journal policy; explicit repository I/O port |
 | `syncwheel_ledger` | Event reduction into lifecycle state | Standard library |
@@ -41,8 +42,13 @@ exceptions, handler replacement, journal reader replacement and Git validation.
 Existing integration suites continue to exercise journal, channel, coordination,
 ledger and index behavior through the supported facade.
 
-This is incremental modularization. Mutable coordination publication and revision-provider orchestration still live in the
-facade. Future extraction should introduce specific repository operations at
+This is incremental modularization. Revision-provider orchestration, control-manifest persistence and domain command
+handlers still live in the composition root. Future extraction should introduce specific repository operations at
 those boundaries, preserve existing patch points, and run the corresponding
 integration suites. Do not use shared-global execution, wildcard imports, module
 proxies or a generic object that forwards arbitrary facade globals.
+
+Vendored installations must copy the complete `scripts/syncwheel*.py` sibling set
+and `VERSION` together; a single copied CLI file is no longer self-contained.
+The invocation remains `python3 path/to/bundle/syncwheel.py`, and updates remain
+manual. The isolated vendored smoke runs with `-I -S` and no `PYTHONPATH`.

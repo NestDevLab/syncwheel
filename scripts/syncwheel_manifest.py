@@ -1168,3 +1168,19 @@ def require_stack(manifest, stack_id):
 
 def coordination_state_ref(config):
     return f"refs/heads/{config['state_branch']}"
+
+
+def manifest_digest(manifest):
+    return hashlib.sha256(canonical_manifest_json(manifest).encode('utf-8')).hexdigest()
+
+
+def canonical_manifest_json(manifest):
+    """Return the semantic manifest representation used for stable identities."""
+    return json.dumps(manifest, sort_keys=True, separators=(',', ':'))
+
+
+def channel_composition_digest(channel):
+    return canonical_json_digest({
+        'pinDigest': channel_pin_digest(channel),
+        'resolution': channel.get('resolution'),
+    })

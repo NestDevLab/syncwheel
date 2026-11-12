@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+import tomllib
 from unittest import mock
 from pathlib import Path
 from types import SimpleNamespace
@@ -1012,13 +1013,21 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(data, indent=2) + '\n')
         return base, [beta, gamma]
 
+    def copy_syncwheel_modules(self, destination):
+        destination.mkdir(parents=True, exist_ok=True)
+        package = tomllib.loads((REPO_ROOT / 'pyproject.toml').read_text())
+        for module_name in package['tool']['setuptools']['py-modules']:
+            shutil.copy2(CLI.parent / f'{module_name}.py', destination / f'{module_name}.py')
+
     def init_syncwheel_install_fixture(self):
         seed = self.tmp / 'syncwheel-seed'
         origin = self.tmp / 'syncwheel-origin.git'
         install = self.tmp / 'syncwheel-install'
         (seed / 'scripts').mkdir(parents=True)
         (seed / 'githooks').mkdir(parents=True)
-        shutil.copy2(CLI, seed / 'scripts' / 'syncwheel.py')
+        self.copy_syncwheel_modules(seed / 'scripts')
+        # Import caches follow the same ignore policy as a real source checkout.
+        shutil.copy2(REPO_ROOT / '.gitignore', seed / '.gitignore')
         shutil.copy2(CLI.parent / 'check-version-bump.py', seed / 'scripts' / 'check-version-bump.py')
         shutil.copy2(REPO_ROOT / 'githooks' / 'pre-commit', seed / 'githooks' / 'pre-commit')
         (seed / 'VERSION').write_text('0.6.0\n')
@@ -9332,7 +9341,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         standalone = self.tmp / 'standalone-syncwheel'
         cli = standalone / 'scripts' / 'syncwheel.py'
         cli.parent.mkdir(parents=True)
-        shutil.copy2(CLI, cli)
+        self.copy_syncwheel_modules(cli.parent)
         (standalone / 'VERSION').write_text('0.18.0\n')
 
         result = self.run_custom_cli(
@@ -9412,7 +9421,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         standalone = self.tmp / 'standalone-syncwheel'
         cli = standalone / 'scripts' / 'syncwheel.py'
         cli.parent.mkdir(parents=True)
-        shutil.copy2(CLI, cli)
+        self.copy_syncwheel_modules(cli.parent)
         (standalone / 'VERSION').write_text('0.18.0\n')
 
         fake_bin = self.tmp / 'fake-bin'
