@@ -13219,6 +13219,36 @@ sys.exit(module.main())
         with self.assertRaisesRegex(module.SyncwheelError, 'local derived provenance has no endpoint witness'):
             contextvars.Context().run(module.derived_provenance_records, repo, manifest, observed['state'])
 
+    def test_v2_publication_cannot_bind_unwitnessed_legacy_overrides(self):
+        origin = self.create_remote('legacy-v2-publication')
+        repo = self.clone(origin, 'legacy-v2-publication')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        self.assertEqual(manifest['version'], 2)
+        config = module.coordination_config(manifest)
+        tip, _ = self.remote_state(origin)
+        profile = module.repo_profile_path(repo)
+        data = json.loads(profile.read_text())
+        data['coordination'].pop('last_seen_state')
+        profile.write_text(json.dumps(data, indent=2) + '\n')
+        record = self.derived_provenance_record(self.git(repo, 'rev-parse', 'HEAD').stdout.strip())
+        store = module.save_derived_provenance_store(repo, {
+            'version': module.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{'paths': record['paths'], 'base_commit': None, 'record': record}],
+        })
+        before = profile.read_bytes(), store.read_bytes(), self.git(origin, 'show-ref').stdout
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            module.derived_provenance_records(repo, manifest)
+        rejected = self.run_cli(repo, 'int', 'push', expected=2)
+        self.assertIn('no endpoint witness', rejected.stderr)
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            module.record_coordination_state_seen(repo, config, tip)
+        self.assertEqual((profile.read_bytes(), store.read_bytes(), self.git(origin, 'show-ref').stdout), before)
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            module.derived_provenance_records(repo, manifest)
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']

@@ -14497,6 +14497,7 @@ def clear_pending_coordination_merge(repo_root, config):
 
 
 def record_coordination_state_seen(repo_root, config, state_tip):
+    coordination_provenance_observation(repo_root, config)
     profile, coordination = coordination_profile(repo_root)
     coordination['last_seen_state'] = {
         'coordination_id': config['id'],
@@ -16432,6 +16433,9 @@ def coordinated_publish_cycle(
         raise SyncwheelError('coordinated publish requires an active-active manifest version 2 coordination block')
     if config['remote'] != manifest['defaults']['publication_remote']:
         raise SyncwheelError('coordination.remote must match defaults.publication_remote')
+    # Publication acknowledgment must never bind historical local data merely
+    # because the current (including version 2) manifest omits its provenance.
+    coordination_provenance_observation(repo_root, config)
     recovery_state = {}
     if not dry_run:
         source_manifest, _ = load_manifest(repo_root, manifest_path)

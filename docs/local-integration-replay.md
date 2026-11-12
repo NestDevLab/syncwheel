@@ -176,6 +176,9 @@ overrides without an endpoint witness are held for governed reconciliation;
 current endpoint uniformity does not establish their historical origin. Tracking
 refs alone never select provenance. A fresh clone without local overrides may
 use a newly observed state without adopting its unbound tracking cache.
+The same namespace check runs before any coordinated publication (including
+version 2 manifests) and before recording its acknowledgment. An ordinary
+publication is not a legacy-provenance reconciliation procedure.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that
