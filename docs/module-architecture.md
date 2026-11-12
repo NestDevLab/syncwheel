@@ -1,6 +1,7 @@
 # Source module boundaries
 
-`syncwheel.py` remains the supported CLI and import facade. Direct execution,
+`syncwheel.py` remains the CLI and application composition root. The supported
+CLI, `main` import and revision-provider entry points remain available. Direct execution,
 installed entry points, and loading it with `importlib.util.spec_from_file_location`
 resolve the same sibling modules. Runtime version and source checkout detection
 remain in that facade, where `__file__` still identifies the entry script.
@@ -10,6 +11,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_manifest` | Manifest normalization, authority, stack dependencies, channel schema | Shared errors; standard library |
 | `syncwheel_coordination` | Snapshot validation, portable refs, proposal comparison and composition | Manifest domain; explicit branch validator |
 | `syncwheel_coordination_state` | Immutable remote state, control-manifest integrity and exclusive ownership evidence | Git observations, manifest inputs and state witnesses |
+| `syncwheel_publication_intents` | Intent identity, durable token lifecycle and bounded landing proofs | Git, ledger, state reader and transaction/evidence ports |
 | `syncwheel_journal` | File admission, status decoding, safe content observation | Shared errors; explicit status and reader inputs |
 | `syncwheel_journal_workflow` | Snapshot, publish, pull and recovery sequencing | Journal policy; explicit repository I/O port |
 | `syncwheel_ledger` | Event reduction into lifecycle state | Standard library |
@@ -24,8 +26,9 @@ Domains never import the CLI facade. File loading and command dispatch remain ap
 transaction sequencing and locking belong to `JournalWorkflow`; its explicit
 `JournalRepository` protocol supplies only the I/O operations those transactions
 use. The facade adapter delegates each operation to the current application
-function so existing `git`, runner, file-reader and fingerprint patches still apply. The facade re-exports
-existing function and constant names for import consumers. Functions that cross
+function so existing `git`, runner, file-reader and fingerprint patches still apply. The facade retains application entry points used by other components. Domain
+helpers are internal: tests inject races and failures at the owning module or an
+explicit port, preserving their original phases and assertions. Functions that cross
 an I/O boundary use small adapters: journal admission receives the current
 facade reader; coordination receives the current branch validator. The parser
 receives a registry built from the current command handlers on every invocation,

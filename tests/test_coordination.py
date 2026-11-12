@@ -8714,7 +8714,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         # Model an intent emitted before stack publication acquired its ref fence.
         # Its real state/claims still use the unchanged atomic publisher protocol.
         with module.manifest_write_transaction(repo, manifest_path):
-            with mock.patch.object(module, 'stack_publication_source_refs', return_value=None):
+            with mock.patch.object(importlib.import_module('syncwheel_publication_intents'), 'stack_publication_source_refs', return_value=None):
                 operation = module.begin_coordination_publication(
                     repo, manifest, manifest_path, broader, 'stack:selected', 'partial',
                     identity_changed_refs=selected,
@@ -12290,7 +12290,7 @@ sys.exit(module.main())
                 ref: module.ref_tip(repo, ref) for ref in extra_refs
             }}
             with module.manifest_write_transaction(repo, manifest_path):
-                with mock.patch.object(module, 'stack_publication_source_refs', return_value=None):
+                with mock.patch.object(importlib.import_module('syncwheel_publication_intents'), 'stack_publication_source_refs', return_value=None):
                     module.begin_coordination_publication(
                         repo, manifest, manifest_path, broader,
                         f'stack:{stack_id}', 'partial', identity_changed_refs=selected,
@@ -12325,7 +12325,7 @@ sys.exit(module.main())
         # Deliberately malformed historical claims must reach the proof
         # checker; the current publication fence would refuse their creation.
         with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
-            module, 'stack_publication_source_refs', return_value=None,
+            importlib.import_module('syncwheel_publication_intents'), 'stack_publication_source_refs', return_value=None,
         ):
             module.coordinated_publish(
                 other, manifest, manifest_path, changed, scope, 'partial',
