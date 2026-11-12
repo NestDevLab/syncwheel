@@ -1928,3 +1928,19 @@ class PublicationCoordinator:
             },
             manifest_path,
         )
+
+
+    def coordinated_publish(self, *args, **kwargs):
+        """Run one publication cycle under this clone's single-writer lock.
+
+        A dry run inspects and prints only, so it never takes the lock and is never
+        refused by a live publication.
+        """
+        repo_root = self.repository.root
+        dry_run = kwargs.get('dry_run') if 'dry_run' in kwargs else (
+            len(args) > 5 and bool(args[5])
+        )
+        if dry_run:
+            return self.coordinated_publish_cycle(*args, **kwargs)
+        with self.coordination_publication_lock():
+            return self.coordinated_publish_cycle(*args, **kwargs)

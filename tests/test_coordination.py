@@ -3223,20 +3223,20 @@ with module.coordination_publication_lock(Path(repo_path)):
         foreign_tip = self.commit_on_branch(repo, 'scratch/foreign-after-preflight', 'foreign.txt')
         local_tip = self.commit_on_branch(repo, 'scratch/local-after-preflight', 'local.txt')
         module = self.load_module()
-        original_materialize = module.materialize_new_stack_branch
+        original_materialize = module.StackLifecycle.materialize_new_stack_branch
         source_ref = 'refs/heads/syncwheel/draft/collision'
 
         def materialize_then_publish_foreign(
-            repo_root, stack, planned_tip=None, operation_token=None
+            lifecycle, stack, planned_tip=None, operation_token=None
         ):
             original_materialize(
-                repo_root, stack, planned_tip=planned_tip,
+                lifecycle, stack, planned_tip=planned_tip,
                 operation_token=operation_token,
             )
             self.git(repo, 'push', '-q', 'origin', f'{foreign_tip}:{source_ref}')
 
         with mock.patch.object(
-            module, 'materialize_new_stack_branch', side_effect=materialize_then_publish_foreign
+            module.StackLifecycle, 'materialize_new_stack_branch', autospec=True, side_effect=materialize_then_publish_foreign
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'managed refs changed after the reviewed plan'):
                 module.command_stack_create(self.draft_create_args(repo, 'collision', local_tip))
@@ -4874,7 +4874,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.git(repo, 'update-ref', f'refs/heads/{branch}', foreign)
 
         with mock.patch.object(
-            module, 'draft_branch_creation_checkpoint', create=True,
+            importlib.import_module('syncwheel_stacks'), 'draft_branch_creation_checkpoint',
             side_effect=create_foreign_ref,
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'appeared concurrently'):
@@ -5128,7 +5128,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(repo, 'stack', 'close', 'generation', '--force')
         self.git(repo, 'branch', '-D', stack['branch'])
 
-        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('stop after new intent')):
+        with mock.patch.object(module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('stop after new intent')):
             with self.assertRaisesRegex(module.SyncwheelError, 'stop after new intent'):
                 module.command_stack_create(self.draft_create_args(repo, 'generation', source))
 
@@ -7884,7 +7884,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         first = self.stack_close_args(repo, 'close-reproof')
         first.reason = 'absorbed'
         with mock.patch.object(
-            module, 'coordinated_publish', side_effect=module.SyncwheelError('stop after intent')
+            module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('stop after intent')
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'stop after intent'):
                 module.command_stack_close(first)
@@ -7955,7 +7955,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         }, manifest_path)
 
         with mock.patch.object(
-            module, 'coordinated_publish', side_effect=module.SyncwheelError('close CAS lost')
+            module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('close CAS lost')
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'close CAS lost'):
                 module.command_stack_close(self.stack_close_args(repo, stack['id']))
@@ -8510,7 +8510,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         args = self.archive_args(repo, plan)
         manifest_path = repo / '.syncwheel' / 'manifest.json'
         before = manifest_path.read_bytes()
-        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('publication refused')):
+        with mock.patch.object(module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('publication refused')):
             with self.assertRaisesRegex(module.SyncwheelError, 'publication refused'):
                 module.command_stack_archive(args)
         self.assertEqual(before, manifest_path.read_bytes())
@@ -8523,7 +8523,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         _, repo, _, request = self.archive_fixture()
         module = self.load_module()
         plan = json.loads(self.run_cli(repo, *request).stdout)
-        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('offline')):
+        with mock.patch.object(module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('offline')):
             with self.assertRaises(module.SyncwheelError):
                 module.command_stack_archive(self.archive_args(repo, plan))
         self.run_cli(repo, 'stack', 'create', 'unrelated', '--draft')
@@ -8546,7 +8546,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         with mock.patch.object(module, 'save_manifest', side_effect=OSError('save interrupted')):
             with self.assertRaisesRegex(OSError, 'save interrupted'):
                 module.command_stack_archive(args)
-        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(module, 'coordinated_publish') as publish:
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(module.PublicationCoordinator, 'coordinated_publish') as publish:
             module.command_stack_archive(args)
             publish.assert_not_called()
         self.assertEqual(json.loads((repo / '.syncwheel' / 'manifest.json').read_text())['stacks'], [])
