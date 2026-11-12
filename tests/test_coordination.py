@@ -13156,9 +13156,9 @@ sys.exit(module.main())
         # acknowledged profile or tracking cache without a fresh observation.
         self.git(repo, 'config', '--worktree', 'remote.origin.url', str(other_origin))
         self.git(peer, 'config', '--worktree', 'remote.origin.url', str(other_origin))
-        with self.assertRaisesRegex(module.SyncwheelError, 'fresh observation'):
+        with self.assertRaisesRegex(module.SyncwheelError, 'governed reconciliation'):
             module.local_coordination_provenance_state(repo, manifest)
-        with self.assertRaisesRegex(module.SyncwheelError, 'fresh observation'):
+        with self.assertRaisesRegex(module.SyncwheelError, 'governed reconciliation'):
             contextvars.Context().run(module.local_coordination_provenance_state, repo, manifest)
         replacement = json.loads(json.dumps(observed['state']))
         replacement.update(parent_state=None, publication_id=str(uuid.uuid4()))
@@ -13168,7 +13168,11 @@ sys.exit(module.main())
         self.git(fixture['other'], 'push', str(other_origin), *refspecs,
                  f'{replacement_tip}:refs/heads/syncwheel/state/default')
         module.read_remote_coordination_state(repo, config)
-        self.assertEqual(module.derived_provenance_records(repo, manifest), [])
+        # A fresh read is not migration authority over the old shared store.
+        with self.assertRaisesRegex(module.SyncwheelError, 'governed reconciliation'):
+            module.derived_provenance_records(repo, manifest)
+        with self.assertRaisesRegex(module.SyncwheelError, 'governed reconciliation'):
+            module.derived_provenance_records(repo, manifest, replacement)
         self.assertEqual(profile.read_bytes(), before[1])
 
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):

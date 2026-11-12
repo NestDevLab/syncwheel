@@ -3261,34 +3261,36 @@ def remember_coordination_state_observation(repo_root, config, tip, *, expected_
     _COORDINATION_STATE_OBSERVATIONS.set(observations)
 
 
+def coordination_provenance_observation(repo_root, config):
+    """Validate the namespace before combining shared provenance metadata."""
+    observation_key = coordination_state_observation_key(repo_root, config)
+    observations = _COORDINATION_STATE_OBSERVATIONS.get() or {}
+    _profile, local_coordination = coordination_profile(repo_root)
+    seen = local_coordination.get('last_seen_state') or {}
+    if seen.get('coordination_id') != config['id']:
+        seen = {}
+    seen_endpoint = seen.get('endpoint_digest')
+    changed_endpoint = (
+        any(key[:4] == observation_key[:4] and key != observation_key for key in observations)
+        or (seen_endpoint is not None and seen_endpoint != observation_key[-1])
+    )
+    if changed_endpoint:
+        raise SyncwheelError('coordination provenance endpoint changed; shared metadata requires governed reconciliation')
+    return observations.get(observation_key), seen
+
+
 def local_coordination_provenance_state(repo_root, manifest):
     """Return the newest locally available published coordination state."""
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         return None
-    candidates = []
-    observation_key = coordination_state_observation_key(repo_root, config)
-    observations = _COORDINATION_STATE_OBSERVATIONS.get() or {}
-    observed_tip = observations.get(observation_key)
-    if observed_tip:
-        candidates.append(observed_tip)
-    _profile, local_coordination = coordination_profile(repo_root)
-    seen = local_coordination.get('last_seen_state') or {}
-    same_domain = seen.get('coordination_id') == config['id']
-    seen_endpoint = seen.get('endpoint_digest') if same_domain else None
-    changed_endpoint = (
-        any(key[:4] == observation_key[:4] and key != observation_key for key in observations)
-        or (seen_endpoint is not None and seen_endpoint != observation_key[-1])
-    )
-    if changed_endpoint and not observed_tip:
-        raise SyncwheelError('coordination provenance requires a fresh observation of the changed endpoint')
-    if not changed_endpoint:
-        remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
-        remote_tip = ref_tip(repo_root, remote_state_ref)
-        if remote_tip:
-            candidates.append(remote_tip)
-    if (same_domain and isinstance(seen.get('state_tip'), str)
-            and (seen_endpoint == observation_key[-1] or (seen_endpoint is None and not changed_endpoint))):
+    observed_tip, seen = coordination_provenance_observation(repo_root, config)
+    candidates = [observed_tip] if observed_tip else []
+    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
+    remote_tip = ref_tip(repo_root, remote_state_ref)
+    if remote_tip:
+        candidates.append(remote_tip)
+    if isinstance(seen.get('state_tip'), str):
         candidates.append(seen['state_tip'])
     candidates = list(dict.fromkeys(candidates))
     available = [tip for tip in candidates if commit_exists(repo_root, tip)]
@@ -3314,6 +3316,8 @@ def shared_derived_provenance_records(repo_root, manifest, coordination_state=No
     state = coordination_state if active else None
     if active and state is None:
         state = local_coordination_provenance_state(repo_root, manifest)
+    elif active and repo_root is not None:
+        coordination_provenance_observation(repo_root, coordination_config(manifest))
     if state:
         shared = (state.get('manifest', {}).get('integration', {}).get(
             'derived_provenance'
