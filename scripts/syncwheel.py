@@ -122,7 +122,24 @@ from syncwheel_revision_backend import (
 from syncwheel_manifest import integration_composition_digest, SYNCWHEEL_TRACKING_GIT_TRACKED
 from syncwheel_ledger import manifest_stack_history_summary, manifest_event_payload
 from syncwheel_files import _write_all, fsync_directory_path
-from syncwheel_provenance import derived_projection_paths_digest
+from syncwheel_provenance import (
+    ProvenanceStore,
+    derived_projection_paths_digest,
+    DERIVED_PATHS_REBUILD_REASON,
+    DERIVED_PATHS_TRAILER,
+    DERIVED_PROJECTION_TRAILER,
+    DERIVED_PROVENANCE_DISCARD_REASON,
+    DERIVED_PROVENANCE_OVERRIDE_FIELDS,
+    DERIVED_PROVENANCE_RESET_REASON,
+    DERIVED_PROVENANCE_STORE_VERSION,
+    apply_derived_provenance_overrides,
+    default_derived_provenance_store,
+    derived_paths_rebuild_remedy,
+    derived_provenance_reset_remedy,
+    normalize_derived_provenance_store,
+    projected_derived_provenance_store,
+    resolve_derived_provenance_overrides,
+)
 from syncwheel_contracts import MANAGED_REF_MOVE_AUTH_ENV
 
 from syncwheel_publication import (
@@ -504,15 +521,6 @@ GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
     'registration_mismatch',
     'ledger_pending',
 })
-DERIVED_PROJECTION_TRAILER = 'syncwheel-derived-projection'
-DERIVED_PATHS_TRAILER = 'syncwheel-derived-paths'
-DERIVED_PROVENANCE_STORE_VERSION = 1
-DERIVED_PROVENANCE_OVERRIDE_FIELDS = {'paths', 'base_commit', 'record'}
-DERIVED_PATHS_REBUILD_REASON = 'reconcile narrowed derived paths'
-DERIVED_PROVENANCE_DISCARD_REASON = (
-    'discard clone-local derived provenance superseded by the coordination snapshot'
-)
-DERIVED_PROVENANCE_RESET_REASON = 'discard an unreadable clone-local derived provenance store'
 JOURNAL_FORBIDDEN_COMMANDS = {
     'stack', 's', 'spoke', 'int', 'i', 'publish', 'sync', 'reconcile', 'rec',
     'resume', 'coordination', 'coord', 'handoff', 'gc', 'worktree', 'wt',
@@ -3195,275 +3203,71 @@ def commit_path_blob(repo_root, commit, path):
 
 
 def derived_projection_commit_paths_digest(repo_root, commit, paths):
-    return derived_projection_paths_digest({
-        path: commit_path_blob(repo_root, commit, path)
-        for path in paths
-    })
+    return _provenance_store().derived_projection_commit_paths_digest(
+        repo_root, commit, paths,
+    )
 
 
 def derived_provenance_store_path(repo_root):
-    return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.json'
+    return _provenance_store().derived_provenance_store_path(
+        repo_root,
+    )
 
 
 def derived_provenance_store_lock_path(repo_root):
-    return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.lock'
+    return _provenance_store().derived_provenance_store_lock_path(
+        repo_root,
+    )
 
 
-def default_derived_provenance_store():
-    return {
-        'version': DERIVED_PROVENANCE_STORE_VERSION,
-        'overrides': [],
-    }
 
 
-def normalize_derived_provenance_store(data, label='derived provenance store'):
-    if not isinstance(data, dict) or set(data) != {'version', 'overrides'}:
-        raise SyncwheelError(f'{label} must contain exactly: overrides, version')
-    if data.get('version') != DERIVED_PROVENANCE_STORE_VERSION:
-        raise SyncwheelError(f'{label} has an unsupported version')
-    overrides = data.get('overrides')
-    if not isinstance(overrides, list):
-        raise SyncwheelError(f'{label}.overrides must be an array')
-    normalized = []
-    path_sets = set()
-    for index, raw in enumerate(overrides):
-        item_label = f'{label}.overrides[{index}]'
-        if not isinstance(raw, dict) or set(raw) != DERIVED_PROVENANCE_OVERRIDE_FIELDS:
-            raise SyncwheelError(
-                f'{item_label} must contain exactly: '
-                + ', '.join(sorted(DERIVED_PROVENANCE_OVERRIDE_FIELDS))
-            )
-        paths = raw.get('paths')
-        if (
-            not isinstance(paths, list)
-            or not paths
-            or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
-            or paths != sorted(paths)
-            or len(paths) != len(set(paths))
-        ):
-            raise SyncwheelError(
-                f'{item_label}.paths must be a non-empty sorted unique NUL-free string array'
-            )
-        path_key = tuple(paths)
-        if path_key in path_sets:
-            raise SyncwheelError(f'{label} contains duplicate declared path sets')
-        path_sets.add(path_key)
-        base_commit = raw.get('base_commit')
-        if base_commit is not None and (
-            not isinstance(base_commit, str)
-            or not re.fullmatch(r'[0-9a-f]{40}', base_commit)
-        ):
-            raise SyncwheelError(f'{item_label}.base_commit must be null or a full SHA-1')
-        record = raw.get('record')
-        if record is not None:
-            record = normalize_derived_provenance(
-                [record], label=f'{item_label}.record'
-            )[0]
-            if record['paths'] != paths:
-                raise SyncwheelError(f'{item_label}.record paths do not match its override key')
-        normalized.append({
-            'paths': list(paths),
-            'base_commit': base_commit,
-            'record': record,
-        })
-    return {
-        'version': DERIVED_PROVENANCE_STORE_VERSION,
-        'overrides': sorted(normalized, key=lambda item: item['paths']),
-    }
 
 
 def load_derived_provenance_store(repo_root):
-    path = derived_provenance_store_path(repo_root)
-    if not path.exists():
-        return default_derived_provenance_store()
-    try:
-        data = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SyncwheelError(
-            f'invalid derived provenance store {path}: {exc}; discard it with '
-            + derived_provenance_reset_remedy(whole_store=True)
-        ) from exc
-    try:
-        return normalize_derived_provenance_store(data, str(path))
-    except SyncwheelError as exc:
-        raise SyncwheelError(
-            f'{exc}; discard the derived provenance store with '
-            + derived_provenance_reset_remedy(whole_store=True)
-        ) from exc
+    return _provenance_store().load_derived_provenance_store(
+        repo_root,
+    )
 
 
 def save_derived_provenance_store(repo_root, store):
-    store = normalize_derived_provenance_store(store)
-    path = derived_provenance_store_path(repo_root)
-    parent_existed = path.parent.exists()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if not parent_existed:
-        fsync_directory_path(path.parent.parent)
-    payload = (json.dumps(store, indent=2, sort_keys=True) + '\n').encode('utf-8')
-    temporary_prefix = f'.{path.name}.tmp-'
-    for orphan in path.parent.glob(f'{temporary_prefix}*'):
-        orphan.unlink(missing_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=temporary_prefix, dir=str(path.parent)
+    return _provenance_store().save_derived_provenance_store(
+        repo_root, store,
     )
-    temporary = Path(temporary_name)
-    replaced = False
-    try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, 'wb') as handle:
-            descriptor = -1
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        replaced = True
-        try:
-            fsync_directory_path(path.parent)
-        except OSError as exc:
-            raise DerivedProvenanceDurabilityError(
-                'derived provenance replace completed but parent directory '
-                f'durability check failed; outcome is unknown: {path}'
-            ) from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if not replaced:
-            temporary.unlink(missing_ok=True)
-    return path
 
 
-@contextlib.contextmanager
 def derived_provenance_store_lock(repo_root):
-    if fcntl is None:
-        raise SyncwheelError('derived provenance writes require POSIX file locking support')
-    lock_path = derived_provenance_store_lock_path(repo_root)
-    parent_existed = lock_path.parent.exists()
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    if not parent_existed:
-        fsync_directory_path(lock_path.parent.parent)
-    existed = lock_path.exists()
-    with lock_path.open('a+b') as handle:
-        if not existed:
-            os.fchmod(handle.fileno(), 0o600)
-            handle.flush()
-            os.fsync(handle.fileno())
-            fsync_directory_path(lock_path.parent)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return _provenance_store().derived_provenance_store_lock(
+        repo_root,
+    )
 
 
 def local_coordination_provenance_state(repo_root, manifest):
-    """Return the newest locally available published coordination state."""
-    config = coordination_config(manifest)
-    if not config or config.get('mode') != 'active-active':
-        return None
-    candidates = []
-    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
-    remote_tip = ref_tip(repo_root, remote_state_ref)
-    if remote_tip:
-        candidates.append(remote_tip)
-    _profile, local_coordination = coordination_profile(repo_root)
-    seen = local_coordination.get('last_seen_state') or {}
-    if seen.get('coordination_id') == config['id'] and isinstance(seen.get('state_tip'), str):
-        candidates.append(seen['state_tip'])
-    candidates = list(dict.fromkeys(candidates))
-    available = [tip for tip in candidates if commit_exists(repo_root, tip)]
-    if not available:
-        return None
-    newest = available[0]
-    for candidate in available[1:]:
-        if git(
-            repo_root,
-            'merge-base',
-            '--is-ancestor',
-            newest,
-            candidate,
-            check=False,
-        ).returncode == 0:
-            newest = candidate
-    return coordination_state_from_commit(repo_root, newest, config['id'])
+    return _provenance_store().local_coordination_provenance_state(
+        repo_root, manifest,
+    )
 
 
 def shared_derived_provenance_records(repo_root, manifest, coordination_state=None):
-    """Return the active-active snapshot provenance, or an empty clone-local base."""
-    active = coordination_is_active(manifest)
-    state = coordination_state if active else None
-    if active and state is None:
-        state = local_coordination_provenance_state(repo_root, manifest)
-    if state:
-        shared = (state.get('manifest', {}).get('integration', {}).get(
-            'derived_provenance'
-        ) or [])
-    elif active:
-        shared = manifest.get('integration', {}).get('derived_provenance') or []
-    else:
-        shared = []
-    return normalize_derived_provenance(
-        shared, label='integration.derived_provenance'
+    return _provenance_store().shared_derived_provenance_records(
+        repo_root, manifest, coordination_state,
     )
 
 
-def resolve_derived_provenance_overrides(shared, store, *, coordinated=True):
-    """Return the effective records plus the clone-local entries the snapshot supersedes.
-
-    Under coordination the snapshot wins: a superseded cache entry is dropped, never raised.
-    """
-    records = normalize_derived_provenance(
-        shared, label='shared derived provenance'
-    )
-    by_paths = {tuple(item['paths']): item for item in records}
-    store = normalize_derived_provenance_store(store)
-    diverged = []
-    for override in store['overrides']:
-        key = tuple(override['paths'])
-        current = by_paths.get(key)
-        desired = override['record']
-        if current == desired:
-            continue
-        current_commit = current['commit'] if current else None
-        if coordinated and current_commit != override['base_commit']:
-            diverged.append({
-                'paths': list(override['paths']),
-                'base_commit': override['base_commit'],
-                'local_commit': desired['commit'] if desired else None,
-                'snapshot_commit': current_commit,
-            })
-            continue
-        if desired is None:
-            by_paths.pop(key, None)
-        else:
-            by_paths[key] = desired
-    return (
-        normalize_derived_provenance(
-            list(by_paths.values()), label='effective derived provenance'
-        ),
-        sorted(diverged, key=lambda item: item['paths']),
-    )
 
 
-def apply_derived_provenance_overrides(shared, store, *, coordinated=True):
-    return resolve_derived_provenance_overrides(
-        shared, store, coordinated=coordinated
-    )[0]
 
 
 def derived_provenance_snapshot(repo_root, manifest, coordination_state=None):
-    """Resolve provenance from the shared snapshot plus Git-common-dir state."""
-    shared = shared_derived_provenance_records(
-        repo_root, manifest, coordination_state
-    )
-    return resolve_derived_provenance_overrides(
-        shared,
-        load_derived_provenance_store(repo_root),
-        coordinated=coordination_is_active(manifest),
+    return _provenance_store().derived_provenance_snapshot(
+        repo_root, manifest, coordination_state,
     )
 
 
 def derived_provenance_records(repo_root, manifest, coordination_state=None):
-    return derived_provenance_snapshot(repo_root, manifest, coordination_state)[0]
+    return _provenance_store().derived_provenance_records(
+        repo_root, manifest, coordination_state,
+    )
 
 
 def update_common_derived_provenance(
@@ -3475,102 +3279,18 @@ def update_common_derived_provenance(
     expected_commit=None,
     coordination_state=None,
 ):
-    """Atomically set or resolve one complete provenance path set."""
-    paths = list(paths)
-    if (
-        not paths
-        or paths != sorted(paths)
-        or len(paths) != len(set(paths))
-        or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
-    ):
-        raise SyncwheelError(
-            'derived provenance update paths must be a non-empty sorted unique '
-            'NUL-free string array'
-        )
-    if record is not None:
-        record = normalize_derived_provenance(
-            [record], label='derived provenance update'
-        )[0]
-        if record['paths'] != paths:
-            raise SyncwheelError('derived provenance update record paths do not match')
-    with derived_provenance_store_lock(repo_root):
-        shared = shared_derived_provenance_records(
-            repo_root, manifest, coordination_state
-        )
-        original_store = load_derived_provenance_store(repo_root)
-        updated = projected_derived_provenance_store(
-            original_store, shared, paths, record, expected_commit=expected_commit,
-            coordinated=coordination_is_active(manifest),
-        )
-        if updated is None or updated == original_store:
-            return False
-        save_derived_provenance_store(repo_root, updated)
-        return True
-
-
-def projected_derived_provenance_store(
-    original_store, shared, paths, record, *, expected_commit=None, coordinated=True,
-):
-    """Compute the existing provenance transition without persisting it."""
-    shared_by_paths = {
-        tuple(item['paths']): item for item in shared
-    }
-    store = {
-        'version': DERIVED_PROVENANCE_STORE_VERSION,
-        'overrides': [
-            item for item in original_store['overrides']
-            if item['record'] != shared_by_paths.get(tuple(item['paths']))
-        ],
-    }
-    store = normalize_derived_provenance_store(store)
-    effective = apply_derived_provenance_overrides(
-        shared, store, coordinated=coordinated
+    return _provenance_store().update_common_derived_provenance(
+        repo_root, manifest, paths, record, expected_commit=expected_commit, coordination_state=coordination_state,
     )
-    key = tuple(paths)
-    current = {tuple(item['paths']): item for item in effective}.get(key)
-    if expected_commit is not None and current is not None and (
-        current['commit'] != expected_commit
-    ):
-        raise SyncwheelError(
-            'derived provenance changed before reconciliation for '
-            + json.dumps(paths, ensure_ascii=True)
-        )
-    if expected_commit is not None and current is None:
-        return None
-    overrides = {
-        tuple(item['paths']): item for item in store['overrides']
-    }
-    shared_record = {
-        tuple(item['paths']): item for item in shared
-    }.get(key)
-    base_commit = shared_record['commit'] if shared_record else None
-    if record == shared_record:
-        overrides.pop(key, None)
-    else:
-        overrides[key] = {
-            'paths': paths,
-            'base_commit': base_commit,
-            'record': record,
-        }
-    updated = {
-        'version': DERIVED_PROVENANCE_STORE_VERSION,
-        'overrides': list(overrides.values()),
-    }
-    return normalize_derived_provenance_store(updated)
+
+
 
 
 def record_common_derived_provenance(
     repo_root, manifest, record, coordination_state=None
 ):
-    normalized = normalize_derived_provenance(
-        [record], label='derived provenance record'
-    )[0]
-    return update_common_derived_provenance(
-        repo_root,
-        manifest,
-        normalized['paths'],
-        normalized,
-        coordination_state=coordination_state,
+    return _provenance_store().record_common_derived_provenance(
+        repo_root, manifest, record, coordination_state,
     )
 
 
@@ -3582,138 +3302,39 @@ def resolve_common_derived_provenance(
     expected_commit=None,
     coordination_state=None,
 ):
-    return update_common_derived_provenance(
-        repo_root,
-        manifest,
-        sorted(paths),
-        None,
-        expected_commit=expected_commit,
-        coordination_state=coordination_state,
+    return _provenance_store().resolve_common_derived_provenance(
+        repo_root, manifest, paths, expected_commit=expected_commit, coordination_state=coordination_state,
     )
 
 
 def is_provenance_bound_derived_projection_commit(repo_root, commit, provenance):
-    """Verify trailers, content, and provenance independently of the current path policy."""
-    if commit_parent_count(repo_root, commit) != 1:
-        return False
-    full_commit = commit_full_sha(repo_root, commit)
-    files = commit_changed_files(repo_root, full_commit)
-    if not files:
-        return False
-    trailers = parsed_commit_trailers(repo_root, full_commit)
-    operation_values = [
-        value for key, value in trailers
-        if key.casefold() == DERIVED_PROJECTION_TRAILER
-    ]
-    digest_values = [
-        value for key, value in trailers
-        if key.casefold() == DERIVED_PATHS_TRAILER
-    ]
-    if (
-        len(operation_values) != 1
-        or not DERIVED_OPERATION_ID.fullmatch(operation_values[0])
-        or len(digest_values) != 1
-        or not re.fullmatch(r'[0-9a-f]{64}', digest_values[0])
-    ):
-        return False
-    paths = sorted(files)
-    content_digest = derived_projection_commit_paths_digest(
-        repo_root, full_commit, paths
-    )
-    if digest_values[0] != content_digest:
-        return False
-    records = normalize_derived_provenance(provenance)
-    return any(
-        record['operation_id'] == operation_values[0]
-        and record['commit'] == full_commit
-        and record['paths'] == paths
-        and record['paths_digest'] == content_digest
-        for record in records
+    return _provenance_store().is_provenance_bound_derived_projection_commit(
+        repo_root, commit, provenance,
     )
 
 
 def is_derived_projection_commit(repo_root, manifest, commit, provenance=None):
-    """Recognize only a currently allowed, provenance-bound provider projection."""
-    full_commit = commit_full_sha(repo_root, commit)
-    prefixes = manifest.get('integration', {}).get('derived_paths') or []
-    files = commit_changed_files(repo_root, full_commit)
-    if not files or not prefixes or not all(
-        any(path.startswith(prefix) for prefix in prefixes) for path in files
-    ):
-        return False
-    records = (
-        normalize_derived_provenance(provenance)
-        if provenance is not None
-        else derived_provenance_records(repo_root, manifest)
-    )
-    return is_provenance_bound_derived_projection_commit(
-        repo_root, full_commit, records
+    return _provenance_store().is_derived_projection_commit(
+        repo_root, manifest, commit, provenance,
     )
 
 
 def narrowed_derived_provenance_records(repo_root, manifest, provenance=None):
-    """Return provenance paths excluded by the current derived-path policy."""
-    prefixes = manifest.get('integration', {}).get('derived_paths') or []
-    records = (
-        normalize_derived_provenance(provenance)
-        if provenance is not None
-        else derived_provenance_records(repo_root, manifest)
-    )
-    narrowed = []
-    for record in records:
-        outside = [
-            path for path in record['paths']
-            if not any(path.startswith(prefix) for prefix in prefixes)
-        ]
-        for path in outside:
-            narrowed.append({**record, 'path': path})
-    return sorted(
-        narrowed,
-        key=lambda item: (item['path'], item['commit'], item['operation_id']),
+    return _provenance_store().narrowed_derived_provenance_records(
+        repo_root, manifest, provenance,
     )
 
 
-def derived_provenance_reset_remedy(*, whole_store=False):
-    return (
-        'syncwheel coordination provenance reset'
-        + (' --all' if whole_store else '')
-        + ' --reason '
-        + shlex.quote(
-            DERIVED_PROVENANCE_RESET_REASON
-            if whole_store
-            else DERIVED_PROVENANCE_DISCARD_REASON
-        )
-    )
 
 
-def derived_paths_rebuild_remedy():
-    return (
-        'syncwheel int rebuild --reason '
-        + shlex.quote(DERIVED_PATHS_REBUILD_REASON)
-    )
 
 
 def stale_derived_projection_records(
     repo_root, manifest, integration_branch, provenance=None
 ):
-    """Return provider paths whose recorded result is absent from integration."""
-    stale = []
-    records = (
-        normalize_derived_provenance(provenance)
-        if provenance is not None
-        else derived_provenance_records(repo_root, manifest)
+    return _provenance_store().stale_derived_projection_records(
+        repo_root, manifest, integration_branch, provenance,
     )
-    for record in records:
-        reachable = branch_contains(repo_root, integration_branch, record['commit'])
-        for path in record['paths']:
-            # Reconciliation preserves ancestry while replacing the product tree.
-            # Reachability alone therefore no longer proves the derived result.
-            if reachable and tree_path_entry(repo_root, integration_branch, path) == tree_path_entry(
-                repo_root, record['commit'], path
-            ):
-                continue
-            stale.append({**record, 'path': path})
-    return sorted(stale, key=lambda item: (item['path'], item['operation_id']))
 
 
 def branches_containing_commit(repo_root, commit, remotes=False):
@@ -22156,6 +21777,54 @@ def _publication_coordinator(repo_root):
     )
 
 
+
+
+
+class _ProvenanceRepository:
+    def branch_contains(self, *args, **kwargs):
+        return branch_contains(*args, **kwargs)
+
+    def commit_changed_files(self, *args, **kwargs):
+        return commit_changed_files(*args, **kwargs)
+
+    def commit_exists(self, *args, **kwargs):
+        return commit_exists(*args, **kwargs)
+
+    def commit_full_sha(self, *args, **kwargs):
+        return commit_full_sha(*args, **kwargs)
+
+    def commit_parent_count(self, *args, **kwargs):
+        return commit_parent_count(*args, **kwargs)
+
+    def commit_path_blob(self, *args, **kwargs):
+        return commit_path_blob(*args, **kwargs)
+
+    def git(self, *args, **kwargs):
+        return git(*args, **kwargs)
+
+    def git_common_dir(self, *args, **kwargs):
+        return git_common_dir(*args, **kwargs)
+
+    def parsed_commit_trailers(self, *args, **kwargs):
+        return parsed_commit_trailers(*args, **kwargs)
+
+    def ref_tip(self, *args, **kwargs):
+        return ref_tip(*args, **kwargs)
+
+    def tree_path_entry(self, *args, **kwargs):
+        return tree_path_entry(*args, **kwargs)
+
+
+class _ProvenanceState:
+    def coordination_profile(self, *args, **kwargs):
+        return coordination_profile(*args, **kwargs)
+
+    def coordination_state_from_commit(self, *args, **kwargs):
+        return coordination_state_from_commit(*args, **kwargs)
+
+
+def _provenance_store():
+    return ProvenanceStore(_ProvenanceRepository(), _ProvenanceState())
 
 
 class _ManifestRepository:
