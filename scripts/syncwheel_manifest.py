@@ -1132,3 +1132,35 @@ def stack_delivery_identity(stack):
 
 def stack_map(manifest):
     return {stack['id']: stack for stack in manifest.get('stacks', [])}
+
+
+def syncwheel_worktree_root(manifest):
+    if not manifest:
+        return DEFAULT_SYNCWHEEL_WORKTREE_ROOT
+    return normalize_syncwheel_worktree_root(manifest.get('syncwheel_worktree_root'))
+
+
+def resolve_worktree_root_path(repo_root, worktree_root):
+    root = Path(worktree_root or DEFAULT_SYNCWHEEL_WORKTREE_ROOT).expanduser()
+    if not root.is_absolute():
+        root = repo_root / root
+    return root.resolve()
+
+
+def effective_worktree_root(manifest, override=None):
+    return override or syncwheel_worktree_root(manifest)
+
+
+def path_is_relative_to(path, root):
+    try:
+        Path(path).resolve().relative_to(Path(root).resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def require_stack(manifest, stack_id):
+    stacks = stack_map(manifest)
+    if stack_id not in stacks:
+        raise SyncwheelError(f'unknown stack: {stack_id}')
+    return stacks[stack_id]

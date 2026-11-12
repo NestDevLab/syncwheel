@@ -34,6 +34,40 @@ _MODULE_DIRECTORY = str(Path(__file__).resolve().parent)
 if _MODULE_DIRECTORY not in sys.path:
     sys.path.insert(0, _MODULE_DIRECTORY)
 
+from syncwheel_worktrees import (
+    GovernedWorktrees,
+    GOVERNED_WORKTREE_LOCK_STALE_SECONDS,
+    GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS,
+    GOVERNED_WORKTREE_REGISTRY_VERSION,
+    GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES,
+    RESET,
+    YELLOW,
+    _REGISTRY_EXPECTED_DIGEST_UNSET,
+    completed_governed_worktree_lane,
+    governed_worktree_cleanup_intent_payload,
+    governed_worktree_cleanup_key,
+    governed_worktree_cleanup_lock_reason,
+    governed_worktree_generation_token,
+    governed_worktree_lane_lease_expired,
+    governed_worktree_owner_is_dead,
+    governed_worktree_pending_remedy,
+    governed_worktree_reaped_payload,
+    governed_worktree_recovery_ref,
+    governed_worktree_registry_busy_error,
+    governed_worktree_registry_file_digest,
+    governed_worktree_registry_payload,
+    governed_worktree_release_note_key,
+    prepare_governed_worktree_cleanup,
+)
+from syncwheel_manifest import (
+    syncwheel_worktree_root,
+    resolve_worktree_root_path,
+    effective_worktree_root,
+    path_is_relative_to,
+    require_stack,
+)
+from syncwheel_contracts import iso_utc_now, parse_coordination_timestamp
+
 from syncwheel_replay import (
     ReplayEngine,
     replay_hygiene_env,
@@ -329,8 +363,6 @@ FALLBACK_GIT_IDENTITY_CONFIG = [
     '-c',
     'user.email=syncwheel@example.com',
 ]
-YELLOW = '\033[33m'
-RESET = '\033[0m'
 WARNED_GIT_IDENTITY_PATHS = set()
 COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'commit-tree', 'merge', 'revert'}
 CHANNEL_PLAN_SCHEMA_VERSION = 1
@@ -340,10 +372,7 @@ GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
 GITHUB_PR_MERGE_BYPASSES = {'private_free_rules', 'required_reviews'}
 GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
 GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
-GOVERNED_WORKTREE_REGISTRY_VERSION = 1
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
-GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
-GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
 GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
 COORDINATION_PUBLICATION_LOCK_TIMEOUT_SECONDS = 5
 COORDINATION_PUBLICATION_LOCK_STALE_SECONDS = 300
@@ -352,10 +381,6 @@ STACK_OWNER_STATE_SCAN_LIMIT = 50
 PENDING_STACK_LIST_LIMIT = 2600
 PENDING_RESET_LIST_LIMIT = 600
 PENDING_STACK_COMMIT_LIMIT = 5
-GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES = (
-    'governed_worktree_released',
-    'governed_worktree_reaped',
-)
 GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
     'reaping',
     'worktree_remove_failed',
@@ -364,7 +389,6 @@ GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
     'registration_mismatch',
     'ledger_pending',
 })
-_REGISTRY_EXPECTED_DIGEST_UNSET = object()
 DERIVED_PROJECTION_TRAILER = 'syncwheel-derived-projection'
 DERIVED_PATHS_TRAILER = 'syncwheel-derived-paths'
 DERIVED_PROVENANCE_STORE_VERSION = 1
@@ -603,10 +627,6 @@ def get_repo_root(explicit=None):
     return Path(result.stdout.strip())
 
 
-def iso_utc_now():
-    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
-
-
 def get_settings_path():
     raw = os.environ.get(ENV_UPDATE_SETTINGS_PATH)
     if raw:
@@ -718,14 +738,6 @@ def load_update_state():
 
 def save_update_state(data, path=None):
     return save_json_file(path or get_update_state_path(), data)
-
-
-def path_is_relative_to(path, root):
-    try:
-        Path(path).resolve().relative_to(Path(root).resolve())
-        return True
-    except (OSError, ValueError):
-        return False
 
 
 def default_remote_version_url(repo_url=None):
@@ -3797,19 +3809,6 @@ def coordination_claim_ref(source_ref):
             f'coordination claim requires a full refs/heads source ref: {source_ref!r}'
         )
     return f"refs/heads/{COORDINATION_CLAIM_PREFIX}{source_ref[len('refs/'):]}"
-
-
-def syncwheel_worktree_root(manifest):
-    if not manifest:
-        return DEFAULT_SYNCWHEEL_WORKTREE_ROOT
-    return normalize_syncwheel_worktree_root(manifest.get('syncwheel_worktree_root'))
-
-
-def resolve_worktree_root_path(repo_root, worktree_root):
-    root = Path(worktree_root or DEFAULT_SYNCWHEEL_WORKTREE_ROOT).expanduser()
-    if not root.is_absolute():
-        root = repo_root / root
-    return root.resolve()
 
 
 def syncwheel_ignore_pattern(value):
@@ -7698,13 +7697,6 @@ def require_manifest(repo_root, repo_value=None, manifest_override=None, persona
     return manifest, manifest_path
 
 
-def require_stack(manifest, stack_id):
-    stacks = stack_map(manifest)
-    if stack_id not in stacks:
-        raise SyncwheelError(f'unknown stack: {stack_id}')
-    return stacks[stack_id]
-
-
 def channel_map(manifest):
     return {channel['id']: channel for channel in manifest.get('channels', [])}
 
@@ -9144,11 +9136,11 @@ def command_stack_merge_pr(args):
 
 
 def governed_worktree_registry_path(repo_root):
-    return git_common_dir(repo_root) / 'syncwheel' / 'governed-worktrees.json'
+    return _governed_worktrees(repo_root).governed_worktree_registry_path()
 
 
 def governed_worktree_lock_path(repo_root):
-    return git_common_dir(repo_root) / 'syncwheel' / 'governed-worktrees.lock'
+    return _governed_worktrees(repo_root).governed_worktree_lock_path()
 
 
 def governed_worktree_owner():
@@ -9449,109 +9441,18 @@ def exclusive_metadata_lock(
             os.close(descriptor)
 
 
-def governed_worktree_registry_busy_error(metadata, stale):
-    suffix = (
-        ' (the lock metadata could not prove that its owner died; inspect it manually)'
-        if stale else ''
-    )
-    return SyncwheelError(
-        'governed worktree registry is busy; retry after the other local operation finishes'
-        + suffix
-    )
-
-
-@contextlib.contextmanager
 def governed_worktree_registry_lock(repo_root):
-    """Serialize clone-local lane state and recover a provably dead owner."""
-    lock_path = governed_worktree_lock_path(repo_root)
-    with exclusive_metadata_lock(
-        lock_path,
-        label='governed worktree registry',
-        recovery_log_path=lock_path.with_name('governed-worktrees-lock-recovery.jsonl'),
-        timeout_seconds=GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS,
-        stale_seconds=GOVERNED_WORKTREE_LOCK_STALE_SECONDS,
-        busy_error=governed_worktree_registry_busy_error,
-    ) as (held_path, _metadata):
-        yield held_path
+    return _governed_worktrees(repo_root).governed_worktree_registry_lock()
 
 
 def prune_governed_worktree_stale_locks(repo_root, manifest_path=None):
-    """Drop retained stale lock inodes nobody holds; the recovery log keeps the evidence."""
-    if fcntl is None:
-        return []
-    lock_path = governed_worktree_lock_path(repo_root)
-    directory = lock_path.parent
-    candidates = []
-    for owner in (lock_path, coordination_publication_lock_path(repo_root)):
-        candidates.extend(owner.parent.glob(f'{owner.name}.stale-*'))
-    pruned = []
-    for candidate in sorted(set(candidates)):
-        try:
-            descriptor = os.open(str(candidate), os.O_RDWR)
-        except OSError:
-            continue
-        held = False
-        try:
-            try:
-                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError:
-                continue
-            held = True
-            try:
-                candidate.unlink()
-            except FileNotFoundError:
-                continue
-            pruned.append(candidate.name)
-        finally:
-            if held:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            os.close(descriptor)
-    if pruned:
-        fsync_directory_path(directory)
-        append_ledger_event(
-            repo_root,
-            'governed_worktree_stale_locks_pruned',
-            {'files': pruned, 'count': len(pruned)},
-            manifest_path,
-        )
-    return pruned
+    return _governed_worktrees(repo_root).prune_governed_worktree_stale_locks(
+        manifest_path,
+    )
 
 
 def load_governed_worktree_registry(repo_root):
-    path = governed_worktree_registry_path(repo_root)
-    data = load_json_file(path, {'version': GOVERNED_WORKTREE_REGISTRY_VERSION, 'lanes': []})
-    if data.get('version') != GOVERNED_WORKTREE_REGISTRY_VERSION:
-        raise SyncwheelError(f'unsupported governed worktree registry version: {path}')
-    lanes = data.get('lanes')
-    if not isinstance(lanes, list):
-        raise SyncwheelError(f'governed worktree registry lanes must be a list: {path}')
-    identifiers = set()
-    for lane in lanes:
-        if not isinstance(lane, dict):
-            raise SyncwheelError(f'governed worktree registry lane must be an object: {path}')
-        lane_id = lane.get('id')
-        if not isinstance(lane_id, str) or not lane_id or lane_id in identifiers:
-            raise SyncwheelError(f'governed worktree registry has an invalid or duplicate lane id: {path}')
-        identifiers.add(lane_id)
-        for key in ('owner', 'path', 'base', 'branch', 'state', 'created_at', 'lease_expires_at'):
-            if not isinstance(lane.get(key), str) or not lane[key]:
-                raise SyncwheelError(f'governed worktree lane {lane_id!r} is missing {key!r}: {path}')
-        if not isinstance(lane.get('full'), bool):
-            raise SyncwheelError(f'governed worktree lane {lane_id!r} has invalid full mode: {path}')
-    return data, path
-
-
-def governed_worktree_registry_payload(registry):
-    return (json.dumps(registry, indent=2, sort_keys=True) + '\n').encode('utf-8')
-
-
-def governed_worktree_registry_file_digest(path):
-    path = Path(path)
-    try:
-        payload = path.read_bytes()
-    except FileNotFoundError:
-        return None
-    return hashlib.sha256(payload).hexdigest()
+    return _governed_worktrees(repo_root).load_governed_worktree_registry()
 
 
 def governed_worktree_registry_io_checkpoint(stage):
@@ -9564,307 +9465,51 @@ def save_governed_worktree_registry(
     registry,
     expected_digest=_REGISTRY_EXPECTED_DIGEST_UNSET,
 ):
-    path = governed_worktree_registry_path(repo_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = governed_worktree_registry_payload(registry)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f'.{path.name}.', suffix='.tmp', dir=str(path.parent)
+    return _governed_worktrees(repo_root).save_governed_worktree_registry(
+        registry, expected_digest,
     )
-    temporary = Path(temporary_name)
-    replaced = False
-    try:
-        _write_all(descriptor, payload)
-        governed_worktree_registry_io_checkpoint('registry_temp_written')
-        os.fsync(descriptor)
-        governed_worktree_registry_io_checkpoint('registry_temp_fsynced')
-        os.close(descriptor)
-        descriptor = None
-        if expected_digest is not _REGISTRY_EXPECTED_DIGEST_UNSET:
-            current_digest = governed_worktree_registry_file_digest(path)
-            if current_digest != expected_digest:
-                raise SyncwheelError(
-                    'governed worktree registry changed after its decision snapshot; '
-                    'refusing a stale local-state write'
-                )
-        governed_worktree_registry_io_checkpoint('registry_preimage_verified')
-        os.replace(temporary, path)
-        replaced = True
-        fsync_directory_path(path.parent)
-        governed_worktree_registry_io_checkpoint('registry_directory_fsynced')
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if not replaced:
-            temporary.unlink(missing_ok=True)
-    return path
 
 
 def governed_worktree_registry_cas_persister(repo_root, registry):
-    path = governed_worktree_registry_path(repo_root)
-    state = {'expected_digest': governed_worktree_registry_file_digest(path)}
-
-    def persist():
-        save_governed_worktree_registry(
-            repo_root,
-            registry,
-            expected_digest=state['expected_digest'],
-        )
-        state['expected_digest'] = hashlib.sha256(
-            governed_worktree_registry_payload(registry)
-        ).hexdigest()
-
-    return persist
+    return _governed_worktrees(repo_root).governed_worktree_registry_cas_persister(
+        registry,
+    )
 
 
 def governed_worktree_root(repo_root, manifest):
-    worktrees = get_worktrees(repo_root)
-    primary = Path(worktrees[0]['path']).resolve() if worktrees else Path(repo_root).resolve()
-    return resolve_worktree_root_path(primary, effective_worktree_root(manifest)).resolve()
-
-
-def governed_worktree_owner_is_dead(owner):
-    """Return true only for a dead PID that belongs to this host.
-
-    Owners are advisory identifiers, so an unparseable or remote owner must never
-    make a lane eligible for deletion.  A missing local process is enough to reap
-    a missing lane because there is no worktree left to protect.
-    """
-    if not isinstance(owner, str):
-        return False
-    owner_and_host, separator, raw_pid = owner.rpartition(':')
-    user, at, hostname = owner_and_host.rpartition('@')
-    if not separator or not at or not user or hostname != socket.gethostname():
-        return False
-    try:
-        pid = int(raw_pid)
-    except ValueError:
-        return False
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return True
-    except (PermissionError, OSError, OverflowError):
-        return False
-    return False
-
-
-def governed_worktree_lane_lease_expired(lane, now):
-    expires = parse_coordination_timestamp(lane['lease_expires_at'])
-    return bool(expires and expires <= now)
-
-
-def governed_worktree_pending_remedy(manifest, lane, manifest_path=None):
-    reason = shlex.quote(
-        lane.get('cleanup_event_reason')
-        if lane.get('cleanup_event_type') == 'governed_worktree_released'
-        and lane.get('cleanup_event_reason') else 'complete captured lane cleanup'
-    )
-    selector = f' --manifest {shlex.quote(str(manifest_path))}' if manifest_path else ''
-    return (
-        f"retry with: syncwheel worktree release {shlex.quote(lane['id'])} "
-        f'--reason {reason}{selector} --apply'
+    return _governed_worktrees(repo_root).governed_worktree_root(
+        manifest,
     )
 
 
 def governed_worktree_lane_status(repo_root, manifest, lane, now=None, manifest_path=None):
-    now = now or datetime.datetime.now(datetime.timezone.utc)
-    root = governed_worktree_root(repo_root, manifest)
-    registered_path = Path(lane['path']).resolve(strict=False)
-    worktree = find_worktree_record_for_branch(repo_root, lane['branch'])
-    worktree_path = (
-        Path(worktree['path']).resolve(strict=False)
-        if worktree and worktree.get('path') else None
+    return _governed_worktrees(repo_root).governed_worktree_lane_status(
+        manifest, lane, now, manifest_path,
     )
-    path_moved = bool(
-        not registered_path.exists()
-        and worktree_path is not None
-        and worktree_path != registered_path
-    )
-    path = worktree_path if path_moved else registered_path
-    status = {
-        'id': lane['id'], 'state': lane['state'], 'path': str(path),
-        'branch': lane['branch'], 'owner': lane['owner'], 'full': lane['full'],
-        'target': lane.get('target'), 'lease_expires_at': lane['lease_expires_at'],
-        'code': None, 'remedy': None,
-    }
-    if path_moved:
-        status['registered_path'] = str(registered_path)
-        status['path_moved'] = True
-    if lane['state'] == 'reaped':
-        if lane.get('pending_reason') == 'ledger_pending':
-            status.update(
-                code='ledger_pending',
-                remedy=governed_worktree_pending_remedy(manifest, lane, manifest_path),
-            )
-        return status
-    if lane['state'] == 'captured_pending_cleanup':
-        status.update(
-            code=lane.get('pending_reason') or 'captured_pending_cleanup',
-            remedy=governed_worktree_pending_remedy(manifest, lane, manifest_path),
-        )
-        return status
-    if (
-        worktree
-        and worktree.get('locked')
-        and worktree.get('locked') != governed_worktree_cleanup_lock_reason(lane)
-    ):
-        status.update(
-            code='locked',
-            remedy='unlock the Git worktree before retrying cleanup',
-        )
-        return status
-    if path.exists():
-        if path_moved:
-            dirty = local_worktree_status(path)
-            if dirty is None:
-                status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
-                return status
-            if dirty:
-                status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
-                return status
-        if not path_is_relative_to(path, root):
-            status.update(code='outside_root', remedy='inspect and recover this lane; Syncwheel will not move or remove it')
-            return status
-        if worktree_path is None or worktree_path != path:
-            status.update(code='unregistered_worktree', remedy='inspect the path and branch; Syncwheel will not remove an unregistered worktree')
-            return status
-        dirty = local_worktree_status(path)
-        if dirty is None:
-            status.update(code='unavailable', remedy='restore the worktree before attempting cleanup')
-            return status
-        if dirty:
-            status.update(code='dirty', remedy=governed_lane_remedy(manifest, lane, commit_first=True))
-            return status
-        if governed_worktree_lane_lease_expired(lane, now):
-            status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
-            return status
-    elif governed_worktree_lane_lease_expired(lane, now) or governed_worktree_owner_is_dead(lane['owner']):
-        # An expired or dead owner cannot keep a missing path alive merely
-        # because an old root configuration no longer contains that path.
-        status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
-        return status
-    elif not path_is_relative_to(path, root):
-        status.update(code='outside_root', remedy='inspect and recover this lane; Syncwheel will not move or remove it')
-        return status
-    elif worktree_path is None or worktree_path != path:
-        status.update(code='unregistered_worktree', remedy='inspect the path and branch; Syncwheel will not remove an unregistered worktree')
-        return status
-    expires = parse_coordination_timestamp(lane['lease_expires_at'])
-    if expires is None:
-        status.update(code='invalid_lease', remedy='repair the local registry before any cleanup')
-    elif governed_worktree_lane_lease_expired(lane, now):
-        status.update(code='expired', remedy=governed_lane_remedy(manifest, lane))
-    return status
 
 
 def governed_worktree_diagnostics(repo_root, manifest, manifest_path=None):
-    registry, path = load_governed_worktree_registry(repo_root)
-    root = governed_worktree_root(repo_root, manifest)
-    diagnostics = [governed_worktree_lane_status(repo_root, manifest, lane, manifest_path=manifest_path)
-                   for lane in registry['lanes']]
-    known_paths = {item['path'] for item in diagnostics if item.get('id')}
-    for worktree in get_worktrees(repo_root):
-        worktree_path = Path(worktree['path']).resolve(strict=False)
-        if worktree_path == Path(repo_root).resolve(strict=False) or not path_is_relative_to(worktree_path, root):
-            continue
-        if worktree.get('branch', '').startswith('syncwheel/lane/') and str(worktree_path) not in known_paths:
-            diagnostics.append({
-                'id': None, 'state': 'unknown', 'path': str(worktree_path),
-                'branch': worktree.get('branch'), 'owner': None, 'full': None,
-                'target': None, 'lease_expires_at': None,
-                'code': 'unregistered_worktree',
-                'remedy': 'inspect it manually; Syncwheel will not remove an unregistered worktree',
-            })
-    return {'registry_path': str(path), 'lanes': diagnostics}
-
-
-def governed_worktree_warning_lines(repo_root, manifest, manifest_path=None):
-    lines = []
-    for lane in governed_worktree_diagnostics(repo_root, manifest, manifest_path)['lanes']:
-        if not lane['code']:
-            continue
-        label = lane['id'] or lane['branch'] or lane['path']
-        lines.append(
-            f"governed worktree {label}: {lane['code']}; {lane['remedy']}"
-        )
-    return lines
-
-
-def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False, manifest_path=None):
-    lines = governed_worktree_warning_lines(repo_root, manifest, manifest_path)
-    if not lines:
-        return lines
-    color = '' if os.environ.get('NO_COLOR') or not sys.stderr.isatty() else YELLOW
-    reset = '' if not color else RESET
-    for line in lines:
-        print(f'{color}WARNING: {line}{reset}', file=sys.stderr)
-    return lines
-
-
-def governed_worktree_recovery_ref(lane):
-    return f'refs/syncwheel/recovery/lanes/{safe_ref_segment(lane["id"])}-{syncwheel_timestamp()}'
-
-
-def governed_worktree_cleanup_lock_reason(lane):
-    material = f"{lane['id']}\0{lane['created_at']}".encode('utf-8')
-    token = hashlib.sha256(material).hexdigest()[:24]
-    return f"syncwheel-cleanup:{safe_ref_segment(lane['id'])}:{token}"
-
-
-def governed_worktree_generation_token(lane):
-    token = lane.get('generation_token')
-    if isinstance(token, str) and token:
-        return token
-    material = f"{lane['id']}\0{lane['created_at']}\0{lane['branch']}".encode('utf-8')
-    return hashlib.sha256(material).hexdigest()
-
-
-def governed_worktree_cleanup_tip(repo_root, lane):
-    return (
-        lane.get('cleanup_tip')
-        or lane.get('branch_delete_tip')
-        or ref_tip(repo_root, lane['branch'])
-        or (ref_tip(repo_root, lane['recovery_ref']) if lane.get('recovery_ref') else None)
+    return _governed_worktrees(repo_root).governed_worktree_diagnostics(
+        manifest, manifest_path,
     )
 
 
-def governed_worktree_cleanup_key(lane):
-    material = {
-        'lane': lane['id'],
-        'generation_token': governed_worktree_generation_token(lane),
-        'operation_token': lane.get('cleanup_operation_token'),
-        'tip': lane.get('cleanup_tip'),
-        'recovery_ref': lane.get('recovery_ref'),
-        'event_type': lane.get('cleanup_event_type'),
-        'reason': lane.get('cleanup_event_reason'),
-    }
-    digest = hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(',', ':')).encode('utf-8')
-    ).hexdigest()
-    return f'governed-worktree-cleanup:{digest}'
+def governed_worktree_warning_lines(repo_root, manifest, manifest_path=None):
+    return _governed_worktrees(repo_root).governed_worktree_warning_lines(
+        manifest, manifest_path,
+    )
 
 
-def prepare_governed_worktree_cleanup(lane, event_type, reason, tip=None):
-    existing_type = lane.get('cleanup_event_type')
-    existing_reason = lane.get('cleanup_event_reason')
-    if existing_type is None:
-        lane['cleanup_event_type'] = event_type
-        lane['cleanup_event_reason'] = reason
-    elif event_type == 'governed_worktree_released' and existing_type != event_type:
-        raise SyncwheelError(
-            f"governed worktree lane {lane['id']!r} is already pending as {existing_type}"
-        )
-    elif event_type == 'governed_worktree_released' and existing_reason != reason:
-        raise SyncwheelError(
-            f"governed worktree lane {lane['id']!r} must retry its original --reason "
-            f'{existing_reason!r}'
-        )
-    if tip and not lane.get('cleanup_tip'):
-        lane['cleanup_tip'] = tip
-    lane.setdefault('cleanup_operation_token', uuid.uuid4().hex)
-    lane.setdefault('cleanup_idempotency_key', governed_worktree_cleanup_key(lane))
+def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False, manifest_path=None):
+    return _governed_worktrees(repo_root).emit_governed_worktree_warnings(
+        manifest, json_mode, manifest_path,
+    )
+
+
+def governed_worktree_cleanup_tip(repo_root, lane):
+    return _governed_worktrees(repo_root).governed_worktree_cleanup_tip(
+        lane,
+    )
 
 
 def governed_worktree_cleanup_checkpoint(stage):
@@ -9872,67 +9517,16 @@ def governed_worktree_cleanup_checkpoint(stage):
     return None
 
 
-def governed_worktree_cleanup_intent_payload(lane):
-    return {
-        'operation_token': lane['cleanup_operation_token'],
-        'lane': lane['id'],
-        'generation_token': governed_worktree_generation_token(lane),
-        'cleanup_tip': lane.get('cleanup_tip'),
-        'recovery_ref': lane.get('recovery_ref'),
-        'terminal_type': lane.get('cleanup_event_type') or 'governed_worktree_reaped',
-        'reason': lane.get('cleanup_event_reason') or 'expired',
-        'supersedes': lane.get('cleanup_supersedes_key'),
-        'lane_record': copy.deepcopy(lane),
-    }
-
-
 def append_governed_worktree_cleanup_intent(repo_root, lane, manifest_path=None):
-    return append_ledger_event(
-        repo_root,
-        'governed_worktree_cleanup_intent',
-        governed_worktree_cleanup_intent_payload(lane),
-        manifest_path,
-        idempotency_key=lane['cleanup_idempotency_key'],
+    return _governed_worktrees(repo_root).append_governed_worktree_cleanup_intent(
+        lane, manifest_path,
     )
 
 
 def governed_worktree_cleanup_ledger(repo_root, manifest_path=None):
-    if not ledger_events_dir(repo_root, manifest_path).exists():
-        return {
-            'events': [],
-            'intents': {},
-            'pending': {},
-            'successful': {},
-            'superseded': set(),
-        }
-    recover_ledger_tail(repo_root, manifest_path)
-    events = load_ledger_events(repo_root, manifest_path)
-    intents = {}
-    superseded = set()
-    successful = {}
-    for event in events:
-        payload = event.get('payload') or {}
-        key = payload.get('idempotency_key')
-        if not isinstance(key, str) or not key:
-            continue
-        if event.get('type') == 'governed_worktree_cleanup_intent':
-            intents[key] = event
-            prior = payload.get('supersedes')
-            if isinstance(prior, str) and prior:
-                superseded.add(prior)
-        elif event.get('type') in {'governed_worktree_reaped', 'governed_worktree_released'}:
-            successful[key] = event
-    pending = {
-        key: event for key, event in intents.items()
-        if key not in successful and key not in superseded
-    }
-    return {
-        'events': events,
-        'intents': intents,
-        'pending': pending,
-        'successful': successful,
-        'superseded': superseded,
-    }
+    return _governed_worktrees(repo_root).governed_worktree_cleanup_ledger(
+        manifest_path,
+    )
 
 
 def recover_governed_worktree_registry_from_ledger(
@@ -9941,370 +9535,81 @@ def recover_governed_worktree_registry_from_ledger(
     persist,
     manifest_path=None,
 ):
-    ledger = governed_worktree_cleanup_ledger(repo_root, manifest_path)
-    changed = False
-    by_id = {lane['id']: lane for lane in registry['lanes']}
-
-    for key, terminal in ledger['successful'].items():
-        payload = terminal.get('payload') or {}
-        lane_id = payload.get('lane')
-        generation = payload.get('generation_token')
-        lane = by_id.get(lane_id)
-        if (
-            lane is not None
-            and generation
-            and governed_worktree_generation_token(lane) == generation
-        ):
-            registry['lanes'].remove(lane)
-            by_id.pop(lane_id, None)
-            changed = True
-
-    pending_by_lane = {}
-    for key, intent in ledger['pending'].items():
-        payload = intent.get('payload') or {}
-        lane_id = payload.get('lane')
-        if isinstance(lane_id, str):
-            previous = pending_by_lane.get(lane_id)
-            if previous is None or intent.get('seq', 0) > previous[1].get('seq', 0):
-                pending_by_lane[lane_id] = (key, intent)
-
-    for lane_id, (key, intent) in pending_by_lane.items():
-        payload = intent.get('payload') or {}
-        recorded = payload.get('lane_record')
-        generation = payload.get('generation_token')
-        if not isinstance(recorded, dict) or not generation:
-            continue
-        lane = by_id.get(lane_id)
-        if lane is None:
-            restored = copy.deepcopy(recorded)
-            registry['lanes'].append(restored)
-            by_id[lane_id] = restored
-            changed = True
-            continue
-        if governed_worktree_generation_token(lane) != generation:
-            raise SyncwheelError(
-                f'governed worktree lane {lane_id!r} has a different generation than its '
-                'durable cleanup intent; inspect the lane before retrying cleanup'
-            )
-        current_key = lane.get('cleanup_idempotency_key')
-        if current_key == key:
-            continue
-        if current_key is not None:
-            if payload.get('supersedes') != current_key:
-                raise SyncwheelError(
-                    f'governed worktree lane {lane_id!r} has a cleanup operation that conflicts '
-                    'with its durable ledger intent'
-                )
-        lane.clear()
-        lane.update(copy.deepcopy(recorded))
-        changed = True
-
-    if changed:
-        persist()
-    return ledger
+    return _governed_worktrees(repo_root).recover_governed_worktree_registry_from_ledger(
+        registry, persist, manifest_path,
+    )
 
 
 def governed_worktree_release_terminal(repo_root, lane_id, manifest_path=None):
-    """Latest terminal any Syncwheel command wrote for this lane, release or reap."""
-    ledger = governed_worktree_cleanup_ledger(repo_root, manifest_path)
-    intent_keys = {
-        key for key, event in ledger['intents'].items()
-        if (event.get('payload') or {}).get('lane') == lane_id
-    }
-    for event in reversed(ledger['events']):
-        if event.get('type') not in GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES:
-            continue
-        payload = event.get('payload') or {}
-        if (
-            payload.get('lane') == lane_id
-            and payload.get('idempotency_key') in intent_keys
-        ):
-            return event
-    return None
-
-
-def governed_worktree_release_note_key(lane_id, terminal, reason):
-    payload = terminal.get('payload') or {}
-    material = {
-        'lane': lane_id,
-        'generation_token': payload.get('generation_token'),
-        'terminal_type': terminal.get('type'),
-        'terminal_key': payload.get('idempotency_key'),
-        'reason': reason,
-    }
-    digest = hashlib.sha256(
-        json.dumps(material, sort_keys=True, separators=(',', ':')).encode('utf-8')
-    ).hexdigest()
-    return f'governed-worktree-release-note:{digest}'
+    return _governed_worktrees(repo_root).governed_worktree_release_terminal(
+        lane_id, manifest_path,
+    )
 
 
 def append_governed_worktree_release_note(repo_root, lane_id, reason, terminal, manifest_path=None):
-    payload = terminal.get('payload') or {}
-    return append_ledger_event(
-        repo_root,
-        'governed_worktree_release_noted',
-        {
-            'lane': lane_id,
-            'reason': reason,
-            'terminal_type': terminal.get('type'),
-            'terminal_seq': terminal.get('seq'),
-            'terminal_reason': payload.get('reason'),
-            'generation_token': payload.get('generation_token'),
-            'branch': payload.get('branch'),
-            'path': payload.get('path'),
-            'recovery_ref': payload.get('recovery_ref'),
-        },
-        manifest_path,
-        idempotency_key=governed_worktree_release_note_key(lane_id, terminal, reason),
+    return _governed_worktrees(repo_root).append_governed_worktree_release_note(
+        lane_id, reason, terminal, manifest_path,
     )
 
 
 def ensure_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
-    current = ref_tip(repo_root, recovery_ref)
-    if current == tip:
-        return
-    if current is not None:
-        raise SyncwheelError(
-            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
-            f'points to {current} instead of {tip}'
-        )
-    result = git(repo_root, 'update-ref', recovery_ref, tip, ZERO_OBJECT_ID, check=False)
-    if result.returncode == 0:
-        return
-    current = ref_tip(repo_root, recovery_ref)
-    if current == tip:
-        return
-    if current is not None:
-        raise SyncwheelError(
-            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
-            f'points to {current} instead of {tip}'
-        )
-    raise SyncwheelError(
-        result.stderr.strip() or result.stdout.strip()
-        or f'could not create governed worktree recovery ref {recovery_ref}'
+    return _governed_worktrees(repo_root).ensure_governed_worktree_recovery_ref(
+        recovery_ref, tip,
     )
 
 
 def verify_governed_worktree_recovery_ref(repo_root, recovery_ref, tip):
-    current = ref_tip(repo_root, recovery_ref)
-    if current != tip:
-        actual = current or 'missing'
-        raise SyncwheelError(
-            f'governed worktree recovery_ref_moved: recovery ref {recovery_ref} '
-            f'points to {actual} instead of {tip}; restore the anchored tip before retrying cleanup'
-        )
+    return _governed_worktrees(repo_root).verify_governed_worktree_recovery_ref(
+        recovery_ref, tip,
+    )
 
 
 def governed_worktree_record_for_path(repo_root, path):
-    expected = Path(path).resolve(strict=False)
-    for worktree in get_worktrees(repo_root):
-        if worktree.get('path') and Path(worktree['path']).resolve(strict=False) == expected:
-            return worktree
-    return None
+    return _governed_worktrees(repo_root).governed_worktree_record_for_path(
+        path,
+    )
 
 
 def governed_worktree_admin_dir_for_path(repo_root, path):
-    expected_gitdir = (Path(path).resolve(strict=False) / '.git').resolve(strict=False)
-    worktrees_dir = git_common_dir(repo_root) / 'worktrees'
-    if not worktrees_dir.is_dir():
-        return None
-    matches = []
-    for admin_dir in sorted(item for item in worktrees_dir.iterdir() if item.is_dir()):
-        gitdir_path = admin_dir / 'gitdir'
-        try:
-            raw_gitdir = gitdir_path.read_text(encoding='utf-8').strip()
-        except OSError:
-            continue
-        candidate = Path(raw_gitdir)
-        if not candidate.is_absolute():
-            candidate = admin_dir / candidate
-        if candidate.resolve(strict=False) == expected_gitdir:
-            matches.append(admin_dir.resolve(strict=False))
-    return matches[0] if len(matches) == 1 else None
+    return _governed_worktrees(repo_root).governed_worktree_admin_dir_for_path(
+        path,
+    )
 
 
 def governed_worktree_registration_matches(repo_root, lane, path, admin_dir, lock_reason):
-    path = Path(path).resolve(strict=False)
-    admin_dir = Path(admin_dir).resolve(strict=False)
-    try:
-        raw_gitdir = (admin_dir / 'gitdir').read_text(encoding='utf-8').strip()
-        head = (admin_dir / 'HEAD').read_text(encoding='utf-8').strip()
-    except OSError:
-        return False
-    registered_gitdir = Path(raw_gitdir)
-    if not registered_gitdir.is_absolute():
-        registered_gitdir = admin_dir / registered_gitdir
-    if registered_gitdir.resolve(strict=False) != (path / '.git').resolve(strict=False):
-        return False
-    if head != f"ref: refs/heads/{lane['branch']}":
-        return False
-    worktree = governed_worktree_record_for_path(repo_root, path)
-    return bool(worktree and worktree.get('locked') == lock_reason)
+    return _governed_worktrees(repo_root).governed_worktree_registration_matches(
+        lane, path, admin_dir, lock_reason,
+    )
 
 
 def lock_governed_worktree_for_cleanup(repo_root, lane):
-    stored_admin = lane.get('cleanup_admin_dir')
-    if stored_admin:
-        path = Path(lane['path']).resolve(strict=False)
-        worktree = governed_worktree_record_for_path(repo_root, path)
-        admin_dir = Path(stored_admin).resolve(strict=False)
-        if not worktree and not admin_dir.exists() and not path.exists():
-            return {
-                'path': path,
-                'admin_dir': admin_dir,
-                'lock_reason': governed_worktree_cleanup_lock_reason(lane),
-                'registration_removed': True,
-            }, None
-    else:
-        worktree = find_worktree_record_for_branch(repo_root, lane['branch'])
-        if not worktree or not worktree.get('path'):
-            return None, None
-        path = Path(worktree['path']).resolve(strict=False)
-        admin_dir = governed_worktree_admin_dir_for_path(repo_root, path)
-    if not worktree:
-        return None, {
-            'code': 'registration_mismatch',
-            'remedy': 'inspect the recorded Git worktree registration before retrying cleanup',
-        }
-    lock_reason = governed_worktree_cleanup_lock_reason(lane)
-    locked = git(
-        repo_root,
-        'worktree',
-        'lock',
-        '--reason',
-        lock_reason,
-        str(path),
-        check=False,
-    )
-    refreshed = governed_worktree_record_for_path(repo_root, path)
-    if locked.returncode != 0 and not (refreshed and refreshed.get('locked') == lock_reason):
-        return None, {
-            'code': 'lane_in_use',
-            'remedy': 'retry after the process using the governed lane releases its Git worktree lock',
-        }
-    if admin_dir is None or not governed_worktree_registration_matches(
-        repo_root,
+    return _governed_worktrees(repo_root).lock_governed_worktree_for_cleanup(
         lane,
-        path,
-        admin_dir,
-        lock_reason,
-    ):
-        if refreshed and refreshed.get('locked') == lock_reason:
-            git(repo_root, 'worktree', 'unlock', str(path), check=False)
-        return None, {
-            'code': 'registration_mismatch',
-            'remedy': 'inspect the recorded Git worktree registration before retrying cleanup',
-        }
-    return {
-        'path': path,
-        'admin_dir': admin_dir,
-        'lock_reason': lock_reason,
-    }, None
+    )
 
 
 def unlock_governed_worktree_cleanup(repo_root, lock):
-    if not lock:
-        return
-    worktree = governed_worktree_record_for_path(repo_root, lock['path'])
-    if worktree and worktree.get('locked') == lock['lock_reason']:
-        git(repo_root, 'worktree', 'unlock', str(lock['path']), check=False)
+    return _governed_worktrees(repo_root).unlock_governed_worktree_cleanup(
+        lock,
+    )
 
 
 def governed_worktree_final_probe(path, anchored_tip, missing_at_classification):
-    path = Path(path).resolve(strict=False)
-    if missing_at_classification and path.exists():
-        return {
-            'code': 'path_reappeared',
-            'remedy': 'inspect the reappeared lane path, then retry its recorded worktree release',
-        }
-    if not path.exists():
-        return None
-    untracked = run(
-        ['git', '-C', str(path), 'ls-files', '--others', '--exclude-standard', '-z'],
-        check=False,
+    return _governed_worktrees(path).governed_worktree_final_probe(
+        path, anchored_tip, missing_at_classification,
     )
-    if untracked.returncode != 0:
-        return {
-            'code': 'unavailable',
-            'remedy': 'restore the worktree before retrying cleanup',
-        }
-    tracked = run(
-        ['git', '-C', str(path), 'diff-index', '--quiet', anchored_tip, '--'],
-        check=False,
-    )
-    if untracked.stdout or tracked.returncode != 0:
-        return {
-            'code': 'dirty',
-            'remedy': 'the worktree became dirty before removal; retain or commit its changes, then retry release',
-        }
-    return None
 
 
 def delete_governed_worktree_branch_with_anchor(repo_root, lane, tip):
-    recovery_ref = lane['recovery_ref']
-    branch_ref = f'refs/heads/{lane["branch"]}'
-    transaction = '\n'.join([
-        'start',
-        f'update {recovery_ref} {tip} {tip}',
-        f'delete {branch_ref} {tip}',
-        'prepare',
-        'commit',
-        '',
-    ])
-    deletion = git(
-        repo_root,
-        'update-ref',
-        '--stdin',
-        check=False,
-        input_text=transaction,
+    return _governed_worktrees(repo_root).delete_governed_worktree_branch_with_anchor(
+        lane, tip,
     )
-    committed = 'commit: ok' in {line.strip() for line in deletion.stdout.splitlines()}
-    if (
-        deletion.returncode == 0
-        and committed
-        and ref_tip(repo_root, recovery_ref) == tip
-        and ref_tip(repo_root, lane['branch']) is None
-    ):
-        return True, None
-    recovery_tip = ref_tip(repo_root, recovery_ref)
-    branch_tip = ref_tip(repo_root, lane['branch'])
-    if recovery_tip != tip:
-        actual = recovery_tip or 'missing'
-        return False, {
-            'code': 'recovery_ref_moved',
-            'remedy': (
-                f'restore recovery ref {recovery_ref} from {actual} to anchored tip {tip}, '
-                'then retry cleanup'
-            ),
-        }
-    if branch_tip != tip:
-        return False, {
-            'code': 'branch_advanced',
-            'remedy': 'inspect the retained lane branch; its recovery ref is immutable',
-        }
-    detail = deletion.stderr.strip() or deletion.stdout.strip()
-    if deletion.returncode == 0 and not committed:
-        detail = 'ref transaction did not report commit: ok'
-    return False, {
-        'code': 'branch_delete_failed',
-        'remedy': detail or 'retry cleanup',
-    }
 
 
 def governed_worktree_cleanup_candidates(repo_root, manifest, registry=None):
-    if registry is None:
-        registry = load_governed_worktree_registry(repo_root)[0]
-    candidates = []
-    for lane in registry['lanes']:
-        status = governed_worktree_lane_status(repo_root, manifest, lane)
-        if lane['state'] == 'active' and status['code'] != 'expired':
-            continue
-        if lane['state'] == 'reaped' and lane.get('pending_reason') != 'ledger_pending':
-            continue
-        if lane['state'] not in {'active', 'captured_pending_cleanup', 'reaped'}:
-            continue
-        candidates.append(status)
-    return candidates
+    return _governed_worktrees(repo_root).governed_worktree_cleanup_candidates(
+        manifest, registry,
+    )
 
 
 def reap_governed_worktree_lane(
@@ -10316,349 +9621,21 @@ def reap_governed_worktree_lane(
     event_type='governed_worktree_reaped',
     event_reason='expired',
 ):
-    if lane['state'] == 'reaped' and lane.get('pending_reason') == 'ledger_pending':
-        return True, governed_worktree_lane_status(repo_root, manifest, lane)
-
-    status = governed_worktree_lane_status(repo_root, manifest, lane)
-    lock, lock_failure = lock_governed_worktree_for_cleanup(repo_root, lane)
-    if lock_failure:
-        return False, {**status, **lock_failure}
-    governed_worktree_cleanup_checkpoint('after_git_worktree_lock')
-    path = lock['path'] if lock else Path(lane['path']).resolve(strict=False)
-    if lock and Path(lane['path']).resolve(strict=False) != path:
-        lane['path'] = str(path)
-
-    def fail_before_ref_change(code, remedy):
-        unlock_governed_worktree_cleanup(repo_root, lock)
-        return False, {**status, 'code': code, 'remedy': remedy}
-
-    path_exists = path.exists()
-    if path_exists and not path_is_relative_to(path, governed_worktree_root(repo_root, manifest)):
-        return fail_before_ref_change(
-            'outside_root',
-            'inspect and recover this lane; Syncwheel will not move or remove it',
-        )
-    if path_exists and not lock:
-        return fail_before_ref_change(
-            'unregistered_worktree',
-            'inspect the path and branch; Syncwheel will not remove an unregistered worktree',
-        )
-    if lane['state'] == 'active' and event_type != 'governed_worktree_released':
-        expired = governed_worktree_lane_lease_expired(
-            lane,
-            datetime.datetime.now(datetime.timezone.utc),
-        )
-        abandoned_missing = not path_exists and governed_worktree_owner_is_dead(lane['owner'])
-        if not expired and not abandoned_missing:
-            return fail_before_ref_change(status['code'], status['remedy'])
-    current_tip = ref_tip(repo_root, lane['branch'])
-    post_ref_cleanup = bool(
-        current_tip is None
-        and lane.get('cleanup_tip')
-        and lane.get('recovery_ref')
+    return _governed_worktrees(repo_root).reap_governed_worktree_lane(
+        manifest, lane, persist, manifest_path, event_type, event_reason,
     )
-    if path_exists and post_ref_cleanup:
-        retry_probe = governed_worktree_final_probe(path, lane['cleanup_tip'], False)
-        if retry_probe:
-            lane['state'] = 'captured_pending_cleanup'
-            lane['pending_reason'] = 'worktree_remove_failed'
-            lane['cleanup_failure'] = retry_probe['code']
-            if persist:
-                persist()
-            return False, {**status, **retry_probe}
-    elif path_exists:
-        dirty = local_worktree_status(path)
-        if dirty is None:
-            return fail_before_ref_change(
-                'unavailable',
-                'restore the worktree before attempting cleanup',
-            )
-        if dirty:
-            return fail_before_ref_change(
-                'dirty',
-                governed_lane_remedy(manifest, lane, commit_first=True),
-            )
-    current = run(['git', 'rev-parse', '--show-toplevel'], check=False)
-    current_path = Path(current.stdout.strip()).resolve(strict=False) if current.returncode == 0 else None
-    if current_path == path:
-        return fail_before_ref_change(
-            'current_directory',
-            'leave the lane directory, then run a Syncwheel mutation again',
-        )
-
-    branch_advanced_pending = lane.get('pending_reason') == 'branch_advanced'
-    retrying_advanced = bool(
-        branch_advanced_pending
-        and current_tip
-        and lane.get('cleanup_tip')
-        and lane.get('recovery_ref')
-        and lane.get('cleanup_event_type')
-    )
-    if branch_advanced_pending and not retrying_advanced:
-        return False, {
-            **status,
-            'code': 'branch_advanced',
-            'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
-        }
-    if retrying_advanced and current_tip:
-        superseded_key = lane.get('cleanup_idempotency_key')
-        superseded_event_type = lane.get('cleanup_event_type')
-        lane.pop('cleanup_tip', None)
-        lane.pop('branch_delete_tip', None)
-        lane.pop('recovery_ref', None)
-        lane.pop('cleanup_idempotency_key', None)
-        lane.pop('cleanup_operation_token', None)
-        if (
-            event_type == 'governed_worktree_released'
-            and superseded_event_type != event_type
-        ):
-            lane.pop('cleanup_event_type', None)
-            lane.pop('cleanup_event_reason', None)
-        if superseded_key:
-            lane['cleanup_supersedes_key'] = superseded_key
-
-    anchored_tip = governed_worktree_cleanup_tip(repo_root, lane)
-    if lane.get('cleanup_tip') and current_tip not in {None, lane['cleanup_tip']}:
-        lane['state'] = 'captured_pending_cleanup'
-        lane['pending_reason'] = 'branch_advanced'
-        lane['cleanup_admin_dir'] = str(lock['admin_dir']) if lock else None
-        lane['cleanup_lock_reason'] = lock['lock_reason'] if lock else None
-        if persist:
-            persist()
-        return False, {
-            **status,
-            'code': 'branch_advanced',
-            'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
-        }
-
-    lane['state'] = 'captured_pending_cleanup'
-    lane['pending_reason'] = 'reaping'
-    if lock:
-        lane['cleanup_admin_dir'] = str(lock['admin_dir'])
-        lane['cleanup_lock_reason'] = lock['lock_reason']
-    if anchored_tip:
-        lane['cleanup_tip'] = anchored_tip
-        lane['recovery_ref'] = lane.get('recovery_ref') or governed_worktree_recovery_ref(lane)
-    prepare_governed_worktree_cleanup(lane, event_type, event_reason, anchored_tip)
-    governed_worktree_cleanup_checkpoint('before_cleanup_intent')
-    append_governed_worktree_cleanup_intent(repo_root, lane, manifest_path)
-    if persist:
-        persist()
-    governed_worktree_cleanup_checkpoint('after_cleanup_intent')
-
-    if anchored_tip:
-        try:
-            ensure_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
-            verify_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
-        except SyncwheelError:
-            lane['pending_reason'] = 'recovery_ref_moved'
-            if persist:
-                persist()
-            raise
-        governed_worktree_cleanup_checkpoint('after_recovery_anchor')
-        current_tip = ref_tip(repo_root, lane['branch'])
-        if current_tip is not None:
-            if current_tip != anchored_tip:
-                lane['pending_reason'] = 'branch_advanced'
-                if persist:
-                    persist()
-                return False, {
-                    **status,
-                    'code': 'branch_advanced',
-                    'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
-                }
-            deleted, delete_detail = delete_governed_worktree_branch_with_anchor(
-                repo_root,
-                lane,
-                anchored_tip,
-            )
-            if not deleted:
-                lane['pending_reason'] = delete_detail['code']
-                lane['branch_delete_tip'] = anchored_tip
-                if persist:
-                    persist()
-                if delete_detail['code'] == 'branch_advanced':
-                    delete_detail['remedy'] = governed_worktree_pending_remedy(manifest, lane, manifest_path)
-                return False, {**status, **delete_detail}
-            governed_worktree_cleanup_checkpoint('after_ref_transaction')
-        else:
-            try:
-                verify_governed_worktree_recovery_ref(repo_root, lane['recovery_ref'], anchored_tip)
-            except SyncwheelError:
-                lane['pending_reason'] = 'recovery_ref_moved'
-                if persist:
-                    persist()
-                raise
-
-    if lock and not lock.get('registration_removed') and not governed_worktree_registration_matches(
-        repo_root,
-        lane,
-        path,
-        lock['admin_dir'],
-        lock['lock_reason'],
-    ):
-        lane['pending_reason'] = 'worktree_remove_failed'
-        lane['cleanup_failure'] = 'registration_mismatch'
-        if persist:
-            persist()
-        return False, {
-            **status,
-            'code': 'registration_mismatch',
-            'remedy': 'the locked Git worktree registration changed; inspect it before retrying release',
-        }
-
-    final_probe = governed_worktree_final_probe(path, anchored_tip, not path_exists)
-    if final_probe:
-        lane['pending_reason'] = 'worktree_remove_failed'
-        lane['cleanup_failure'] = final_probe['code']
-        if persist:
-            persist()
-        return False, {**status, **final_probe}
-
-    if lock and not lock.get('registration_removed'):
-        governed_worktree_cleanup_checkpoint('before_worktree_remove')
-        try:
-            removal = run(
-                ['git', 'worktree', 'remove', '--force', '--force', str(path)],
-                cwd=repo_root,
-                check=False,
-            )
-        except SyncwheelError:
-            lane['pending_reason'] = 'worktree_remove_failed'
-            lane['cleanup_failure'] = 'worktree_remove_failed'
-            if persist:
-                persist()
-            raise
-        if removal.returncode != 0:
-            lane['pending_reason'] = 'worktree_remove_failed'
-            lane['cleanup_failure'] = 'worktree_remove_failed'
-            if persist:
-                persist()
-            raise SyncwheelError(
-                removal.stderr.strip() or removal.stdout.strip()
-                or f'could not remove governed worktree {path}'
-            )
-        governed_worktree_cleanup_checkpoint('after_worktree_remove')
-        if Path(lock['admin_dir']).exists():
-            lane['pending_reason'] = 'worktree_remove_failed'
-            lane['cleanup_failure'] = 'registration_mismatch'
-            if persist:
-                persist()
-            return False, {
-                **status,
-                'code': 'registration_mismatch',
-                'remedy': 'Git retained the targeted worktree registration; inspect it before retrying release',
-            }
-
-    lane['state'] = 'reaped'
-    lane['reaped_at'] = iso_utc_now()
-    lane['pending_reason'] = 'ledger_pending'
-    if persist:
-        persist()
-    return True, governed_worktree_lane_status(repo_root, manifest, lane)
-
-
-def governed_worktree_reaped_payload(lane, reason='expired'):
-    return {
-        'lane': lane['id'], 'branch': lane['branch'], 'reason': reason,
-        'recovery_ref': lane.get('recovery_ref'), 'target': lane.get('target'),
-        'full': lane['full'],
-        'generation_token': governed_worktree_generation_token(lane),
-        'operation_token': lane.get('cleanup_operation_token'),
-        'cleanup_tip': lane.get('cleanup_tip'),
-        'path': lane.get('path'),
-    }
 
 
 def append_governed_worktree_cleanup_event(repo_root, lane, manifest_path=None):
-    event_type = lane.get('cleanup_event_type') or 'governed_worktree_reaped'
-    reason = lane.get('cleanup_event_reason') or 'expired'
-    key = lane.get('cleanup_idempotency_key') or governed_worktree_cleanup_key(lane)
-    lane['cleanup_idempotency_key'] = key
-    return append_ledger_event(
-        repo_root,
-        event_type,
-        governed_worktree_reaped_payload(lane, reason),
-        manifest_path,
-        idempotency_key=key,
+    return _governed_worktrees(repo_root).append_governed_worktree_cleanup_event(
+        lane, manifest_path,
     )
 
 
-def completed_governed_worktree_lane(lane):
-    completed = dict(lane)
-    completed.pop('pending_reason', None)
-    completed.pop('branch_delete_tip', None)
-    completed.pop('cleanup_event_type', None)
-    completed.pop('cleanup_event_reason', None)
-    completed.pop('cleanup_idempotency_key', None)
-    completed.pop('cleanup_operation_token', None)
-    completed.pop('cleanup_supersedes_key', None)
-    completed.pop('cleanup_tip', None)
-    completed.pop('cleanup_admin_dir', None)
-    completed.pop('cleanup_lock_reason', None)
-    completed.pop('cleanup_failure', None)
-    return completed
-
-
 def reconcile_governed_worktrees(repo_root, manifest, manifest_path=None, candidate_ids=None):
-    with governed_worktree_registry_lock(repo_root):
-        prune_governed_worktree_stale_locks(repo_root, manifest_path)
-        registry, _ = load_governed_worktree_registry(repo_root)
-        persist = governed_worktree_registry_cas_persister(repo_root, registry)
-        recover_governed_worktree_registry_from_ledger(
-            repo_root,
-            registry,
-            persist,
-            manifest_path,
-        )
-        paths_updated = False
-        for lane in registry['lanes']:
-            status = governed_worktree_lane_status(repo_root, manifest, lane)
-            if (
-                status.get('path_moved')
-                and (candidate_ids is None or lane['id'] in candidate_ids)
-            ):
-                lane['path'] = status['path']
-                paths_updated = True
-        if paths_updated:
-            persist()
-        if candidate_ids is None:
-            candidates = governed_worktree_cleanup_candidates(repo_root, manifest, registry)
-            selected = {item['id'] for item in candidates}
-        else:
-            selected = set(candidate_ids)
-        reaped = []
-        failures = []
-        for lane in list(registry['lanes']):
-            if lane['id'] not in selected:
-                continue
-            completed, detail = reap_governed_worktree_lane(
-                repo_root,
-                manifest,
-                lane,
-                persist=persist,
-                manifest_path=manifest_path,
-            )
-            if not completed:
-                failures.append({
-                    'id': lane['id'],
-                    'code': detail.get('code') or 'lane_generation_changed',
-                })
-                continue
-            try:
-                governed_worktree_cleanup_checkpoint('before_terminal_ledger')
-                append_governed_worktree_cleanup_event(repo_root, lane, manifest_path)
-                governed_worktree_cleanup_checkpoint('after_terminal_ledger')
-            except Exception:
-                lane['state'] = 'reaped'
-                lane['pending_reason'] = 'ledger_pending'
-                persist()
-                raise
-            registry['lanes'].remove(lane)
-            persist()
-            governed_worktree_cleanup_checkpoint('after_cleanup_record_removed')
-            reaped.append({'id': lane['id']})
-        return {'reaped': reaped, 'failures': failures}
+    return _governed_worktrees(repo_root).reconcile_governed_worktrees(
+        manifest, manifest_path, candidate_ids,
+    )
 
 
 def coordination_profile(repo_root):
@@ -15163,18 +14140,6 @@ def apply_pending_coordination_merge(
     return updated
 
 
-def parse_coordination_timestamp(value):
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
-    return parsed.astimezone(datetime.timezone.utc)
-
-
 def local_worktree_status(path):
     result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
     if result.returncode != 0:
@@ -15522,10 +14487,6 @@ def command_handoff(args):
 def default_worktree_path(repo_root, branch):
     safe = branch.replace('/', '-').replace('\\', '-')
     return repo_root.parent / f'{repo_root.name}-wt-{safe}'
-
-
-def effective_worktree_root(manifest, override=None):
-    return override or syncwheel_worktree_root(manifest)
 
 
 def configured_worktree_path(repo_root, branch, worktree_root):
@@ -18921,9 +17882,9 @@ def command_worktree_release(args):
 
 
 def governed_worktree_commit_set(repo_root, lane):
-    if not branch_exists(repo_root, lane['branch']):
-        return set()
-    return set(rev_list(repo_root, f"{lane['base']}..{lane['branch']}"))
+    return _governed_worktrees(repo_root).governed_worktree_commit_set(
+        lane,
+    )
 
 
 def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, capture=False):
@@ -19015,39 +17976,9 @@ def verify_retained_captured_worktrees(repo_root, manifest, args, *, after_captu
 
 
 def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest_path=None):
-    stack = require_stack(manifest, stack_id)
-    owned = {commit_full_sha(repo_root, commit) for commit in stack['commits']}
-    with governed_worktree_registry_lock(repo_root):
-        registry, _ = load_governed_worktree_registry(repo_root)
-        persist = governed_worktree_registry_cas_persister(repo_root, registry)
-        recover_governed_worktree_registry_from_ledger(
-            repo_root,
-            registry,
-            persist,
-            manifest_path,
-        )
-        captured = []
-        for lane in registry['lanes']:
-            if lane['state'] != 'active' or lane.get('target') not in {None, stack_id}:
-                continue
-            commits = governed_worktree_commit_set(repo_root, lane)
-            if not commits or not commits.issubset(owned):
-                continue
-            lane['state'] = 'captured_pending_cleanup'
-            lane['captured_at'] = iso_utc_now()
-            reaped, detail = reap_governed_worktree_lane(
-                repo_root,
-                manifest,
-                lane,
-                persist=persist,
-                manifest_path=manifest_path,
-            )
-            captured.append({
-                'id': lane['id'], 'state': lane['state'], 'detail': detail['code'], 'reaped': reaped,
-            })
-        if captured:
-            persist()
-        return captured
+    return _governed_worktrees(repo_root).capture_governed_worktrees_for_stack(
+        manifest, stack_id, manifest_path,
+    )
 
 
 def command_use(args):
@@ -32571,6 +31502,97 @@ class _ReplayRepository:
 def _replay_engine(repo_root):
     repository = _ReplayRepository(repo_root)
     return ReplayEngine(repository, repository, repository)
+
+
+class _GovernedWorktreeRepository:
+    """Adapt only the named worktree transport, storage and event operations."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def git(self, *args, **kwargs):
+        return git(*args, **kwargs)
+
+    def run(self, *args, **kwargs):
+        return run(*args, **kwargs)
+
+    def git_common_dir(self, *args, **kwargs):
+        return git_common_dir(*args, **kwargs)
+
+    def get_worktrees(self, *args, **kwargs):
+        return get_worktrees(*args, **kwargs)
+
+    def find_worktree_record_for_branch(self, *args, **kwargs):
+        return find_worktree_record_for_branch(*args, **kwargs)
+
+    def local_worktree_status(self, *args, **kwargs):
+        return local_worktree_status(*args, **kwargs)
+
+    def ref_tip(self, *args, **kwargs):
+        return ref_tip(*args, **kwargs)
+
+    def branch_exists(self, *args, **kwargs):
+        return branch_exists(*args, **kwargs)
+
+    def commit_full_sha(self, *args, **kwargs):
+        return commit_full_sha(*args, **kwargs)
+
+    def rev_list(self, *args, **kwargs):
+        return rev_list(*args, **kwargs)
+
+    def append_ledger_event(self, *args, **kwargs):
+        return append_ledger_event(*args, **kwargs)
+
+    def ledger_events_dir(self, *args, **kwargs):
+        return ledger_events_dir(*args, **kwargs)
+
+    def load_ledger_events(self, *args, **kwargs):
+        return load_ledger_events(*args, **kwargs)
+
+    def recover_ledger_tail(self, *args, **kwargs):
+        return recover_ledger_tail(*args, **kwargs)
+
+    def load_json_file(self, *args, **kwargs):
+        return load_json_file(*args, **kwargs)
+
+    def _write_all(self, *args, **kwargs):
+        return _write_all(*args, **kwargs)
+
+    def fsync_directory_path(self, *args, **kwargs):
+        return fsync_directory_path(*args, **kwargs)
+
+    def exclusive_metadata_lock(self, *args, **kwargs):
+        return exclusive_metadata_lock(*args, **kwargs)
+
+    def coordination_publication_lock_path(self, *args, **kwargs):
+        return coordination_publication_lock_path(*args, **kwargs)
+
+    def governed_lane_remedy(self, *args, **kwargs):
+        return governed_lane_remedy(*args, **kwargs)
+
+    def governed_worktree_registry_io_checkpoint(self, *args, **kwargs):
+        return governed_worktree_registry_io_checkpoint(*args, **kwargs)
+
+    def governed_worktree_cleanup_checkpoint(self, *args, **kwargs):
+        return governed_worktree_cleanup_checkpoint(*args, **kwargs)
+
+
+    def delete_governed_worktree_branch_with_anchor(self, *args, **kwargs):
+        return delete_governed_worktree_branch_with_anchor(*args, **kwargs)
+
+    def ensure_governed_worktree_recovery_ref(self, *args, **kwargs):
+        return ensure_governed_worktree_recovery_ref(*args, **kwargs)
+
+    def governed_worktree_cleanup_candidates(self, *args, **kwargs):
+        return governed_worktree_cleanup_candidates(*args, **kwargs)
+
+    def append_governed_worktree_cleanup_event(self, *args, **kwargs):
+        return append_governed_worktree_cleanup_event(*args, **kwargs)
+
+
+def _governed_worktrees(repo_root):
+    repository = _GovernedWorktreeRepository(repo_root)
+    return GovernedWorktrees(repository, repository, repository, repository)
 
 
 if __name__ == '__main__':

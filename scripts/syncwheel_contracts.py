@@ -3,6 +3,8 @@
 Stable values used by both CLI options and their domain validators.
 """
 
+import datetime
+
 from syncwheel_manifest import AUTHORITY_CLASS_SOURCE_CHANGE, AUTHORITY_CLASS_RUNTIME_CHANGE
 
 COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
@@ -29,3 +31,23 @@ GITHUB_PR_MERGE_CHECKS = {'all', 'none'}
 PROFILE_FILENAME = 'profile.local.json'
 
 ZERO_OBJECT_ID = '0' * 40
+
+
+def iso_utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
+
+
+def parse_coordination_timestamp(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+    return parsed.astimezone(datetime.timezone.utc)
+
+
+def syncwheel_timestamp():
+    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
