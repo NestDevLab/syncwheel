@@ -37,7 +37,8 @@
       "concurrency-guidance",
       "pure-cherry-preview",
       "mgt0249-maintenance-policy",
-      "local-replay-guarded"
+      "local-replay-guarded",
+      "local-replay-delivery"
     ],
     "strategy": "cherry-pick"
   },
@@ -164,6 +165,49 @@
         "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5"
       ],
       "id": "local-replay-guarded",
+      "integration_branch": "main-integration",
+      "meta": {},
+      "publication": {
+        "enabled": true
+      },
+      "state": "published",
+      "target_branch": "main",
+      "target_remote": "origin"
+    },
+    {
+      "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
+      "branch": "pr/local-replay-delivery",
+      "commits": [
+        "d08ee3c49ebf9955573d49565c0dcb348c857211",
+        "bcebb908e60054dd9071aaf95e8876c67eb5578c",
+        "e63527de261b64ae82dfba5c0f30ba177cf3b364",
+        "2a0b7ef1c185dde248bf6886f36ba3137d15eba0",
+        "aee2e8e080367c4b8ac52dad5bea61f2009e3b3c",
+        "ddba601807047d7329ac9a48665afaded3742c16",
+        "9e5f7b3194dd816e82cc63a013932bbb210aca74",
+        "4507d771385e61255bf7f2cd738cb783c60d56cb",
+        "9c9da54eefd8c2e0cd7b55ccee45d1ca09eb0235",
+        "e56474d5fff6702af50d6c5a26d1c0445c24acf0",
+        "d70dad8ba94438dbe8962cfc4bef713051bd143c",
+        "02bf973efd156dc8737ae2ff117e279abe8ebd12",
+        "6c9479015cea170ed5e28a44416d0960f18f6adf",
+        "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5",
+        "5319870403c9c23e7ad1f85a840e5107f6cbe3c7",
+        "54823aab64190db066f501b998839e52e9e5e944",
+        "918f4be221b603916056c359af0a66aa6ccc9cf5",
+        "edc6446f4d4c2ab461168bcb7d11880ff9ed5465",
+        "5ab4946fb594c453ee54dc72d5fcd511f97a2385",
+        "c097f039118696a22b2dcf759a35001d1b25ad18",
+        "6cb121fe3694d151cf32d59a50b5d0ccbbdda45a",
+        "0593da73388f615000cebd52f633780a3f4af5f9",
+        "706616c30da1ca30bb859aa1837c2d05714f9f95",
+        "3da38c9f22e16c6602a36babdf5012b55a17e881",
+        "feff6d8c7ff6d184d9784af51ad3bb16d8aa96b4",
+        "27a6a3a8c9d15a007695e17543880f5e0470cc88",
+        "c5a4f631a573eacb29796d2a0229f1a62bc0f9f7",
+        "1c297abf9b44b5db0b917b16a60f6dc149884754"
+      ],
+      "id": "local-replay-delivery",
       "integration_branch": "main-integration",
       "meta": {},
       "publication": {
