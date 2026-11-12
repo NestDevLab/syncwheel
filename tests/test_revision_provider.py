@@ -3139,7 +3139,7 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             fixture.repo, historical, replacement, observation
         ))
         with mock.patch.object(
-            SYNCWHEEL, 'integration_reconciliation_proof',
+            SYNCWHEEL.IntegrationHistory, 'integration_reconciliation_proof', autospec=True,
             side_effect=AssertionError('published derived history needs no replay'),
         ):
             self.assertEqual(
@@ -3164,10 +3164,10 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             for call in observed_git.call_args_list
         ))
         with mock.patch.object(
-            SYNCWHEEL, 'observe_published_integration_tip',
+            SYNCWHEEL.ProjectionService, 'observe_published_integration_tip', autospec=True,
             return_value={'status': 'stale'},
         ), mock.patch.object(
-            SYNCWHEEL, 'integration_reconciliation_historical_derived',
+            SYNCWHEEL.IntegrationHistory, 'integration_reconciliation_historical_derived', autospec=True,
             side_effect=AssertionError('stale observation cannot authenticate history'),
         ):
             self.assertEqual(

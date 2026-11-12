@@ -174,7 +174,7 @@ def test_a14_refuses_dirt_added_after_reset_destination_preflight():
         ) = _fixture(case, "a14-reset-destination-dirt")
         remote_before = case.a14_remote_snapshot(fixture)
         clean_at_entry = not case.git(target, "status", "--porcelain").stdout
-        original_plan = syncwheel.plan_published_integration_tip_reuse
+        original_plan = syncwheel.ProjectionService.plan_published_integration_tip_reuse
         injected = []
 
         def inject_after_preflight(*args, **kwargs):
@@ -193,8 +193,8 @@ def test_a14_refuses_dirt_added_after_reset_destination_preflight():
         stdout = io.StringIO()
         stderr = io.StringIO()
         with mock.patch.object(
-            syncwheel,
-            "plan_published_integration_tip_reuse",
+            syncwheel.ProjectionService,
+            "plan_published_integration_tip_reuse", autospec=True,
             side_effect=inject_after_preflight,
         ):
             try:
