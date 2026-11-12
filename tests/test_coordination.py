@@ -5543,6 +5543,54 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(module.load_ledger_events(repo), events)
         self.assertEqual(self.git(repo, 'show-ref').stdout, refs)
 
+    def test_bounded_delivery_preserves_foreign_authorization_records(self):
+        repo, source, module, _ = self.declaration_fixture('bounded-auth-cleanup')
+        directory = module.ref_auth_dir(repo)
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        for nonce, pid in [('f' * 64, 2147483647), ('e' * 64, os.getpid())]:
+            module.atomic_write_private_json(directory / nonce, {
+                'nonce': nonce, 'pid': pid, 'pidStart': 'foreign-process-epoch',
+                'expiresAt': 0, 'remaining': [], 'operation': 'syncwheel',
+            })
+        malformed = directory / 'foreign-malformed'
+        malformed.write_text('{invalid')
+        stale = time.time() - module.SYNCWHEEL_REF_AUTH_TTL_SECONDS - 5
+        os.utime(malformed, (stale, stale))
+        preserved = {p: (p.read_bytes(), p.stat()) for p in directory.iterdir()}
+        events = module.ref_auth_events_path(repo)
+        before_events = events.read_bytes() if events.exists() else None
+        def assert_preserved():
+            for path, (payload, identity) in preserved.items():
+                current = path.stat()
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual((current.st_dev, current.st_ino, current.st_mode, current.st_mtime_ns),
+                                 (identity.st_dev, identity.st_ino, identity.st_mode, identity.st_mtime_ns))
+            self.assertEqual(events.read_bytes() if events.exists() else None, before_events)
+        own_nonce = module.authorize_ref_move(repo)
+        module.clear_ref_authorizations(repo, only_current_process=True)
+        self.assertFalse((directory / own_nonce).exists())
+        assert_preserved()
+        self.run_cli(repo, 'repo', 'tracking', 'status', '--json')
+        assert_preserved()
+        origin = self.create_remote('bounded-object-input')
+        writer = self.clone(origin, 'bounded-object-writer')
+        imported = self.commit_on_branch(writer, 'scratch/object-input', 'object-input.txt')
+        self.git(repo, 'cat-file', '-e', imported, expected=1)
+        metadata = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        refs = self.git(repo, 'show-ref').stdout
+        self.run_cli(repo, 'int', 'git', '--', '-c', 'fetch.prune=false', '-c', 'fetch.pruneTags=false',
+                     '-c', 'gc.auto=0', '-c', 'maintenance.auto=false', 'fetch', '--no-tags',
+                     '--no-write-fetch-head', '--no-recurse-submodules', '--no-prune',
+                     '--no-auto-maintenance', '--keep', str(writer), imported,
+                     extra_env={'GIT_ALLOW_PROTOCOL': 'file', 'GIT_OPTIONAL_LOCKS': '0'})
+        self.git(repo, 'cat-file', '-e', imported)
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), metadata[0])
+        self.assertEqual((repo / '.git/index').read_bytes(), metadata[1])
+        self.assertEqual(self.git(repo, 'show-ref').stdout, refs)
+        assert_preserved()
+        self.run_cli(repo, 'stack', 'create', 'bounded-auth', source, '--preserve-lanes')
+        assert_preserved()
+
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
         repo = self.clone(origin, 'disabled-draft')

@@ -1222,13 +1222,15 @@ def discard_stale_ref_authorization(repo_root, path, now):
     return True
 
 
-def clear_ref_authorizations(repo_root):
+def clear_ref_authorizations(repo_root, *, only_current_process=False):
     owner_pid = os.getpid()
     owner_start = process_start_identity(owner_pid)
     now = time.time()
     directory = ref_auth_dir(repo_root)
     if directory.exists():
         for path in directory.iterdir():
+            if only_current_process and path.is_symlink():
+                continue
             try:
                 payload = json.loads(path.read_text())
                 nonce_pid = int(payload['pid'])
@@ -1240,14 +1242,19 @@ def clear_ref_authorizations(repo_root):
                 ):
                     raise ValueError('invalid ref authorization owner')
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                discard_stale_ref_authorization(repo_root, path, now)
+                if not only_current_process:
+                    discard_stale_ref_authorization(repo_root, path, now)
                 continue
-            current_start = process_start_identity(nonce_pid)
             owned = (
                 nonce_pid == owner_pid
                 and owner_start is not None
                 and nonce_start == owner_start
             )
+            if only_current_process:
+                if owned and payload.get('nonce') == path.name:
+                    path.unlink(missing_ok=True)
+                continue
+            current_start = process_start_identity(nonce_pid)
             owner_is_gone = not process_is_alive(nonce_pid)
             owner_was_recycled = (
                 current_start is not None and current_start != nonce_start
@@ -36947,7 +36954,12 @@ def main():
             else:
                 os.environ['GIT_OPTIONAL_LOCKS'] = optional_lock_setting
         if SYNCWHEEL_REF_AUTH_REPO:
-            clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
+            scoped_cleanup = (
+                not syncwheel_mutation_requested(args)
+                or args.func == command_int_git
+                or (args.func == command_stack_create and bool(getattr(args, 'preserve_lanes', False)))
+            )
+            clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO, only_current_process=scoped_cleanup)
         SYNCWHEEL_REF_AUTH_REPO = None
 
 

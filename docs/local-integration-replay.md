@@ -143,3 +143,9 @@ Ref-only materialization uses the same read-only checkout verification.
 Terminal declaration recovery checks the manifest image and index permissions
 against its original journal. Declaration startup leaves pending control intents
 to their owners and checks them under the metadata lock.
+
+Read-only commands, `int git` and lane-preserving declarations limit exit-time
+authorization cleanup to the current process identity and matching nonce.
+Foreign, malformed and recycled-process records remain available to their
+separate maintenance lifecycle. Local object acquisition includes the current
+process's transient authorization creation and cleanup alongside its Git objects.
