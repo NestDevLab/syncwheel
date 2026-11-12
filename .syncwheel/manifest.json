@@ -35,7 +35,8 @@
       "prepared-journal-recovery",
       "selective-coordination-projection",
       "concurrency-guidance",
-      "pure-cherry-preview"
+      "pure-cherry-preview",
+      "mgt0249-maintenance-policy"
     ],
     "strategy": "cherry-pick"
   },
@@ -123,6 +124,24 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "mgt0249-maintenance-policy",
+      "branch": "pr/mgt0249-maintenance-policy",
+      "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "a2ebfd90fafef95562f59d2e4fb8c393317991a9"
+      ],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
