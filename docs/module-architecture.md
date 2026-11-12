@@ -21,7 +21,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_stacks` | Stack creation, close/archive, draft promotion, rebuild and push commands | Selected manifest inputs; composed coordination/replay/worktree services; explicit Git/control/ledger/projection ports |
 | `syncwheel_revision_backend` | Delivery/journal revision transactions, recovery and index leases | Explicit repository, manifest, ledger, guard and provenance capabilities; domain service factories |
 | `syncwheel_files` | Durable byte writes and directory fsync | Standard library |
-| `syncwheel_provenance` | Derived projection identity data | Shared errors; standard library |
+| `syncwheel_provenance` | Derived identity, durable provenance store and override/reset policy | Explicit Git observations and coordination-state evidence |
 | `syncwheel_replay` | Mode selection, replay planning/execution, product projections | Separate Git, resolution and checkout-lease ports |
 | `syncwheel_worktrees` | Registry CAS, lifecycle recovery, capture and retirement | Git, lifecycle ledger, durable storage and phase observer ports |
 | `syncwheel_cli` | Argument grammar and command behavior descriptions | Schema vocabulary; named handler registry |
