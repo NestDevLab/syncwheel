@@ -51,3 +51,6 @@ def parse_coordination_timestamp(value):
 
 def syncwheel_timestamp():
     return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+
+
+MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'

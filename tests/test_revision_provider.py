@@ -751,12 +751,7 @@ class RevisionProviderProtocolTest(unittest.TestCase):
         self.assertEqual(response['unmappedIntegrationCommits'], ['4' * 40])
 
     def test_provider_backend_has_no_worktree_materialization_path(self):
-        module_source = CLI.read_text()
-        class_start = module_source.index('class SyncwheelRevisionBackend:')
-        class_end = module_source.index('\ndef command_revision_provider', class_start)
-        source = module_source[
-            class_start:class_end
-        ]
+        source = (SCRIPTS / 'syncwheel_revision_backend.py').read_text()
         self.assertNotIn('materialize_new_stack_branch', source)
         self.assertNotIn('deterministic_stack_replay_worktree', source)
 
@@ -6092,7 +6087,7 @@ class RevisionProviderPackagingTest(unittest.TestCase):
             self.assertIn('syncwheel_revision_provider.py', names)
             for domain in (
                 'cli', 'contracts', 'coordination', 'errors', 'index', 'journal',
-                'journal_workflow', 'ledger', 'manifest', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication',
+                'journal_workflow', 'ledger', 'manifest', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication', 'revision_backend', 'files', 'provenance',
             ):
                 self.assertIn(f'syncwheel_{domain}.py', names)
             installed = root / 'installed'
