@@ -2449,6 +2449,8 @@ def maybe_handle_startup_update_policy(args):
     if getattr(args, 'command', None) == 'self':
         return
     try:
+        if load_update_settings()['mode'] == 'off':
+            return
         status, settings, _, _ = refresh_cached_self_update_status(force=False)
     except SyncwheelError:
         return

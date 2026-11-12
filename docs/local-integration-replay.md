@@ -150,3 +150,6 @@ the invocation actually issued.
 Foreign, malformed and recycled-process records remain available to their
 separate maintenance lifecycle. Local object acquisition includes the current
 process's transient authorization creation and cleanup alongside its Git objects.
+Startup mode `off` returns before the updater refreshes its cache, including
+when that cache is absent or belongs to another installation. This mode applies
+to the acquisition and declaration commands in a bounded delivery invocation.

@@ -5597,6 +5597,29 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(repo, 'stack', 'create', 'bounded-auth', source, '--preserve-lanes')
         assert_preserved()
 
+    def test_update_off_skips_refresh_with_missing_or_mismatched_cache(self):
+        origin = self.create_remote('update-off-cache')
+        repo = self.clone(origin, 'update-off-cache')
+        self.init_coordinated(repo)
+        module = self.load_module()
+        cache = self.tmp / 'explicit-update-state.json'
+        for cache_payload in [None, {'status': {'install_root': '/different-fixture-install',
+                                                'install_kind': 'git-checkout'}, 'last_checked_epoch': 1}]:
+            if cache_payload is not None: cache.write_text(json.dumps(cache_payload) + '\n')
+            before = cache.read_bytes() if cache.exists() else None
+            trace = self.tmp / ('trace-' + str(cache_payload is None) + '.jsonl')
+            self.run_cli(repo, 'repo', 'tracking', 'status', '--json', extra_env={
+                'SYNCWHEEL_UPDATE_MODE': 'off', 'SYNCWHEEL_UPDATE_STATE_PATH': str(cache),
+                'GIT_TRACE2_EVENT': str(trace), 'GIT_ALLOW_PROTOCOL': 'file',
+            })
+            self.assertEqual(cache.read_bytes() if cache.exists() else None, before)
+            starts = [json.loads(row)['argv'] for row in trace.read_text().splitlines()
+                      if json.loads(row).get('event') == 'start']
+            self.assertTrue(starts)
+            self.assertFalse(any('fetch' in argv or 'ls-remote' in argv for argv in starts))
+            with mock.patch.object(module, 'refresh_cached_self_update_status', side_effect=AssertionError('off refresh forbidden')):
+                module.maybe_handle_startup_update_policy(SimpleNamespace(command='repo'))
+
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
         repo = self.clone(origin, 'disabled-draft')
