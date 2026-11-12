@@ -34,6 +34,15 @@ _MODULE_DIRECTORY = str(Path(__file__).resolve().parent)
 if _MODULE_DIRECTORY not in sys.path:
     sys.path.insert(0, _MODULE_DIRECTORY)
 
+from syncwheel_coordination_state import (
+    CoordinationStateReader,
+    COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST,
+    COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT,
+    COORDINATION_STATE_DIGEST_FORM_ORPHANED,
+    COORDINATION_STATE_FILE,
+)
+from syncwheel_manifest import coordination_state_ref
+
 from syncwheel_worktrees import (
     GovernedWorktrees,
     GOVERNED_WORKTREE_LOCK_STALE_SECONDS,
@@ -275,7 +284,6 @@ ENV_TEST_CONTROL_MANIFEST_READY = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_READY'
 ENV_TEST_CONTROL_MANIFEST_RELEASE = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_RELEASE'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 MANIFEST_VERSION_LEGACY = 1
-COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
 COORDINATION_CLAIM_FILE = 'claim.json'
 COORDINATION_CLAIM_PREFIX = 'syncwheel/claim/'
 EXPECTED_COORDINATION_STATE_UNSET = object()
@@ -296,9 +304,6 @@ COORDINATION_REPAIR_DIGEST_HEAL_CLASS = 'digest-heal'
 COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION = (
     'exact-recomputed-control-manifest-digest-and-state-only-cas'
 )
-COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST = 'control-manifest-file'
-COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT = 'legacy-normalized-snapshot'
-COORDINATION_STATE_DIGEST_FORM_ORPHANED = 'orphaned'
 COORDINATION_REPAIR_MAX_ADVANCE_COMMITS = 1024
 COORDINATION_GIT_IDENTITY_CONFIG = [
     '-c',
@@ -3851,10 +3856,6 @@ def draft_push_refusal(manifest, stack, remote):
         f"{stack['id']}: cannot push stack in state draft to remote {remote!r}; "
         'a draft publishes its source ref only to the coordination remote'
     )
-
-
-def coordination_state_ref(config):
-    return f"refs/heads/{config['state_branch']}"
 
 
 def coordination_claim_ref(source_ref):
@@ -10048,93 +10049,45 @@ def coordination_manifest_digest(manifest, repo_root=None):
 
 
 def coordination_state_control_manifest(repo_root, state, remote=None):
-    snapshot = state.get('manifest') or {}
-    integration = snapshot.get('integration') or {}
-    branch = integration.get('branch')
-    if not isinstance(branch, str) or not branch:
-        raise SyncwheelError('coordination state manifest has no integration branch')
-    integration_ref = f'refs/heads/{branch}'
-    tip = (state.get('managed_refs') or {}).get(integration_ref)
-    if not isinstance(tip, str) or not re.fullmatch(r'[0-9a-f]{40}', tip):
-        raise SyncwheelError('coordination state has no exact integration tip')
-    available = commit_exists(repo_root, tip)
-    if not available and remote:
-        fetched = git(repo_root, 'fetch', '--quiet', remote, integration_ref, check=False)
-        available = fetched.returncode == 0 and commit_exists(repo_root, tip)
-    if not available:
-        raise SyncwheelError(
-            'coordination state integration tip object is unavailable for manifest verification'
-        )
-    committed = manifest_from_tree(
-        repo_root, tip, integration_manifest_path(repo_root)
+    return _coordination_state_reader(repo_root).coordination_state_control_manifest(
+        state, remote,
     )
-    if committed is None:
-        raise SyncwheelError(
-            'coordination state integration tip has no control manifest'
-        )
-    return committed
 
 
 def coordination_state_manifest_digest(repo_root, state, remote=None):
-    return manifest_digest(
-        coordination_state_control_manifest(repo_root, state, remote)
+    return _coordination_state_reader(repo_root).coordination_state_manifest_digest(
+        state, remote,
     )
 
 
 def coordination_state_legacy_manifest_digest(repo_root, control_manifest, state):
-    """Return the digest form published before 0.42.2: the normalized snapshot."""
-    try:
-        snapshot = coordination_manifest_snapshot(control_manifest, repo_root, state)
-    except SyncwheelError:
-        return None
-    return manifest_digest(snapshot)
+    return _coordination_state_reader(repo_root).coordination_state_legacy_manifest_digest(
+        control_manifest, state,
+    )
 
 
 def coordination_state_manifest_digest_classification(repo_root, state, remote=None):
-    """Classify a state's manifest_digest, including the unrecognized (orphaned) case.
-
-    Unreadable control-manifest evidence (missing tip, missing manifest file)
-    is a distinct failure and is not caught here: it always propagates so a
-    caller can never mistake it for a healable, merely-unrecognized digest.
-    """
-    control_manifest = coordination_state_control_manifest(repo_root, state, remote)
-    control_digest = manifest_digest(control_manifest)
-    recorded = state.get('manifest_digest')
-    if recorded == control_digest:
-        form = COORDINATION_STATE_DIGEST_FORM_CONTROL_MANIFEST
-    elif recorded == coordination_state_legacy_manifest_digest(
-        repo_root, control_manifest, state
-    ):
-        form = COORDINATION_STATE_DIGEST_FORM_LEGACY_SNAPSHOT
-    else:
-        form = COORDINATION_STATE_DIGEST_FORM_ORPHANED
-    return {
-        'form': form,
-        'recorded_digest': recorded,
-        'control_manifest_digest': control_digest,
-    }
+    return _coordination_state_reader(repo_root).coordination_state_manifest_digest_classification(
+        state, remote,
+    )
 
 
 def classify_coordination_state_manifest_digest(repo_root, state, remote=None):
-    classification = coordination_state_manifest_digest_classification(repo_root, state, remote)
-    if classification['form'] == COORDINATION_STATE_DIGEST_FORM_ORPHANED:
-        raise SyncwheelError(
-            'coordination state manifest_digest does not match the control manifest '
-            'on its integration tip'
-        )
-    return classification
+    return _coordination_state_reader(repo_root).classify_coordination_state_manifest_digest(
+        state, remote,
+    )
 
 
 def coordination_state_manifest_digest_form(repo_root, state, remote=None):
-    """Classify without failing closed, for callers that only report the form."""
-    try:
-        return classify_coordination_state_manifest_digest(repo_root, state, remote)
-    except SyncwheelError:
-        return None
+    return _coordination_state_reader(repo_root).coordination_state_manifest_digest_form(
+        state, remote,
+    )
 
 
 def verify_coordination_state_manifest_digest(repo_root, state, remote=None):
-    return classify_coordination_state_manifest_digest(repo_root, state, remote)
+    return _coordination_state_reader(repo_root).verify_coordination_state_manifest_digest(
+        state, remote,
+    )
 
 
 def record_coordination_state_digest_migration(
@@ -10223,18 +10176,9 @@ def delivery_ref_names(manifest):
 
 
 def remote_ref_tips(repo_root, remote, refs):
-    refs = list(dict.fromkeys(refs))
-    output = {ref: None for ref in refs}
-    if not refs:
-        return output
-    result = git(repo_root, 'ls-remote', '--heads', remote, *refs, check=False)
-    if result.returncode != 0:
-        raise SyncwheelError(result.stderr.strip() or result.stdout.strip() or f'cannot inspect remote {remote}')
-    for line in result.stdout.splitlines():
-        sha, separator, ref = line.partition('\t')
-        if separator and ref in output:
-            output[ref] = sha.strip()
-    return output
+    return _coordination_state_reader(repo_root).remote_ref_tips(
+        remote, refs,
+    )
 
 
 def validate_coordination_snapshot_refs(snapshot):
@@ -10252,103 +10196,27 @@ def validate_coordination_state(state, expected_id=None, claims_mode='advisory')
 def coordination_state_from_commit(
     repo_root, commit, expected_id=None, claims_mode='advisory'
 ):
-    result = git(repo_root, 'show', f'{commit}:{COORDINATION_STATE_FILE}', check=False)
-    if result.returncode != 0:
-        raise SyncwheelError(
-            result.stderr.strip()
-            or f'coordination state commit {commit} does not contain {COORDINATION_STATE_FILE}'
-        )
-    try:
-        state = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise SyncwheelError(f'invalid coordination state JSON at {commit}: {exc}') from exc
-    return validate_coordination_state(state, expected_id, claims_mode)
+    return _coordination_state_reader(repo_root).coordination_state_from_commit(
+        commit, expected_id, claims_mode,
+    )
 
 
 def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest_version=None):
-    state_ref = coordination_state_ref(config)
-    tip = remote_ref_tips(repo_root, config['remote'], [state_ref])[state_ref]
-    if not tip:
-        return {'tip': None, 'state': None}
-    if fetch:
-        result = git(repo_root, 'fetch', '--quiet', config['remote'], state_ref, check=False)
-        if result.returncode != 0:
-            raise SyncwheelError(
-                result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
-            )
-        # FETCH_HEAD is clone-global and another fetch may replace it before
-        # the read. Keep the state paired with the remote tip we observed.
-        commit = tip
-    else:
-        commit = tip
-    state = coordination_state_from_commit(
-        repo_root, commit, config['id'], config.get('claims', 'advisory')
+    return _coordination_state_reader(repo_root).read_remote_coordination_state(
+        config, fetch, local_manifest_version,
     )
-    remote_manifest_version = state['manifest'].get('version')
-    compatible_upgrade = (
-        local_manifest_version == MANIFEST_VERSION_CHANNELS
-        and remote_manifest_version == MANIFEST_VERSION_COORDINATED
-    )
-    if (
-        local_manifest_version is not None
-        and remote_manifest_version != local_manifest_version
-        and not compatible_upgrade
-    ):
-        raise SyncwheelError(
-            f"remote coordination manifest version {remote_manifest_version} is incompatible "
-            f'with local manifest version {local_manifest_version}; migrate explicitly'
-        )
-    return {
-        'tip': tip,
-        'state': state,
-    }
 
 
 def read_remote_coordination_states(repo_root, config, *, fetch=True):
-    result = git(
-        repo_root,
-        'ls-remote',
-        '--heads',
-        config['remote'],
-        f"refs/heads/{COORDINATION_STATE_PREFIX}*",
-        check=False,
+    return _coordination_state_reader(repo_root).read_remote_coordination_states(
+        config, fetch=fetch,
     )
-    if result.returncode != 0:
-        raise SyncwheelError(result.stderr.strip() or result.stdout.strip() or 'failed to inspect coordination state refs')
-    states = []
-    for line in result.stdout.splitlines():
-        tip, separator, ref = line.partition('\t')
-        if not separator:
-            continue
-        if fetch:
-            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
-            if fetched.returncode != 0:
-                raise SyncwheelError(fetched.stderr.strip() or f'failed to fetch coordination state {ref}')
-        state = coordination_state_from_commit(repo_root, tip)
-        expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
-        if ref != expected_ref:
-            raise SyncwheelError(
-                f'coordination state branch mismatch: {ref} declares {state["coordination_id"]!r}'
-            )
-        states.append({'ref': ref, 'tip': tip, 'state': state})
-    return states
 
 
 def coordination_ownership_conflicts(repo_root, config, managed_refs, states=None):
-    claimed = set(managed_refs)
-    conflicts = []
-    for item in (states if states is not None else read_remote_coordination_states(repo_root, config)):
-        state = item['state']
-        if state['coordination_id'] == config['id']:
-            continue
-        overlap = sorted(claimed.intersection(state['managed_refs']))
-        if overlap:
-            conflicts.append({
-                'coordination_id': state['coordination_id'],
-                'state_ref': item['ref'],
-                'refs': overlap,
-            })
-    return conflicts
+    return _coordination_state_reader(repo_root).coordination_ownership_conflicts(
+        config, managed_refs, states,
+    )
 
 
 def require_exclusive_coordination_ownership(
@@ -10358,23 +10226,9 @@ def require_exclusive_coordination_ownership(
     expected_state_refs=None,
     *, fetch=True,
 ):
-    states = read_remote_coordination_states(repo_root, config, fetch=fetch)
-    observed_state_refs = {item['ref']: item['tip'] for item in states}
-    if expected_state_refs is not None and observed_state_refs != expected_state_refs:
-        raise SyncwheelError(
-            'coordinated publish STOP: coordination state refs changed after the reviewed plan'
-        )
-    conflicts = coordination_ownership_conflicts(
-        repo_root, config, managed_refs, states=states
+    return _coordination_state_reader(repo_root).require_exclusive_coordination_ownership(
+        config, managed_refs, expected_state_refs, fetch=fetch,
     )
-    if conflicts:
-        details = '; '.join(
-            f"{item['coordination_id']}: {', '.join(item['refs'])}" for item in conflicts
-        )
-        raise SyncwheelError(
-            'managed refs are already owned by another coordination domain: ' + details
-        )
-    return observed_state_refs
 
 
 def coordination_tombstone_ref(tombstone):
@@ -31941,6 +31795,54 @@ class _GovernedWorktreeRepository:
 def _governed_worktrees(repo_root):
     repository = _GovernedWorktreeRepository(repo_root)
     return GovernedWorktrees(repository, repository, repository, repository)
+
+
+class _CoordinationStateRepository:
+    """Bind state observations and schema inputs to the supported facade seams."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def git(self, *args, **kwargs):
+        return git(*args, **kwargs)
+
+    def commit_exists(self, *args, **kwargs):
+        return commit_exists(*args, **kwargs)
+
+    def manifest_from_tree(self, *args, **kwargs):
+        return manifest_from_tree(*args, **kwargs)
+
+    def integration_manifest_path(self, *args, **kwargs):
+        return integration_manifest_path(*args, **kwargs)
+
+    def manifest_digest(self, *args, **kwargs):
+        return manifest_digest(*args, **kwargs)
+
+    def coordination_manifest_snapshot(self, *args, **kwargs):
+        return coordination_manifest_snapshot(*args, **kwargs)
+
+    def validate_coordination_state(self, *args, **kwargs):
+        return validate_coordination_state(*args, **kwargs)
+
+    def remote_ref_tips(self, *args, **kwargs):
+        return remote_ref_tips(*args, **kwargs)
+
+    def coordination_state_from_commit(self, *args, **kwargs):
+        return coordination_state_from_commit(*args, **kwargs)
+
+    def coordination_state_control_manifest(self, *args, **kwargs):
+        return coordination_state_control_manifest(*args, **kwargs)
+
+    def coordination_state_manifest_digest_classification(self, *args, **kwargs):
+        return coordination_state_manifest_digest_classification(*args, **kwargs)
+
+    def read_remote_coordination_states(self, *args, **kwargs):
+        return read_remote_coordination_states(*args, **kwargs)
+
+
+def _coordination_state_reader(repo_root):
+    repository = _CoordinationStateRepository(repo_root)
+    return CoordinationStateReader(repository, repository, repository)
 
 
 if __name__ == '__main__':
