@@ -254,7 +254,7 @@ class WorktreeRepository(Protocol):
 class WorktreeLedger(Protocol):
     def append_governed_worktree_cleanup_event(self, repo_root, lane, manifest_path=None): ...
 
-    def append_ledger_event(self, 
+    def append_ledger_event(self,
         repo_root, event_type, payload, manifest_path=None, idempotency_key=None,
     ): ...
     def ledger_events_dir(self, repo_root, manifest_path=None): ...
@@ -266,7 +266,7 @@ class WorktreeStorage(Protocol):
     def load_json_file(self, path, default): ...
     def _write_all(self, descriptor, payload): ...
     def fsync_directory_path(self, directory): ...
-    def exclusive_metadata_lock(self, 
+    def exclusive_metadata_lock(self,
         lock_path,
         *,
         label,
@@ -1167,7 +1167,7 @@ class GovernedWorktrees:
                         'code': 'branch_advanced',
                         'remedy': governed_worktree_pending_remedy(manifest, lane, manifest_path),
                     }
-                deleted, delete_detail = self.repository.delete_governed_worktree_branch_with_anchor(repo_root, 
+                deleted, delete_detail = self.repository.delete_governed_worktree_branch_with_anchor(repo_root,
                     lane,
                     anchored_tip,
                 )
