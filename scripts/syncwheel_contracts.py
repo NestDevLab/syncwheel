@@ -54,3 +54,6 @@ def syncwheel_timestamp():
 
 
 MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'
+
+
+INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}

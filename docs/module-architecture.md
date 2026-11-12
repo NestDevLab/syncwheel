@@ -21,6 +21,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_stacks` | Stack creation, close/archive, draft promotion, rebuild and push commands | Selected manifest inputs; composed coordination/replay/worktree services; explicit Git/control/ledger/projection ports |
 | `syncwheel_revision_backend` | Delivery/journal revision transactions, recovery and index leases | Explicit repository, manifest, ledger, guard and provenance capabilities; domain service factories |
 | `syncwheel_files` | Durable byte writes and directory fsync | Standard library |
+| `syncwheel_integration_history` | Historical delivery/close proofs, integration ancestry and lease-bound reconciliation | Composed provenance, projection and manifest stores; Git, coordination, replay and ignore observations |
 | `syncwheel_projection` | Checkout content/reset leases and published integration tip reuse planning | Git/status observations, coordination state, replay, control-manifest and ignore policy capabilities |
 | `syncwheel_provenance` | Derived identity, durable provenance store and override/reset policy | Explicit Git observations and coordination-state evidence |
 | `syncwheel_replay` | Mode selection, replay planning/execution, product projections | Separate Git, resolution and checkout-lease ports |
@@ -48,7 +49,7 @@ exceptions, handler replacement, journal reader replacement and Git validation.
 Existing integration suites continue to exercise journal, channel, coordination,
 ledger and index behavior through the supported facade.
 
-This is incremental modularization. Integration reconciliation and remaining integration/channel command handlers still live in the
+This is incremental modularization. Remaining integration/channel command handlers, repair and lifecycle guards still live in the
 composition root. Public backend constructors compose the implementation modules
 without changing the revision-provider wire protocol. Future extraction should introduce specific repository operations at
 those boundaries, preserve existing patch points, and run the corresponding

@@ -11135,7 +11135,7 @@ sys.exit(module.main())
                        'integration_ref': 'refs/heads/integration/shared'}
         witness = {'changed_refs': {observation['integration_ref']: absorbed_tip},
                    'manifest': {'integration': {'derived_provenance': []}}}
-        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+        with mock.patch.object(module.IntegrationHistory, 'integration_reconciliation_publishing_states',
                                side_effect=lambda *_: iter([])):
             with self.assertRaisesRegex(module.SyncwheelError,
                                         'unexplained product paths: README.md'):
@@ -11143,7 +11143,7 @@ sys.exit(module.main())
                     repo, manifest, stack_tip, {}, observation=observation,
                     delivery_tip=delivery_tip,
                 )
-        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+        with mock.patch.object(module.IntegrationHistory, 'integration_reconciliation_publishing_states',
                                return_value=iter([witness])):
             module.integration_reconciliation_history(
                 repo, manifest, stack_tip, {}, observation=observation,
@@ -11152,7 +11152,7 @@ sys.exit(module.main())
         (repo / 'unmapped.txt').write_text('must remain blocked\n')
         self.git(repo, 'add', 'unmapped.txt')
         self.git(repo, 'commit', '-q', '-m', 'test: unowned product')
-        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+        with mock.patch.object(module.IntegrationHistory, 'integration_reconciliation_publishing_states',
                                side_effect=lambda *_: iter([witness])):
             with self.assertRaisesRegex(module.SyncwheelError,
                                         'unexplained product paths: unmapped.txt'):
@@ -13993,7 +13993,8 @@ sys.exit(module.main())
                         'integration replay inputs changed during published-tip proof'
                     )
                 else:
-                    original = module.apply_integration_reconciliation
+                    patched_owner = module.IntegrationHistory
+                    original = module.IntegrationHistory.apply_integration_reconciliation
 
                     def race_before_reconciliation_cas(*args, **kwargs):
                         if not raced:
@@ -14011,7 +14012,7 @@ sys.exit(module.main())
                 ])
                 args.dry_run = False
                 with mock.patch.object(
-                    patched_owner, patched_name, autospec=(stale == 'merge-stack'),
+                    patched_owner, patched_name, autospec=True,
                     side_effect=patched_effect,
                 ):
                     with self.assertRaisesRegex(
@@ -14254,7 +14255,7 @@ sys.exit(module.main())
                 self.stage_owned_control_manifest_delta(follower)
             )
             remote_before = self.a14_remote_snapshot(fixture)
-            original = module.apply_integration_reconciliation
+            original = module.IntegrationHistory.apply_integration_reconciliation
             injected = []
 
             def inject_before_reconciliation_cas(*args, **kwargs):
@@ -14293,8 +14294,8 @@ sys.exit(module.main())
             stdout = io.StringIO()
             stderr = io.StringIO()
             with mock.patch.object(
-                module,
-                'apply_integration_reconciliation',
+                module.IntegrationHistory,
+                'apply_integration_reconciliation', autospec=True,
                 side_effect=inject_before_reconciliation_cas,
             ):
                 try:
