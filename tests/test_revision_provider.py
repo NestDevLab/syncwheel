@@ -6092,7 +6092,7 @@ class RevisionProviderPackagingTest(unittest.TestCase):
             self.assertIn('syncwheel_revision_provider.py', names)
             for domain in (
                 'cli', 'contracts', 'coordination', 'errors', 'index', 'journal',
-                'journal_workflow', 'ledger', 'manifest',
+                'journal_workflow', 'ledger', 'manifest', 'replay',
             ):
                 self.assertIn(f'syncwheel_{domain}.py', names)
             installed = root / 'installed'

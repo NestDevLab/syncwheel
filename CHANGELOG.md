@@ -2,7 +2,7 @@
 
 ## 0.46.26 - 2026-11-12
 
-- Separate manifest schema, CLI grammar, coordination snapshots, journal workflows, ledger projection and Git index decoding into explicit domain modules. Preserve the supported CLI and import facade, patchable I/O operations and package entry points.
+- Separate manifest schema, CLI grammar, coordination snapshots, journal workflows, replay execution, ledger projection and Git index decoding into explicit domain modules. Preserve the supported CLI and import facade, patchable I/O operations and package entry points.
 
 ## 0.46.25 - 2026-11-08
 

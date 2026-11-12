@@ -1083,3 +1083,52 @@ def normalize_replay_mode(value, source):
         allowed = ', '.join(REPLAY_MODE_CHOICES)
         raise SyncwheelError(f'invalid {source}: {value!r}; expected one of: {allowed}')
     return value
+
+
+def stack_integration_base_commits(stack):
+    """Return the source or resolved commits that materialize a stack on integration.
+
+    Source commits remain authoritative for rebuilding the stack branch. A resolved
+    integration projection can be recorded separately after conflict resolution so
+    validation never asks Syncwheel to rewrite that source branch with integration
+    commits.
+    """
+    return list(stack.get('integration_commits', stack['commits']))
+
+
+def bound_merge_stack_resolution_commits(stack):
+    """Only input-bound replacements participate in merge-stack replay."""
+    return stack_integration_base_commits(stack) if stack.get('integration_resolution') else None
+
+
+def stack_integration_only_commits(stack):
+    """Return commits owned by a stack only in its integration projection."""
+    return list(stack.get('integration_only_commits') or [])
+
+
+def stack_integration_commits(stack):
+    """Return every commit owned by a stack in the integration projection."""
+    return list(dict.fromkeys([
+        *stack_integration_base_commits(stack),
+        *stack_integration_only_commits(stack),
+    ]))
+
+
+def stack_delivery_identity(stack):
+    """Return fields that determine which product a stack revision delivers."""
+    return {
+        'branch': stack.get('branch'),
+        'base': stack.get('base'),
+        'state': stack.get('state', 'published'),
+        'target_remote': stack.get('target_remote'),
+        'target_branch': stack.get('target_branch'),
+        'integration_branch': stack.get('integration_branch'),
+        'depends_on': list(stack.get('depends_on') or []),
+        'commits': list(stack.get('commits') or []),
+        'integration_commits': stack_integration_base_commits(stack),
+        'integration_only_commits': stack_integration_only_commits(stack),
+    }
+
+
+def stack_map(manifest):
+    return {stack['id']: stack for stack in manifest.get('stacks', [])}
