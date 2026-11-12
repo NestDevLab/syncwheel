@@ -8,6 +8,7 @@ import copy
 import json
 import re
 
+from syncwheel_manifest import canonical_json_digest
 from syncwheel_errors import SyncwheelError
 from syncwheel_manifest import (
     CHANNEL_LIFECYCLES,
@@ -570,3 +571,46 @@ def apply_coordination_snapshot(manifest, snapshot, *, branch_is_valid):
     if 'landing' in snapshot:
         updated['landing'] = normalize_landing_policy(snapshot['landing'])
     return updated
+
+
+COORDINATION_CLAIM_PREFIX = 'syncwheel/claim/'
+
+def coordination_claim_ref(source_ref):
+    if not isinstance(source_ref, str) or not source_ref.startswith('refs/heads/'):
+        raise SyncwheelError(
+            f'coordination claim requires a full refs/heads source ref: {source_ref!r}'
+        )
+    return f"refs/heads/{COORDINATION_CLAIM_PREFIX}{source_ref[len('refs/'):]}"
+
+
+def coordination_tombstone_ref(tombstone):
+    if not isinstance(tombstone, dict):
+        return None
+    ref = tombstone.get('ref')
+    if isinstance(ref, str) and ref:
+        return ref
+    branch = tombstone.get('branch')
+    if isinstance(branch, str) and branch:
+        return f'refs/heads/{branch}'
+    return None
+
+
+def coordination_identity_snapshot(snapshot):
+    """Strip the projection both sides of a publication resolve differently.
+
+    ``integration.derived_provenance`` comes from this clone's last-seen state on
+    the intent side and from the state just read from the remote on the
+    publication side, so it cannot belong to an operation's identity.
+    """
+    identity = copy.deepcopy(snapshot)
+    integration = identity.get('integration')
+    if isinstance(integration, dict):
+        integration.pop('derived_provenance', None)
+    return identity
+
+
+def coordination_state_operation_manifest_digest(state):
+    snapshot = (state or {}).get('manifest')
+    if not isinstance(snapshot, dict):
+        return None
+    return canonical_json_digest(coordination_identity_snapshot(snapshot))
