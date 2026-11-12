@@ -1184,3 +1184,25 @@ def channel_composition_digest(channel):
         'pinDigest': channel_pin_digest(channel),
         'resolution': channel.get('resolution'),
     })
+
+
+def integration_composition_digest(manifest):
+    """Digest only declared integration composition, not unrelated manifest metadata."""
+    integration = manifest['integration']
+    stacks = stack_map(manifest)
+    return canonical_json_digest({
+        'base': integration['base'],
+        'strategy': integration['strategy'],
+        'stacks': [
+            {
+                'id': stack_id,
+                'commits': list(stacks[stack_id].get('commits') or []),
+                'integration_commits': list(stacks[stack_id].get('integration_commits') or []),
+                'integration_only_commits': list(stacks[stack_id].get('integration_only_commits') or []),
+            }
+            for stack_id in integration.get('stacks') or []
+            if stack_id in stacks
+        ],
+    })
+
+SYNCWHEEL_TRACKING_GIT_TRACKED = 'git-tracked'

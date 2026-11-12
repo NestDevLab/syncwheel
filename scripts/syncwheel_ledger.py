@@ -3,6 +3,8 @@
 File locking, tail recovery and durable persistence are caller responsibilities.
 """
 
+from syncwheel_manifest import manifest_digest, stack_integration_commits, stack_integration_only_commits
+
 LEDGER_SCHEMA_VERSION = 1
 
 COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES = (
@@ -223,3 +225,42 @@ def manifest_channel_history_summary(channel):
     if channel.get('resolution'):
         summary['resolution'] = dict(channel['resolution'])
     return summary
+
+
+def manifest_stack_history_summary(stack):
+    summary = {
+        'id': stack['id'],
+        'branch': stack['branch'],
+        'base': stack['base'],
+        'target_remote': stack['target_remote'],
+        'target_branch': stack['target_branch'],
+        'integration_branch': stack.get('integration_branch'),
+        'state': stack.get('state', 'published'),
+        'commits': list(stack['commits']),
+        'integration_commits': stack_integration_commits(stack),
+        'integration_only_commits': stack_integration_only_commits(stack),
+        'meta': dict(stack.get('meta', {})),
+    }
+    if stack.get('depends_on'):
+        summary['depends_on'] = list(stack['depends_on'])
+    return summary
+
+
+def manifest_event_payload(manifest_path, manifest, reason, context=None):
+    return {
+        'manifest_path': str(manifest_path),
+        'manifest_hash': manifest_digest(manifest),
+        'reason': reason,
+        'context': context or {},
+        'integration': {
+            'branch': manifest['integration']['branch'],
+            'base': manifest['integration']['base'],
+            'strategy': manifest['integration'].get('strategy', 'cherry-pick'),
+            'stacks': list(manifest['integration'].get('stacks', [])),
+        },
+        'stacks': [manifest_stack_history_summary(stack) for stack in manifest['stacks']],
+        'channels': [
+            manifest_channel_history_summary(channel)
+            for channel in manifest.get('channels', [])
+        ],
+    }

@@ -17,6 +17,9 @@ remain in that facade, where `__file__` still identifies the entry script.
 | `syncwheel_journal_workflow` | Snapshot, publish, pull and recovery sequencing | Journal policy; explicit repository I/O port |
 | `syncwheel_ledger` | Event reduction into lifecycle state | Standard library |
 | `syncwheel_index` | Git index decoding and semantic content leases | Standard library |
+| `syncwheel_revision_backend` | Delivery/journal revision transactions, recovery and index leases | Explicit repository, manifest, ledger, guard and provenance capabilities; domain service factories |
+| `syncwheel_files` | Durable byte writes and directory fsync | Standard library |
+| `syncwheel_provenance` | Derived projection identity data | Shared errors; standard library |
 | `syncwheel_replay` | Mode selection, replay planning/execution, product projections | Separate Git, resolution and checkout-lease ports |
 | `syncwheel_worktrees` | Registry CAS, lifecycle recovery, capture and retirement | Git, lifecycle ledger, durable storage and phase observer ports |
 | `syncwheel_cli` | Argument grammar and command behavior descriptions | Schema vocabulary; named handler registry |
@@ -42,8 +45,9 @@ exceptions, handler replacement, journal reader replacement and Git validation.
 Existing integration suites continue to exercise journal, channel, coordination,
 ledger and index behavior through the supported facade.
 
-This is incremental modularization. Revision-provider orchestration, control-manifest persistence and domain command
-handlers still live in the composition root. Future extraction should introduce specific repository operations at
+This is incremental modularization. Control-manifest persistence and domain command handlers still live in the
+composition root. Public backend constructors compose the implementation modules
+without changing the revision-provider wire protocol. Future extraction should introduce specific repository operations at
 those boundaries, preserve existing patch points, and run the corresponding
 integration suites. Do not use shared-global execution, wildcard imports, module
 proxies or a generic object that forwards arbitrary facade globals.
