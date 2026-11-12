@@ -153,6 +153,12 @@ Terminal declaration recovery checks the manifest image and index permissions
 against its original journal. Declaration startup leaves pending control intents
 to their owners and checks them under the metadata lock.
 
+Coordination-state reads fetch the exact observed object with an empty refmap.
+They preserve local tracking refs and FETCH_HEAD, including when a remote state
+has moved backwards. All coordination domains remain observable. These reads
+disable tag following, pruning, recursive submodules and automatic maintenance.
+Planning can still populate the shared patch-ID cache through normal validation.
+
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that
 the invocation actually issued.

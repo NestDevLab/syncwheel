@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -7352,6 +7353,103 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual(
             self.remote_state(fixture['origin'], 'second-domain')[0], competing_tip
         )
+
+    def test_coordination_reads_preserve_tracking_refs_and_fetch_head_across_domains(self):
+        origin = self.create_remote('state-object-reads')
+        repo = self.clone(origin, 'state-object-reader')
+        manifest = self.init_coordinated(repo, integration_membership='required')
+        module = self.load_module()
+        config = module.coordination_config(manifest)
+        integration_ref = 'refs/heads/' + manifest['integration']['branch']
+        integration = module.ref_tip(repo, manifest['integration']['branch'])
+        state = module.build_coordination_state(
+            repo, manifest, config, None, {integration_ref: integration},
+            {integration_ref: integration}, 'fixture', 'partial', 'fixture-installation',
+            operation_token='fixture-state-read')
+        first = module.create_coordination_state_commit(repo, state)
+        second_state = json.loads(json.dumps(state))
+        second_state.update(parent_state=first, publication_id=str(uuid.uuid4()))
+        second = module.create_coordination_state_commit(repo, second_state, first)
+        state_ref = module.coordination_state_ref(config)
+        self.git(repo, 'push', 'origin', f'{integration}:{integration_ref}', f'{second}:{state_ref}')
+        # Only this synthetic bare remote is rewound. The reader must retain
+        # its newer tracking ref while reading the currently advertised object.
+        self.git(origin, 'update-ref', state_ref, first, second)
+        seed = self.tmp / 'state-object-reads-seed'
+        other_state = json.loads(json.dumps(state))
+        other_state.update(coordination_id='other', publication_id=str(uuid.uuid4()), parent_state=None)
+        other_state['manifest']['integration']['branch'] = 'integration/other'
+        other_state['managed_refs'] = {'refs/heads/integration/other': integration}
+        other_state['changed_refs'] = dict(other_state['managed_refs'])
+        other = module.create_coordination_state_commit(seed, other_state)
+        self.git(seed, 'push', 'origin', f'{other}:refs/heads/syncwheel/state/other')
+        tracking = 'refs/remotes/origin/syncwheel/state/default'
+        self.assertEqual(self.git(repo, 'rev-parse', tracking).stdout.strip(), second)
+        self.git(repo, 'cat-file', '-e', other, expected=1)
+        fetch_head = repo / '.git/FETCH_HEAD'
+        fetch_head.write_bytes(b'foreign fetch receipt\n')
+        before = self.git(repo, 'show-ref').stdout, fetch_head.read_bytes(), (repo / '.git/index').read_bytes()
+        # Repository defaults must not broaden this read into pruning or
+        # automatic tracking updates.
+        self.git(repo, 'config', 'fetch.prune', 'true')
+        self.git(repo, 'config', 'fetch.pruneTags', 'true')
+        calls = []
+        run_git = module.git
+        def observed_git(root, *args, **kwargs):
+            calls.append(args)
+            return run_git(root, *args, **kwargs)
+        with mock.patch.object(module, 'git', side_effect=observed_git):
+            selected = module.read_remote_coordination_state(repo, config)
+            states = module.read_remote_coordination_states(repo, config)
+        self.assertEqual(selected['tip'], first)
+        self.assertEqual({item['state']['coordination_id'] for item in states}, {'default', 'other'})
+        self.git(repo, 'cat-file', '-e', other)
+        self.assertEqual((self.git(repo, 'show-ref').stdout, fetch_head.read_bytes(),
+                          (repo / '.git/index').read_bytes()), before)
+        fetches = [args for args in calls if args[0] == 'fetch']
+        self.assertEqual(len(fetches), 3)
+        for args in fetches:
+            for option in ['--refmap=', '--no-tags', '--no-write-fetch-head', '--no-prune',
+                           '--no-recurse-submodules', '--no-auto-maintenance']:
+                self.assertIn(option, args)
+            self.assertRegex(args[-1], r'^[0-9a-f]{40}$')
+        self.assertNotIn('refs/remotes/origin/syncwheel/state/other', before[0])
+
+    def test_compose_plan_preserves_fetch_metadata_and_keeps_cache_valid(self):
+        fixture = self.prepare_additive_compose('compose-read-effects', plan=False)
+        repo, module = fixture['repo'], fixture['module']
+        module.validate_manifest(repo, fixture['manifest'])
+        cache = repo / '.git/syncwheel/patch-ids-v2.sqlite3'
+        self.assertTrue(cache.is_file())
+        foreign = self.tmp / 'compose-foreign'
+        self.git(repo, 'worktree', 'add', '-q', '-b', 'foreign', str(foreign), 'HEAD')
+        (foreign / 'README.md').write_bytes(b'foreign tracked work\n')
+        (foreign / 'untracked.bin').write_bytes(b'foreign untracked\x00')
+        self.git(repo, 'worktree', 'lock', str(foreign), '--reason', 'fixture retention')
+        fetch_head = repo / '.git/FETCH_HEAD'
+        fetch_head.write_bytes(b'foreign fetch receipt\n')
+        def observed():
+            return (self.git(repo, 'rev-parse', 'HEAD').stdout,
+                    self.git(repo, 'show-ref').stdout,
+                    (repo / '.git/index').read_bytes(),
+                    (repo / '.syncwheel/manifest.json').read_bytes(),
+                    fetch_head.read_bytes(),
+                    (repo / '.git/config').read_bytes(),
+                    (foreign / 'README.md').read_bytes(),
+                    (foreign / 'untracked.bin').read_bytes(),
+                    self.git(repo, 'worktree', 'list', '--porcelain').stdout)
+        before = observed()
+        with mock.patch.dict(os.environ, {'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1'}):
+            result = self.run_cli(
+                repo, 'coordination', 'compose', '--stack', 'new-stack',
+                '--known-base-state', fixture['base_tip'],
+                '--known-base-manifest-digest', fixture['base_state']['manifest_digest'])
+        plan = json.loads(result.stdout)
+        self.assertEqual(plan['status'], 'publish-required')
+        self.assertEqual(observed(), before)
+        with sqlite3.connect(cache) as connection:
+            self.assertEqual(connection.execute('PRAGMA integrity_check').fetchone(), ('ok',))
+        self.assertEqual(plan['sourceTip'], fixture['new_tip'])
 
     def test_compose_binds_a_linear_local_manifest_only_suffix(self):
         fixture = self.prepare_additive_compose('compose-local-control', plan=False)

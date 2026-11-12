@@ -12500,19 +12500,29 @@ def coordination_state_from_commit(
     return validate_coordination_state(state, expected_id, claims_mode)
 
 
+def fetch_coordination_state_object(repo_root, remote, tip):
+    """Read the observed object without changing tracking refs or FETCH_HEAD."""
+    if not isinstance(tip, str) or not re.fullmatch(r'[0-9a-f]{40}', tip):
+        raise SyncwheelError('coordination state fetch requires an exact observed commit')
+    result = git(
+        repo_root, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head',
+        '--no-recurse-submodules', '--no-prune', '--no-auto-maintenance',
+        '--refmap=', remote, tip, check=False,
+    )
+    if result.returncode != 0:
+        raise SyncwheelError(
+            result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
+        )
+
+
 def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest_version=None):
     state_ref = coordination_state_ref(config)
     tip = remote_ref_tips(repo_root, config['remote'], [state_ref])[state_ref]
     if not tip:
         return {'tip': None, 'state': None}
     if fetch:
-        result = git(repo_root, 'fetch', '--quiet', config['remote'], state_ref, check=False)
-        if result.returncode != 0:
-            raise SyncwheelError(
-                result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
-            )
-        # FETCH_HEAD is clone-global and another fetch may replace it before
-        # the read. Keep the state paired with the remote tip we observed.
+        fetch_coordination_state_object(repo_root, config['remote'], tip)
+        # Keep the state paired with the remote tip we observed.
         commit = tip
     else:
         commit = tip
@@ -12556,9 +12566,7 @@ def read_remote_coordination_states(repo_root, config, *, fetch=True):
         if not separator:
             continue
         if fetch:
-            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
-            if fetched.returncode != 0:
-                raise SyncwheelError(fetched.stderr.strip() or f'failed to fetch coordination state {ref}')
+            fetch_coordination_state_object(repo_root, config['remote'], tip)
         state = coordination_state_from_commit(repo_root, tip)
         expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
         if ref != expected_ref:
