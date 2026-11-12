@@ -13,7 +13,7 @@ import tempfile
 from typing import Protocol
 
 from syncwheel_errors import SyncwheelError
-from syncwheel_contracts import PROFILE_FILENAME, ZERO_OBJECT_ID
+from syncwheel_contracts import PROFILE_FILENAME, ZERO_OBJECT_ID, syncwheel_timestamp
 from syncwheel_manifest import (
     REPLAY_MODE_CHOICES, normalize_replay_mode, stack_map,
     stack_integration_base_commits, stack_integration_only_commits,
@@ -219,8 +219,6 @@ def bind_ephemeral_worktree(plan, worktree):
     return {**plan, 'target': target, 'steps': steps}
 
 
-def syncwheel_timestamp():
-    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
 
 
 def backup_branch_name(branch, timestamp):
