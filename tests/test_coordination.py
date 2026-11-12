@@ -13371,6 +13371,7 @@ sys.exit(module.main())
             repo, 'coordination', 'provenance', 'bind-empty', '--apply',
             '--plan-file', str(path), '--reason', 'retry receipt lookup').stdout)
         self.assertEqual(result, repeated)
+        self.assertTrue(result['bindingUsable'])
         self.assertEqual(protected(), before)
         bindings = [event for event in module.load_ledger_events(repo)
                     if event['type'] == 'coordination_provenance_bound']
@@ -13433,6 +13434,15 @@ sys.exit(module.main())
         with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
             module.local_coordination_provenance_state(repo, manifest)
 
+        held = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                      '--apply', '--plan-file', str(path), '--reason', 'retry changed profile', expected=2).stdout)
+        self.assertEqual(held['status'], 'held')
+        self.assertFalse(held['bindingUsable'])
+        self.assertEqual(held['receiptSequence'], result['receiptSequence'])
+        self.assertEqual(held['reason'], 'original binding')
+        self.assertEqual(len([event for event in module.load_ledger_events(repo)
+                              if event['type'] == 'coordination_provenance_bound']), 1)
+
     def test_empty_legacy_binding_refuses_nonmatching_published_state(self):
         repo, module, profile = self.legacy_binding_fixture('binding-state-mismatch')
         manifest, _ = module.load_manifest(repo)
@@ -13462,12 +13472,20 @@ sys.exit(module.main())
         })
         with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
             module.local_coordination_provenance_state(repo, manifest)
+        held = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                      '--apply', '--plan-file', str(path), '--reason', 'retry populated store', expected=2).stdout)
+        self.assertEqual(held['status'], 'held')
+        self.assertFalse(held['bindingUsable'])
         module.save_derived_provenance_store(repo, module.default_derived_provenance_store())
         other = self.create_remote('binding-other-endpoint')
         self.git(repo, 'remote', 'set-url', 'origin', str(other))
         before = profile.read_bytes(), module.load_ledger_events(repo)
         with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
             contextvars.Context().run(module.local_coordination_provenance_state, repo, manifest)
+        held = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                      '--apply', '--plan-file', str(path), '--reason', 'retry endpoint change', expected=2).stdout)
+        self.assertEqual(held['status'], 'held')
+        self.assertFalse(held['bindingUsable'])
         self.assertEqual((profile.read_bytes(), module.load_ledger_events(repo)), before)
 
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):

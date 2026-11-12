@@ -21446,10 +21446,25 @@ def command_coordination_provenance_bind(args):
                 event = append_ledger_event(repo_root, 'coordination_provenance_bound', {
                     'plan': plan, 'reason': args.reason.strip(), 'actor': governed_worktree_owner(),
                 }, manifest_path, idempotency_key=idempotency)
-    print(json.dumps({'status': 'recorded', 'planDigest': digest,
+    usable = False
+    try:
+        current, _ = load_manifest(repo_root, manifest_path)
+        if current and coordination_is_active(current):
+            config = coordination_config(current)
+            key = coordination_state_observation_key(repo_root, config)
+            _profile, coordination = coordination_profile(repo_root)
+            usable = coordination_legacy_binding_receipt(
+                repo_root, key, coordination.get('last_seen_state') or {},
+            ) == event
+    except SyncwheelError:
+        # The durable receipt remains inspectable when its current inputs fail
+        # validation. It must not authorize continuation in that condition.
+        usable = False
+    print(json.dumps({'status': 'recorded' if usable else 'held', 'planDigest': digest,
+                      'bindingUsable': usable,
                       'receiptSequence': event['seq'],
                       'reason': event['payload']['reason']}, indent=2, sort_keys=True))
-    return 0
+    return 0 if usable else 2
 
 
 def command_coordination_provenance_reset(args):

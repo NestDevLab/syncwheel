@@ -206,7 +206,9 @@ appends an idempotent binding receipt to the Syncwheel ledger. The legacy profil
 bytes are retained. A lost acknowledgment can be inspected by repeating the same
 plan, which returns the original receipt and reason. Receipt use requires the
 same profile bytes and endpoint namespace with an empty override store. Changes
-to those inputs require a fresh reconciliation. Remote observation may acquire
+to those inputs return `status=held`, `bindingUsable=false` and exit 2 while the
+historical receipt remains inspectable. Valid current inputs return
+`status=recorded`, `bindingUsable=true` and exit 0. Remote observation may acquire
 the exact state object using the governed object reader. The ledger and its
 standard private lock/checkpoint files constitute the local write footprint.
 
