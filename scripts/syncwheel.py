@@ -28,39 +28,167 @@ import urllib.request
 import uuid
 from pathlib import Path
 
+# Direct-file consumers load this facade without putting scripts/ on sys.path.
+# Resolve the installed sibling modules through the same directory as this file.
+_MODULE_DIRECTORY = str(Path(__file__).resolve().parent)
+if _MODULE_DIRECTORY not in sys.path:
+    sys.path.insert(0, _MODULE_DIRECTORY)
+
+from syncwheel_journal_workflow import JournalWorkflow
+
+import syncwheel_journal as _journal
+from syncwheel_journal import (
+    journal_path_matches,
+    journal_path_sensitive,
+    journal_secret_reason,
+    journal_file_fingerprint,
+    journal_read_admitted_file,
+    JOURNAL_SENSITIVE_PARTS,
+    JOURNAL_SECRET_PATTERNS,
+)
+from syncwheel_ledger import (
+    default_ledger_state,
+    branch_ref_matches,
+    apply_ledger_event,
+    reduce_ledger_state,
+    LEDGER_SCHEMA_VERSION,
+    COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES,
+)
+
+import syncwheel_coordination as _coordination
+from syncwheel_coordination import (
+    COORDINATION_REMOTE_ROLE_CANONICAL,
+    COORDINATION_REMOTE_ROLE_PUBLICATION,
+    COORDINATION_STATE_SCHEMA_VERSION,
+    COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
+    COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS,
+    additive_coordination_snapshot_delta,
+    changed_snapshot_fields,
+    changed_stack_ids,
+    channel_snapshot_map,
+    coordination_integration_resolutions,
+    coordination_snapshot_managed_ref_names,
+    coordination_snapshot_schema,
+    local_proposal_diff,
+    local_proposal_lines,
+    merge_coordination_snapshots,
+    snapshot_globals,
+    stack_snapshot_map,
+)
+
+import syncwheel_cli as _cli
+from syncwheel_contracts import (
+    AUTHORITY_GRANTABLE_CLASSES,
+    COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
+    COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
+    COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
+    COORDINATION_REPAIR_MISSING_REF_BACKEND,
+    COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
+    GITHUB_PR_MERGE_CHECKS,
+    GITHUB_PR_MERGE_METHODS,
+    RECONCILE_MODES,
+    UPDATE_MODES,
+)
+
+from syncwheel_errors import (
+    ControlManifestAlignmentDrift,
+    CoordinationRemoteRejection,
+    DerivedProvenanceDurabilityError,
+    IntegrationReconciliationLeaseDrift,
+    ManifestDurabilityError,
+    SyncwheelError,
+)
+
+from syncwheel_manifest import (
+    AUTHORITY_CLASSES,
+    AUTHORITY_CLASS_DESTRUCTIVE_REWRITE,
+    AUTHORITY_CLASS_RUNTIME_CHANGE,
+    AUTHORITY_CLASS_SOURCE_CHANGE,
+    AUTHORITY_MODES,
+    AUTHORITY_MODE_AI_MANAGED,
+    AUTHORITY_MODE_HUMAN_GATED,
+    CHANNEL_LIFECYCLES,
+    COORDINATION_CLAIM_MODES,
+    COORDINATION_MODES,
+    COORDINATION_STATE_PREFIX,
+    DEFAULT_COORDINATION_GC,
+    DEFAULT_INTEGRATION_BRANCH,
+    DEFAULT_JOURNAL_INTERVAL,
+    DEFAULT_SYNCWHEEL_WORKTREE_ROOT,
+    DERIVED_OPERATION_ID,
+    DERIVED_PROVENANCE_FIELDS,
+    GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS,
+    GOVERNED_WORKTREE_DEFAULT_CAPACITY,
+    INTEGRATION_MEMBERSHIP_LEGACY,
+    INTEGRATION_MEMBERSHIP_POLICIES,
+    INTEGRATION_MEMBERSHIP_REQUIRED,
+    MANIFEST_VERSIONS,
+    MANIFEST_VERSION_CHANNELS,
+    MANIFEST_VERSION_COORDINATED,
+    REPLAY_MODE_CHOICES,
+    REPOSITORY_MODES,
+    STACK_STATES,
+    SYNCWHEEL_TRACKING_LOCAL_ONLY,
+    SYNCWHEEL_TRACKING_VALUES,
+    active_coordination_config,
+    authority_allows,
+    canonical_json_digest,
+    channel_pin_digest,
+    control_manifest_stays_untracked,
+    coordination_config,
+    coordination_is_active,
+    default_authority_policy,
+    default_coordination_id,
+    default_coordination_state_branch,
+    derive_stack_dependencies,
+    disabled_coordination_config,
+    governed_worktree_capacity,
+    manifest_authority,
+    manifest_is_local_only,
+    normalize_authority_policy,
+    normalize_channel_entry,
+    normalize_channel_resolution,
+    normalize_channel_timestamp,
+    normalize_coordination,
+    normalize_coordination_gc,
+    normalize_coordination_id,
+    normalize_derived_provenance,
+    normalize_governed_worktree_capacity,
+    normalize_integration_membership,
+    normalize_landing_policy,
+    normalize_landing_requirement,
+    normalize_manifest_channels,
+    normalize_manifest_data,
+    normalize_replay_mode,
+    normalize_syncwheel_tracking,
+    normalize_syncwheel_worktree_root,
+    safe_ref_segment,
+    stack_base_owner_id,
+    symbolic_base_branch_for_remote,
+    validate_channel_branch_ownership,
+    validate_channel_dependency_order,
+    validate_channel_stack_authority,
+    validate_stack_dependency_graph,
+)
+
+from syncwheel_index import (
+    INDEX_CACHE_ONLY_EXTENSIONS,
+    INDEX_ENTRY_ASSUME_VALID,
+    INDEX_ENTRY_EXTENDED,
+    INDEX_ENTRY_NAME_MASK,
+    INDEX_OBJECT_FORMATS,
+    INDEX_SEMANTIC_DIGEST_DOMAIN,
+    IndexLease,
+    IndexObservation,
+    _index_varint,
+    index_semantic_digest,
+    parse_index_semantics,
+)
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-POSIX snapshotting reports unsupported at runtime
     fcntl = None
-
-
-class SyncwheelError(Exception):
-    pass
-
-
-class ManifestDurabilityError(SyncwheelError):
-    """The manifest was replaced, but durable directory sync could not be proven."""
-
-
-class DerivedProvenanceDurabilityError(SyncwheelError):
-    """The provenance store was replaced, but directory durability is unknown."""
-
-
-class CoordinationRemoteRejection(SyncwheelError):
-    """The coordination remote refused the atomic push and nothing moved."""
-
-
-class IntegrationReconciliationLeaseDrift(SyncwheelError):
-    """A prepared reconciliation lost an input lease before moving its ref."""
-
-
-class ControlManifestAlignmentDrift(SyncwheelError):
-    """The integration ref moved after the control-manifest decision point."""
-
-    def __init__(self, message, observed_tip):
-        super().__init__(message)
-        self.observed_tip = observed_tip
-
 
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
@@ -78,46 +206,23 @@ ENV_TEST_CONTROL_MANIFEST_READY = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_READY'
 ENV_TEST_CONTROL_MANIFEST_RELEASE = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_RELEASE'
 PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
-INTEGRATION_MEMBERSHIP_LEGACY = 'legacy'
-INTEGRATION_MEMBERSHIP_REQUIRED = 'required'
-INTEGRATION_MEMBERSHIP_POLICIES = {
-    INTEGRATION_MEMBERSHIP_LEGACY,
-    INTEGRATION_MEMBERSHIP_REQUIRED,
-}
-STACK_STATES = {'draft', 'published'}
-MANIFEST_VERSIONS = {1, 2, 3}
 MANIFEST_VERSION_LEGACY = 1
-MANIFEST_VERSION_COORDINATED = 2
-MANIFEST_VERSION_CHANNELS = 3
-COORDINATION_MODES = {'active-active', 'disabled'}
-COORDINATION_STATE_SCHEMA_VERSION = 2
-COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
-COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS = 4
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
-COORDINATION_STATE_PREFIX = 'syncwheel/state/'
 COORDINATION_CLAIM_FILE = 'claim.json'
 COORDINATION_CLAIM_PREFIX = 'syncwheel/claim/'
-COORDINATION_CLAIM_MODES = {'advisory', 'required'}
 EXPECTED_COORDINATION_STATE_UNSET = object()
 VERIFIED_STACK_PUBLICATION_RECOVERY = object()
-COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
-COORDINATION_REMOTE_ROLE_PUBLICATION = 'publication'
 COORDINATION_LEASE_SECONDS = 5 * 60
 COORDINATION_REPAIR_PLAN_SCHEMA_VERSION = 1
 COORDINATION_COMPOSE_PLAN_SCHEMA_VERSION = 1
-COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND = 'tree-equivalent-state-cas'
 COORDINATION_REPAIR_TREE_EQUIVALENT_PROOF = 'exact-tree-equality'
-COORDINATION_REPAIR_FAST_FORWARD_BACKEND = 'fast-forward-state-cas'
 COORDINATION_REPAIR_FAST_FORWARD_PROOF = 'exact-fast-forward-ancestry'
-COORDINATION_REPAIR_MISSING_REF_BACKEND = 'missing-ref-create-cas'
 COORDINATION_REPAIR_MISSING_REF_PROOF = 'exact-missing-ref-create'
-COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND = 'state-digest-migration'
 COORDINATION_REPAIR_DIGEST_MIGRATION_PROOF = 'exact-control-manifest-digest'
 COORDINATION_REPAIR_DIGEST_MIGRATION_CLASS = 'legacy-digest-migration'
 COORDINATION_REPAIR_DIGEST_MIGRATION_PRECONDITION = (
     'exact-control-manifest-digest-and-state-only-cas'
 )
-COORDINATION_REPAIR_DIGEST_HEAL_BACKEND = 'state-digest-heal'
 COORDINATION_REPAIR_DIGEST_HEAL_PROOF = 'exact-recomputed-control-manifest-digest'
 COORDINATION_REPAIR_DIGEST_HEAL_CLASS = 'digest-heal'
 COORDINATION_REPAIR_DIGEST_HEAL_PRECONDITION = (
@@ -152,32 +257,8 @@ CONTROL_MANIFEST_IDENTITY_VERSIONS = (
     CONTROL_MANIFEST_IDENTITY_VERSION, CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
     CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION,
 )
-DEFAULT_COORDINATION_GC = {
-    'worktree_grace_days': 7,
-    'backup_retention_days': 30,
-    'backup_keep': 2,
-}
-DEFAULT_INTEGRATION_BRANCH = 'main-integration'
-SYNCWHEEL_TRACKING_VALUES = {'git-tracked', 'local-only'}
 SYNCWHEEL_TRACKING_GIT_TRACKED = 'git-tracked'
-SYNCWHEEL_TRACKING_LOCAL_ONLY = 'local-only'
-AUTHORITY_MODE_HUMAN_GATED = 'human-gated'
-AUTHORITY_MODE_AI_MANAGED = 'ai-managed'
-AUTHORITY_MODES = {AUTHORITY_MODE_HUMAN_GATED, AUTHORITY_MODE_AI_MANAGED}
-AUTHORITY_CLASS_SOURCE_CHANGE = 'source_change'
-AUTHORITY_CLASS_RUNTIME_CHANGE = 'runtime_change'
-AUTHORITY_CLASS_DESTRUCTIVE_REWRITE = 'destructive_rewrite'
-AUTHORITY_CLASSES = (
-    AUTHORITY_CLASS_SOURCE_CHANGE,
-    AUTHORITY_CLASS_RUNTIME_CHANGE,
-    AUTHORITY_CLASS_DESTRUCTIVE_REWRITE,
-)
-AUTHORITY_GRANTABLE_CLASSES = (AUTHORITY_CLASS_SOURCE_CHANGE, AUTHORITY_CLASS_RUNTIME_CHANGE)
-DEFAULT_SYNCWHEEL_WORKTREE_ROOT = '.syncwheel/wt'
 LEGACY_SYNCWHEEL_WORKTREE_ROOTS = ('var/syncwheel',)
-UPDATE_MODES = {'off', 'notify', 'auto'}
-RECONCILE_MODES = {'standard', 'resume'}
-LEDGER_SCHEMA_VERSION = 1
 LEDGER_SEGMENT_MAX_EVENTS = 256
 SYNCWHEEL_LOCAL_EXCLUDE_PATTERN = '.syncwheel/'
 SYNCWHEEL_LOCAL_EXCLUDE_MARKER = '# syncwheel local metadata'
@@ -218,21 +299,14 @@ YELLOW = '\033[33m'
 RESET = '\033[0m'
 WARNED_GIT_IDENTITY_PATHS = set()
 COMMIT_CREATING_GIT_ACTIONS = {'cherry-pick', 'commit', 'commit-tree', 'merge', 'revert'}
-REPOSITORY_MODES = {'delivery', 'journal'}
-DEFAULT_JOURNAL_INTERVAL = '30m'
-CHANNEL_LIFECYCLES = {'shared', 'ephemeral'}
 CHANNEL_PLAN_SCHEMA_VERSION = 1
 STACK_LAND_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
-GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
 GITHUB_PR_MERGE_BYPASSES = {'private_free_rules', 'required_reviews'}
-GITHUB_PR_MERGE_CHECKS = {'all', 'none'}
 GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
 GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
 GOVERNED_WORKTREE_REGISTRY_VERSION = 1
-GOVERNED_WORKTREE_DEFAULT_CAPACITY = 4
-GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS = ('error', 'warn')
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
@@ -244,10 +318,6 @@ STACK_OWNER_STATE_SCAN_LIMIT = 50
 PENDING_STACK_LIST_LIMIT = 2600
 PENDING_RESET_LIST_LIMIT = 600
 PENDING_STACK_COMMIT_LIMIT = 5
-COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES = (
-    'coordination_publish_completed',
-    'coordination_publish_abandoned',
-)
 GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES = (
     'governed_worktree_released',
     'governed_worktree_reaped',
@@ -265,14 +335,6 @@ ZERO_OBJECT_ID = '0' * 40
 _REGISTRY_EXPECTED_DIGEST_UNSET = object()
 DERIVED_PROJECTION_TRAILER = 'syncwheel-derived-projection'
 DERIVED_PATHS_TRAILER = 'syncwheel-derived-paths'
-DERIVED_OPERATION_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,62}')
-DERIVED_PROVENANCE_FIELDS = {
-    'operation_id',
-    'commit',
-    'paths',
-    'paths_digest',
-    'composition_digest',
-}
 DERIVED_PROVENANCE_STORE_VERSION = 1
 DERIVED_PROVENANCE_OVERRIDE_FIELDS = {'paths', 'base_commit', 'record'}
 DERIVED_PATHS_REBUILD_REASON = 'reconcile narrowed derived paths'
@@ -280,18 +342,6 @@ DERIVED_PROVENANCE_DISCARD_REASON = (
     'discard clone-local derived provenance superseded by the coordination snapshot'
 )
 DERIVED_PROVENANCE_RESET_REASON = 'discard an unreadable clone-local derived provenance store'
-JOURNAL_SENSITIVE_PARTS = {
-    '.env', '.ssh', '.gnupg', '.aws', '.kube', '.docker',
-    'id_rsa', 'id_ed25519', 'credentials', 'credentials.json',
-}
-JOURNAL_SECRET_PATTERNS = (
-    ('private key', re.compile(br'-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----')),
-    ('OpenSSH private key', re.compile(br'-----BEGIN OPENSSH PRIVATE KEY-----')),
-    ('AWS access key', re.compile(br'(?<![A-Z0-9])AKIA[A-Z0-9]{16}(?![A-Z0-9])')),
-    ('GitHub token', re.compile(br'(?<![A-Za-z0-9])ghp_[A-Za-z0-9]{36}(?![A-Za-z0-9])')),
-    ('GitHub token', re.compile(br'(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{60,}(?![A-Za-z0-9_])')),
-    ('Slack token', re.compile(br'(?<![A-Za-z0-9])xoxb-[0-9]{10,}-[A-Za-z0-9-]{20,}(?![A-Za-z0-9])')),
-)
 JOURNAL_FORBIDDEN_COMMANDS = {
     'stack', 's', 'spoke', 'int', 'i', 'publish', 'sync', 'reconcile', 'rec',
     'resume', 'coordination', 'coord', 'handoff', 'gc', 'worktree', 'wt',
@@ -3051,66 +3101,6 @@ def derived_projection_commit_paths_digest(repo_root, commit, paths):
     })
 
 
-def normalize_derived_provenance(records, prefixes=None, label='derived provenance'):
-    if records is None:
-        records = []
-    if not isinstance(records, list):
-        raise SyncwheelError(f'{label} must be an array')
-    normalized = []
-    operation_ids = set()
-    path_sets = set()
-    for index, raw in enumerate(records):
-        if not isinstance(raw, dict) or set(raw) != DERIVED_PROVENANCE_FIELDS:
-            raise SyncwheelError(
-                f'{label}[{index}] must contain exactly: '
-                + ', '.join(sorted(DERIVED_PROVENANCE_FIELDS))
-            )
-        operation_id = raw.get('operation_id')
-        commit = raw.get('commit')
-        paths = raw.get('paths')
-        paths_digest = raw.get('paths_digest')
-        composition_digest = raw.get('composition_digest')
-        if not isinstance(operation_id, str) or not DERIVED_OPERATION_ID.fullmatch(operation_id):
-            raise SyncwheelError(f'{label}[{index}].operation_id is invalid')
-        if not isinstance(commit, str) or not re.fullmatch(r'[0-9a-f]{40}', commit):
-            raise SyncwheelError(f'{label}[{index}].commit must be a full SHA-1')
-        if (
-            not isinstance(paths, list)
-            or not paths
-            or not all(isinstance(path, str) and path and '\0' not in path for path in paths)
-            or paths != sorted(paths)
-            or len(paths) != len(set(paths))
-        ):
-            raise SyncwheelError(
-                f'{label}[{index}].paths must be a non-empty sorted unique NUL-free string array'
-            )
-        if prefixes is not None and not all(
-            any(path.startswith(prefix) for prefix in prefixes) for path in paths
-        ):
-            raise SyncwheelError(f'{label}[{index}] contains a path outside integration.derived_paths')
-        if not isinstance(paths_digest, str) or not re.fullmatch(r'[0-9a-f]{64}', paths_digest):
-            raise SyncwheelError(f'{label}[{index}].paths_digest must be a SHA-256')
-        if not isinstance(composition_digest, str) or not re.fullmatch(
-            r'[0-9a-f]{64}', composition_digest
-        ):
-            raise SyncwheelError(f'{label}[{index}].composition_digest must be a SHA-256')
-        path_key = tuple(paths)
-        if operation_id in operation_ids:
-            raise SyncwheelError(f'{label} contains duplicate operation_id {operation_id!r}')
-        if path_key in path_sets:
-            raise SyncwheelError(f'{label} contains duplicate declared path sets')
-        operation_ids.add(operation_id)
-        path_sets.add(path_key)
-        normalized.append({
-            'operation_id': operation_id,
-            'commit': commit,
-            'paths': list(paths),
-            'paths_digest': paths_digest,
-            'composition_digest': composition_digest,
-        })
-    return sorted(normalized, key=lambda item: (item['paths'], item['operation_id']))
-
-
 def derived_provenance_store_path(repo_root):
     return git_common_dir(repo_root) / 'syncwheel' / 'derived-provenance.json'
 
@@ -3822,218 +3812,6 @@ def ensure_clean_worktree(
         raise SyncwheelError(f'{path} is not clean' + format_remedy_suffix(remedy_commands or []))
 
 
-def normalize_syncwheel_tracking(value, path='manifest'):
-    if value is None:
-        return None
-    if value not in SYNCWHEEL_TRACKING_VALUES:
-        allowed = ', '.join(sorted(SYNCWHEEL_TRACKING_VALUES))
-        raise SyncwheelError(f'{path} syncwheel_tracking must be one of: {allowed}')
-    return value
-
-
-def manifest_is_local_only(manifest):
-    """A local-only manifest never becomes a tracked file, in any tree or index.
-
-    A manifest with no tracking policy is not local-only.
-    """
-    return (manifest or {}).get('syncwheel_tracking') == SYNCWHEEL_TRACKING_LOCAL_ONLY
-
-
-def control_manifest_stays_untracked(manifest):
-    """Whether the integration tree of this repository must not carry the manifest.
-
-    Active-active coordination binds the manifest by reading it from the
-    published integration tip, so a coordinated repository keeps its control
-    commit whatever the tracking policy says.
-    """
-    return manifest_is_local_only(manifest) and not coordination_is_active(manifest)
-
-
-
-def default_authority_policy():
-    return {
-        'mode': AUTHORITY_MODE_HUMAN_GATED,
-        'allow': [],
-        'deny': [AUTHORITY_CLASS_DESTRUCTIVE_REWRITE],
-    }
-
-
-def normalize_authority_policy(value, path='manifest'):
-    if value is None:
-        return default_authority_policy()
-    if not isinstance(value, dict):
-        raise SyncwheelError(f'{path} authority must be an object')
-    mode = value.get('mode')
-    if mode not in AUTHORITY_MODES:
-        allowed = ', '.join(sorted(AUTHORITY_MODES))
-        raise SyncwheelError(f'{path} authority.mode must be one of: {allowed}')
-    classes = {}
-    for field in ('allow', 'deny'):
-        raw = value.get(field, [])
-        if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
-            raise SyncwheelError(f'{path} authority.{field} must be a string array')
-        unknown = sorted(set(raw) - set(AUTHORITY_CLASSES))
-        if unknown:
-            raise SyncwheelError(
-                f'{path} authority.{field} contains unknown classes: ' + ', '.join(unknown)
-                + '; allowed: ' + ', '.join(AUTHORITY_CLASSES)
-            )
-        classes[field] = set(raw)
-    if AUTHORITY_CLASS_DESTRUCTIVE_REWRITE in classes['allow']:
-        raise SyncwheelError(f'{path} authority.allow may never contain {AUTHORITY_CLASS_DESTRUCTIVE_REWRITE}')
-    classes['deny'].add(AUTHORITY_CLASS_DESTRUCTIVE_REWRITE)
-    overlap = sorted(classes['allow'] & classes['deny'])
-    if overlap:
-        raise SyncwheelError(f'{path} authority classes cannot be both allowed and denied: ' + ', '.join(overlap))
-    if mode == AUTHORITY_MODE_HUMAN_GATED and classes['allow']:
-        raise SyncwheelError(f'{path} authority.mode={AUTHORITY_MODE_HUMAN_GATED} cannot allow any class')
-    if mode == AUTHORITY_MODE_AI_MANAGED and not classes['allow']:
-        raise SyncwheelError(f'{path} authority.mode={AUTHORITY_MODE_AI_MANAGED} requires at least one allowed class')
-    return {
-        'mode': mode,
-        'allow': [item for item in AUTHORITY_CLASSES if item in classes['allow']],
-        'deny': [item for item in AUTHORITY_CLASSES if item in classes['deny']],
-    }
-
-
-def manifest_authority(manifest):
-    if not manifest:
-        return default_authority_policy()
-    return normalize_authority_policy(manifest.get('authority'))
-
-
-def authority_allows(manifest, authority_class):
-    return authority_class in manifest_authority(manifest)['allow']
-
-
-def normalize_syncwheel_worktree_root(value, path='manifest'):
-    if value is None:
-        return DEFAULT_SYNCWHEEL_WORKTREE_ROOT
-    if not isinstance(value, str) or not value.strip():
-        raise SyncwheelError(f'{path} syncwheel_worktree_root must be a non-empty string')
-    return value.strip()
-
-
-def normalize_governed_worktree_capacity(value, path='manifest'):
-    key = f'{path} governed_worktree_capacity'
-    if value is None:
-        value = {}
-    if not isinstance(value, dict):
-        raise SyncwheelError(f'{key} must be an object')
-    unknown = sorted(set(value) - {'limit', 'enforcement'})
-    if unknown:
-        raise SyncwheelError(f"{key} has unknown field(s): {', '.join(unknown)}")
-    limit = value.get('limit', GOVERNED_WORKTREE_DEFAULT_CAPACITY)
-    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
-        raise SyncwheelError(f'{key}.limit must be a positive integer')
-    enforcement = value.get('enforcement', 'warn')
-    if enforcement not in GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS:
-        raise SyncwheelError(
-            f"{key}.enforcement must be one of: {', '.join(GOVERNED_WORKTREE_CAPACITY_ENFORCEMENTS)}"
-        )
-    return {'limit': limit, 'enforcement': enforcement}
-
-
-def governed_worktree_capacity(manifest):
-    return normalize_governed_worktree_capacity((manifest or {}).get('governed_worktree_capacity'))
-
-
-def normalize_coordination_gc(value, path='coordination.gc'):
-    if value is None:
-        value = {}
-    if not isinstance(value, dict):
-        raise SyncwheelError(f'{path} must be an object')
-    normalized = dict(DEFAULT_COORDINATION_GC)
-    for key in DEFAULT_COORDINATION_GC:
-        if key not in value:
-            continue
-        candidate = value[key]
-        if not isinstance(candidate, int) or isinstance(candidate, bool) or candidate < 1:
-            raise SyncwheelError(f'{path}.{key} must be a positive integer')
-        normalized[key] = candidate
-    unknown = sorted(set(value) - set(DEFAULT_COORDINATION_GC))
-    if unknown:
-        raise SyncwheelError(f'{path} has unknown keys: {", ".join(unknown)}')
-    return normalized
-
-
-def normalize_coordination_id(value, path='coordination.id'):
-    if not isinstance(value, str) or not value.strip():
-        raise SyncwheelError(f'{path} must be a non-empty string')
-    return safe_ref_segment(value)
-
-
-def default_coordination_id(manifest_path):
-    stem = Path(manifest_path).stem
-    if stem == 'manifest':
-        return 'default'
-    if stem.endswith('.local'):
-        stem = stem[:-len('.local')]
-    return safe_ref_segment(stem or 'default')
-
-
-def default_coordination_state_branch(coordination_id):
-    return f'{COORDINATION_STATE_PREFIX}{normalize_coordination_id(coordination_id)}'
-
-
-def normalize_coordination(value, manifest_path='manifest'):
-    if not isinstance(value, dict):
-        raise SyncwheelError('manifest version 2 requires a coordination object')
-    mode = value.get('mode')
-    if mode not in COORDINATION_MODES:
-        allowed = ', '.join(sorted(COORDINATION_MODES))
-        raise SyncwheelError(f'coordination.mode must be one of: {allowed}')
-    coordination_id = normalize_coordination_id(value.get('id'))
-    remote = value.get('remote')
-    if not isinstance(remote, str) or not remote.strip():
-        raise SyncwheelError('coordination.remote must be a non-empty string')
-    state_branch = value.get('state_branch')
-    expected_state_branch = default_coordination_state_branch(coordination_id)
-    if state_branch != expected_state_branch:
-        raise SyncwheelError(
-            f'coordination.state_branch must be {expected_state_branch!r} for coordination id {coordination_id!r}'
-        )
-    normalized = {
-        'mode': mode,
-        'id': coordination_id,
-        'remote': remote.strip(),
-        'state_branch': state_branch,
-        'gc': normalize_coordination_gc(value.get('gc')),
-    }
-    claims = value.get('claims')
-    if claims is not None:
-        if claims not in COORDINATION_CLAIM_MODES:
-            raise SyncwheelError('coordination.claims must be one of: advisory, required')
-        normalized['claims'] = claims
-    unknown = sorted(set(value) - {'mode', 'id', 'remote', 'state_branch', 'gc', 'claims'})
-    if unknown:
-        raise SyncwheelError(f'coordination has unknown keys: {", ".join(unknown)}')
-    return normalized
-
-
-def normalize_integration_membership(value, path='defaults.integration_membership'):
-    if value is None:
-        return INTEGRATION_MEMBERSHIP_LEGACY
-    if value not in INTEGRATION_MEMBERSHIP_POLICIES:
-        allowed = ', '.join(sorted(INTEGRATION_MEMBERSHIP_POLICIES))
-        raise SyncwheelError(f'{path} must be one of: {allowed}')
-    return value
-
-
-def coordination_config(manifest):
-    if manifest.get('version') not in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS}:
-        return None
-    config = manifest.get('coordination')
-    if not isinstance(config, dict):
-        return config
-    return {**config, 'claims': config.get('claims', 'advisory')}
-
-
-def coordination_is_active(manifest):
-    config = coordination_config(manifest)
-    return bool(config and config.get('mode') == 'active-active')
-
-
 def stack_push_remote(manifest, stack, remote_override=None):
     return remote_override or stack.get('publication_remote') or manifest['defaults']['publication_remote']
 
@@ -4061,36 +3839,6 @@ def coordination_claim_ref(source_ref):
             f'coordination claim requires a full refs/heads source ref: {source_ref!r}'
         )
     return f"refs/heads/{COORDINATION_CLAIM_PREFIX}{source_ref[len('refs/'):]}"
-
-
-def active_coordination_config(manifest_path, remote, coordination_id=None):
-    coordination_id = normalize_coordination_id(
-        coordination_id or default_coordination_id(manifest_path)
-    )
-    return {
-        'mode': 'active-active',
-        'id': coordination_id,
-        'remote': remote,
-        'state_branch': default_coordination_state_branch(coordination_id),
-        'gc': dict(DEFAULT_COORDINATION_GC),
-        'claims': 'advisory',
-    }
-
-
-def disabled_coordination_config(manifest_path, remote, coordination_id=None):
-    coordination_id = normalize_coordination_id(
-        coordination_id or default_coordination_id(manifest_path)
-    )
-    if not isinstance(remote, str) or not remote.strip():
-        raise SyncwheelError('disabled coordination requires a non-empty publication remote name')
-    return {
-        'mode': 'disabled',
-        'id': coordination_id,
-        'remote': remote.strip(),
-        'state_branch': default_coordination_state_branch(coordination_id),
-        'gc': dict(DEFAULT_COORDINATION_GC),
-        'claims': 'advisory',
-    }
 
 
 def syncwheel_worktree_root(manifest):
@@ -4368,441 +4116,6 @@ def ensure_in_place_target(
     )
 
 
-def normalize_channel_timestamp(value, field):
-    if not isinstance(value, str) or not value.strip():
-        raise SyncwheelError(f'{field} must be a non-empty ISO-8601 timestamp')
-    candidate = value.strip()
-    try:
-        datetime.datetime.fromisoformat(candidate.replace('Z', '+00:00'))
-    except ValueError as exc:
-        raise SyncwheelError(f'{field} must be an ISO-8601 timestamp') from exc
-    return candidate
-
-
-def normalize_landing_requirement(value, path='landing.checks', seen_ids=None):
-    """Normalize the deliberately small all/any requirement grammar for stack land."""
-    if not isinstance(value, dict):
-        raise SyncwheelError(f'{path} must be an object')
-    requirement_id = value.get('id')
-    if not isinstance(requirement_id, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:-]{0,127}', requirement_id):
-        raise SyncwheelError(f'{path}.id must be a 1-128 character requirement id')
-    seen_ids = seen_ids if seen_ids is not None else set()
-    if requirement_id in seen_ids:
-        raise SyncwheelError(f'duplicate landing requirement id: {requirement_id}')
-    seen_ids.add(requirement_id)
-    kinds = [kind for kind in ('all', 'any', 'local', 'attestation', 'pr') if kind in value]
-    if len(kinds) != 1:
-        raise SyncwheelError(f'{path} must contain exactly one of all, any, local, attestation, or pr')
-    kind = kinds[0]
-    if kind in {'all', 'any'}:
-        children = value[kind]
-        if not isinstance(children, list) or not children:
-            raise SyncwheelError(f'{path}.{kind} must be a non-empty array')
-        if set(value) != {'id', kind}:
-            raise SyncwheelError(f'{path} {kind} groups may contain only id and {kind}')
-        return {'id': requirement_id, kind: [
-            normalize_landing_requirement(item, f'{path}.{kind}[{index}]', seen_ids)
-            for index, item in enumerate(children)
-        ]}
-    if kind == 'local':
-        local = value['local']
-        if not isinstance(local, dict) or set(local) - {'scope', 'argv', 'timeoutSeconds'}:
-            raise SyncwheelError(f'{path}.local must contain scope, argv, and optional timeoutSeconds')
-        scope = local.get('scope')
-        argv = local.get('argv')
-        timeout = local.get('timeoutSeconds', 1800)
-        if scope not in {'stack', 'integration'}:
-            raise SyncwheelError(f'{path}.local.scope must be stack or integration')
-        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
-            raise SyncwheelError(f'{path}.local.argv must be a non-empty string array')
-        if not isinstance(timeout, int) or isinstance(timeout, bool) or timeout <= 0:
-            raise SyncwheelError(f'{path}.local.timeoutSeconds must be a positive integer')
-        return {'id': requirement_id, 'local': {'scope': scope, 'argv': list(argv), 'timeoutSeconds': timeout}}
-    if kind == 'attestation':
-        attestation = value['attestation']
-        if not isinstance(attestation, dict) or set(attestation) != {'scope', 'verifierArgv'}:
-            raise SyncwheelError(f'{path}.attestation must contain exactly scope and verifierArgv')
-        if attestation.get('scope') not in {'stack', 'integration'}:
-            raise SyncwheelError(f'{path}.attestation.scope must be stack or integration')
-        argv = attestation.get('verifierArgv')
-        if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
-            raise SyncwheelError(f'{path}.attestation.verifierArgv must be a non-empty string array')
-        return {'id': requirement_id, 'attestation': {'scope': attestation['scope'], 'verifierArgv': list(argv)}}
-    pr = value['pr']
-    if not isinstance(pr, dict) or set(pr) != {'checks'}:
-        raise SyncwheelError(f'{path}.pr must contain exactly checks')
-    checks = pr.get('checks')
-    if not isinstance(checks, list) or not checks or not all(isinstance(item, str) and item for item in checks):
-        raise SyncwheelError(f'{path}.pr.checks must be a non-empty string array')
-    return {'id': requirement_id, 'pr': {'checks': list(checks)}}
-
-
-def normalize_landing_policy(value):
-    if value is None:
-        return {'mode': 'disabled', 'strategy': 'merge', 'checks': None}
-    if not isinstance(value, dict):
-        raise SyncwheelError('landing must be an object')
-    unknown = sorted(set(value) - {'mode', 'strategy', 'checks'})
-    if unknown:
-        raise SyncwheelError('landing has unknown keys: ' + ', '.join(unknown))
-    mode = value.get('mode', 'disabled')
-    if mode not in {'disabled', 'direct'}:
-        raise SyncwheelError('landing.mode must be disabled or direct')
-    strategy = value.get('strategy', 'merge')
-    if strategy not in {'merge', 'ff-only'}:
-        raise SyncwheelError('landing.strategy must be merge or ff-only')
-    checks = value.get('checks')
-    return {
-        'mode': mode,
-        'strategy': strategy,
-        'checks': normalize_landing_requirement(checks) if checks is not None else None,
-    }
-
-
-def normalize_channel_entry(raw, channel_id):
-    if not isinstance(raw, dict):
-        raise SyncwheelError(f'channel {channel_id} composition entries must be objects')
-    entry = dict(raw)
-    stack_id = entry.get('stack')
-    branch = entry.get('branch')
-    stack_base = entry.get('stackBase')
-    stack_base_revision = entry.get('stackBaseRevision')
-    branch_revision = entry.get('branchRevision')
-    commits = entry.get('commits')
-    if not isinstance(stack_id, str) or not stack_id:
-        raise SyncwheelError(f'channel {channel_id} composition entry needs a stack id')
-    if not isinstance(branch, str) or not branch:
-        raise SyncwheelError(f'channel {channel_id} stack {stack_id} needs a branch')
-    if not isinstance(stack_base, str) or not stack_base:
-        raise SyncwheelError(f'channel {channel_id} stack {stack_id} needs stackBase')
-    if not isinstance(stack_base_revision, str) or not re.fullmatch(r'[0-9a-f]{40}', stack_base_revision):
-        raise SyncwheelError(
-            f'channel {channel_id} stack {stack_id} stackBaseRevision must be a full commit SHA'
-        )
-    if not isinstance(branch_revision, str) or not re.fullmatch(r'[0-9a-f]{40}', branch_revision):
-        raise SyncwheelError(
-            f'channel {channel_id} stack {stack_id} branchRevision must be a full commit SHA'
-        )
-    if (
-        not isinstance(commits, list)
-        or not all(isinstance(commit, str) and re.fullmatch(r'[0-9a-f]{40}', commit) for commit in commits)
-    ):
-        raise SyncwheelError(
-            f'channel {channel_id} stack {stack_id} commits must be ordered full commit SHAs'
-        )
-    dependencies = entry.get('dependsOn', [])
-    if (
-        not isinstance(dependencies, list)
-        or not all(isinstance(item, str) and item for item in dependencies)
-        or len(dependencies) != len(set(dependencies))
-        or stack_id in dependencies
-    ):
-        raise SyncwheelError(
-            f'channel {channel_id} stack {stack_id} dependsOn must be a unique string array '
-            'that excludes itself'
-        )
-    normalized = {
-        'stack': stack_id,
-        'branch': branch,
-        'stackBase': stack_base,
-        'stackBaseRevision': stack_base_revision,
-        'branchRevision': branch_revision,
-        'commits': list(commits),
-        'dependsOn': list(dependencies),
-    }
-    return normalized
-
-
-def normalize_channel_resolution(raw, channel_id, pin_digest):
-    if raw is None:
-        return None
-    if not isinstance(raw, dict):
-        raise SyncwheelError(f'channel {channel_id} resolution must be an object')
-    required = ('forPinDigest', 'revision', 'tree', 'parentRevision')
-    for field in required:
-        value = raw.get(field)
-        expected_length = 64 if field == 'forPinDigest' else 40
-        if not isinstance(value, str) or not re.fullmatch(
-            rf'[0-9a-f]{{{expected_length}}}', value
-        ):
-            raise SyncwheelError(
-                f'channel {channel_id} resolution.{field} must be a full object id or digest'
-            )
-    if raw['forPinDigest'] != pin_digest:
-        raise SyncwheelError(
-            f'channel {channel_id} resolution does not bind the current pin digest'
-        )
-    return {field: raw[field] for field in required}
-
-
-def validate_channel_dependency_order(channel):
-    seen = set()
-    for entry in channel.get('composition', []):
-        missing = [dependency for dependency in entry.get('dependsOn', []) if dependency not in seen]
-        if missing:
-            raise SyncwheelError(
-                f"channel {channel['id']} stack {entry['stack']} requires earlier dependency stack(s): "
-                + ', '.join(missing)
-            )
-        seen.add(entry['stack'])
-
-
-def normalize_manifest_channels(data, defaults, repository_mode):
-    raw_channels = data.get('channels', [])
-    if raw_channels and repository_mode != 'delivery':
-        raise SyncwheelError('manifest channels are supported only in repository_mode="delivery"')
-    if not isinstance(raw_channels, list):
-        raise SyncwheelError('manifest channels must be an array')
-    seen_ids = set()
-    seen_branches = set()
-    channels = []
-    for raw in raw_channels:
-        if not isinstance(raw, dict):
-            raise SyncwheelError('each channel entry must be an object')
-        channel = dict(raw)
-        channel_id = channel.get('id')
-        branch = channel.get('branch')
-        if not isinstance(channel_id, str) or not channel_id:
-            raise SyncwheelError('each channel needs a string id')
-        if channel_id in seen_ids:
-            raise SyncwheelError(f'duplicate channel id: {channel_id}')
-        if not isinstance(branch, str) or not branch:
-            raise SyncwheelError(f'channel {channel_id} needs a branch')
-        if branch in seen_branches:
-            raise SyncwheelError(f'duplicate channel branch: {branch}')
-        lifecycle = channel.get('lifecycle', 'shared')
-        if lifecycle not in CHANNEL_LIFECYCLES:
-            raise SyncwheelError(
-                f'channel {channel_id} lifecycle must be one of: '
-                + ', '.join(sorted(CHANNEL_LIFECYCLES))
-            )
-        composition = channel.get('composition', [])
-        if not isinstance(composition, list):
-            raise SyncwheelError(f'channel {channel_id} composition must be an array')
-        normalized_composition = []
-        composition_ids = set()
-        for entry in composition:
-            normalized_entry = normalize_channel_entry(entry, channel_id)
-            if normalized_entry['stack'] in composition_ids:
-                raise SyncwheelError(
-                    f"channel {channel_id} contains stack {normalized_entry['stack']} more than once"
-                )
-            composition_ids.add(normalized_entry['stack'])
-            normalized_composition.append(normalized_entry)
-        normalized = {
-            'id': channel_id,
-            'branch': branch,
-            'lifecycle': lifecycle,
-            'base': channel.get('base') or defaults['base_ref'],
-            'baseRevision': channel.get('baseRevision'),
-            'remote': channel.get('remote') or defaults['publication_remote'],
-            'composition': normalized_composition,
-        }
-        if (
-            not isinstance(normalized['baseRevision'], str)
-            or not re.fullmatch(r'[0-9a-f]{40}', normalized['baseRevision'])
-        ):
-            raise SyncwheelError(
-                f'channel {channel_id} baseRevision must be a full commit SHA'
-            )
-        if lifecycle == 'ephemeral':
-            expiry = channel.get('expiry')
-            if not isinstance(expiry, dict):
-                raise SyncwheelError(f'ephemeral channel {channel_id} requires expiry metadata')
-            normalized['expiry'] = {
-                'createdAt': normalize_channel_timestamp(
-                    expiry.get('createdAt'), f'channel {channel_id} expiry.createdAt'
-                ),
-                'expiresAt': normalize_channel_timestamp(
-                    expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt'
-                ),
-            }
-        elif 'expiry' in channel:
-            raise SyncwheelError(f'shared channel {channel_id} must not define expiry metadata')
-        validate_channel_dependency_order(normalized)
-        pin_digest = channel_pin_digest(normalized)
-        resolution = normalize_channel_resolution(
-            channel.get('resolution'), channel_id, pin_digest
-        )
-        if resolution:
-            normalized['resolution'] = resolution
-        seen_ids.add(channel_id)
-        seen_branches.add(branch)
-        channels.append(normalized)
-    return channels
-
-
-def validate_channel_stack_authority(channels, stacks):
-    """Bind every persisted channel entry to its authoritative stack declaration."""
-    by_id = {stack['id']: stack for stack in stacks}
-    for channel in channels:
-        for entry in channel.get('composition', []):
-            stack = by_id.get(entry['stack'])
-            if stack is None:
-                raise SyncwheelError(
-                    f"channel {channel['id']} references unknown stack: {entry['stack']}"
-                )
-            if entry['branch'] != stack['branch']:
-                raise SyncwheelError(
-                    f"channel {channel['id']} stack {entry['stack']} pinned branch "
-                    f"{entry['branch']!r} does not match stack branch {stack['branch']!r}"
-                )
-            if entry['stackBase'] != stack['base']:
-                raise SyncwheelError(
-                    f"channel {channel['id']} stack {entry['stack']} pinned stackBase "
-                    f"{entry['stackBase']!r} does not match stack base {stack['base']!r}"
-                )
-            if list(entry.get('dependsOn', [])) != list(stack.get('depends_on', [])):
-                raise SyncwheelError(
-                    f"channel {channel['id']} stack {entry['stack']} pinned dependencies "
-                    'do not match the authoritative stack declaration'
-                )
-
-
-def symbolic_base_branch_for_remote(value, remote):
-    if not isinstance(value, str) or not value or re.fullmatch(r'[0-9a-f]{40}', value):
-        return None
-    remote_ref_prefix = f'refs/remotes/{remote}/'
-    if value.startswith(remote_ref_prefix):
-        return value[len(remote_ref_prefix):]
-    short_remote_prefix = f'{remote}/'
-    if value.startswith(short_remote_prefix):
-        return value[len(short_remote_prefix):]
-    if value.startswith('refs/remotes/'):
-        return None
-    if value.startswith('refs/heads/'):
-        return value[len('refs/heads/'):]
-    if value.startswith('refs/') or value in {'HEAD', '@'}:
-        return None
-    return value
-
-
-def validate_channel_branch_ownership(manifest):
-    """Keep channel refs disjoint from every authoritative repository ref role."""
-    defaults = manifest['defaults']
-    integration_branch = manifest['integration']['branch']
-    coordination = manifest.get('coordination') or {}
-    stacks = manifest.get('stacks', [])
-    for channel in manifest.get('channels', []):
-        branch = channel['branch']
-        remote = channel['remote']
-        if branch == defaults['base_branch']:
-            raise SyncwheelError(
-                f"channel {channel['id']} branch {branch!r} overlaps protected "
-                f"defaults.base_branch on remote {remote!r}"
-            )
-        base_authorities = [
-            ('channel.base', channel.get('base')),
-            ('defaults.base_ref', defaults.get('base_ref')),
-            ('integration.base', manifest['integration'].get('base')),
-            *(
-                (f"stack {stack['id']} base", stack.get('base'))
-                for stack in stacks
-            ),
-        ]
-        conflicting_bases = [
-            label for label, value in base_authorities
-            if symbolic_base_branch_for_remote(value, remote) == branch
-        ]
-        if conflicting_bases:
-            raise SyncwheelError(
-                f"channel {channel['id']} branch {branch!r} on remote {remote!r} "
-                'overlaps canonical symbolic base(s): ' + ', '.join(conflicting_bases)
-            )
-        source_owners = sorted(
-            stack['id'] for stack in stacks if stack['branch'] == branch
-        )
-        if branch == integration_branch or source_owners:
-            raise SyncwheelError(
-                f"channel {channel['id']} branch overlaps a stack or integration branch: "
-                f'{branch}'
-            )
-        target_owners = sorted(
-            stack['id'] for stack in stacks
-            if stack.get('target_remote') == remote
-            and stack.get('target_branch') == branch
-        )
-        if target_owners:
-            raise SyncwheelError(
-                f"channel {channel['id']} branch {branch!r} on remote {remote!r} "
-                'overlaps target branch owned by stack(s): ' + ', '.join(target_owners)
-            )
-        if branch == coordination.get('state_branch'):
-            raise SyncwheelError(
-                f"channel {channel['id']} branch must not overlap coordination.state_branch"
-            )
-
-
-def stack_base_owner_id(stack, stacks):
-    base = stack.get('base')
-    if not isinstance(base, str):
-        # Public coordination snapshots encode remote refs as typed objects.
-        # Their explicit depends_on graph is still validated below.
-        return None
-    candidates = [
-        (len(candidate['branch']), candidate['id'])
-        for candidate in stacks
-        if candidate['id'] != stack['id']
-        and (
-            base == candidate['branch']
-            or base.endswith(f"/{candidate['branch']}")
-        )
-    ]
-    if not candidates:
-        return None
-    candidates.sort(reverse=True)
-    return candidates[0][1]
-
-
-def derive_stack_dependencies(stacks):
-    for stack in stacks:
-        owner = stack_base_owner_id(stack, stacks)
-        if owner and owner not in stack.get('depends_on', []):
-            stack['depends_on'] = [*stack.get('depends_on', []), owner]
-    return stacks
-
-
-def validate_stack_dependency_graph(stacks, require_declared_dependencies=True):
-    by_id = {stack['id']: stack for stack in stacks}
-    for stack in stacks:
-        dependencies = stack.get('depends_on', [])
-        unknown = sorted(set(dependencies) - set(by_id))
-        if unknown:
-            raise SyncwheelError(
-                f"stack {stack['id']} depends_on unknown stack(s): " + ', '.join(unknown)
-            )
-        if stack['id'] in dependencies:
-            raise SyncwheelError(f"stack {stack['id']} must not depend on itself")
-        base_owner = stack_base_owner_id(stack, stacks)
-        if (
-            require_declared_dependencies
-            and base_owner
-            and base_owner not in dependencies
-        ):
-            raise SyncwheelError(
-                f"stack {stack['id']} base {stack['base']!r} belongs to stack {base_owner}; "
-                f'declare depends_on: ["{base_owner}"]'
-            )
-
-    visiting = set()
-    visited = set()
-
-    def visit(stack_id, path):
-        if stack_id in visiting:
-            cycle = path[path.index(stack_id):] + [stack_id]
-            raise SyncwheelError('stack dependency cycle: ' + ' -> '.join(cycle))
-        if stack_id in visited:
-            return
-        visiting.add(stack_id)
-        for dependency in by_id[stack_id].get('depends_on', []):
-            visit(dependency, [*path, dependency])
-        visiting.remove(stack_id)
-        visited.add(stack_id)
-
-    for stack_id in by_id:
-        visit(stack_id, [stack_id])
-
-
 def load_manifest(repo_root, manifest_path=None):
     path = Path(manifest_path) if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
     if not path.exists():
@@ -4812,204 +4125,6 @@ def load_manifest(repo_root, manifest_path=None):
     except json.JSONDecodeError as exc:
         raise SyncwheelError(f'invalid manifest JSON: {exc}') from exc
     return normalize_manifest_data(data, path), path
-
-
-def normalize_manifest_data(data, path):
-    """Normalize parsed control data without inspecting moving refs or a checkout."""
-    if not isinstance(data, dict):
-        raise SyncwheelError('manifest root must be an object')
-    version = data.get('version')
-    if version not in MANIFEST_VERSIONS:
-        allowed = ', '.join(str(item) for item in sorted(MANIFEST_VERSIONS))
-        raise SyncwheelError(f'manifest version must be one of: {allowed}')
-    if 'syncwheel_tracking' in data:
-        normalize_syncwheel_tracking(data.get('syncwheel_tracking'))
-    if 'authority' in data:
-        data['authority'] = normalize_authority_policy(data.get('authority'))
-    repository_mode = data.get('repository_mode', 'delivery')
-    if repository_mode not in REPOSITORY_MODES:
-        raise SyncwheelError(
-            'repository_mode must be one of: ' + ', '.join(sorted(REPOSITORY_MODES))
-        )
-    data['repository_mode'] = repository_mode
-    if repository_mode == 'journal':
-        raw_journal = data.get('journal')
-        if not isinstance(raw_journal, dict):
-            raise SyncwheelError('journal mode requires a journal object')
-        journal = dict(raw_journal)
-        for field in ('branch', 'remote'):
-            if not isinstance(journal.get(field), str) or not journal[field].strip():
-                raise SyncwheelError(f'journal.{field} must be a non-empty string')
-        for field in ('include', 'exclude'):
-            value = journal.get(field)
-            if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
-                raise SyncwheelError(f'journal.{field} must be a string array')
-            if field == 'include' and not value:
-                raise SyncwheelError('journal.include must be a non-empty explicit allowlist')
-            journal[field] = value
-        max_bytes = journal.get('max_file_bytes')
-        if not isinstance(max_bytes, int) or isinstance(max_bytes, bool) or max_bytes <= 0:
-            raise SyncwheelError('journal.max_file_bytes must be a positive integer')
-        journal['max_file_bytes'] = max_bytes
-        interval = journal.get('interval', DEFAULT_JOURNAL_INTERVAL)
-        if not isinstance(interval, str) or not re.fullmatch(r'[1-9][0-9]*(?:s|min|m|h|d|w)', interval):
-            raise SyncwheelError('journal.interval must be a positive systemd duration such as 30m')
-        journal['interval'] = interval
-        data['journal'] = journal
-    data['syncwheel_worktree_root'] = normalize_syncwheel_worktree_root(
-        data.get('syncwheel_worktree_root')
-    )
-    if 'governed_worktree_capacity' in data:
-        data['governed_worktree_capacity'] = normalize_governed_worktree_capacity(
-            data['governed_worktree_capacity']
-        )
-
-    defaults = data.setdefault('defaults', {})
-    canonical_remote = defaults.setdefault('canonical_remote', 'origin')
-    defaults.setdefault('publication_remote', 'fork')
-    defaults.setdefault('base_branch', 'main')
-    defaults.setdefault('base_ref', f"{canonical_remote}/{defaults['base_branch']}")
-    defaults['integration_membership'] = normalize_integration_membership(
-        defaults.get('integration_membership')
-    )
-    if defaults.get('replay_mode') is not None:
-        normalize_replay_mode(defaults['replay_mode'], 'manifest defaults.replay_mode')
-    if 'landing' in data:
-        data['landing'] = normalize_landing_policy(data['landing'])
-
-    integration = data.setdefault('integration', {})
-    integration.setdefault('branch', DEFAULT_INTEGRATION_BRANCH)
-    integration.setdefault('base', defaults['base_ref'])
-    integration.setdefault('strategy', 'cherry-pick')
-    integration.setdefault('stacks', [])
-    if version == MANIFEST_VERSION_CHANNELS:
-        derived_paths = integration.setdefault('derived_paths', [])
-        if (
-            not isinstance(derived_paths, list)
-            or not all(isinstance(item, str) and item.endswith('/') and item for item in derived_paths)
-            or len(derived_paths) != len(set(derived_paths))
-        ):
-            raise SyncwheelError('integration.derived_paths must be a unique string array of path prefixes')
-        if 'derived_provenance' in integration:
-            integration['derived_provenance'] = normalize_derived_provenance(
-                integration['derived_provenance'],
-                label='integration.derived_provenance',
-            )
-    elif 'derived_paths' in integration:
-        raise SyncwheelError('integration.derived_paths requires manifest version 3')
-    elif 'derived_provenance' in integration:
-        raise SyncwheelError('integration.derived_provenance requires manifest version 3')
-
-    stacks = data.setdefault('stacks', [])
-    if not isinstance(stacks, list):
-        raise SyncwheelError('manifest stacks must be an array')
-
-    seen_ids = set()
-    seen_branches = set()
-    normalized = []
-    for raw in stacks:
-        if not isinstance(raw, dict):
-            raise SyncwheelError('each stack entry must be an object')
-        stack = dict(raw)
-        stack_id = stack.get('id')
-        branch = stack.get('branch')
-        commits = stack.get('commits', [])
-        if not stack_id or not isinstance(stack_id, str):
-            raise SyncwheelError('each stack needs a string id')
-        if stack_id in seen_ids:
-            raise SyncwheelError(f'duplicate stack id: {stack_id}')
-        if not branch or not isinstance(branch, str):
-            raise SyncwheelError(f'stack {stack_id} needs a branch')
-        if branch in seen_branches:
-            raise SyncwheelError(f'duplicate stack branch: {branch}')
-        if not isinstance(commits, list) or not all(isinstance(c, str) and c for c in commits):
-            raise SyncwheelError(f'stack {stack_id} commits must be a string array')
-        integration_commits = stack.get('integration_commits')
-        if integration_commits is not None and (
-            not isinstance(integration_commits, list)
-            or not all(isinstance(c, str) and c for c in integration_commits)
-        ):
-            raise SyncwheelError(
-                f'stack {stack_id} integration_commits must be a string array when present'
-            )
-        resolution = stack.get('integration_resolution')
-        if resolution is not None and (
-            not isinstance(resolution, dict) or set(resolution) != {'source_tip'}
-            or not isinstance(resolution.get('source_tip'), str)
-            or not re.fullmatch(r'[0-9a-f]{40,64}', resolution['source_tip'])
-            or integration_commits is None
-        ):
-            raise SyncwheelError(f'stack {stack_id} has an invalid integration_resolution binding')
-        integration_only_commits = stack.get('integration_only_commits')
-        if integration_only_commits is not None and (
-            not isinstance(integration_only_commits, list)
-            or not all(isinstance(c, str) and c for c in integration_only_commits)
-            or len(integration_only_commits) != len(set(integration_only_commits))
-        ):
-            raise SyncwheelError(
-                f'stack {stack_id} integration_only_commits must be a unique string array when present'
-            )
-        seen_ids.add(stack_id)
-        seen_branches.add(branch)
-        stack.setdefault('base', defaults['base_ref'])
-        stack.setdefault('target_remote', canonical_remote)
-        stack.setdefault('target_branch', defaults['base_branch'])
-        stack.setdefault('integration_branch', integration['branch'])
-        stack.setdefault('state', 'published')
-        if stack['state'] not in STACK_STATES:
-            raise SyncwheelError(
-                f"stack {stack_id} state must be one of: {', '.join(sorted(STACK_STATES))}"
-            )
-        stack['publication'] = {'enabled': stack['state'] != 'draft'}
-        if 'meta' in stack and not isinstance(stack['meta'], dict):
-            raise SyncwheelError(f'stack {stack_id} meta must be an object when present')
-        dependencies = stack.get('depends_on', [])
-        if (
-            not isinstance(dependencies, list)
-            or not all(isinstance(item, str) and item for item in dependencies)
-            or len(dependencies) != len(set(dependencies))
-        ):
-            raise SyncwheelError(f'stack {stack_id} depends_on must be a unique string array')
-        if dependencies and version != MANIFEST_VERSION_CHANNELS:
-            raise SyncwheelError(
-                f'stack {stack_id} depends_on requires manifest version 3; '
-                'migrate explicitly with channel create --apply before declaring dependencies'
-            )
-        if dependencies:
-            stack['depends_on'] = list(dependencies)
-        else:
-            stack.pop('depends_on', None)
-        stack.setdefault('meta', {})
-        normalized.append(stack)
-    data['stacks'] = normalized
-    validate_stack_dependency_graph(
-        data['stacks'], require_declared_dependencies=version == MANIFEST_VERSION_CHANNELS
-    )
-    data['channels'] = normalize_manifest_channels(data, defaults, repository_mode)
-    validate_channel_stack_authority(data['channels'], data['stacks'])
-    if version == MANIFEST_VERSION_CHANNELS and repository_mode != 'delivery':
-        raise SyncwheelError('manifest version 3 is supported only for repository_mode="delivery"')
-    if data.get('channels') and version != MANIFEST_VERSION_CHANNELS:
-        raise SyncwheelError('manifest channels require version 3; migrate explicitly with channel create --apply')
-    if version in {MANIFEST_VERSION_COORDINATED, MANIFEST_VERSION_CHANNELS} and repository_mode != 'journal':
-        coordination = normalize_coordination(data.get('coordination'), path)
-        if coordination['remote'] != defaults['publication_remote']:
-            raise SyncwheelError(
-                'coordination.remote must match defaults.publication_remote'
-            )
-        data['coordination'] = coordination
-        if version == MANIFEST_VERSION_CHANNELS and coordination['mode'] == 'active-active':
-            mismatched = [
-                channel['id'] for channel in data['channels']
-                if channel['remote'] != coordination['remote']
-            ]
-            if mismatched:
-                raise SyncwheelError(
-                    'active-active channel remote must match coordination.remote for: '
-                    + ', '.join(mismatched)
-                )
-    validate_channel_branch_ownership(data)
-    return data
 
 
 def save_manifest(path, manifest):
@@ -5553,20 +4668,6 @@ def manifest_event_payload(manifest_path, manifest, reason, context=None):
     }
 
 
-def default_ledger_state():
-    return {
-        'schema_version': LEDGER_SCHEMA_VERSION,
-        'last_seq': 0,
-        'event_count': 0,
-        'manifest': None,
-        'integration': {},
-        'stacks': {},
-        'channels': {},
-        'coordination_publications': {},
-        'recent_events': [],
-    }
-
-
 def load_ledger_events(repo_root, manifest_path=None):
     directory = ledger_events_dir(repo_root, manifest_path)
     if not directory.exists():
@@ -5593,178 +4694,6 @@ def load_ledger_events(repo_root, manifest_path=None):
                 )
             events.append(data)
     return events
-
-
-def branch_ref_matches(candidate, branch):
-    return candidate == branch or candidate.endswith(f'/{branch}')
-
-
-def apply_ledger_event(state, event):
-    payload = event.get('payload') or {}
-    state['last_seq'] = event['seq']
-    state['event_count'] += 1
-    state['recent_events'].append(event)
-    state['recent_events'] = state['recent_events'][-20:]
-
-    if event['type'] in ('manifest_initialized', 'manifest_saved'):
-        active_ids = set()
-        for summary in payload.get('stacks') or []:
-            stack = state['stacks'].setdefault(summary['id'], {'id': summary['id']})
-            stack.update(summary)
-            stack['active_in_manifest'] = True
-            stack['last_manifest_seq'] = event['seq']
-            active_ids.add(summary['id'])
-        for stack_id, stack in state['stacks'].items():
-            if stack_id not in active_ids:
-                stack['active_in_manifest'] = False
-        active_channel_ids = set()
-        channels = state.setdefault('channels', {})
-        for summary in payload.get('channels') or []:
-            channel = channels.setdefault(summary['id'], {'id': summary['id']})
-            channel.update(summary)
-            channel['active_in_manifest'] = True
-            channel['last_manifest_seq'] = event['seq']
-            active_channel_ids.add(summary['id'])
-        for channel_id, channel in channels.items():
-            if channel_id not in active_channel_ids:
-                channel['active_in_manifest'] = False
-        integration = payload.get('integration') or {}
-        state['manifest'] = {
-            'manifest_path': payload.get('manifest_path'),
-            'manifest_hash': payload.get('manifest_hash'),
-            'reason': payload.get('reason'),
-            'integration': integration,
-            'active_stacks': sorted(active_ids),
-            'active_channels': sorted(active_channel_ids),
-            'last_seq': event['seq'],
-        }
-        state['integration'].update({
-            'branch': integration.get('branch'),
-            'base': integration.get('base'),
-            'strategy': integration.get('strategy'),
-            'active_stacks': list(integration.get('stacks') or []),
-            'last_manifest_seq': event['seq'],
-        })
-        return state
-
-    if event['type'] in (
-        'channel_operation_started', 'channel_operation_prepared',
-        'channel_operation_receipt',
-    ):
-        channel_id = payload.get('channel')
-        if channel_id:
-            channels = state.setdefault('channels', {})
-            channel = channels.setdefault(channel_id, {'id': channel_id})
-            channel['last_operation_id'] = payload.get('operationId')
-            channel['last_operation'] = payload.get('operation')
-            channel['last_operation_seq'] = event['seq']
-            channel['last_operation_status'] = (
-                payload.get('status')
-                if event['type'] == 'channel_operation_receipt' else 'pending'
-            )
-        return state
-
-    if event['type'] in ('channel_applied', 'channel_published', 'channel_closed'):
-        channel_id = payload.get('channel')
-        if channel_id:
-            channels = state.setdefault('channels', {})
-            channel = channels.setdefault(channel_id, {'id': channel_id})
-            channel.update({
-                'branch': payload.get('branch') or channel.get('branch'),
-                'last_event_type': event['type'],
-                'last_event_seq': event['seq'],
-                'last_plan_digest': payload.get('planDigest'),
-                'last_tip': payload.get('tip') or channel.get('last_tip'),
-                'last_remote_tip': payload.get('publishedRevision') or channel.get('last_remote_tip'),
-            })
-            if event['type'] == 'channel_closed':
-                channel['active_in_manifest'] = False
-        return state
-
-    if event['type'] == 'stack_rebuilt':
-        stack = state['stacks'].setdefault(payload['stack'], {'id': payload['stack']})
-        stack.update({
-            'branch': payload.get('branch') or stack.get('branch'),
-            'base': payload.get('base') or stack.get('base'),
-            'integration_branch': payload.get('integration_branch') or stack.get('integration_branch'),
-            'last_rebuilt_tip': payload.get('after_tip'),
-            'last_rebuild_seq': event['seq'],
-            'active_in_manifest': stack.get('active_in_manifest', False),
-        })
-        return state
-
-    if event['type'] == 'stack_pushed':
-        stack = state['stacks'].setdefault(payload['stack'], {'id': payload['stack']})
-        stack.update({
-            'branch': payload.get('branch') or stack.get('branch'),
-            'last_pushed_tip': payload.get('tip'),
-            'last_push_remote': payload.get('remote'),
-            'last_push_seq': event['seq'],
-        })
-        return state
-
-    if event['type'] in ('integration_rebuilt', 'integration_aligned_remote', 'integration_pushed'):
-        state['integration'].update({
-            'branch': payload.get('branch') or state['integration'].get('branch'),
-            'last_tip': payload.get('after_tip') or payload.get('tip') or state['integration'].get('last_tip'),
-            'last_remote_ref': payload.get('remote_ref') or state['integration'].get('last_remote_ref'),
-            'last_push_remote': payload.get('remote') or state['integration'].get('last_push_remote'),
-            'last_event_type': event['type'],
-            'last_event_seq': event['seq'],
-        })
-        return state
-
-    if event['type'] == 'coordination_publish_intent':
-        token = payload.get('operation_token')
-        if token:
-            record = state.setdefault('coordination_publications', {}).setdefault(
-                token, {'operation_token': token}
-            )
-            record.update({
-                'scope': payload.get('scope'),
-                'intent_seq': event['seq'],
-                'owner': payload.get('owner'),
-            })
-        return state
-
-    if event['type'] in COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES:
-        token = payload.get('operation_token')
-        if token:
-            record = state.setdefault('coordination_publications', {}).setdefault(
-                token, {'operation_token': token}
-            )
-            if record.get('terminal'):
-                record.setdefault('duplicate_terminals', []).append(event['type'])
-                return state
-            record.update({
-                'terminal': event['type'],
-                'terminal_seq': event['seq'],
-                'terminal_status': (
-                    payload.get('status') or payload.get('coordination_status')
-                ),
-            })
-        return state
-
-    if event['type'] == 'stack_closed':
-        stack_id = payload.get('stack')
-        if stack_id:
-            stack = state['stacks'].setdefault(stack_id, {'id': stack_id})
-            stack.update({
-                'branch': payload.get('branch') or stack.get('branch'),
-                'active_in_manifest': False,
-                'closed_reason': payload.get('reason', 'merged'),
-                'last_closed_seq': event['seq'],
-            })
-        return state
-
-    return state
-
-
-def reduce_ledger_state(events):
-    state = default_ledger_state()
-    for event in events:
-        apply_ledger_event(state, event)
-    return state
 
 
 def load_ledger_state(repo_root, manifest_path=None):
@@ -8891,14 +7820,6 @@ def require_channel(manifest, channel_id):
     return channels[channel_id]
 
 
-def channel_pin_digest(channel):
-    return canonical_json_digest({
-        'base': channel['base'],
-        'baseRevision': channel['baseRevision'],
-        'composition': channel.get('composition', []),
-    })
-
-
 def channel_composition_digest(channel):
     return canonical_json_digest({
         'pinDigest': channel_pin_digest(channel),
@@ -9361,18 +8282,6 @@ def commit_list_for_spec(repo_root, spec):
     if not commit_exists(repo_root, spec):
         raise SyncwheelError(f'commit does not exist: {spec}')
     return [git(repo_root, 'rev-parse', spec).stdout.strip()]
-
-
-def safe_ref_segment(value):
-    cleaned = value.strip().replace('\\', '/').strip('/')
-    if not cleaned or cleaned.startswith('.') or '..' in cleaned:
-        raise SyncwheelError(f'invalid ref segment: {value!r}')
-    disallowed = set(' ~^:?*[')
-    if any(char in disallowed for char in cleaned):
-        raise SyncwheelError(f'invalid ref segment: {value!r}')
-    if cleaned.endswith('.lock') or cleaned.endswith('/'):
-        raise SyncwheelError(f'invalid ref segment: {value!r}')
-    return cleaned
 
 
 def manifest_remedy_stack_ids(manifest, stack_id=None):
@@ -12034,11 +10943,6 @@ def installation_id(create=False):
     return value
 
 
-def canonical_json_digest(value):
-    canonical = json.dumps(value, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
-
-
 def coordination_manifest_remote_roles(manifest):
     """Map only portable manifest roles to local Git remote aliases."""
     defaults = manifest['defaults']
@@ -12115,40 +11019,15 @@ def is_valid_coordination_branch_ref(value):
 
 
 def coordination_public_remote_ref_parts(value, path):
-    """Validate and unpack a typed public remote ref, if present."""
-    if isinstance(value, str):
-        if not value:
-            raise SyncwheelError(f'{path} must be a non-empty ref string')
-        return None
-    if not isinstance(value, dict):
-        raise SyncwheelError(f'{path} must be a ref string or typed remote ref')
-    if set(value) != {'kind', 'role', 'ref'} or value.get('kind') != 'remote-ref':
-        raise SyncwheelError(f'{path} contains an invalid typed remote ref')
-    role = value.get('role')
-    ref = value.get('ref')
-    if role not in {
-        COORDINATION_REMOTE_ROLE_CANONICAL,
-        COORDINATION_REMOTE_ROLE_PUBLICATION,
-    } or not is_valid_coordination_branch_ref(ref):
-        raise SyncwheelError(f'{path} contains an invalid typed remote ref')
-    return role, ref
+    return _coordination.coordination_public_remote_ref_parts(
+        value, path, branch_is_valid=is_valid_coordination_branch_ref,
+    )
 
 
 def local_coordination_ref(value, defaults):
-    """Map a portable public ref back to this checkout's remote role."""
-    canonical_remote = defaults['canonical_remote']
-    publication_remote = defaults['publication_remote']
-    remote_ref = coordination_public_remote_ref_parts(value, 'coordination state ref')
-    if remote_ref:
-        role, ref = remote_ref
-        remote = {
-            COORDINATION_REMOTE_ROLE_CANONICAL: canonical_remote,
-            COORDINATION_REMOTE_ROLE_PUBLICATION: publication_remote,
-        }.get(role)
-        if not remote:
-            raise SyncwheelError('coordination state contains an invalid typed remote ref')
-        return f"{remote}/{ref[len('refs/heads/'):]}"
-    return value
+    return _coordination.local_coordination_ref(
+        value, defaults, branch_is_valid=is_valid_coordination_branch_ref,
+    )
 
 
 def coordination_manifest_snapshot(manifest, repo_root=None, coordination_state=None):
@@ -12424,20 +11303,6 @@ def delivery_ref_names(manifest):
     return list(dict.fromkeys(names))
 
 
-def coordination_snapshot_managed_ref_names(snapshot):
-    refs = []
-    integration = snapshot.get('integration') or {}
-    if isinstance(integration.get('branch'), str) and integration['branch']:
-        refs.append(f"refs/heads/{integration['branch']}")
-    for stack in snapshot.get('stacks') or []:
-        if isinstance(stack, dict) and isinstance(stack.get('branch'), str) and stack['branch']:
-            refs.append(f"refs/heads/{stack['branch']}")
-    for channel in snapshot.get('channels') or []:
-        if isinstance(channel, dict) and isinstance(channel.get('branch'), str) and channel['branch']:
-            refs.append(f"refs/heads/{channel['branch']}")
-    return list(dict.fromkeys(refs))
-
-
 def remote_ref_tips(repo_root, remote, refs):
     refs = list(dict.fromkeys(refs))
     output = {ref: None for ref in refs}
@@ -12453,223 +11318,16 @@ def remote_ref_tips(repo_root, remote, refs):
     return output
 
 
-def coordination_integration_resolutions(snapshot):
-    """Validate integration-owned replacements without permitting source edits."""
-    resolutions = snapshot.get('integration', {}).get('resolutions', {})
-    ids = {item.get('id') for item in snapshot.get('stacks', []) if isinstance(item, dict)}
-    allowed = {'integration_commits', 'integration_only_commits', 'integration_resolution'}
-    if not isinstance(resolutions, dict):
-        raise SyncwheelError('coordination integration resolutions must be an object')
-    for stack_id, resolution in resolutions.items():
-        if stack_id not in ids or not isinstance(resolution, dict) or not set(resolution).issubset(allowed):
-            raise SyncwheelError('coordination integration resolution has unknown stack or fields')
-        for field in ('integration_commits', 'integration_only_commits'):
-            if field in resolution and (
-                not isinstance(resolution[field], list)
-                or not all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{40,64}', value)
-                           for value in resolution[field])
-            ):
-                raise SyncwheelError('coordination integration resolution commits must be object IDs')
-        binding = resolution.get('integration_resolution')
-        if binding is None:
-            raise SyncwheelError('coordination integration resolution requires a source binding')
-        if binding is not None and (
-            not isinstance(binding, dict) or set(binding) != {'source_tip'}
-            or not isinstance(binding['source_tip'], str)
-            or not re.fullmatch(r'[0-9a-f]{40,64}', binding['source_tip'])
-            or 'integration_commits' not in resolution
-        ):
-            raise SyncwheelError('coordination integration resolution binding is invalid')
-    return resolutions
-
-
 def validate_coordination_snapshot_refs(snapshot):
-    if not isinstance(snapshot, dict):
-        raise SyncwheelError('coordination state manifest must be an object')
-    defaults = snapshot.get('defaults')
-    integration = snapshot.get('integration')
-    stacks = snapshot.get('stacks')
-    channels = snapshot.get('channels', [])
-    if not isinstance(defaults, dict) or 'base_ref' not in defaults:
-        raise SyncwheelError('coordination state manifest is missing defaults.base_ref')
-    if not isinstance(integration, dict) or 'base' not in integration:
-        raise SyncwheelError('coordination state manifest is missing integration.base')
-    derived_paths = integration.get('derived_paths')
-    if snapshot.get('version') == MANIFEST_VERSION_CHANNELS:
-        if (
-            not isinstance(derived_paths, list)
-            or not all(
-                isinstance(item, str) and item and item.endswith('/')
-                for item in derived_paths
-            )
-            or len(derived_paths) != len(set(derived_paths))
-        ):
-            raise SyncwheelError(
-                'coordination state manifest integration.derived_paths must be '
-                'a unique string array of path prefixes'
-            )
-        normalize_derived_provenance(
-            integration.get('derived_provenance') or [],
-            label='coordination state manifest integration.derived_provenance',
-        )
-    else:
-        if derived_paths is not None:
-            raise SyncwheelError(
-                'coordination state manifest integration.derived_paths requires version 3'
-            )
-        if 'derived_provenance' in integration:
-            raise SyncwheelError(
-                'coordination state manifest integration.derived_provenance requires version 3'
-            )
-    if not isinstance(stacks, list):
-        raise SyncwheelError('coordination state manifest stacks must be an array')
-    if not isinstance(channels, list):
-        raise SyncwheelError('coordination state manifest channels must be an array')
-    coordination_integration_resolutions(snapshot)
-    if 'landing' in snapshot:
-        normalize_landing_policy(snapshot['landing'])
-    coordination_public_remote_ref_parts(
-        defaults['base_ref'], 'coordination state defaults.base_ref'
+    return _coordination.validate_coordination_snapshot_refs(
+        snapshot, branch_is_valid=is_valid_coordination_branch_ref,
     )
-    coordination_public_remote_ref_parts(
-        integration['base'], 'coordination state integration.base'
-    )
-    for index, stack in enumerate(stacks):
-        if not isinstance(stack, dict) or 'base' not in stack:
-            raise SyncwheelError(f'coordination state manifest stack {index} is missing base')
-        coordination_public_remote_ref_parts(
-            stack['base'], f'coordination state stacks[{index}].base'
-        )
-        dependencies = stack.get('depends_on', [])
-        if (
-            not isinstance(dependencies, list)
-            or not all(isinstance(item, str) and item for item in dependencies)
-            or len(dependencies) != len(set(dependencies))
-        ):
-            raise SyncwheelError(
-                f'coordination state manifest stack {index} has invalid depends_on'
-            )
-    validate_stack_dependency_graph(
-        stacks,
-        require_declared_dependencies=snapshot.get('version') == MANIFEST_VERSION_CHANNELS,
-    )
-    for index, channel in enumerate(channels):
-        if not isinstance(channel, dict) or 'base' not in channel:
-            raise SyncwheelError(f'coordination state manifest channel {index} is missing base')
-        coordination_public_remote_ref_parts(
-            channel['base'], f'coordination state channels[{index}].base'
-        )
-        channel_id = channel.get('id')
-        if not isinstance(channel_id, str) or not channel_id:
-            raise SyncwheelError(f'coordination state manifest channel {index} is missing id')
-        if not isinstance(channel.get('branch'), str) or not channel['branch']:
-            raise SyncwheelError(f'coordination state manifest channel {channel_id} is missing branch')
-        if not isinstance(channel.get('baseRevision'), str) or not re.fullmatch(
-            r'[0-9a-f]{40}', channel['baseRevision']
-        ):
-            raise SyncwheelError(
-                f'coordination state manifest channel {channel_id} has invalid baseRevision'
-            )
-        if channel.get('lifecycle') not in CHANNEL_LIFECYCLES:
-            raise SyncwheelError(
-                f'coordination state manifest channel {channel_id} has invalid lifecycle'
-            )
-        composition = channel.get('composition')
-        if not isinstance(composition, list):
-            raise SyncwheelError(
-                f'coordination state manifest channel {channel_id} has invalid composition'
-            )
-        for entry in composition:
-            normalize_channel_entry(entry, channel_id)
-        normalize_channel_resolution(
-            channel.get('resolution'), channel_id, channel_pin_digest(channel)
-        )
-        if channel['lifecycle'] == 'ephemeral':
-            expiry = channel.get('expiry')
-            if not isinstance(expiry, dict):
-                raise SyncwheelError(
-                    f'coordination state ephemeral channel {channel_id} is missing expiry'
-                )
-            normalize_channel_timestamp(expiry.get('createdAt'), f'channel {channel_id} expiry.createdAt')
-            normalize_channel_timestamp(expiry.get('expiresAt'), f'channel {channel_id} expiry.expiresAt')
-
-
-def coordination_snapshot_schema(snapshot):
-    # Older peers must reject bound resolutions rather than silently erase them.
-    integration = snapshot.get('integration')
-    if isinstance(integration, dict) and integration.get('resolutions'):
-        return COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS
-    return (COORDINATION_STATE_SCHEMA_VERSION_CHANNELS
-            if snapshot.get('version') == MANIFEST_VERSION_CHANNELS
-            else COORDINATION_STATE_SCHEMA_VERSION)
 
 
 def validate_coordination_state(state, expected_id=None, claims_mode='advisory'):
-    if not isinstance(state, dict):
-        raise SyncwheelError('coordination state must be an object')
-    if state.get('schema_version') not in {
-        COORDINATION_STATE_SCHEMA_VERSION,
-        COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
-        COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS,
-    }:
-        raise SyncwheelError(
-            f"unsupported coordination state schema: {state.get('schema_version')!r}"
-        )
-    coordination_id = state.get('coordination_id')
-    if not isinstance(coordination_id, str) or not coordination_id:
-        raise SyncwheelError('coordination state is missing coordination_id')
-    if expected_id and coordination_id != expected_id:
-        raise SyncwheelError(
-            f'coordination state id mismatch: expected {expected_id!r}, got {coordination_id!r}'
-        )
-    if not isinstance(state.get('manifest'), dict):
-        raise SyncwheelError('coordination state is missing the normalized manifest snapshot')
-    manifest_version = state['manifest'].get('version')
-    expected_schema = coordination_snapshot_schema(state['manifest'])
-    if state['schema_version'] != expected_schema:
-        raise SyncwheelError(
-            f'coordination state schema {state["schema_version"]} is incompatible with '
-            f'manifest version {manifest_version}'
-        )
-    dependency_stacks = [
-        stack.get('id') for stack in state['manifest'].get('stacks', [])
-        if isinstance(stack, dict) and stack.get('depends_on')
-    ]
-    if dependency_stacks and manifest_version != MANIFEST_VERSION_CHANNELS:
-        raise SyncwheelError(
-            'coordination state stack depends_on requires manifest version 3: '
-            + ', '.join(str(stack_id) for stack_id in dependency_stacks)
-        )
-    validate_coordination_snapshot_refs(state['manifest'])
-    if not isinstance(state.get('manifest_digest'), str) or not re.fullmatch(
-        r'[0-9a-f]{64}', state['manifest_digest']
-    ):
-        raise SyncwheelError('coordination state is missing manifest_digest')
-    if not isinstance(state.get('managed_refs'), dict):
-        raise SyncwheelError('coordination state is missing managed_refs')
-    claims = state.get('claims', {})
-    if not isinstance(claims, dict):
-        raise SyncwheelError('coordination state claims must be an object')
-    invalid_claims = sorted(set(claims) - set(state['managed_refs']))
-    if invalid_claims:
-        raise SyncwheelError(
-            'coordination state claims contain unmanaged refs: ' + ', '.join(invalid_claims)
-        )
-    if claims_mode == 'required':
-        unclaimed = sorted(set(state['managed_refs']) - set(claims))
-        if unclaimed:
-            raise SyncwheelError(
-                'coordination claims required mode refuses unclaimed managed refs: '
-                + ', '.join(unclaimed)
-            )
-    operation_token = state.get('operation_token')
-    if operation_token is not None and (
-        not isinstance(operation_token, str) or not operation_token
-    ):
-        raise SyncwheelError('coordination state operation_token must be a non-empty string')
-    if not isinstance(state.get('tombstones', []), list):
-        raise SyncwheelError('coordination state tombstones must be an array')
-    return state
+    return _coordination.validate_coordination_state(
+        state, expected_id, claims_mode, branch_is_valid=is_valid_coordination_branch_ref,
+    )
 
 
 def coordination_state_from_commit(
@@ -14621,63 +13279,6 @@ def record_coordination_state_seen(repo_root, config, state_tip):
     save_repo_profile(repo_root, profile)
 
 
-def stack_snapshot_map(snapshot):
-    return {stack['id']: stack for stack in snapshot.get('stacks') or []}
-
-
-def channel_snapshot_map(snapshot):
-    return {channel['id']: channel for channel in snapshot.get('channels') or []}
-
-
-def changed_stack_ids(base, candidate):
-    base_stacks = stack_snapshot_map(base)
-    candidate_stacks = stack_snapshot_map(candidate)
-    return {
-        stack_id
-        for stack_id in set(base_stacks) | set(candidate_stacks)
-        if base_stacks.get(stack_id) != candidate_stacks.get(stack_id)
-    }
-
-
-def changed_snapshot_fields(base, candidate):
-    return sorted(
-        key for key in set(base) | set(candidate)
-        if base.get(key) != candidate.get(key)
-    )
-
-
-def local_proposal_diff(local_snapshot, published_snapshot):
-    local_stacks = stack_snapshot_map(local_snapshot or {})
-    published_stacks = stack_snapshot_map(published_snapshot or {})
-    return {
-        'added': sorted(set(local_stacks) - set(published_stacks)),
-        'changed': {
-            stack_id: changed_snapshot_fields(
-                published_stacks[stack_id], local_stacks[stack_id]
-            )
-            for stack_id in sorted(set(local_stacks) & set(published_stacks))
-            if local_stacks[stack_id] != published_stacks[stack_id]
-        },
-        'removed': sorted(set(published_stacks) - set(local_stacks)),
-        'integration': changed_snapshot_fields(
-            (published_snapshot or {}).get('integration') or {},
-            (local_snapshot or {}).get('integration') or {},
-        ),
-    }
-
-
-def local_proposal_lines(diff):
-    lines = [f'added stack: {stack_id}' for stack_id in diff['added']]
-    lines.extend(
-        f"changed stack: {stack_id} ({', '.join(fields)})"
-        for stack_id, fields in diff['changed'].items()
-    )
-    lines.extend(f'removed stack: {stack_id}' for stack_id in diff['removed'])
-    if diff['integration']:
-        lines.append(f"integration changed: {', '.join(diff['integration'])}")
-    return lines
-
-
 def published_stack_owner(repo_root, stack_id, state_tip):
     scopes = {
         f'{kind}:{stack_id}' for kind in ('create', 'stack', 'promote', 'demote', 'close')
@@ -14857,55 +13458,6 @@ def handoff_misalignment_detail(repo_root, manifest_path, manifest, config, obse
     return ': unpublished local proposal: ' + listed + remedy
 
 
-def snapshot_globals(snapshot):
-    return {
-        'version': snapshot.get('version'),
-        'defaults': snapshot.get('defaults'),
-        'integration': snapshot.get('integration'),
-        'channels': snapshot.get('channels', []),
-        'coordination': snapshot.get('coordination'),
-        'landing': snapshot.get('landing'),
-    }
-
-
-def merge_coordination_snapshots(base, local, remote):
-    """Merge only disjoint stack-record changes with an unchanged shared integration contract."""
-    if not base or snapshot_globals(base) != snapshot_globals(local) or snapshot_globals(base) != snapshot_globals(remote):
-        return {'status': 'conflict', 'reason': 'shared_integration_or_defaults_changed'}
-    local_changes = changed_stack_ids(base, local)
-    remote_changes = changed_stack_ids(base, remote)
-    overlap = sorted(local_changes.intersection(remote_changes))
-    if overlap:
-        return {'status': 'conflict', 'reason': 'overlapping_stack_changes', 'stacks': overlap}
-    if not local_changes or not remote_changes:
-        return {'status': 'conflict', 'reason': 'no_disjoint_changes_to_merge'}
-    merged = json.loads(json.dumps(remote))
-    base_map = stack_snapshot_map(base)
-    local_map = stack_snapshot_map(local)
-    merged_map = stack_snapshot_map(merged)
-    for stack_id in local_changes:
-        if stack_id in local_map:
-            merged_map[stack_id] = local_map[stack_id]
-        else:
-            merged_map.pop(stack_id, None)
-    ordered_ids = []
-    for source in (base.get('stacks') or [], remote.get('stacks') or [], local.get('stacks') or []):
-        for stack in source:
-            stack_id = stack['id']
-            if stack_id in merged_map and stack_id not in ordered_ids:
-                ordered_ids.append(stack_id)
-    merged['stacks'] = [merged_map[stack_id] for stack_id in ordered_ids]
-    branches = [stack['branch'] for stack in merged['stacks']]
-    if len(branches) != len(set(branches)):
-        return {'status': 'conflict', 'reason': 'merged_stack_branch_ownership_conflict'}
-    return {
-        'status': 'mergeable',
-        'merged': merged,
-        'local_stacks': sorted(local_changes),
-        'remote_stacks': sorted(remote_changes),
-    }
-
-
 def require_sha1_repository(repo_root, operation):
     object_format = git(repo_root, 'rev-parse', '--show-object-format').stdout.strip()
     if object_format != 'sha1':
@@ -14929,112 +13481,10 @@ def coordination_state_chain_contains(repo_root, coordination_id, base_tip, late
     return True
 
 
-def additive_coordination_snapshot_delta(base, candidate, side, updated_stack=None):
-    """Accept stack additions, their integration membership, and one named stack's new commits."""
-    base_contract = json.loads(json.dumps(base))
-    candidate_contract = json.loads(json.dumps(candidate))
-    base_contract.pop('stacks', None)
-    candidate_contract.pop('stacks', None)
-    base_contract.get('integration', {}).pop('stacks', None)
-    candidate_contract.get('integration', {}).pop('stacks', None)
-    if base_contract != candidate_contract:
-        raise SyncwheelError(
-            f'coordination compose {side} proposal changes shared defaults or integration contract'
-        )
-    base_stacks = stack_snapshot_map(base)
-    candidate_stacks = stack_snapshot_map(candidate)
-    removed = sorted(set(base_stacks) - set(candidate_stacks))
-    changed = sorted(
-        stack_id for stack_id in set(base_stacks) & set(candidate_stacks)
-        if stack_id != updated_stack and base_stacks[stack_id] != candidate_stacks[stack_id]
-    )
-    if removed or changed:
-        raise SyncwheelError(
-            f'coordination compose {side} proposal is not additive; '
-            f'removed={removed}, changed={changed}'
-        )
-    base_order = [stack['id'] for stack in base.get('stacks') or []]
-    candidate_order = [stack['id'] for stack in candidate.get('stacks') or []]
-    if candidate_order[:len(base_order)] != base_order:
-        raise SyncwheelError(f'coordination compose {side} proposal reorders existing stacks')
-    added = candidate_order[len(base_order):]
-    if set(added) != set(candidate_stacks) - set(base_stacks):
-        raise SyncwheelError(f'coordination compose {side} proposal has ambiguous stack ordering')
-    base_members = list(base.get('integration', {}).get('stacks') or [])
-    candidate_members = list(candidate.get('integration', {}).get('stacks') or [])
-    # legacy local drafts are stacks without integration membership
-    appended = (
-        [stack_id for stack_id in added if stack_id in candidate_members]
-        if side == 'local' else added
-    )
-    if candidate_members != [*base_members, *appended]:
-        raise SyncwheelError(
-            f'coordination compose {side} integration membership must append exactly its new stacks'
-        )
-    return {'added': added, 'members': appended}
-
-
 def compose_additive_coordination_snapshots(base, local, remote, requested_stack):
-    local_delta = additive_coordination_snapshot_delta(
-        base, local, 'local', updated_stack=requested_stack
+    return _coordination.compose_additive_coordination_snapshots(
+        base, local, remote, requested_stack, branch_is_valid=is_valid_coordination_branch_ref,
     )
-    remote_delta = additive_coordination_snapshot_delta(base, remote, 'remote')
-    local_map = stack_snapshot_map(local)
-    remote_map = stack_snapshot_map(remote)
-    base_requested = stack_snapshot_map(base).get(requested_stack)
-    if base_requested is None and requested_stack not in local_delta['members']:
-        raise SyncwheelError(
-            'coordination compose local proposal must add the requested stack'
-        )
-    if base_requested is not None and (
-        {**base_requested, 'commits': None}
-        != {**local_map[requested_stack], 'commits': None}
-    ):
-        raise SyncwheelError(
-            'coordination compose can only change the commits of a published stack'
-        )
-    overlap = set(local_delta['added']).intersection(remote_delta['added'])
-    conflicting = sorted(
-        stack_id for stack_id in overlap if local_map[stack_id] != remote_map[stack_id]
-    )
-    if conflicting:
-        raise SyncwheelError(
-            'coordination compose has conflicting additions: ' + ', '.join(conflicting)
-        )
-    merged = json.loads(json.dumps(base))
-    merged_map = stack_snapshot_map(merged)
-    ordered_additions = []
-    for source, added in ((remote_map, remote_delta['added']), (local_map, [requested_stack])):
-        for stack_id in added:
-            if stack_id not in merged_map:
-                merged_map[stack_id] = json.loads(json.dumps(source[stack_id]))
-                ordered_additions.append(stack_id)
-    merged['stacks'] = [
-        *(
-            json.loads(json.dumps(local_map[stack['id']]))
-            if stack['id'] == requested_stack else stack
-            for stack in base.get('stacks') or []
-        ),
-        *(merged_map[stack_id] for stack_id in ordered_additions),
-    ]
-    merged['integration']['stacks'] = [
-        *list(base.get('integration', {}).get('stacks') or []),
-        *ordered_additions,
-    ]
-    retained = [stack_id for stack_id in local_delta['added'] if stack_id not in merged_map]
-    branches = [
-        *(stack['branch'] for stack in merged['stacks']),
-        *(local_map[stack_id]['branch'] for stack_id in retained),
-    ]
-    if len(branches) != len(set(branches)):
-        raise SyncwheelError('coordination compose stack branch ownership is ambiguous')
-    validate_coordination_snapshot_refs(merged)
-    return {
-        'merged': merged,
-        'localAddedStacks': [] if base_requested is not None else [requested_stack],
-        'localRetainedStacks': retained,
-        'remoteAddedStacks': remote_delta['added'],
-    }
 
 
 def retain_local_compose_stacks(local_manifest, composed_manifest, retained):
@@ -15050,59 +13500,9 @@ def retain_local_compose_stacks(local_manifest, composed_manifest, retained):
 
 
 def apply_coordination_snapshot(manifest, snapshot):
-    updated = json.loads(json.dumps(manifest))
-    local_stacks = {
-        stack['id']: stack
-        for stack in updated.get('stacks') or []
-        if isinstance(stack, dict) and isinstance(stack.get('id'), str)
-    }
-    updated['version'] = snapshot['version']
-    defaults = dict(updated.get('defaults') or {})
-    defaults.update(snapshot['defaults'])
-    defaults['base_ref'] = local_coordination_ref(
-        snapshot['defaults']['base_ref'],
-        defaults,
+    return _coordination.apply_coordination_snapshot(
+        manifest, snapshot, branch_is_valid=is_valid_coordination_branch_ref,
     )
-    updated['defaults'] = defaults
-    integration = dict(snapshot['integration'])
-    resolutions = coordination_integration_resolutions(snapshot)
-    integration.pop('resolutions', None)
-    integration['base'] = local_coordination_ref(
-        snapshot['integration']['base'],
-        defaults,
-    )
-    updated['integration'] = integration
-    updated['stacks'] = []
-    for stack in snapshot['stacks']:
-        restored = dict(stack)
-        local_stack = local_stacks.get(stack['id'], {})
-        restored['base'] = local_coordination_ref(stack['base'], defaults)
-        restored['target_remote'] = local_stack.get(
-            'target_remote', defaults['canonical_remote']
-        )
-        restored.update(copy.deepcopy(resolutions.get(stack['id'], {})))
-        restored['state'] = stack.get('state', 'published')
-        restored['publication'] = {'enabled': restored['state'] != 'draft'}
-        restored['meta'] = (
-            local_stack['meta'] if isinstance(local_stack.get('meta'), dict) else {}
-        )
-        updated['stacks'].append(restored)
-    updated['channels'] = []
-    for channel in snapshot.get('channels', []):
-        restored_channel = dict(channel)
-        restored_channel['base'] = local_coordination_ref(channel['base'], defaults)
-        restored_channel['remote'] = defaults['publication_remote']
-        updated['channels'].append(restored_channel)
-    if 'coordination' in snapshot:
-        coordination = dict(updated.get('coordination') or {})
-        coordination.update(snapshot['coordination'])
-        coordination['remote'] = coordination.get('remote') or defaults['publication_remote']
-        updated['coordination'] = coordination
-    else:
-        updated.pop('coordination', None)
-    if 'landing' in snapshot:
-        updated['landing'] = normalize_landing_policy(snapshot['landing'])
-    return updated
 
 
 def coordination_state_matches_remote(repo_root, config, state):
@@ -17589,7 +15989,6 @@ def resolve_int_rebuild_location(repo_root, manifest, args):
     ), False
 
 
-REPLAY_MODE_CHOICES = ('auto', 'plumbing', 'in-place', 'ephemeral', 'desk')
 EPHEMERAL_WORKTREE_PLACEHOLDER = '<syncwheel-ephemeral-worktree>'
 EMPTY_REPLAY_MESSAGE = (
     'The previous cherry-pick is now empty, possibly due to conflict resolution.\n'
@@ -17613,13 +16012,6 @@ def git_supports_write_tree(repo_root):
     except (TypeError, ValueError):
         return False
     return (major, minor) >= (2, 38)
-
-
-def normalize_replay_mode(value, source):
-    if value not in REPLAY_MODE_CHOICES:
-        allowed = ', '.join(REPLAY_MODE_CHOICES)
-        raise SyncwheelError(f'invalid {source}: {value!r}; expected one of: {allowed}')
-    return value
 
 
 def configured_replay_mode(repo_root, manifest):
@@ -17746,296 +16138,31 @@ def require_journal_manifest(args):
     return repo_root, manifest, manifest_path
 
 
-def journal_path_matches(path, patterns):
-    path = path.replace(os.sep, '/')
-    return any(
-        pattern == '**'
-        or fnmatch.fnmatchcase(path, pattern)
-        or (pattern.startswith('**/') and fnmatch.fnmatchcase(path, pattern[3:]))
-        for pattern in patterns
-    )
-
-
-def journal_path_sensitive(path):
-    parts = Path(path).parts
-    return any(part.lower() in JOURNAL_SENSITIVE_PARTS for part in parts)
-
-
-def journal_secret_reason(content):
-    for label, pattern in JOURNAL_SECRET_PATTERNS:
-        if pattern.search(content):
-            return label
-    return None
-
-
 def journal_status_entries(repo_root):
     result = git(
         repo_root, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
         '--ignore-submodules=all', '--no-renames',
     )
-    tokens = result.stdout.split('\0')
-    entries = []
-    index = 0
-    while index < len(tokens):
-        record = tokens[index]
-        index += 1
-        if not record:
-            continue
-        status = record[:2]
-        path = record[3:]
-        if status[0] in {'R', 'C'}:
-            if index >= len(tokens):
-                raise SyncwheelError('could not parse git status rename record')
-            path = tokens[index]
-            index += 1
-        entries.append({'status': status, 'path': path})
-    return entries
+    return _journal.parse_status_entries(result.stdout)
 
 
 def journal_real_index_clean(repo_root):
     return git(repo_root, 'diff', '--cached', '--quiet', 'HEAD', '--', check=False).returncode == 0
 
 
-def journal_file_fingerprint(path):
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-    try:
-        file_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise SyncwheelError('unsupported file type')
-        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
-            content = handle.read()
-    finally:
-        os.close(descriptor)
-    return (
-        file_stat.st_mode, file_stat.st_size, file_stat.st_mtime_ns,
-        file_stat.st_dev, file_stat.st_ino, hashlib.sha256(content).hexdigest(),
-    )
-
-
-def journal_read_admitted_file(path, max_file_bytes):
-    path_stat = os.lstat(path)
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-    try:
-        opened_stat = os.fstat(descriptor)
-        if not stat.S_ISREG(opened_stat.st_mode):
-            raise SyncwheelError('unsupported file type')
-        if (path_stat.st_dev, path_stat.st_ino) != (opened_stat.st_dev, opened_stat.st_ino):
-            raise SyncwheelError('content changed before reading')
-        with os.fdopen(descriptor, 'rb', closefd=False) as handle:
-            before = os.fstat(handle.fileno())
-            content = handle.read(max_file_bytes + 1)
-            after = os.fstat(handle.fileno())
-    finally:
-        os.close(descriptor)
-    if len(content) > max_file_bytes or after.st_size > max_file_bytes:
-        raise SyncwheelError(f'oversize ({after.st_size} bytes)')
-    stable_fields = ('st_mode', 'st_size', 'st_mtime_ns', 'st_ino', 'st_dev')
-    if any(getattr(before, field) != getattr(after, field) for field in stable_fields):
-        raise SyncwheelError('content changed while reading')
-    mode = '100755' if before.st_mode & 0o111 else '100644'
-    fingerprint = (
-        before.st_mode, before.st_size, before.st_mtime_ns,
-        before.st_dev, before.st_ino, hashlib.sha256(content).hexdigest(),
-    )
-    return content, fingerprint, mode
-
-
 def journal_admission(repo_root, journal, paths=None):
-    admitted = []
-    excluded = []
-    rejected = []
-    fingerprints = {}
-    blobs = {}
-    for entry in journal_status_entries(repo_root):
-        path = entry['path']
-        if paths is not None and path not in paths:
-            continue
-        if not journal_path_matches(path, journal['include']) or journal_path_matches(path, journal['exclude']):
-            excluded.append(entry)
-            continue
-        if journal_path_sensitive(path):
-            rejected.append({**entry, 'reason': 'sensitive path'})
-            continue
-        target = repo_root / path
-        deleted = entry['status'][1] == 'D' or (entry['status'] == ' D') or not target.exists()
-        if deleted:
-            fingerprints[path] = None
-        else:
-            try:
-                content, fingerprint, mode = journal_read_admitted_file(
-                    target, journal['max_file_bytes']
-                )
-            except (OSError, SyncwheelError) as exc:
-                rejected.append({**entry, 'reason': str(exc)})
-                continue
-            secret = journal_secret_reason(content)
-            if secret:
-                rejected.append({**entry, 'reason': f'high-confidence secret: {secret}'})
-                continue
-            fingerprints[path] = fingerprint
-            blobs[path] = {'content': content, 'mode': mode}
-        admitted.append(entry)
-    return admitted, excluded, rejected, fingerprints, blobs
-
-
-@contextlib.contextmanager
-def journal_lock(repo_root):
-    if fcntl is None:
-        raise SyncwheelError(f'journal snapshot locking is unsupported on {sys.platform}')
-    git_dir = Path(git(repo_root, 'rev-parse', '--absolute-git-dir').stdout.strip())
-    lock_path = git_dir / 'syncwheel-journal.lock'
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with lock_path.open('a+') as handle:
-        try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise SyncwheelError(f'journal snapshot already running: {lock_path}') from exc
-        yield lock_path
-
-
-@contextlib.contextmanager
-def journal_index_lock(repo_root):
-    git_dir = Path(git(repo_root, 'rev-parse', '--absolute-git-dir').stdout.strip())
-    index_path = git_dir / 'index'
-    lock_path = git_dir / 'index.lock'
-    try:
-        descriptor = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    except FileExistsError as exc:
-        raise SyncwheelError(f'journal could not lock real index: {lock_path}') from exc
-    try:
-        with os.fdopen(descriptor, 'wb') as handle:
-            if index_path.exists():
-                handle.write(index_path.read_bytes())
-            handle.flush()
-            os.fsync(handle.fileno())
-        yield index_path, lock_path
-    finally:
-        lock_path.unlink(missing_ok=True)
+    return _journal.admit_paths(
+        repo_root, journal, journal_status_entries(repo_root), paths,
+        read_file=journal_read_admitted_file,
+    )
 
 
 def journal_snapshot(repo_root, manifest, apply=False, paths=None):
-    journal = manifest['journal']
-    branch = journal['branch']
-    if get_current_branch(repo_root) != branch:
-        raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}')
-    if paths is not None:
-        for path in paths:
-            if not isinstance(path, str) or path.startswith('/') or '\\' in path or any(
-                part in {'', '.', '..'} for part in path.split('/')
-            ) or path.split('/')[0] == '.git':
-                raise SyncwheelError('snapshot --path requires an exact repo-relative file path')
-        if git(repo_root, 'ls-files', '-u').stdout.strip():
-            raise SyncwheelError('journal snapshot requires a conflict-free index')
-    elif not journal_real_index_clean(repo_root):
-        raise SyncwheelError('journal snapshot requires a clean real index')
-    parent = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
-    admitted, excluded, rejected, fingerprints, blobs = journal_admission(repo_root, journal, paths=paths)
-    result = {
-        'mode': 'apply' if apply else 'plan',
-        'branch': branch,
-        'parent': parent,
-        'admitted': admitted,
-        'excluded': excluded,
-        'rejected': rejected,
-        'commit': None,
-        'changed': False,
-    }
-    if rejected:
-        reasons = ', '.join(f"{item['path']}: {item['reason']}" for item in rejected)
-        raise SyncwheelError(f'journal snapshot rejected content: {reasons}')
-    if not apply or not admitted:
-        return result
-    with journal_lock(repo_root), journal_index_lock(repo_root) as (real_index_path, real_index_lock):
-        if git(repo_root, 'rev-parse', 'HEAD').stdout.strip() != parent:
-            raise SyncwheelError('journal HEAD changed during snapshot; retry')
-        if paths is None and not journal_real_index_clean(repo_root):
-            raise SyncwheelError('journal real index changed during snapshot; retry')
-        with tempfile.NamedTemporaryFile(prefix='syncwheel-journal-index-', delete=False) as handle:
-            index_path = Path(handle.name)
-        index_path.unlink(missing_ok=True)
-        env = {'GIT_INDEX_FILE': str(index_path)}
-        try:
-            git(repo_root, 'read-tree', parent, env=env)
-            for entry in admitted:
-                path = entry['path']
-                blob = blobs.get(path)
-                if blob is None:
-                    git(repo_root, 'update-index', '--force-remove', '--', path, env=env)
-                    continue
-                with tempfile.NamedTemporaryFile(prefix='syncwheel-journal-blob-', delete=False) as blob_file:
-                    blob_path = Path(blob_file.name)
-                    blob_file.write(blob['content'])
-                try:
-                    object_id = git(repo_root, 'hash-object', '-w', str(blob_path)).stdout.strip()
-                finally:
-                    blob_path.unlink(missing_ok=True)
-                git(
-                    repo_root, 'update-index', '--add', '--cacheinfo',
-                    f"{blob['mode']},{object_id},{path}", env=env,
-                )
-            tree = git(repo_root, 'write-tree', env=env).stdout.strip()
-            parent_tree = git(repo_root, 'rev-parse', f'{parent}^{{tree}}').stdout.strip()
-            if tree == parent_tree:
-                return result
-            for path, before in fingerprints.items():
-                target = repo_root / path
-                if before is None:
-                    stable = not target.exists()
-                else:
-                    try:
-                        stable = target.exists() and journal_file_fingerprint(target) == before
-                    except (OSError, SyncwheelError):
-                        stable = False
-                if not stable:
-                    raise SyncwheelError(f'journal content changed during snapshot: {path}; retry')
-            if git(repo_root, 'rev-parse', 'HEAD').stdout.strip() != parent:
-                raise SyncwheelError('journal HEAD changed during snapshot; retry')
-            timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
-            message = f'journal: snapshot {timestamp}'
-            commit_cmd = with_git_identity(
-                repo_root, ['git', 'commit-tree', tree, '-p', parent, '-m', message]
-            )
-            commit = run(commit_cmd, cwd=repo_root).stdout.strip()
-            update = git(repo_root, 'update-ref', f'refs/heads/{branch}', commit, parent, check=False)
-            if update.returncode != 0:
-                raise SyncwheelError('journal HEAD changed before commit publication; retry')
-            try:
-                if paths is None:
-                    git(repo_root, 'read-tree', commit, env={'GIT_INDEX_FILE': str(real_index_lock)})
-                else:
-                    for entry in admitted:
-                        relative = entry['path']
-                        value = blobs.get(relative)
-                        if value is None:
-                            git(repo_root, 'update-index', '--force-remove', '--', relative,
-                                env={'GIT_INDEX_FILE': str(real_index_lock)})
-                        else:
-                            object_id = git(repo_root, 'rev-parse', f'{commit}:{relative}').stdout.strip()
-                            git(repo_root, 'update-index', '--add', '--cacheinfo',
-                                f"{value['mode']},{object_id},{relative}",
-                                env={'GIT_INDEX_FILE': str(real_index_lock)})
-                os.replace(real_index_lock, real_index_path)
-            except Exception as exc:
-                rollback = git(
-                    repo_root, 'update-ref', f'refs/heads/{branch}', parent, commit, check=False
-                )
-                if rollback.returncode != 0:
-                    raise SyncwheelError(
-                        'journal index realignment failed and branch rollback also failed; STOP'
-                    ) from exc
-                raise SyncwheelError('journal index realignment failed; branch update rolled back') from exc
-            result.update({'commit': commit, 'changed': True})
-            return result
-        finally:
-            index_path.unlink(missing_ok=True)
+    return JournalWorkflow(_JournalRepository(repo_root)).snapshot(manifest, apply, paths)
 
 
 def journal_remote_tip(repo_root, remote, branch):
-    result = git(repo_root, 'ls-remote', '--heads', remote, f'refs/heads/{branch}', check=False)
-    if result.returncode != 0:
-        raise SyncwheelError(result.stderr.strip() or f'could not observe journal remote {remote}')
-    line = result.stdout.strip()
-    return line.split()[0] if line else None
+    return JournalWorkflow(_JournalRepository(repo_root)).remote_tip(remote, branch)
 
 
 def command_journal_status(args):
@@ -18080,84 +16207,8 @@ def command_journal_publish(args):
     return 0
 
 
-def journal_unroll_snapshot(repo_root, branch, commit, parent):
-    """Turn an unpublished snapshot commit back into working-tree changes."""
-    with journal_lock(repo_root):
-        moved = git(repo_root, 'update-ref', f'refs/heads/{branch}', parent, commit, check=False)
-        if moved.returncode != 0:
-            raise SyncwheelError(
-                'journal publish lease lost and the local snapshot could not be unrolled; STOP'
-            )
-        git(repo_root, 'read-tree', parent)
-
-
 def journal_publish(repo_root, manifest, apply=False, committed_only=False):
-    journal = manifest['journal']
-    branch, remote = journal['branch'], journal['remote']
-    # Another clone may have published since the last run; catching up first
-    # keeps two writers from wedging each other on remote-ahead.
-    pull = journal_pull(repo_root, manifest, apply=apply)
-    expected_parent = pull['remote_tip']
-    empty_snapshot = {'mode': 'apply' if apply else 'plan', 'branch': branch,
-                      'parent': ref_tip(repo_root, 'HEAD'), 'admitted': [],
-                      'excluded': [], 'rejected': [], 'commit': None, 'changed': False}
-    if not apply:
-        payload = empty_snapshot if committed_only else journal_snapshot(repo_root, manifest, apply=False)
-        payload.update({'remote': remote, 'expected_remote_tip': expected_parent, 'pull': pull})
-        return payload
-    local_head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
-    if expected_parent and git(
-        repo_root, 'merge-base', '--is-ancestor', expected_parent, local_head, check=False
-    ).returncode != 0:
-        raise SyncwheelError('journal local branch diverged from the expected remote parent; STOP')
-    snapshot = empty_snapshot if committed_only else journal_snapshot(repo_root, manifest, apply=True)
-    tip = snapshot['commit'] or local_head
-    if tip != expected_parent:
-        refspec = f'{tip}:refs/heads/{branch}'
-        lease = f'--force-with-lease=refs/heads/{branch}:{expected_parent or ""}'
-        pushed = run_authorized_push(
-            repo_root,
-            ['git', 'push', '--porcelain', lease, remote, refspec],
-            remote,
-            [f'refs/heads/{branch}'],
-            check=False,
-            manifest=manifest,
-        )
-        if pushed.returncode != 0:
-            if snapshot['commit']:
-                journal_unroll_snapshot(repo_root, branch, snapshot['commit'], snapshot['parent'])
-            raise SyncwheelError(
-                'journal publish lease lost; local changes are back in the working tree. '
-                'Retry journal publish --apply, which pulls first'
-            )
-    snapshot.update({
-        'remote': remote, 'expected_remote_tip': expected_parent,
-        'published_tip': tip, 'pull': pull,
-    })
-    return snapshot
-
-
-def journal_pull_blob_matches(repo_root, path, entry):
-    """Return True when the working-tree path is byte-identical to a tree entry."""
-    absolute = repo_root / path
-    if entry is None:
-        return not os.path.lexists(absolute)
-    mode, object_id = entry
-    if not os.path.lexists(absolute):
-        return False
-    if mode == '120000':
-        if not absolute.is_symlink():
-            return False
-        content = os.readlink(absolute).encode()
-    elif mode in {'100644', '100755'}:
-        if absolute.is_symlink() or not absolute.is_file():
-            return False
-        if (mode == '100755') != bool(absolute.stat().st_mode & 0o111):
-            return False
-        content = absolute.read_bytes()
-    else:
-        return False
-    return content == git_bytes(repo_root, 'cat-file', 'blob', object_id)
+    return JournalWorkflow(_JournalRepository(repo_root)).publish(manifest, apply, committed_only)
 
 
 def git_bytes(repo_root, *args, ok_codes=(0,)):
@@ -18169,243 +16220,8 @@ def git_bytes(repo_root, *args, ok_codes=(0,)):
     return result.stdout
 
 
-def journal_pull_tree_entries(repo_root, commit, paths):
-    if not paths:
-        return {}
-    listed = git_bytes(repo_root, '--literal-pathspecs', 'ls-tree', '-z', commit, '--', *paths)
-    entries = {}
-    for record in listed.split(b'\0'):
-        if not record:
-            continue
-        meta, name = record.split(b'\t', 1)
-        mode, _kind, object_id = meta.decode().split()
-        entries[name.decode()] = (mode, object_id)
-    return {path: entries.get(path) for path in paths}
-
-
-def journal_pull_index_entries(repo_root):
-    """Map each path whose index entry differs from HEAD to its (mode, object) or None."""
-    changed = git_bytes(repo_root, 'diff', '--cached', '--name-only', '--no-renames', '-z', 'HEAD')
-    paths = [name.decode() for name in changed.split(b'\0') if name]
-    if not paths:
-        return {}
-    listed = git_bytes(repo_root, '--literal-pathspecs', 'ls-files', '--stage', '-z', '--', *paths)
-    entries = {path: None for path in paths}
-    for record in listed.split(b'\0'):
-        if not record:
-            continue
-        meta, name = record.split(b'\t', 1)
-        mode, object_id, stage = meta.decode().split()
-        if stage != '0':
-            raise SyncwheelError(f'journal pull refuses an unmerged index entry: {name.decode()}')
-        entries[name.decode()] = (mode, object_id)
-    return entries
-
-
-def journal_pull_plan(repo_root, manifest, fetch=True):
-    journal = manifest['journal']
-    branch, remote = journal['branch'], journal['remote']
-    current = get_current_branch(repo_root)
-    if current != branch:
-        raise SyncwheelError(f'journal branch must be checked out: expected {branch!r}, found {current!r}')
-    tracking_ref = f'refs/remotes/{remote}/{branch}'
-    head = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
-    plan = {
-        'mode': 'plan', 'branch': branch, 'remote': remote, 'head': head,
-        'remote_tip': None, 'relation': None, 'identical_dirty': [],
-        'kept_local': [], 'conflicts': [], 'changed': False,
-    }
-    if fetch:
-        if journal_remote_tip(repo_root, remote, branch) is None:
-            plan['relation'] = 'remote-missing'
-            return plan
-        git(repo_root, 'fetch', '--quiet', remote, f'+refs/heads/{branch}:{tracking_ref}')
-    remote_tip = ref_tip(repo_root, tracking_ref)
-    plan['remote_tip'] = remote_tip
-    if not remote_tip:
-        plan['relation'] = 'remote-missing'
-        return plan
-    if head == remote_tip:
-        plan['relation'] = 'aligned'
-        return plan
-    if git(repo_root, 'merge-base', '--is-ancestor', remote_tip, head, check=False).returncode == 0:
-        plan['relation'] = 'ahead'
-        return plan
-    if git(repo_root, 'merge-base', '--is-ancestor', head, remote_tip, check=False).returncode != 0:
-        raise SyncwheelError(
-            f'journal local branch {branch} diverged from {remote}/{branch}; '
-            'STOP without merge, reset, rebase, or force'
-        )
-    plan['relation'] = 'behind'
-    upstream = {
-        name.decode()
-        for name in git_bytes(
-            repo_root, 'diff', '--name-only', '--no-renames', '-z', head, remote_tip
-        ).split(b'\0')
-        if name
-    }
-    dirty = [entry['path'] for entry in journal_status_entries(repo_root)]
-    touched = [path for path in dirty if path in upstream]
-    targets = journal_pull_tree_entries(repo_root, remote_tip, touched)
-    staged = journal_pull_index_entries(repo_root)
-    for path in sorted(dirty):
-        if path not in upstream:
-            # A local file where upstream now needs a directory (or the reverse)
-            # cannot survive the fast-forward either.
-            prefix = path + '/'
-            if any(other.startswith(prefix) or path.startswith(other + '/') for other in upstream):
-                plan['conflicts'].append(path)
-            else:
-                plan['kept_local'].append(path)
-        elif journal_pull_blob_matches(repo_root, path, targets[path]) and (
-            path not in staged or staged[path] == targets[path]
-        ):
-            plan['identical_dirty'].append(path)
-        else:
-            plan['conflicts'].append(path)
-    return plan
-
-
-def journal_conflict_error(conflicts):
-    return SyncwheelError(
-        'journal pull refuses local changes that differ from the remote tip: '
-        + ', '.join(conflicts)
-        + '. Resolve with: syncwheel journal pull --apply --park-conflicts'
-    )
-
-
-def journal_regular_file(path):
-    return os.path.lexists(path) and not os.path.islink(path) and os.path.isfile(path)
-
-
-def journal_park_conflicts(repo_root, plan):
-    """Save each conflicting local version outside the worktree and restore the path to HEAD."""
-    stamp = datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-    directory = (
-        git_common_dir(repo_root) / 'syncwheel' / 'journal-conflicts'
-        / f"{stamp}-{plan['remote_tip'][:12]}"
-    )
-    directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-    paths = plan['conflicts']
-    in_head = journal_pull_tree_entries(repo_root, plan['head'], paths)
-    entries = []
-    for path in paths:
-        source = repo_root / path
-        ours = None
-        if os.path.lexists(source):
-            if not journal_regular_file(source):
-                raise SyncwheelError(f'journal conflict on a non-regular path needs manual resolution: {path}')
-            ours = directory / 'ours' / path
-            ours.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, ours)
-        entries.append({'path': path, 'ours': str(ours) if ours else None})
-    tracked = [path for path in paths if in_head[path]]
-    if tracked:
-        git(repo_root, '--literal-pathspecs', 'restore', '--source=HEAD', '--staged', '--worktree', '--', *tracked)
-    for path in paths:
-        if in_head[path]:
-            continue
-        git(repo_root, '--literal-pathspecs', 'rm', '-q', '--cached', '--ignore-unmatch', '--', path)
-        if os.path.lexists(repo_root / path):
-            (repo_root / path).unlink()
-    return {'directory': directory, 'base': plan['head'], 'theirs': plan['remote_tip'], 'entries': entries}
-
-
-def journal_merge_parked(repo_root, parked):
-    """Three-way merge each parked file; clean results land in the worktree, the rest stay parked."""
-    directory = parked['directory']
-    paths = [entry['path'] for entry in parked['entries']]
-    bases = journal_pull_tree_entries(repo_root, parked['base'], paths)
-    for entry in parked['entries']:
-        path = entry['path']
-        target = repo_root / path
-        entry['theirs'] = f"{parked['theirs']}:{path}"
-        entry['base'] = f"{parked['base']}:{path}"
-        if entry['ours'] is None or bases[path] is None or not journal_regular_file(target):
-            entry['status'] = 'conflict'
-            entry['reason'] = 'deleted or added on one side; no common base to merge'
-            continue
-        base_file = directory / 'base' / path
-        base_file.parent.mkdir(parents=True, exist_ok=True)
-        base_file.write_bytes(git_bytes(repo_root, 'cat-file', 'blob', bases[path][1]))
-        theirs_file = directory / 'theirs' / path
-        theirs_file.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(target, theirs_file)
-        result = subprocess.run(
-            ['git', 'merge-file', '-p', '-L', 'local', '-L', 'base', '-L', 'remote',
-             entry['ours'], str(base_file), str(theirs_file)],
-            cwd=repo_root, capture_output=True, env=managed_process_env(authorize=False),
-        )
-        if result.returncode == 0:
-            target.write_bytes(result.stdout)
-            entry['status'] = 'merged'
-        else:
-            conflict_file = directory / 'conflict' / path
-            conflict_file.parent.mkdir(parents=True, exist_ok=True)
-            conflict_file.write_bytes(result.stdout)
-            entry['status'] = 'conflict'
-            entry['conflict'] = str(conflict_file)
-            entry['reason'] = 'overlapping edits' if result.returncode > 0 else 'binary or unmergeable content'
-    atomic_write_private_json(directory / 'conflicts.json', {
-        'base': parked['base'], 'theirs': parked['theirs'], 'entries': parked['entries'],
-    })
-    return parked['entries']
-
-
 def journal_pull(repo_root, manifest, apply=False, park_conflicts=False):
-    plan = journal_pull_plan(repo_root, manifest)
-    if plan['conflicts'] and not (apply and park_conflicts):
-        raise journal_conflict_error(plan['conflicts'])
-    if not apply or plan['relation'] != 'behind':
-        plan['mode'] = 'apply' if apply else 'plan'
-        return plan
-    head, remote_tip = plan['head'], plan['remote_tip']
-    parked = None
-    with journal_lock(repo_root):
-        # Re-run the whole proof under the snapshot lock so a concurrent
-        # snapshot or edit cannot slip in between the check and the move.
-        locked = journal_pull_plan(repo_root, manifest, fetch=False)
-        if (locked['head'], locked['remote_tip'], locked['relation']) != (head, remote_tip, 'behind'):
-            raise SyncwheelError('journal state changed during pull; retry')
-        if locked['conflicts']:
-            if not park_conflicts:
-                raise journal_conflict_error(locked['conflicts'])
-            parked = journal_park_conflicts(repo_root, locked)
-            locked = journal_pull_plan(repo_root, manifest, fetch=False)
-            if locked['conflicts']:
-                raise SyncwheelError(
-                    f"journal conflicts remain after parking in {parked['directory']}; STOP"
-                )
-        already_staged = journal_pull_index_entries(repo_root)
-        staged = [path for path in locked['identical_dirty'] if path not in already_staged]
-        if staged:
-            # Staging the byte-identical paths makes the index agree with the
-            # target tree, so git's own fast-forward accepts them and still
-            # refuses anything that changed after the proof.
-            git(repo_root, '--literal-pathspecs', 'add', '-A', '--', *staged)
-        merged = git(repo_root, 'merge', '--ff-only', '--no-edit', remote_tip, check=False)
-        if merged.returncode != 0:
-            if staged:
-                git(repo_root, '--literal-pathspecs', 'reset', '-q', 'HEAD', '--', *staged, check=False)
-            parked_note = f"; local versions are parked in {parked['directory']}" if parked else ''
-            raise SyncwheelError(
-                'journal fast-forward failed; local branch left unchanged'
-                + parked_note + ': '
-                + (merged.stderr.strip() or merged.stdout.strip())
-            )
-    updated = git(repo_root, 'rev-parse', 'HEAD').stdout.strip()
-    if updated != remote_tip:
-        raise SyncwheelError(f'journal fast-forward landed on {updated}, expected {remote_tip}; STOP')
-    changed_paths = git(repo_root, 'diff', '--name-only', head, remote_tip).stdout.splitlines()
-    locked.update({
-        'mode': 'apply', 'changed': True, 'head': updated, 'previous_head': head,
-        'changed_paths': changed_paths, 'conflicts': plan['conflicts'],
-    })
-    if parked:
-        entries = journal_merge_parked(repo_root, parked)
-        locked['parked'] = {'directory': str(parked['directory']), 'entries': entries}
-        locked['resolution_required'] = any(entry['status'] == 'conflict' for entry in entries)
-    return locked
+    return JournalWorkflow(_JournalRepository(repo_root)).pull(manifest, apply, park_conflicts)
 
 
 def command_journal_pull(args):
@@ -18424,204 +16240,8 @@ def command_journal_pull(args):
     return 0
 
 
-def journal_recover_clean_paths(repo_root, paths):
-    status = git(repo_root, 'status', '--porcelain=v1', '-z', '--untracked-files=all',
-                 '--ignore-submodules=none', '--no-renames').stdout
-    dirty = [entry[3:] for entry in status.split('\0') if entry]
-    dirty.extend(path.decode() for path in git_bytes(
-        repo_root, 'ls-files', '--others', '--ignored', '--exclude-standard', '-z'
-    ).split(b'\0') if path)
-    conflicts = sorted({path for path in dirty if any(
-        path == touched or path.startswith(touched + '/') or touched.startswith(path + '/')
-        for touched in paths
-    )})
-    if conflicts:
-        raise SyncwheelError('journal recover refuses local changes on replay paths: ' + ', '.join(conflicts))
-
-
-def journal_recover_move(repo_root, branch, before, after):
-    """Align the checkout without discarding edits, then CAS through the owned ref guard."""
-    if get_current_branch(repo_root) != branch or ref_tip(repo_root, 'HEAD') != before:
-        raise SyncwheelError('journal branch changed during recovery; STOP')
-    # Two-tree checkout refuses dirty overlaps and untracked obstructions itself.
-    git(repo_root, 'read-tree', '-m', '-u', before, after)
-    moved = git(repo_root, 'update-ref', f'refs/heads/{branch}', after, before, check=False)
-    if moved.returncode:
-        git(repo_root, 'read-tree', '-m', '-u', after, before)
-        raise SyncwheelError('journal recovery ref lease lost; checkout restored: ' + moved.stderr.strip())
-
-
-def journal_prefix_absorbed(repo_root, first, last, tip):
-    """Whether the net change of the snapshots ``first``..``last`` is already on ``tip``.
-
-    Every path the snapshots change must hold the same entry (mode and object,
-    or absence) on ``tip`` as on ``last``. No merge runs, so merge drivers and
-    conflict styles cannot make missing work look absorbed, and no path is
-    passed as an argument, so pathspec magic and path encoding cannot either.
-    """
-    def changed_paths(old, new):
-        # Plumbing with explicit flags: no diff.* or submodule ignore config may
-        # hide a changed path.
-        return {path for path in git_bytes(
-            repo_root, 'diff-tree', '-r', '-z', '--name-only', '--no-renames',
-            '--ignore-submodules=none', old, new,
-        ).split(b'\0') if path}
-
-    return not changed_paths(f'{first}^', last) & changed_paths(last, tip)
-
-
 def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_path=None):
-    journal = manifest['journal']
-    branch, remote = journal['branch'], journal['remote']
-    if get_current_branch(repo_root) != branch:
-        raise SyncwheelError('journal recovery requires the journal branch checked out')
-    if rollback:
-        receipt = json.loads(Path(rollback).read_text())
-        if receipt.get('branch') != branch or receipt.get('operation') != 'journal-recover':
-            raise SyncwheelError('receipt does not describe recovery of this journal branch')
-        before, after = receipt['after'], receipt['before']
-        if ref_tip(repo_root, 'HEAD') != before:
-            raise SyncwheelError('journal rollback requires the exact recovered head; STOP')
-        paths = [path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', before, after).split(b'\0') if path]
-        journal_recover_clean_paths(repo_root, paths)
-        if apply:
-            with journal_lock(repo_root):
-                journal_recover_clean_paths(repo_root, paths)
-                journal_recover_move(repo_root, branch, before, after)
-        return {'mode': 'apply' if apply else 'plan', 'operation': 'rollback',
-                'before': before, 'after': after, 'changed': apply}
-    # Fetch all advertised remote refs, including tags and other branches: a local
-    # snapshot published on another ref must never be rewritten.
-    git(repo_root, 'fetch', '--quiet', '--all', '--tags')
-    published_tips = []
-    for name in git(repo_root, 'remote').stdout.splitlines():
-        advertised = git(repo_root, 'ls-remote', '--refs', name).stdout.splitlines()
-        refs = [line.split()[1] for line in advertised]
-        if refs:
-            git(repo_root, 'fetch', '--quiet', '--no-tags', name, *refs)
-        for line in advertised:
-            object_id = line.split()[0]
-            peeled = git(repo_root, 'rev-parse', '--verify', object_id + '^{commit}', check=False)
-            if peeled.returncode == 0:
-                published_tips.append((line.split()[1], peeled.stdout.strip()))
-    tip = journal_remote_tip(repo_root, remote, branch)
-    if tip is None:
-        raise SyncwheelError('journal recovery requires an existing remote branch')
-    head = ref_tip(repo_root, 'HEAD')
-    ahead, behind = map(int, git(repo_root, 'rev-list', '--left-right', '--count', f'{head}...{tip}').stdout.split())
-    relation = 'diverged' if ahead and behind else 'ahead-only' if ahead else 'behind-only' if behind else 'in-sync'
-    plan = {'mode': 'apply' if apply else 'plan', 'branch': branch, 'remote': remote,
-            'before': head, 'remote_tip': tip, 'relation': relation,
-            'ahead': ahead, 'behind': behind, 'changed': False, 'replayed': {}}
-    if relation == 'behind-only':
-        plan['pull'] = journal_pull(repo_root, manifest, apply=apply)
-        plan['changed'] = plan['pull']['changed']
-        return plan
-    if relation != 'diverged':
-        if ahead:
-            plan['next'] = 'syncwheel journal publish --committed-only'
-        return plan
-    commits = git(repo_root, 'rev-list', '--reverse', '--topo-order', f'{tip}..{head}').stdout.splitlines()
-    remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/').stdout.splitlines()
-    published_tips.extend((ref, ref) for ref in remote_refs)
-    published = []
-    for commit in commits:
-        if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
-            raise SyncwheelError(f'journal recovery requires single-parent snapshots: {commit}')
-        for remote_ref, remote_commit in published_tips:
-            if git(repo_root, 'merge-base', '--is-ancestor', commit, remote_commit, check=False).returncode == 0:
-                published.append((commit, remote_ref))
-                break
-    if published:
-        # Ancestors of a published snapshot are published too, so they form a
-        # prefix. When its net change is already on the tip (for example a
-        # squash-merged pull request), drop the prefix from the replay: it
-        # stays on its remote ref and nothing published is rewritten.
-        prefix = [commit for commit, _ref in published]
-        first, first_ref = published[0]
-        # The snapshots form one single-parent chain, so published ones are a prefix.
-        last, last_ref = published[-1]
-        if prefix != commits[:len(prefix)] or not journal_prefix_absorbed(repo_root, first, last, tip):
-            where = f'{first} on {first_ref}' if last == first else (
-                f'{first} on {first_ref}; the published snapshots run up to {last} on {last_ref}'
-            )
-            raise SyncwheelError(
-                f'journal recovery refuses already-published commit {where}, '
-                'and their change is not on the journal tip, so they cannot be dropped as absorbed '
-                'and must not be rewritten'
-            )
-        plan['absorbed'] = prefix
-        commits = commits[len(prefix):]
-    paths = {path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', head, tip).split(b'\0') if path}
-    for commit in commits:
-        paths.update(path.decode() for path in git_bytes(repo_root, 'diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-z', '-r', commit).split(b'\0') if path)
-    journal_recover_clean_paths(repo_root, paths)
-    if not apply:
-        plan['commits'] = commits
-        return plan
-    with journal_lock(repo_root):
-        if ref_tip(repo_root, 'HEAD') != head:
-            raise SyncwheelError('journal head changed during recovery; STOP')
-        journal_recover_clean_paths(repo_root, paths)
-        directory = git_common_dir(repo_root) / 'syncwheel' / 'journal-recover'
-        directory.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix='replay-', dir=directory) as temporary:
-            worktree = Path(temporary) / 'worktree'
-            git(repo_root, 'worktree', 'add', '--quiet', '--detach', str(worktree), tip)
-            try:
-                parent = tip
-                for commit in commits:
-                    picked = git(worktree, 'cherry-pick', '--no-commit', commit, check=False)
-                    if picked.returncode:
-                        conflicts = [path.decode() for path in git_bytes(worktree, 'diff', '--name-only', '--diff-filter=U', '-z').split(b'\0') if path]
-                        raise SyncwheelError(f'journal recovery conflict at {commit}: '
-                                             + ', '.join(conflicts) + '; ' + picked.stderr.strip())
-                    tree = git(worktree, 'write-tree').stdout.strip()
-                    # Rebuild the commit from its raw headers/message to preserve
-                    # author, committer, timestamps, encoding and message bytes.
-                    raw = git_bytes(repo_root, 'cat-file', 'commit', commit)
-                    headers, message = raw.split(b'\n\n', 1)
-                    kept = []
-                    skip = False
-                    for line in headers.split(b'\n'):
-                        if line.startswith(b' '):
-                            if not skip:
-                                kept.append(line)
-                            continue
-                        skip = line.startswith((b'tree ', b'parent ', b'gpgsig ', b'gpgsig-sha256 ', b'mergetag '))
-                        if not skip:
-                            kept.append(line)
-                    content = (f'tree {tree}\nparent {parent}\n'.encode()
-                               + b'\n'.join(kept) + b'\n\n' + message)
-                    result = subprocess.run(['git', 'hash-object', '-t', 'commit', '-w', '--stdin'],
-                                            cwd=repo_root, input=content, capture_output=True,
-                                            env=managed_process_env())
-                    if result.returncode:
-                        raise SyncwheelError(result.stderr.decode(errors='replace'))
-                    parent = result.stdout.decode().strip()
-                    plan['replayed'][commit] = parent
-                    git(worktree, 'reset', '--quiet', '--hard', parent)
-                journal_recover_clean_paths(repo_root, paths)
-                stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
-                receipt_path = directory / f'{head}-{parent}.json'
-                receipt = {'operation': 'journal-recover', 'branch': branch, 'before': head,
-                           'after': parent, 'remote_tip': tip, 'replayed': plan['replayed'],
-                           'absorbed': plan.get('absorbed', []),
-                           'timestamp': stamp, 'status': 'prepared',
-                           'rollback': 'syncwheel journal recover --rollback '
-                                       + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root))
-                                       + (' -M ' + shlex.quote(str(manifest_path)) if manifest_path else '') + ' --apply'}
-                atomic_write_private_json(receipt_path, receipt)
-                journal_recover_move(repo_root, branch, head, parent)
-                receipt['status'] = 'complete'
-                atomic_write_private_json(receipt_path, receipt)
-                plan.update({'after': parent, 'changed': True, 'receipt': str(receipt_path)})
-                if commits:
-                    plan['next'] = 'syncwheel journal publish --committed-only'
-            finally:
-                # Only the isolated replay is disposable, including conflict state.
-                git(repo_root, 'worktree', 'remove', '--force', str(worktree))
-    return plan
+    return JournalWorkflow(_JournalRepository(repo_root)).recover(manifest, apply, rollback, manifest_path)
 
 
 def command_journal_recover(args):
@@ -31254,160 +28874,7 @@ def command_repo_tracking_set(args):
     return 0
 
 
-INDEX_OBJECT_FORMATS = {'sha1': (20, hashlib.sha1), 'sha256': (32, hashlib.sha256)}
 # Git rebuilds these from the entries, the worktree, or its own bookkeeping.
-INDEX_CACHE_ONLY_EXTENSIONS = frozenset({b'TREE', b'UNTR', b'FSMN', b'EOIE', b'IEOT'})
-INDEX_SEMANTIC_DIGEST_DOMAIN = b'syncwheel-index-semantic-v1\0'
-INDEX_ENTRY_ASSUME_VALID = 0x8000
-INDEX_ENTRY_EXTENDED = 0x4000
-INDEX_ENTRY_NAME_MASK = 0x0FFF
-
-
-def _index_varint(payload, offset, end):
-    if offset >= end:
-        return None, offset
-    byte = payload[offset]
-    offset += 1
-    value = byte & 0x7F
-    while byte & 0x80:
-        if offset >= end:
-            return None, offset
-        byte = payload[offset]
-        offset += 1
-        value = ((value + 1) << 7) | (byte & 0x7F)
-    return value, offset
-
-
-def parse_index_semantics(payload, object_format):
-    """Return the staged content of a Git index file, without stat data.
-
-    Returns None whenever the bytes alone cannot prove what Git would stage:
-    unknown object format or version, a required extension (split or sparse
-    index), truncation, or a trailer checksum mismatch.
-    """
-    spec = INDEX_OBJECT_FORMATS.get(object_format)
-    if spec is None:
-        return None
-    oid_size, hash_factory = spec
-    if len(payload) < 12 + oid_size or payload[:4] != b'DIRC':
-        return None
-    end = len(payload) - oid_size
-    if hash_factory(payload[:end]).digest() != payload[end:]:
-        return None
-    version, count = struct.unpack_from('>II', payload, 4)
-    if version not in (2, 3, 4):
-        return None
-    fixed_size = 40 + oid_size + 2
-    offset = 12
-    previous_path = b''
-    entries = []
-    for _ in range(count):
-        start = offset
-        if offset + fixed_size > end:
-            return None
-        (mode,) = struct.unpack_from('>I', payload, offset + 24)
-        oid = payload[offset + 40:offset + 40 + oid_size]
-        (flags,) = struct.unpack_from('>H', payload, offset + 40 + oid_size)
-        offset += fixed_size
-        extended = 0
-        if flags & INDEX_ENTRY_EXTENDED:
-            if version < 3 or offset + 2 > end:
-                return None
-            (extended,) = struct.unpack_from('>H', payload, offset)
-            offset += 2
-        if version == 4:
-            strip, offset = _index_varint(payload, offset, end)
-            if strip is None or strip > len(previous_path):
-                return None
-            terminator = payload.find(b'\0', offset, end)
-            if terminator < 0:
-                return None
-            path = previous_path[:len(previous_path) - strip] + payload[offset:terminator]
-            offset = terminator + 1
-        else:
-            terminator = payload.find(b'\0', offset, end)
-            if terminator < 0:
-                return None
-            path = payload[offset:terminator]
-            padded = start + ((terminator - start + 8) & ~7)
-            if padded > end or payload[terminator:padded].strip(b'\0'):
-                return None
-            offset = padded
-        if not path or flags & INDEX_ENTRY_NAME_MASK != min(len(path), INDEX_ENTRY_NAME_MASK):
-            return None
-        previous_path = path
-        entries.append((
-            path,
-            mode,
-            oid,
-            (flags >> 12) & 0x3,
-            bool(flags & INDEX_ENTRY_ASSUME_VALID),
-            extended,
-        ))
-    extensions = []
-    while offset < end:
-        if offset + 8 > end:
-            return None
-        signature = payload[offset:offset + 4]
-        (size,) = struct.unpack_from('>I', payload, offset + 4)
-        data_end = offset + 8 + size
-        if data_end > end:
-            return None
-        # only 'A'..'Z' extensions are optional, others (link, sdir) change
-        # how the entries have to be read
-        if not 0x41 <= signature[0] <= 0x5A:
-            return None
-        if signature not in INDEX_CACHE_ONLY_EXTENSIONS:
-            extensions.append((signature, payload[offset + 8:data_end]))
-        offset = data_end
-    return {'version': version, 'entries': entries, 'extensions': extensions}
-
-
-def index_semantic_digest(payload, object_format):
-    """Digest what an index stages, independent of stat fields and version."""
-    parsed = parse_index_semantics(payload, object_format)
-    if parsed is None:
-        return None
-    digest = hashlib.sha256(
-        INDEX_SEMANTIC_DIGEST_DOMAIN + object_format.encode('ascii') + b'\0'
-    )
-    digest.update(struct.pack('>I', len(parsed['entries'])))
-    for path, mode, oid, stage_number, assume_valid, extended in parsed['entries']:
-        digest.update(struct.pack('>I', len(path)) + path)
-        digest.update(struct.pack('>I', mode) + oid)
-        digest.update(struct.pack('>BBH', stage_number, assume_valid, extended))
-    for signature, data in parsed['extensions']:
-        digest.update(signature + struct.pack('>Q', len(data)) + data)
-    return digest.hexdigest()
-
-
-class IndexLease:
-    __slots__ = ('sha256', 'semantic')
-
-    def __init__(self, sha256, semantic):
-        self.sha256 = sha256
-        self.semantic = semantic
-
-
-class IndexObservation:
-    """One read of the real index, semantic digest parsed on demand."""
-
-    def __init__(self, payload, object_format):
-        self.payload = payload
-        self.object_format = object_format
-        self.sha256 = hashlib.sha256(payload).hexdigest()
-        self._semantic = None
-        self._parsed = False
-
-    @property
-    def semantic(self):
-        if not self._parsed:
-            self._semantic = (
-                index_semantic_digest(self.payload, self.object_format)
-                if self.object_format else None
-            )
-            self._parsed = True
-        return self._semantic
 
 
 class SyncwheelRevisionBackend:
@@ -34962,1056 +32429,8 @@ def command_revision_provider(args):
     )
 
 
-def add_rebuild_args(parser):
-    parser.add_argument('-w', '--worktree')
-    parser.add_argument('-i', '--in-place', action='store_true')
-    parser.add_argument(
-        '--replay-mode',
-        choices=REPLAY_MODE_CHOICES,
-        default=None,
-        help=(
-            'replay execution mode; unset falls back to the repo profile, then the '
-            'manifest default, then auto (plumbing when Git supports it, else ephemeral)'
-        ),
-    )
-    parser.add_argument('-n', '--dry-run', action='store_true')
-
-
-def add_push_args(parser):
-    parser.add_argument('-R', '--remote')
-    parser.add_argument('-n', '--dry-run', action='store_true')
-    parser.add_argument(
-        '-l',
-        '--force-with-lease',
-        action='store_true',
-        help='pass --force-with-lease to git push',
-    )
-
-
-def add_git_args(parser):
-    parser.add_argument('-w', '--worktree', help='create/use this worktree path when the branch has no worktree')
-    parser.add_argument('-a', '--auto-worktree', action='store_true', help='create the default worktree when missing')
-    return parser
-
-
-def add_reconcile_args(parser, include_apply_push=True, include_push_options=True):
-    parser.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
-    parser.add_argument('-j', '--json', action='store_true')
-    parser.add_argument(
-        '--replay-mode',
-        choices=REPLAY_MODE_CHOICES,
-        help='replay execution mode for the rebuilds this reconcile applies',
-    )
-    if include_apply_push:
-        parser.add_argument('-a', '--apply', action='store_true', help='execute the reported rebuild/push plan')
-        parser.add_argument('-P', '--push', action='store_true', help='push rebuilt or drifted managed branches')
-    if include_push_options:
-        parser.add_argument(
-            '-l',
-            '--force-with-lease',
-            action='store_true',
-            default=True,
-            help='pass --force-with-lease to reconcile-managed git pushes (default)',
-        )
-        parser.add_argument(
-            '-L',
-            '--no-force-with-lease',
-            dest='force_with_lease',
-            action='store_false',
-            help='use normal git push for reconcile-managed pushes',
-        )
-    parser.add_argument('-R', '--remote', help='remote override for managed branch comparisons and publication')
-    parser.add_argument(
-        '--accept-merge',
-        action='store_true',
-        help='explicitly apply a previously reported disjoint-stack coordination merge before publishing',
-    )
-    parser.add_argument(
-        '-m',
-        '--mode',
-        choices=sorted(RECONCILE_MODES),
-        default='standard',
-        help='reconcile mode: standard or resume',
-    )
-    parser.add_argument('-s', '--stack', action='append', help='limit reconciliation to one stack; may be repeated')
-    parser.add_argument('-I', '--skip-integration', action='store_true')
-    parser.add_argument(
-        '-A',
-        '--align-local-to-remote',
-        dest='align_local_to_remote',
-        action='store_true',
-        default=True,
-        help='align local branch tips to remote refs when both match the manifest projection (default)',
-    )
-    parser.add_argument(
-        '--no-align-local-to-remote',
-        dest='align_local_to_remote',
-        action='store_false',
-        help='do not normalize local history to remote even when both match the manifest projection',
-    )
-    parser.add_argument(
-        '-b',
-        '--rebuild',
-        choices=['needed', 'all', 'none'],
-        default='needed',
-        help='which managed branches to rebuild before optional push',
-    )
-    parser.add_argument(
-        '-W',
-        '--worktree-root',
-        help='directory where reconcile creates branch worktrees when no worktree already exists',
-    )
-    parser.add_argument(
-        '-i',
-        '--in-place-integration',
-        action='store_true',
-        help='allow integration rebuild in the current clean integration checkout',
-    )
-    parser.add_argument(
-        '-U',
-        '--no-update-manifest',
-        dest='update_manifest',
-        action='store_false',
-        help='do not refresh stack commit SHAs after stack rebuilds',
-    )
-
-
 def build_parser():
-    parser = argparse.ArgumentParser(description='Deterministic syncwheel helper for fork/upstream/integration repos.')
-    parser.add_argument('--version', action='version', version=f'syncwheel {VERSION}')
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument('-r', '--repo', help='target repo path or registered alias')
-    common.add_argument('-M', '--manifest', help='path to a syncwheel manifest JSON file')
-    common.add_argument('-p', '--personal', help='use .syncwheel/manifests/<name>.local.json')
-    sub = parser.add_subparsers(dest='command', required=True)
-
-    revision_provider_p = sub.add_parser(
-        'revision-provider',
-        help='serve one strict Agentwheel revision-provider JSON request on stdin',
-    )
-    revision_provider_p.set_defaults(func=command_revision_provider)
-    revision_provider_sub = revision_provider_p.add_subparsers(dest='revision_provider_command')
-    resolve_prepared_p = revision_provider_sub.add_parser(
-        'resolve-prepared',
-        help='bind an exact reviewed draft object to an unresolved prepared operation',
-    )
-    resolve_prepared_p.add_argument('-r', '--repo', help='canonical operation repository path or alias')
-    resolve_prepared_p.add_argument('operation_id')
-    resolve_prepared_p.add_argument('--resolution', required=True, help='full resolution commit OID')
-    resolve_prepared_p.add_argument('--reason', required=True)
-    resolve_prepared_p.add_argument('--plan-digest')
-    resolve_prepared_p.add_argument('--apply', action='store_true')
-    resolve_prepared_p.set_defaults(func=command_revision_provider_resolve_prepared)
-
-    repo_p = sub.add_parser('repo', aliases=['r'], help='manage repo aliases')
-    repo_sub = repo_p.add_subparsers(dest='repo_command', required=True)
-
-    repo_add_p = repo_sub.add_parser('add', help='add/update one repo alias')
-    repo_add_p.add_argument('alias')
-    repo_add_p.add_argument('path')
-    repo_add_p.add_argument('-M', '--manifest', help='optional default manifest path for this alias')
-    repo_add_p.set_defaults(func=command_repo_add)
-
-    repo_manifest_p = repo_sub.add_parser('set-manifest', help='set/clear default manifest path for one alias')
-    repo_manifest_p.add_argument('alias')
-    repo_manifest_p.add_argument('manifest', nargs='?', help='manifest path; omit with --clear to remove')
-    repo_manifest_p.add_argument('-c', '--clear', action='store_true')
-    repo_manifest_p.set_defaults(func=command_repo_set_manifest)
-
-    repo_rm_p = repo_sub.add_parser('rm', help='remove one repo alias')
-    repo_rm_p.add_argument('alias')
-    repo_rm_p.set_defaults(func=command_repo_rm)
-
-    repo_ls_p = repo_sub.add_parser('ls', help='list repo aliases')
-    repo_ls_p.add_argument('-j', '--json', action='store_true')
-    repo_ls_p.set_defaults(func=command_repo_ls)
-
-    repo_mode_p = repo_sub.add_parser('mode', help='migrate the repository delivery model')
-    repo_mode_sub = repo_mode_p.add_subparsers(dest='mode_command', required=True)
-    repo_mode_set_p = repo_mode_sub.add_parser('set', parents=[common])
-    repo_mode_set_p.add_argument('repository_mode', choices=['journal'])
-    repo_mode_set_p.add_argument('--branch', default='main')
-    repo_mode_set_p.add_argument('--remote', default='origin')
-    repo_mode_set_p.add_argument('--include', action='append')
-    repo_mode_set_p.add_argument('--exclude', action='append')
-    repo_mode_set_p.add_argument('--interval', default='30m')
-    repo_mode_set_p.add_argument('--max-file-bytes', type=int, default=10485760)
-    repo_mode_set_p.add_argument('--manifest-version', type=int, choices=[1, 2], default=1)
-    repo_mode_set_p.add_argument('--reason', required=True)
-    repo_mode_set_p.add_argument('-a', '--apply', action='store_true')
-    repo_mode_set_p.set_defaults(func=command_repo_mode_set)
-
-    repo_tracking_p = repo_sub.add_parser('tracking', help='inspect or set repo-local syncwheel tracking policy')
-    repo_tracking_sub = repo_tracking_p.add_subparsers(dest='tracking_command', required=True)
-
-    repo_tracking_status_p = repo_tracking_sub.add_parser('status', parents=[common])
-    repo_tracking_status_p.add_argument('-j', '--json', action='store_true')
-    repo_tracking_status_p.set_defaults(func=command_repo_tracking_status)
-
-    repo_tracking_set_p = repo_tracking_sub.add_parser('set', parents=[common])
-    repo_tracking_set_p.add_argument('tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
-    repo_tracking_set_p.add_argument('-W', '--worktree-root', help='default repo-relative syncwheel worktree/cache root')
-    repo_tracking_set_p.add_argument('-a', '--apply', action='store_true')
-    repo_tracking_set_p.add_argument('-j', '--json', action='store_true')
-    repo_tracking_set_p.set_defaults(func=command_repo_tracking_set)
-    repo_authority_p = repo_sub.add_parser(
-        'authority', help='inspect or set the repo-local agent authority policy'
-    )
-    repo_authority_sub = repo_authority_p.add_subparsers(dest='repo_authority_command', required=True)
-    repo_authority_status_p = repo_authority_sub.add_parser('status', parents=[common])
-    repo_authority_status_p.add_argument('-j', '--json', action='store_true')
-    repo_authority_status_p.set_defaults(func=command_repo_authority_status)
-    repo_authority_set_p = repo_authority_sub.add_parser('set', parents=[common])
-    repo_authority_set_p.add_argument('mode', choices=sorted(AUTHORITY_MODES))
-    repo_authority_set_p.add_argument(
-        '--allow', action='append', choices=list(AUTHORITY_GRANTABLE_CLASSES),
-        help='authority class agents may exercise without a human gate (repeatable)',
-    )
-    repo_authority_set_p.add_argument('-a', '--apply', action='store_true')
-    repo_authority_set_p.add_argument('-j', '--json', action='store_true')
-    repo_authority_set_p.set_defaults(func=command_repo_authority_set)
-
-    repo_pr_merge_p = repo_sub.add_parser(
-        'pr-merge-policy', help='inspect or set the private GitHub PR merge policy'
-    )
-    repo_pr_merge_sub = repo_pr_merge_p.add_subparsers(
-        dest='pr_merge_policy_command', required=True
-    )
-    repo_pr_merge_status_p = repo_pr_merge_sub.add_parser('status', parents=[common])
-    repo_pr_merge_status_p.add_argument('-j', '--json', action='store_true')
-    repo_pr_merge_status_p.set_defaults(func=command_repo_pr_merge_policy_status)
-    repo_pr_merge_set_p = repo_pr_merge_sub.add_parser('set', parents=[common])
-    repo_pr_merge_set_p.add_argument('provider', choices=('github',))
-    repo_pr_merge_set_p.add_argument('--repository', required=True)
-    repo_pr_merge_set_p.add_argument('--base', action='append', required=True)
-    repo_pr_merge_set_p.add_argument('--method', choices=sorted(GITHUB_PR_MERGE_METHODS), required=True)
-    repo_pr_merge_set_p.add_argument('--allow-bypass', action='append', required=True)
-    repo_pr_merge_set_p.add_argument('--merge-actor', action='append', required=True)
-    repo_pr_merge_set_p.add_argument('--pr-author', action='append')
-    repo_pr_merge_set_p.add_argument('--commit-author', action='append')
-    repo_pr_merge_set_p.add_argument('--head-repository', action='append')
-    repo_pr_merge_set_p.add_argument('--checks', choices=sorted(GITHUB_PR_MERGE_CHECKS), default='all')
-    repo_pr_merge_set_p.add_argument('-a', '--apply', action='store_true')
-    repo_pr_merge_set_p.add_argument('-j', '--json', action='store_true')
-    repo_pr_merge_set_p.set_defaults(func=command_repo_pr_merge_policy_set)
-    repo_pr_merge_clear_p = repo_pr_merge_sub.add_parser('clear', parents=[common])
-    repo_pr_merge_clear_p.add_argument('-a', '--apply', action='store_true')
-    repo_pr_merge_clear_p.add_argument('-j', '--json', action='store_true')
-    repo_pr_merge_clear_p.set_defaults(func=command_repo_pr_merge_policy_clear)
-
-    self_p = sub.add_parser('self', help='inspect or update the syncwheel installation itself')
-    self_sub = self_p.add_subparsers(dest='self_command', required=True)
-
-    self_status_p = self_sub.add_parser('status', help='show syncwheel install/update status')
-    self_status_p.add_argument('-f', '--fetch', action='store_true', help='refresh remote tracking info before reporting')
-    self_status_p.add_argument('-j', '--json', action='store_true')
-    self_status_p.set_defaults(func=command_self_status)
-
-    self_check_p = self_sub.add_parser('check-update', help='check whether a newer syncwheel version exists')
-    self_check_p.add_argument('-f', '--fetch', action='store_true', help='refresh remote tracking info before checking')
-    self_check_p.add_argument('-j', '--json', action='store_true')
-    self_check_p.set_defaults(func=command_self_check_update)
-
-    self_update_p = self_sub.add_parser('update', help='update this syncwheel install')
-    self_update_p.add_argument('-n', '--dry-run', action='store_true')
-    self_update_p.add_argument('-F', '--no-fetch', action='store_true')
-    self_update_p.set_defaults(func=command_self_update)
-
-    self_hooks_p = self_sub.add_parser('install-hooks', help='install syncwheel Git hooks in this syncwheel checkout')
-    self_hooks_p.add_argument('-n', '--dry-run', action='store_true')
-    self_hooks_p.set_defaults(func=command_self_install_hooks)
-
-    self_mode_p = self_sub.add_parser('mode', help='show or set automatic update policy: off, notify, auto')
-    self_mode_p.add_argument('mode', nargs='?', choices=sorted(UPDATE_MODES))
-    self_mode_p.set_defaults(func=command_self_mode)
-
-    hooks_p = sub.add_parser('hooks', help='plan, install, or remove managed repository guards')
-    hooks_sub = hooks_p.add_subparsers(dest='hooks_command', required=True)
-    hooks_status_p = hooks_sub.add_parser('status', parents=[common])
-    hooks_status_p.set_defaults(func=command_hooks_status)
-    hooks_install_p = hooks_sub.add_parser('install', parents=[common])
-    hooks_install_p.add_argument('-a', '--apply', action='store_true')
-    hooks_install_p.add_argument(
-        '--reason',
-        help='required explanation when changing the guarded integration branch',
-    )
-    hooks_install_p.set_defaults(func=command_hooks_install)
-    hooks_remove_p = hooks_sub.add_parser('remove', parents=[common])
-    hooks_remove_p.add_argument('-a', '--apply', action='store_true')
-    hooks_remove_p.add_argument('--disable', action='store_true', help='persist an explicit clone-local opt-out')
-    hooks_remove_p.add_argument('--reason', help='required explanation for --disable')
-    hooks_remove_p.set_defaults(func=command_hooks_remove)
-    hooks_guard_p = hooks_sub.add_parser('guard', parents=[common], help=argparse.SUPPRESS)
-    hooks_guard_p.add_argument('--remote-name', required=True)
-    hooks_guard_p.add_argument('--remote-url', required=True)
-    hooks_guard_p.set_defaults(func=command_hooks_guard)
-    hooks_worktree_guard_p = hooks_sub.add_parser(
-        'worktree-guard', parents=[common], help=argparse.SUPPRESS
-    )
-    hooks_worktree_guard_p.add_argument(
-        '--event', required=True, choices=('pre-commit', 'post-checkout')
-    )
-    hooks_worktree_guard_p.set_defaults(func=command_hooks_worktree_guard)
-    hooks_ref_guard_p = hooks_sub.add_parser(
-        'ref-guard', parents=[common], help=argparse.SUPPRESS
-    )
-    hooks_ref_guard_p.add_argument('--phase', default='')
-    hooks_ref_guard_p.set_defaults(func=command_hooks_ref_guard)
-
-    use_p = sub.add_parser('use', help='show or set the repo-local default syncwheel profile', parents=[common])
-    use_p.add_argument('personal', nargs='?', help='personal profile name to use by default')
-    use_p.add_argument('-s', '--shared', action='store_true', help='clear the local profile and use the shared manifest')
-    use_p.set_defaults(func=command_use)
-
-    replay_mode_p = sub.add_parser(
-        'replay-mode',
-        help='show or set the repo-local default replay execution mode',
-        parents=[common],
-    )
-    replay_mode_p.add_argument('mode', nargs='?', choices=REPLAY_MODE_CHOICES)
-    replay_mode_p.add_argument(
-        '-c', '--clear', action='store_true', help='remove the repo-local default'
-    )
-    replay_mode_p.add_argument('-j', '--json', action='store_true')
-    replay_mode_p.set_defaults(func=command_replay_mode)
-
-    init_p = sub.add_parser('init', aliases=['in'], help='create a starter manifest', parents=[common])
-    init_p.add_argument('-C', '--canonical-remote', default='origin')
-    init_p.add_argument('-P', '--publication-remote')
-    init_p.add_argument('-B', '--base-branch', default='main')
-    init_p.add_argument('-I', '--integration-branch')
-    init_p.add_argument('-T', '--syncwheel-tracking', choices=sorted(SYNCWHEEL_TRACKING_VALUES))
-    init_p.add_argument('-W', '--worktree-root', help='default repo-relative syncwheel worktree/cache root')
-    init_p.add_argument('--no-coordination', action='store_true', help='persist manifest v2 coordination mode=disabled')
-    init_p.add_argument('--coordination-id', help='public coordination-domain id for a new git-tracked manifest')
-    init_p.add_argument('-f', '--force', action='store_true')
-    init_p.add_argument('-o', '--stdout', action='store_true')
-    init_p.set_defaults(func=command_init)
-
-    coordination_p = sub.add_parser(
-        'coordination',
-        aliases=['coord'],
-        help='enable, inspect, or disable active-active remote coordination',
-    )
-    coordination_sub = coordination_p.add_subparsers(dest='coordination_command', required=True)
-
-    coordination_claims_p = coordination_sub.add_parser(
-        'claims', help='inspect or backfill per-source coordination claims'
-    )
-    coordination_claims_sub = coordination_claims_p.add_subparsers(
-        dest='coordination_claims_command', required=True
-    )
-    coordination_claims_backfill_p = coordination_claims_sub.add_parser(
-        'backfill', parents=[common],
-        help='create missing per-source claim refs with create-only leases',
-    )
-    coordination_claims_backfill_p.add_argument('-a', '--apply', action='store_true')
-    coordination_claims_backfill_p.add_argument('--reason')
-    coordination_claims_backfill_p.set_defaults(func=command_coordination_claims_backfill)
-
-    coordination_init_p = coordination_sub.add_parser('init', parents=[common])
-    coordination_init_p.add_argument('-R', '--remote', help='configured publication remote for active-active coordination')
-    coordination_init_p.add_argument('--coordination-id', help='public coordination-domain id')
-    coordination_init_p.add_argument('-a', '--apply', action='store_true')
-    coordination_init_p.set_defaults(func=command_coordination_init)
-
-    coordination_disable_p = coordination_sub.add_parser('disable', parents=[common])
-    coordination_disable_p.add_argument('-a', '--apply', action='store_true')
-    coordination_disable_p.set_defaults(func=command_coordination_disable)
-
-    coordination_provenance_p = coordination_sub.add_parser(
-        'provenance',
-        help='manage the clone-local derived provenance store under the git common dir',
-    )
-    coordination_provenance_sub = coordination_provenance_p.add_subparsers(
-        dest='coordination_provenance_command', required=True
-    )
-    coordination_provenance_reset_p = coordination_provenance_sub.add_parser(
-        'reset',
-        parents=[common],
-        help='discard clone-local derived provenance the coordination snapshot supersedes',
-    )
-    coordination_provenance_reset_p.add_argument(
-        '--reason', required=True, help='recorded reason for discarding clone-local records'
-    )
-    coordination_provenance_reset_p.add_argument(
-        '--all',
-        action='store_true',
-        help='clear the whole store, including an unreadable one',
-    )
-    coordination_provenance_reset_p.set_defaults(
-        func=command_coordination_provenance_reset
-    )
-    coordination_provenance_supersede_p = coordination_provenance_sub.add_parser(
-        'supersede', parents=[common],
-        help='plan or apply exact replay-backed supersession of stale derived records',
-    )
-    coordination_provenance_supersede_p.add_argument('--reconciliation')
-    coordination_provenance_supersede_p.add_argument('--path', action='append')
-    coordination_provenance_supersede_p.add_argument('--reason')
-    coordination_provenance_supersede_p.add_argument('--plan-file')
-    coordination_provenance_supersede_p.add_argument('-a', '--apply', action='store_true')
-    coordination_provenance_supersede_p.set_defaults(
-        func=command_coordination_provenance_supersede
-    )
-
-    coordination_repair_p = coordination_sub.add_parser(
-        'repair',
-        parents=[common],
-        help='plan or apply a serialized coordination-state repair under an exact proof backend',
-    )
-    coordination_repair_p.add_argument(
-        '--ref',
-        required=False,
-        help='full already-owned managed branch ref to repair (required while planning)',
-    )
-    coordination_repair_p.add_argument('-a', '--apply', action='store_true')
-    coordination_repair_p.add_argument(
-        '--freeze-backend',
-        choices=[
-            'github-lock',
-            COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
-            COORDINATION_REPAIR_FAST_FORWARD_BACKEND,
-            COORDINATION_REPAIR_MISSING_REF_BACKEND,
-            COORDINATION_REPAIR_DIGEST_MIGRATION_BACKEND,
-            COORDINATION_REPAIR_DIGEST_HEAL_BACKEND,
-        ],
-        default='github-lock',
-        help=(
-            'reviewed repair backend: github-lock remains unsupported; '
-            'tree-equivalent-state-cas requires exact tree equality; '
-            'fast-forward-state-cas requires exact bounded ancestry; '
-            'missing-ref-create-cas atomically recreates one absent owned ref; '
-            'state-digest-migration republishes a pre-0.42.2 state under the '
-            'control-manifest digest; state-digest-heal recomputes an '
-            'unrecognized (neither raw nor legacy) manifest_digest from the '
-            'manifest already committed at the aligned integration tip'
-        ),
-    )
-    coordination_repair_p.add_argument(
-        '--plan-file',
-        help='exact reviewed JSON plan; required with --apply',
-    )
-    coordination_repair_p.set_defaults(func=command_coordination_repair)
-
-    coordination_compose_p = coordination_sub.add_parser(
-        'compose',
-        parents=[common],
-        help='plan or apply an additive remote/local stack composition without rebuilding integration',
-    )
-    coordination_compose_p.add_argument('--stack', help='single locally added stack to publish')
-    coordination_compose_p.add_argument(
-        '--known-base-state',
-        help='exact append-only coordination state from which the local proposal was derived',
-    )
-    coordination_compose_p.add_argument(
-        '--known-base-manifest-digest',
-        '--known-base-snapshot-digest',
-        dest='known_base_manifest_digest',
-        help=(
-            'exact integration-tip control manifest digest recorded by '
-            '--known-base-state'
-        ),
-    )
-    coordination_compose_p.add_argument('-a', '--apply', action='store_true')
-    coordination_compose_p.add_argument('--plan-file', help='exact reviewed JSON plan')
-    coordination_compose_p.set_defaults(func=command_coordination_compose)
-
-    handoff_p = sub.add_parser(
-        'handoff',
-        help='read-only active-active coordination diagnostic for a multi-device handoff',
-        parents=[common],
-    )
-    handoff_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
-    handoff_p.add_argument('-j', '--json', action='store_true')
-    handoff_p.set_defaults(func=command_handoff, fetch=True)
-
-    gc_p = sub.add_parser(
-        'gc',
-        help='report or reap eligible local tombstoned worktrees, branches, and backups',
-        parents=[common],
-    )
-    gc_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
-    gc_p.add_argument('-a', '--apply', action='store_true')
-    gc_p.add_argument(
-        '-l', '--lane', dest='lanes', action='append', metavar='LANE',
-        help='limit governed lane cleanup to this lane id (repeatable); other artifacts are only reported',
-    )
-    gc_p.add_argument('-j', '--json', action='store_true')
-    gc_p.set_defaults(func=command_gc, fetch=True)
-
-    worktree_p = sub.add_parser('worktree', aliases=['wt'], help='manage governed local worktrees and safety locks')
-    worktree_sub = worktree_p.add_subparsers(dest='worktree_command', required=True)
-
-    worktree_open_p = worktree_sub.add_parser('open', parents=[common])
-    worktree_open_p.add_argument('lane')
-    worktree_open_p.add_argument('--into', help='optional existing stack that will own this lane\'s commits')
-    worktree_open_p.add_argument('--base', help='with --into, start at that stack\'s exact projected tip instead of the current checkout HEAD')
-    worktree_open_p.add_argument('--full', action='store_true', help='mark this explicitly requested lane as eligible for dependency, build, test, and debug work')
-    worktree_open_p.add_argument('-j', '--json', action='store_true')
-    worktree_open_p.set_defaults(func=command_worktree_open)
-
-    worktree_release_p = worktree_sub.add_parser('release', parents=[common])
-    worktree_release_p.add_argument('lane')
-    worktree_release_p.add_argument('--reason', required=True, help='why this dead or abandoned lane is being released')
-    worktree_release_p.add_argument('-a', '--apply', action='store_true', help='create any recovery ref and remove the released lane record')
-    worktree_release_p.add_argument('-j', '--json', action='store_true')
-    worktree_release_p.set_defaults(func=command_worktree_release)
-
-    worktree_lock_p = worktree_sub.add_parser('lock', parents=[common])
-    worktree_lock_p.add_argument('stack')
-    worktree_lock_p.set_defaults(func=command_worktree_lock)
-
-    worktree_unlock_p = worktree_sub.add_parser('unlock', parents=[common])
-    worktree_unlock_p.add_argument('stack')
-    worktree_unlock_p.set_defaults(func=command_worktree_unlock)
-
-    status_p = sub.add_parser('status', aliases=['st'], help='show repo and manifest state', parents=[common])
-    status_p.add_argument('-f', '--fetch', action='store_true')
-    status_p.add_argument('-j', '--json', action='store_true')
-    status_p.set_defaults(func=command_status)
-
-    validate_p = sub.add_parser('validate', aliases=['v'], help='validate the manifest against local git state', parents=[common])
-    validate_p.add_argument('-j', '--json', action='store_true')
-    validate_p.set_defaults(func=command_validate)
-
-    plan_p = sub.add_parser('plan', aliases=['pl'], help='emit a deterministic action plan from the manifest', parents=[common])
-    plan_p.add_argument('-j', '--json', action='store_true')
-    plan_p.set_defaults(func=command_plan)
-
-    check_p = sub.add_parser('check', aliases=['ck'], help='fetch, validate, and print the current action plan', parents=[common])
-    check_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
-    check_p.add_argument('--strict', action='store_true', help='exit nonzero on warnings or planned actions')
-    check_p.add_argument('-j', '--json', action='store_true')
-    check_p.set_defaults(func=command_check, fetch=True)
-
-    ledger_p = sub.add_parser('ledger', help='inspect the append-only syncwheel ledger', parents=[common])
-    ledger_sub = ledger_p.add_subparsers(dest='ledger_command', required=True)
-
-    ledger_show_p = ledger_sub.add_parser('show', aliases=['sh'], parents=[common])
-    ledger_show_p.add_argument('-j', '--json', action='store_true')
-    ledger_show_p.set_defaults(func=command_ledger_show)
-
-    reconcile_p = sub.add_parser(
-        'reconcile',
-        aliases=['rec'],
-        help='reconcile manifest, stack branches, integration, and remote tips',
-        parents=[common],
-    )
-    add_reconcile_args(reconcile_p, include_apply_push=True)
-    reconcile_p.set_defaults(func=command_reconcile, fetch=True, update_manifest=True, mode='standard')
-
-    resume_p = sub.add_parser(
-        'resume',
-        help='resume reconcile from a shared remote state on a new machine',
-        parents=[common],
-    )
-    add_reconcile_args(resume_p, include_apply_push=True)
-    resume_p.set_defaults(func=command_resume, fetch=True, update_manifest=True, mode='resume')
-
-    sync_p = sub.add_parser(
-        'sync',
-        help='apply the safe local reconcile lifecycle without pushing remotes',
-        parents=[common],
-    )
-    add_reconcile_args(sync_p, include_apply_push=False, include_push_options=False)
-    sync_p.set_defaults(
-        func=command_sync,
-        fetch=True,
-        update_manifest=True,
-        apply=True,
-        push=False,
-        force_with_lease=True,
-        mode='standard',
-    )
-
-    publish_p = sub.add_parser(
-        'publish',
-        help='apply the reconcile lifecycle and push managed branches',
-        parents=[common],
-    )
-    add_reconcile_args(publish_p, include_apply_push=False)
-    publish_p.set_defaults(func=command_publish, fetch=True, update_manifest=True, apply=True, push=True, mode='standard')
-
-    manifest_p = sub.add_parser('manifest', aliases=['m'], help='inspect, compare, and migrate syncwheel manifests')
-    manifest_sub = manifest_p.add_subparsers(dest='manifest_command', required=True)
-
-    manifest_compare_p = manifest_sub.add_parser('compare', parents=[common])
-    manifest_compare_p.add_argument('-O', '--other-manifest')
-    manifest_compare_p.add_argument('-P', '--other-personal')
-    manifest_compare_p.add_argument('-j', '--json', action='store_true')
-    manifest_compare_p.set_defaults(func=command_manifest_compare)
-
-    manifest_recover_p = manifest_sub.add_parser(
-        'recover-control', parents=[common],
-        help='plan or restore tracked control metadata from a verified native replay backup',
-    )
-    manifest_recover_p.add_argument('--from-backup', required=True)
-    manifest_recover_p.add_argument('--plan-digest')
-    manifest_recover_p.add_argument('--reason')
-    manifest_recover_p.add_argument('-a', '--apply', action='store_true')
-    manifest_recover_p.set_defaults(func=command_manifest_recover_control)
-
-    manifest_require_integration_p = manifest_sub.add_parser(
-        'require-integration',
-        help='require every declared stack to participate in integration',
-        parents=[common],
-    )
-    manifest_require_integration_p.add_argument('-a', '--apply', action='store_true')
-    manifest_require_integration_p.add_argument('-j', '--json', action='store_true')
-    manifest_require_integration_p.set_defaults(func=command_manifest_require_integration)
-
-    channel_p = sub.add_parser(
-        'channel', aliases=['ch'],
-        help='manage pinned, ordered, rebuildable deployment-channel branches',
-    )
-    channel_sub = channel_p.add_subparsers(dest='channel_command', required=True)
-
-    channel_list_p = channel_sub.add_parser('list', aliases=['ls'], parents=[common])
-    channel_list_p.add_argument('-j', '--json', action='store_true')
-    channel_list_p.set_defaults(func=command_channel_list)
-
-    channel_show_p = channel_sub.add_parser('show', aliases=['sh'], parents=[common])
-    channel_show_p.add_argument('channel')
-    channel_show_p.set_defaults(func=command_channel_show)
-
-    channel_contract_p = channel_sub.add_parser('contract')
-    channel_contract_p.set_defaults(func=command_channel_contract)
-
-    channel_create_p = channel_sub.add_parser('create', aliases=['new'], parents=[common])
-    channel_create_p.add_argument('channel')
-    channel_create_p.add_argument('-b', '--branch')
-    channel_create_p.add_argument('-B', '--base')
-    channel_create_p.add_argument('-R', '--remote')
-    channel_create_p.add_argument(
-        '-L', '--lifecycle', choices=sorted(CHANNEL_LIFECYCLES), default='shared'
-    )
-    channel_create_p.add_argument('--expires-at')
-    channel_create_p.add_argument('-s', '--stack', action='append', default=[])
-    channel_create_p.add_argument('--operation-id')
-    channel_create_p.add_argument('--plan-digest')
-    channel_create_p.add_argument('-a', '--apply', action='store_true')
-    channel_create_p.set_defaults(func=command_channel_create)
-
-    channel_add_p = channel_sub.add_parser('add', parents=[common])
-    channel_add_p.add_argument('channel')
-    channel_add_p.add_argument('stack')
-    channel_add_p.add_argument('--position', type=int)
-    channel_add_p.add_argument('--operation-id')
-    channel_add_p.add_argument('--plan-digest')
-    channel_add_p.add_argument('-a', '--apply', action='store_true')
-    channel_add_p.set_defaults(func=command_channel_add)
-
-    channel_remove_p = channel_sub.add_parser('remove', aliases=['rm'], parents=[common])
-    channel_remove_p.add_argument('channel')
-    channel_remove_p.add_argument('stack')
-    channel_remove_p.add_argument('--operation-id')
-    channel_remove_p.add_argument('--plan-digest')
-    channel_remove_p.add_argument('-a', '--apply', action='store_true')
-    channel_remove_p.set_defaults(func=command_channel_remove)
-
-    channel_replace_p = channel_sub.add_parser('replace', parents=[common])
-    channel_replace_p.add_argument('channel')
-    channel_replace_p.add_argument('old_stack')
-    channel_replace_p.add_argument('new_stack')
-    channel_replace_p.add_argument('--operation-id')
-    channel_replace_p.add_argument('--plan-digest')
-    channel_replace_p.add_argument('-a', '--apply', action='store_true')
-    channel_replace_p.set_defaults(func=command_channel_replace)
-
-    channel_refresh_p = channel_sub.add_parser('refresh', parents=[common])
-    channel_refresh_p.add_argument('channel')
-    channel_refresh_p.add_argument('-s', '--stack', action='append')
-    channel_refresh_p.add_argument('--operation-id')
-    channel_refresh_p.add_argument('--plan-digest')
-    channel_refresh_p.add_argument('-a', '--apply', action='store_true')
-    channel_refresh_p.set_defaults(func=command_channel_refresh)
-
-    channel_diff_p = channel_sub.add_parser('diff', parents=[common])
-    channel_diff_p.add_argument('channel')
-    channel_diff_p.add_argument('-O', '--other')
-    channel_diff_p.set_defaults(func=command_channel_diff)
-
-    channel_promote_p = channel_sub.add_parser('promote', parents=[common])
-    channel_promote_p.add_argument('source')
-    channel_promote_p.add_argument('target')
-    channel_promote_p.add_argument('--operation-id')
-    channel_promote_p.add_argument('--plan-digest')
-    channel_promote_p.add_argument('-a', '--apply', action='store_true')
-    channel_promote_p.set_defaults(func=command_channel_promote)
-
-    channel_resolve_p = channel_sub.add_parser('resolve', parents=[common])
-    channel_resolve_p.add_argument('channel')
-    channel_resolve_choice = channel_resolve_p.add_mutually_exclusive_group(required=True)
-    channel_resolve_choice.add_argument('--revision')
-    channel_resolve_choice.add_argument('--clear', action='store_true')
-    channel_resolve_p.add_argument('--operation-id')
-    channel_resolve_p.add_argument('--plan-digest')
-    channel_resolve_p.add_argument('-a', '--apply', action='store_true')
-    channel_resolve_p.set_defaults(func=command_channel_resolve)
-
-    channel_plan_p = channel_sub.add_parser('plan', parents=[common])
-    channel_plan_p.add_argument('channel')
-    channel_plan_p.add_argument('--operation', choices=('apply', 'publish'), default='apply')
-    channel_plan_p.add_argument('--operation-id')
-    channel_plan_p.set_defaults(func=command_channel_plan)
-
-    channel_apply_p = channel_sub.add_parser('apply', parents=[common])
-    channel_apply_p.add_argument('channel')
-    channel_apply_p.add_argument('--operation-id')
-    channel_apply_p.add_argument('--plan-digest')
-    channel_apply_p.add_argument('-a', '--apply', action='store_true')
-    channel_apply_p.set_defaults(func=command_channel_apply)
-
-    channel_publish_p = channel_sub.add_parser('publish', parents=[common])
-    channel_publish_p.add_argument('channel')
-    channel_publish_p.add_argument('--operation-id')
-    channel_publish_p.add_argument('--plan-digest')
-    channel_publish_p.add_argument('-a', '--apply', action='store_true')
-    channel_publish_p.set_defaults(func=command_channel_publish)
-
-    channel_close_p = channel_sub.add_parser('close', parents=[common])
-    channel_close_p.add_argument('channel')
-    channel_close_p.add_argument('-R', '--reason', default='closed')
-    channel_close_p.add_argument('--delete-local', action='store_true')
-    channel_close_p.add_argument('--operation-id')
-    channel_close_p.add_argument('--plan-digest')
-    channel_close_p.add_argument('-a', '--apply', action='store_true')
-    channel_close_p.set_defaults(func=command_channel_close)
-
-    channel_operation_p = channel_sub.add_parser('operation')
-    channel_operation_sub = channel_operation_p.add_subparsers(
-        dest='channel_operation_command', required=True
-    )
-    channel_operation_list_p = channel_operation_sub.add_parser('list', parents=[common])
-    channel_operation_list_p.add_argument('--channel')
-    channel_operation_list_p.add_argument(
-        '--status', choices=(
-            'pending', 'prepared', 'succeeded', 'failed', 'partial', 'unknown',
-            'cancelled',
-        )
-    )
-    channel_operation_list_p.set_defaults(func=command_channel_operation_list)
-    channel_operation_show_p = channel_operation_sub.add_parser('show', parents=[common])
-    channel_operation_show_p.add_argument('operation_id')
-    channel_operation_show_p.set_defaults(func=command_channel_operation_show)
-    channel_operation_reconcile_p = channel_operation_sub.add_parser(
-        'reconcile', parents=[common]
-    )
-    channel_operation_reconcile_p.add_argument('operation_id')
-    channel_operation_reconcile_p.add_argument('--plan-digest')
-    channel_operation_reconcile_p.add_argument('-a', '--apply', action='store_true')
-    channel_operation_reconcile_p.set_defaults(func=command_channel_reconcile_outcome)
-
-    channel_receipt_p = channel_sub.add_parser('receipt')
-    channel_receipt_sub = channel_receipt_p.add_subparsers(
-        dest='channel_receipt_command', required=True
-    )
-    channel_receipt_show_p = channel_receipt_sub.add_parser('show', parents=[common])
-    channel_receipt_show_p.add_argument('channel', nargs='?')
-    channel_receipt_show_p.set_defaults(func=command_channel_receipt_show)
-
-    channel_reconcile_p = channel_sub.add_parser('reconcile-outcome', parents=[common])
-    channel_reconcile_p.add_argument('operation_id')
-    channel_reconcile_p.add_argument('--plan-digest')
-    channel_reconcile_p.add_argument('-a', '--apply', action='store_true')
-    channel_reconcile_p.set_defaults(func=command_channel_reconcile_outcome)
-
-    journal_p = sub.add_parser(
-        'journal', help='inspect, snapshot, publish, pull, or schedule a journal repository'
-    )
-    journal_sub = journal_p.add_subparsers(dest='journal_command', required=True)
-    journal_status_p = journal_sub.add_parser('status', parents=[common])
-    journal_status_p.add_argument('-j', '--json', action='store_true')
-    journal_status_p.set_defaults(func=command_journal_status)
-    journal_snapshot_p = journal_sub.add_parser('snapshot', parents=[common])
-    journal_snapshot_p.add_argument('--path', dest='paths', action='append', help='snapshot only this exact path; repeatable')
-    journal_snapshot_p.add_argument('-a', '--apply', action='store_true')
-    journal_snapshot_p.set_defaults(func=command_journal_snapshot)
-    journal_publish_p = journal_sub.add_parser('publish', parents=[common])
-    journal_publish_p.add_argument('--committed-only', action='store_true', help='publish existing commits without snapshotting working files')
-    journal_publish_p.add_argument('-a', '--apply', action='store_true')
-    journal_publish_p.set_defaults(func=command_journal_publish)
-    journal_pull_p = journal_sub.add_parser(
-        'pull', parents=[common],
-        help='fast-forward the journal branch to the remote tip when it is a strict ancestor',
-    )
-    journal_pull_p.add_argument('-a', '--apply', action='store_true')
-    journal_pull_p.add_argument(
-        '--park-conflicts', action='store_true',
-        help='with --apply, save conflicting local versions under the git dir, '
-        'fast-forward, and three-way merge them back where possible',
-    )
-    journal_pull_p.set_defaults(func=command_journal_pull)
-    journal_recover_p = journal_sub.add_parser('recover', parents=[common], help='replay unpublished diverged snapshots without publishing')
-    journal_recover_p.add_argument('--apply', action='store_true')
-    journal_recover_p.add_argument('--rollback', metavar='RECEIPT')
-    journal_recover_p.set_defaults(func=command_journal_recover)
-    journal_schedule_p = journal_sub.add_parser('schedule', parents=[common])
-    journal_schedule_p.add_argument('schedule_command', choices=('install', 'status', 'remove'))
-    journal_schedule_p.add_argument('--committed-only', action='store_true', help='schedule publication without working-tree snapshots')
-    journal_schedule_p.add_argument('-a', '--apply', action='store_true')
-    journal_schedule_p.set_defaults(func=command_journal_schedule)
-
-    stack_p = sub.add_parser(
-        'stack',
-        aliases=['s', 'spoke'],
-        help='inspect, create, edit, rebuild, push, or run git for one stack/spoke',
-    )
-    stack_sub = stack_p.add_subparsers(dest='stack_command', required=True)
-
-    stack_list_p = stack_sub.add_parser('list', aliases=['ls'], parents=[common])
-    stack_list_p.set_defaults(func=command_stack_list)
-
-    stack_show_p = stack_sub.add_parser('show', aliases=['sh'], parents=[common])
-    stack_show_p.add_argument('stack')
-    stack_show_p.set_defaults(func=command_stack_show)
-
-    stack_create_p = stack_sub.add_parser('create', aliases=['new'], parents=[common])
-    stack_create_p.add_argument('stack')
-    stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
-    stack_create_p.add_argument('-b', '--branch')
-    stack_create_p.add_argument('-B', '--base')
-    stack_create_p.add_argument('-R', '--target-remote')
-    stack_create_p.add_argument('-T', '--target-branch')
-    stack_create_p.add_argument('-I', '--integration-branch')
-    stack_create_p.add_argument('-P', '--purpose')
-    stack_create_p.add_argument(
-        '--depends-on', action='append', default=[],
-        help='declare one prerequisite stack; may be repeated',
-    )
-    stack_create_p.add_argument(
-        '--draft',
-        action='store_true',
-        help='create a materialized draft stack on syncwheel/draft/<stack>',
-    )
-    stack_create_p.add_argument(
-        '-u',
-        '--include-in-integration',
-        action='store_true',
-        help='compatibility flag; required-membership manifests include every stack by default',
-    )
-    stack_create_p.set_defaults(func=command_stack_create)
-
-    stack_promote_p = stack_sub.add_parser(
-        'promote',
-        aliases=['pro'],
-        parents=[common],
-        help='promote a draft stack and rename its branch for PR publication',
-    )
-    stack_promote_p.add_argument('stack')
-    stack_promote_p.add_argument('-b', '--branch', help='published PR branch name (default: pr/<stack>)')
-    stack_promote_p.set_defaults(func=command_stack_promote)
-
-    stack_demote_p = stack_sub.add_parser(
-        'demote',
-        aliases=['dem'],
-        parents=[common],
-        help='demote a published stack to draft without renaming its branch',
-    )
-    stack_demote_p.add_argument('stack')
-    stack_demote_p.set_defaults(func=command_stack_demote)
-
-    stack_sync_p = stack_sub.add_parser('sync', parents=[common])
-    stack_sync_p.add_argument('stack')
-    stack_sync_p.set_defaults(func=command_stack_sync)
-
-    stack_absorb_p = stack_sub.add_parser('absorb', parents=[common])
-    stack_absorb_p.add_argument('stack')
-    stack_absorb_p.add_argument('paths', nargs='*', help='optional pathspecs to absorb from the integration worktree')
-    stack_absorb_p.add_argument('-s', '--staged', action='store_true', help='absorb staged changes instead of unstaged working tree changes')
-    stack_absorb_p.add_argument('-N', '--no-amend', dest='amend', action='store_false', help='create a new stack commit instead of amending the stack tip')
-    stack_absorb_p.add_argument('-m', '--message', help='commit message used with --no-amend')
-    stack_absorb_p.add_argument('-w', '--worktree', help='stack branch worktree to reuse or create')
-    stack_absorb_p.add_argument('-W', '--worktree-root', help='directory where stack absorb creates a worktree when needed')
-    stack_absorb_p.add_argument('-f', '--force', action='store_true', help='allow absorbing when the current checkout is not the integration branch')
-    stack_absorb_p.set_defaults(func=command_stack_absorb, amend=True)
-
-    stack_set_p = stack_sub.add_parser('set', parents=[common])
-    stack_set_p.add_argument('stack')
-    stack_set_p.add_argument('specs', nargs='*')
-    stack_set_p.add_argument('--target-branch', help='update delivery target metadata without rebuilding refs')
-    stack_set_p.add_argument(
-        '--published',
-        action='store_true',
-        help="reset the stack's commits to its entry in the published coordination state",
-    )
-    stack_set_p.set_defaults(func=command_stack_set)
-
-    stack_resolve_p = stack_sub.add_parser(
-        'resolve-integration',
-        aliases=['resolve'],
-        parents=[common],
-        help='record conflict-resolved commits that materialize this stack on integration',
-    )
-    stack_resolve_p.add_argument('stack')
-    stack_resolve_p.add_argument('specs', nargs='*')
-    stack_resolve_p.add_argument(
-        '--empty',
-        action='store_true',
-        help='record that this stack was absorbed by the integration base or another resolved stack',
-    )
-    stack_resolve_p.add_argument('--worktree', help='capture the staged resolution from a managed integration desk')
-    stack_resolve_p.set_defaults(func=command_stack_resolve_integration)
-
-    stack_classify_p = stack_sub.add_parser(
-        'classify-integration',
-        parents=[common],
-        help='declare integration-only stack ownership without rebuilding refs',
-    )
-    stack_classify_p.add_argument('stack')
-    stack_classify_p.add_argument('specs', nargs='+')
-    stack_classify_p.add_argument('--plan-digest')
-    stack_classify_p.add_argument('-a', '--apply', action='store_true')
-    stack_classify_p.set_defaults(func=command_stack_classify_integration)
-
-    stack_add_p = stack_sub.add_parser('add', parents=[common])
-    stack_add_p.add_argument('stack')
-    stack_add_p.add_argument('specs', nargs='+')
-    stack_add_p.set_defaults(func=command_stack_add)
-
-    stack_capture_p = stack_sub.add_parser(
-        'capture-integration',
-        aliases=['capture'],
-        parents=[common],
-        help='assign integration-first commits to a stack and materialize its branch',
-    )
-    stack_capture_p.add_argument('stack')
-    stack_capture_p.add_argument('specs', nargs='+')
-    stack_capture_p.add_argument(
-        '--retain-captured-worktrees', metavar='REASON',
-        help='recapture contiguous committed history without removing locked captured copies',
-    )
-    stack_capture_p.set_defaults(func=command_stack_capture_integration)
-
-    stack_rebuild_p = stack_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
-    stack_rebuild_p.add_argument('stack')
-    add_rebuild_args(stack_rebuild_p)
-    stack_rebuild_p.set_defaults(func=command_stack_rebuild)
-
-    stack_push_p = stack_sub.add_parser('push', parents=[common])
-    stack_push_p.add_argument('stack')
-    add_push_args(stack_push_p)
-    stack_push_p.add_argument(
-        '--retain-captured-worktrees', metavar='REASON',
-        help='preserve locked, clean captured copies whose HEAD exactly matches the published stack',
-    )
-    stack_push_p.set_defaults(func=command_stack_push)
-
-    stack_land_p = stack_sub.add_parser(
-        'land', parents=[common],
-        help='plan or safely direct-land a validated stack without creating a PR',
-    )
-    stack_land_p.add_argument('stack')
-    stack_land_p.add_argument('--allow-direct', action='store_true')
-    stack_land_p.add_argument('--attestation', action='append', default=[], metavar='ID=PATH')
-    stack_land_p.add_argument('--override-requirement', action='append', default=[], metavar='ID')
-    stack_land_p.add_argument('--override-group', action='append', default=[], metavar='ID')
-    stack_land_p.add_argument('--override-all-checks', action='store_true')
-    stack_land_p.add_argument('--override-reason')
-    stack_land_p.add_argument('--operation-id')
-    stack_land_p.add_argument('--plan-digest')
-    stack_land_p.add_argument('-a', '--apply', action='store_true')
-    stack_land_p.add_argument('-j', '--json', action='store_true')
-    stack_land_p.set_defaults(func=command_stack_land)
-
-    stack_merge_pr_p = stack_sub.add_parser(
-        'merge-pr', parents=[common],
-        help='plan or apply a policy-bound GitHub PR merge',
-    )
-    stack_merge_pr_p.add_argument('stack')
-    stack_merge_pr_p.add_argument('--operation-id')
-    stack_merge_pr_p.add_argument('--plan-digest')
-    stack_merge_pr_p.add_argument('-a', '--apply', action='store_true')
-    stack_merge_pr_p.add_argument('-j', '--json', action='store_true')
-    stack_merge_pr_p.set_defaults(func=command_stack_merge_pr)
-
-    stack_archive_p = stack_sub.add_parser(
-        'archive', parents=[common], help='retain source history and defer a stack without delivery claims',
-    )
-    stack_archive_p.add_argument('stack')
-    stack_archive_p.add_argument('--reason', required=True)
-    stack_archive_p.add_argument('--resume-intent', required=True)
-    stack_archive_p.add_argument('--plan-digest')
-    stack_archive_p.add_argument('-a', '--apply', action='store_true')
-    stack_archive_p.add_argument('-j', '--json', action='store_true')
-    stack_archive_p.set_defaults(func=command_stack_archive)
-
-    stack_close_p = stack_sub.add_parser(
-        'close',
-        aliases=['cl'],
-        parents=[common],
-        help='remove a merged (or abandoned) stack from the manifest and integration',
-    )
-    stack_close_p.add_argument('stack', help='stack id to close')
-    stack_close_p.add_argument(
-        '-R',
-        '--reason',
-        default=None,
-        help=(
-            'closure proof: merged when every declared commit is reachable from the base; '
-            'absorbed for squash/rebase delivery verified by final content; abandoned or a custom string otherwise'
-        ),
-    )
-    stack_close_p.add_argument(
-        '-d', '--delete-branch',
-        dest='delete_branch',
-        action='store_true',
-        help='also delete the local branch after closing',
-    )
-    stack_close_p.add_argument(
-        '-f',
-        '--force',
-        action='store_true',
-        help='close without commit-ancestry proof; not needed for a verified --reason absorbed close',
-    )
-    stack_close_p.set_defaults(func=command_stack_close, delete_branch=False)
-
-    stack_git_p = stack_sub.add_parser('git', aliases=['g'], parents=[common])
-    stack_git_p.add_argument('stack')
-    add_git_args(stack_git_p)
-    stack_git_p.set_defaults(func=command_stack_git)
-
-    int_p = sub.add_parser('int', aliases=['i'], help='inspect, align, rebuild, push, or run git for integration')
-    int_sub = int_p.add_subparsers(dest='int_command', required=True)
-
-    int_show_p = int_sub.add_parser('show', aliases=['sh'], parents=[common])
-    int_show_p.set_defaults(func=command_int_show)
-
-    int_sync_status_p = int_sub.add_parser('sync-status', parents=[common])
-    int_sync_status_p.add_argument('-R', '--remote')
-    int_sync_status_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
-    int_sync_status_p.add_argument('-j', '--json', action='store_true')
-    int_sync_status_p.set_defaults(func=command_int_sync_status, fetch=True)
-
-    int_align_remote_p = int_sub.add_parser('align-remote', parents=[common])
-    int_align_remote_p.add_argument('-R', '--remote')
-    int_align_remote_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
-    int_align_remote_p.add_argument('-n', '--dry-run', action='store_true')
-    int_align_remote_p.add_argument('-f', '--force', action='store_true')
-    int_align_remote_p.set_defaults(func=command_int_align_remote, fetch=True)
-
-    int_rebuild_p = int_sub.add_parser('rebuild', aliases=['rb'], parents=[common])
-    add_rebuild_args(int_rebuild_p)
-    int_rebuild_p.add_argument(
-        '--reason',
-        help=(
-            'operator reason recorded with the integration rebuild; required for '
-            'ai-managed repositories and when reconciling derived_paths narrowing'
-        ),
-    )
-    int_rebuild_p.set_defaults(func=command_int_rebuild)
-
-    int_push_p = int_sub.add_parser('push', parents=[common])
-    add_push_args(int_push_p)
-    int_push_p.set_defaults(func=command_int_push)
-
-    int_git_p = int_sub.add_parser('git', aliases=['g'], parents=[common])
-    add_git_args(int_git_p)
-    int_git_p.set_defaults(func=command_int_git)
-
-    attach_command_behaviors(parser)
-    return parser
+    return _cli.build_parser(command_handlers(), VERSION)
 
 
 def command_repo_add(args):
@@ -36395,217 +32814,19 @@ def command_self_mode(args):
 
 
 def entrypoint_behavior_table():
-    """Single registry for command and internal state-writer behavior."""
-    table = {}
-
-    def register(
-        functions, *, mutates='never', manifest_mutates='never', remedy=False,
-        command=True,
-    ):
-        for function in functions:
-            if function in table:
-                raise RuntimeError(f'duplicate command behavior: {function.__name__}')
-            table[function] = {
-                'command': command,
-                'mutates': mutates,
-                'manifestMutates': manifest_mutates,
-                'primaryGuardRemedy': remedy,
-            }
-
-    register((
-        command_repo_ls,
-        command_repo_tracking_status,
-        command_repo_authority_status,
-        command_repo_pr_merge_policy_status,
-        command_self_status,
-        command_self_check_update,
-        command_hooks_status,
-        command_hooks_guard,
-        command_hooks_worktree_guard,
-        command_hooks_ref_guard,
-        command_handoff,
-        command_status,
-        command_validate,
-        command_plan,
-        command_check,
-        command_ledger_show,
-        command_manifest_compare,
-        command_channel_list,
-        command_channel_show,
-        command_channel_contract,
-        command_channel_diff,
-        command_channel_plan,
-        command_channel_operation_list,
-        command_channel_operation_show,
-        command_channel_receipt_show,
-        command_journal_status,
-        command_stack_list,
-        command_stack_show,
-        command_int_show,
-        command_int_sync_status,
+    return _cli.entrypoint_behavior_table(command_handlers(), (
+        SyncwheelRevisionBackend.ensure_stack_owned,
+        reconcile_governed_worktrees,
+        prune_governed_worktree_stale_locks,
     ))
-    # The revision-provider command deliberately owns its narrower transaction
-    # inside the backend, after request and lease validation have completed.
-    register((command_revision_provider,), mutates='always', manifest_mutates='internal')
-    register((command_revision_provider_resolve_prepared,), mutates='apply', manifest_mutates='internal')
-    register((
-        command_repo_add,
-        command_repo_set_manifest,
-        command_repo_rm,
-        command_worktree_lock,
-        command_worktree_unlock,
-    ), mutates='always')
-    register((command_worktree_open,), mutates='always', remedy=True)
-    register((
-        command_stack_close,
-        command_stack_create,
-        command_stack_promote,
-        command_stack_demote,
-        command_stack_sync,
-        command_stack_absorb,
-        command_stack_set,
-        command_stack_resolve_integration,
-        command_stack_add,
-        command_coordination_provenance_reset,
-    ), mutates='always', manifest_mutates='always')
-    register(
-        (command_stack_capture_integration,),
-        mutates='always',
-        manifest_mutates='always',
-        remedy=True,
-    )
-    register((
-        command_repo_tracking_set,
-        command_repo_authority_set,
-        command_repo_pr_merge_policy_set,
-        command_repo_pr_merge_policy_clear,
-        command_coordination_init,
-        command_coordination_disable,
-        command_coordination_compose,
-        command_reconcile,
-        command_resume,
-        command_sync,
-        command_publish,
-        command_manifest_require_integration,
-        command_channel_create,
-        command_channel_add,
-        command_channel_remove,
-        command_channel_replace,
-        command_channel_refresh,
-        command_channel_promote,
-        command_channel_resolve,
-        command_channel_apply,
-        command_channel_publish,
-        command_channel_close,
-        command_channel_reconcile_outcome,
-        command_stack_classify_integration,
-        command_stack_land,
-        command_stack_merge_pr,
-        command_stack_archive,
-        command_worktree_release,
-        command_gc,
-    ), mutates='apply', manifest_mutates='apply')
-    register((
-        command_coordination_claims_backfill,
-        command_coordination_provenance_supersede,
-    ), mutates='apply', manifest_mutates='apply')
-    register((
-        command_journal_snapshot,
-        command_journal_publish,
-        command_journal_pull, command_journal_recover,
-    ), mutates='apply')
-    register((command_repo_mode_set,), mutates='apply', manifest_mutates='apply')
-    register((command_manifest_recover_control,), mutates='apply', manifest_mutates='apply', remedy=True)
-    # digest-heal is the one repair class that appends a local ledger event
-    # alongside the remote state CAS.
-    register((command_coordination_repair,), mutates='apply', manifest_mutates='apply')
-    # Guard lifecycle writes the profile ledger under its own atomic writes, so it
-    # is registered without joining the global manifest transaction.
-    register(
-        (command_hooks_install, command_hooks_remove),
-        mutates='apply', manifest_mutates='internal', remedy=True,
-    )
-    register((
-        command_self_update,
-        command_self_install_hooks,
-    ), mutates='execute')
-    register((
-        command_int_align_remote,
-        command_stack_push,
-        command_int_rebuild,
-        command_int_push,
-    ), mutates='execute', manifest_mutates='execute')
-    register(
-        (command_stack_rebuild,),
-        mutates='execute',
-        manifest_mutates='update-manifest',
-    )
-    register((command_self_mode,), mutates='mode')
-    register((command_use,), mutates='profile-selection')
-    register((command_replay_mode,), mutates='mode-or-clear')
-    register((command_init,), mutates='init', manifest_mutates='init')
-    register(
-        (command_journal_schedule,),
-        mutates='schedule-apply', manifest_mutates='internal',
-    )
-    register((command_stack_git, command_int_git), mutates='git-passthrough')
-    register(
-        (SyncwheelRevisionBackend.ensure_stack_owned,),
-        manifest_mutates='internal',
-        command=False,
-    )
-    # Governed-lane maintenance writes the same ledger from the pre-command
-    # reconcile, so it joins the registry without being a command.
-    register(
-        (reconcile_governed_worktrees, prune_governed_worktree_stale_locks),
-        manifest_mutates='internal',
-        command=False,
-    )
-    return table
 
 
 def command_behavior_table():
-    """Command-only projection of the authoritative entrypoint registry."""
-    return {
-        function: behavior
-        for function, behavior in entrypoint_behavior_table().items()
-        if behavior['command']
-    }
-
-
-def command_parser_nodes(parser):
-    stack = [parser]
-    seen = set()
-    while stack:
-        current = stack.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        yield current
-        for action in current._actions:
-            if isinstance(action, argparse._SubParsersAction):
-                stack.extend(action.choices.values())
+    return _cli.command_behavior_table(command_handlers())
 
 
 def attach_command_behaviors(parser):
-    table = command_behavior_table()
-    registered = set()
-    for command_parser in command_parser_nodes(parser):
-        function = command_parser._defaults.get('func')
-        if function is None:
-            continue
-        behavior = table.get(function)
-        if behavior is None:
-            raise RuntimeError(f'missing command behavior: {function.__name__}')
-        registered.add(function)
-        command_parser.set_defaults(
-            mutates=behavior['mutates'],
-            manifest_mutates=behavior['manifestMutates'],
-            primary_guard_remedy=behavior['primaryGuardRemedy'],
-        )
-    unused = sorted(function.__name__ for function in set(table) - registered)
-    if unused:
-        raise RuntimeError('unregistered command behavior(s): ' + ', '.join(unused))
+    return _cli.attach_command_behaviors(parser, command_behavior_table())
 
 
 def command_behavior(args):
@@ -37252,6 +33473,170 @@ def main():
         if SYNCWHEEL_REF_AUTH_REPO:
             clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
         SYNCWHEEL_REF_AUTH_REPO = None
+
+
+class _JournalRepository:
+    """Adapt journal I/O to the current, patchable application operations."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def command(self, repo_root, *args, **kwargs):
+        return git(repo_root, *args, **kwargs)
+
+    def output_bytes(self, repo_root, *args, ok_codes=(0,)):
+        return git_bytes(repo_root, *args, ok_codes=ok_codes)
+
+    def execute(self, command, **kwargs):
+        return run(command, **kwargs)
+
+    def binary(self, command, **kwargs):
+        return subprocess.run(command, **kwargs)
+
+    def current_branch(self, repo_root):
+        return get_current_branch(repo_root)
+
+    def tip(self, repo_root, ref):
+        return ref_tip(repo_root, ref)
+
+    def common_dir(self, repo_root):
+        return git_common_dir(repo_root)
+
+    def identity(self, repo_root, command):
+        return with_git_identity(repo_root, command)
+
+    def authorized_push(self, repo_root, command, remote, refs, **kwargs):
+        return run_authorized_push(repo_root, command, remote, refs, **kwargs)
+
+    def environment(self, **kwargs):
+        return managed_process_env(**kwargs)
+
+    def write_json(self, path, payload):
+        return atomic_write_private_json(path, payload)
+
+    def read_file(self, path, max_file_bytes):
+        return journal_read_admitted_file(path, max_file_bytes)
+
+    def fingerprint(self, path):
+        return journal_file_fingerprint(path)
+
+def command_handlers():
+    """Bind parser handlers at call time, preserving facade patch points."""
+    return {
+        'command_channel_add': command_channel_add,
+        'command_channel_apply': command_channel_apply,
+        'command_channel_close': command_channel_close,
+        'command_channel_contract': command_channel_contract,
+        'command_channel_create': command_channel_create,
+        'command_channel_diff': command_channel_diff,
+        'command_channel_list': command_channel_list,
+        'command_channel_operation_list': command_channel_operation_list,
+        'command_channel_operation_show': command_channel_operation_show,
+        'command_channel_plan': command_channel_plan,
+        'command_channel_promote': command_channel_promote,
+        'command_channel_publish': command_channel_publish,
+        'command_channel_receipt_show': command_channel_receipt_show,
+        'command_channel_reconcile_outcome': command_channel_reconcile_outcome,
+        'command_channel_refresh': command_channel_refresh,
+        'command_channel_remove': command_channel_remove,
+        'command_channel_replace': command_channel_replace,
+        'command_channel_resolve': command_channel_resolve,
+        'command_channel_show': command_channel_show,
+        'command_check': command_check,
+        'command_coordination_claims_backfill': command_coordination_claims_backfill,
+        'command_coordination_compose': command_coordination_compose,
+        'command_coordination_disable': command_coordination_disable,
+        'command_coordination_init': command_coordination_init,
+        'command_coordination_provenance_reset': command_coordination_provenance_reset,
+        'command_coordination_provenance_supersede': command_coordination_provenance_supersede,
+        'command_coordination_repair': command_coordination_repair,
+        'command_gc': command_gc,
+        'command_handoff': command_handoff,
+        'command_hooks_guard': command_hooks_guard,
+        'command_hooks_install': command_hooks_install,
+        'command_hooks_ref_guard': command_hooks_ref_guard,
+        'command_hooks_remove': command_hooks_remove,
+        'command_hooks_status': command_hooks_status,
+        'command_hooks_worktree_guard': command_hooks_worktree_guard,
+        'command_init': command_init,
+        'command_int_align_remote': command_int_align_remote,
+        'command_int_git': command_int_git,
+        'command_int_push': command_int_push,
+        'command_int_rebuild': command_int_rebuild,
+        'command_int_show': command_int_show,
+        'command_int_sync_status': command_int_sync_status,
+        'command_journal_publish': command_journal_publish,
+        'command_journal_pull': command_journal_pull,
+        'command_journal_recover': command_journal_recover,
+        'command_journal_schedule': command_journal_schedule,
+        'command_journal_snapshot': command_journal_snapshot,
+        'command_journal_status': command_journal_status,
+        'command_ledger_show': command_ledger_show,
+        'command_manifest_compare': command_manifest_compare,
+        'command_manifest_recover_control': command_manifest_recover_control,
+        'command_manifest_require_integration': command_manifest_require_integration,
+        'command_plan': command_plan,
+        'command_publish': command_publish,
+        'command_reconcile': command_reconcile,
+        'command_replay_mode': command_replay_mode,
+        'command_repo_add': command_repo_add,
+        'command_repo_authority_set': command_repo_authority_set,
+        'command_repo_authority_status': command_repo_authority_status,
+        'command_repo_ls': command_repo_ls,
+        'command_repo_mode_set': command_repo_mode_set,
+        'command_repo_pr_merge_policy_clear': command_repo_pr_merge_policy_clear,
+        'command_repo_pr_merge_policy_set': command_repo_pr_merge_policy_set,
+        'command_repo_pr_merge_policy_status': command_repo_pr_merge_policy_status,
+        'command_repo_rm': command_repo_rm,
+        'command_repo_set_manifest': command_repo_set_manifest,
+        'command_repo_tracking_set': command_repo_tracking_set,
+        'command_repo_tracking_status': command_repo_tracking_status,
+        'command_resume': command_resume,
+        'command_revision_provider': command_revision_provider,
+        'command_revision_provider_resolve_prepared': command_revision_provider_resolve_prepared,
+        'command_self_check_update': command_self_check_update,
+        'command_self_install_hooks': command_self_install_hooks,
+        'command_self_mode': command_self_mode,
+        'command_self_status': command_self_status,
+        'command_self_update': command_self_update,
+        'command_stack_absorb': command_stack_absorb,
+        'command_stack_add': command_stack_add,
+        'command_stack_archive': command_stack_archive,
+        'command_stack_capture_integration': command_stack_capture_integration,
+        'command_stack_classify_integration': command_stack_classify_integration,
+        'command_stack_close': command_stack_close,
+        'command_stack_create': command_stack_create,
+        'command_stack_demote': command_stack_demote,
+        'command_stack_git': command_stack_git,
+        'command_stack_land': command_stack_land,
+        'command_stack_list': command_stack_list,
+        'command_stack_merge_pr': command_stack_merge_pr,
+        'command_stack_promote': command_stack_promote,
+        'command_stack_push': command_stack_push,
+        'command_stack_rebuild': command_stack_rebuild,
+        'command_stack_resolve_integration': command_stack_resolve_integration,
+        'command_stack_set': command_stack_set,
+        'command_stack_show': command_stack_show,
+        'command_stack_sync': command_stack_sync,
+        'command_status': command_status,
+        'command_sync': command_sync,
+        'command_use': command_use,
+        'command_validate': command_validate,
+        'command_worktree_lock': command_worktree_lock,
+        'command_worktree_open': command_worktree_open,
+        'command_worktree_release': command_worktree_release,
+        'command_worktree_unlock': command_worktree_unlock,
+    }
+
+add_rebuild_args = _cli.add_rebuild_args
+
+add_push_args = _cli.add_push_args
+
+add_git_args = _cli.add_git_args
+
+add_reconcile_args = _cli.add_reconcile_args
+
+command_parser_nodes = _cli.command_parser_nodes
 
 
 if __name__ == '__main__':
