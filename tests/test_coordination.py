@@ -5505,6 +5505,25 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.assertEqual(receipts(), [original])
             self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, final)
 
+    def test_local_declaration_preserves_group_writable_untouched_files(self):
+        repo, source, module, backend = self.declaration_fixture('declaration-group-mode')
+        untouched = repo / 'README.md'
+        untouched.chmod(0o664)
+        before, identity = untouched.read_bytes(), untouched.stat()
+        self.run_cli(repo, 'stack', 'create', 'group-mode', source, '--preserve-lanes')
+        operation = next(p for p in (repo / '.git/syncwheel-local-declarations').iterdir() if p.is_dir())
+        result = json.loads(self.run_cli(repo, 'stack', 'recover-declaration', '--plan-digest', operation.name,
+                                        '--apply', '--reason', 'synthetic group-mode inspection').stdout)
+        self.assertEqual(result['status'], 'completed')
+        after = untouched.stat()
+        self.assertEqual((after.st_dev, after.st_ino, after.st_mode, after.st_mtime_ns),
+                         (identity.st_dev, identity.st_ino, identity.st_mode, identity.st_mtime_ns))
+        self.assertEqual(untouched.read_bytes(), before)
+        # Mutation targets keep their existing stricter image contract.
+        (repo / '.syncwheel/manifest.json').chmod(0o664)
+        with self.assertRaisesRegex(backend.LocalReplayError, 'bounded regular files'):
+            backend.declaration_observation(repo, module)
+
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')
         repo = self.clone(origin, 'disabled-draft')

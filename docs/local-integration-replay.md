@@ -135,3 +135,7 @@ journal, not to historical staged manifests left by an older command.
 Normal completion and recovery share the same operation key and immutable
 manifest receipt payload, including the original actor. A crash after ledger
 append does not create another `manifest_saved` event on recovery.
+Unchanged tracked files may retain group-writable modes during read-only
+verification. Their bytes, executable bit and exact permissions are witnessed.
+The manifest and index exchanged by the declaration retain the strict image
+contract. The operation preserves file permissions.

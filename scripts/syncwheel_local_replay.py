@@ -137,12 +137,13 @@ def parent_dir(fd, path):
         yield fd, path.rsplit("/", 1)[-1]
 
 
-def file_image(fd, name):
+def file_image(fd, name, *, allow_group_write=False):
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
     with os.fdopen(descriptor, "rb") as stream:
         before = os.fstat(stream.fileno())
+        unsafe_mode = 0o7002 if allow_group_write else 0o7022
         require(stat.S_ISREG(before.st_mode) and before.st_size <= MAX_BYTES
-                and before.st_nlink == 1 and not before.st_mode & 0o7022
+                and before.st_nlink == 1 and not before.st_mode & unsafe_mode
                 and not os.listxattr(stream.fileno()),
                 "local replay requires bounded regular files without aliases or extended attributes")
         data = stream.read(MAX_BYTES + 1)
@@ -206,13 +207,13 @@ def require_clean_index(root, expected):
     require(entries == expected, "local replay index differs from the expected tree")
 
 
-def checkout(root_fd, expected):
+def checkout(root_fd, expected, *, allow_group_write=False):
     observed = {}
     total = 0
     for path in sorted(expected):
         mode, object_id = expected[path]
         with parent_dir(root_fd, path) as (parent, name):
-            data, permissions = file_image(parent, name)
+            data, permissions = file_image(parent, name, allow_group_write=allow_group_write)
         require(blob_oid(data) == object_id and bool(permissions & 0o100) == (mode == "100755"),
                 f"local replay checkout differs at {path}")
         total += len(data)
@@ -1277,7 +1278,11 @@ def declaration_observation(root, api):
     require_no_attributes(root, expected)
     require_clean_index(root, expected)
     with directory(root) as work, directory(meta) as metadata:
-        observed = checkout(work, expected)
+        observed = checkout(work, expected, allow_group_write=True)
+        # Only untouched tracked files use the broader read-only mode. Images
+        # exchanged by this operation retain the strict mutation contract.
+        with parent_dir(work, MANIFEST) as (parent, name):
+            require(image(parent, name) == observed[MANIFEST], "local declaration manifest image drifted")
         index = image(metadata, "index")
     require(symbolic(root, "HEAD") == target and head(root, target) == tip,
             "local declaration HEAD drifted while observing")
@@ -1322,7 +1327,7 @@ def finish_declaration(root, operation, record, api, *, recover=False):
             require(recover, "local declaration already has a terminal receipt")
             expected_tip = record["final"] if record["state"] == "completed" else plan["integrationTip"]
             require(current == expected_tip, "local declaration terminal ref drifted")
-            require_clean_index(root, tree(root, current)); checkout(work, tree(root, current))
+            require_clean_index(root, tree(root, current)); checkout(work, tree(root, current), allow_group_write=True)
             # A terminal-record crash may leave our own index lease. Native
             # ref locks still have no recoverable ownership proof.
             with RefLease(root, meta, plan, current, verification_auth=True).hold(api):
@@ -1345,7 +1350,7 @@ def finish_declaration(root, operation, record, api, *, recover=False):
                 aligned_files(work, metadata, journal, record, forward=forward)
                 expected = tree(root, record["final"] if forward else plan["integrationTip"])
                 require_no_attributes(root, expected)
-                require_clean_index(root, expected); checkout(work, expected)
+                require_clean_index(root, expected); checkout(work, expected, allow_group_write=True)
                 lease.check()
                 if not recover:
                     lease.commit()
