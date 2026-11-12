@@ -1164,3 +1164,7 @@ def require_stack(manifest, stack_id):
     if stack_id not in stacks:
         raise SyncwheelError(f'unknown stack: {stack_id}')
     return stacks[stack_id]
+
+
+def coordination_state_ref(config):
+    return f"refs/heads/{config['state_branch']}"

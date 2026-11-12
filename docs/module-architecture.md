@@ -9,6 +9,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 | --- | --- | --- |
 | `syncwheel_manifest` | Manifest normalization, authority, stack dependencies, channel schema | Shared errors; standard library |
 | `syncwheel_coordination` | Snapshot validation, portable refs, proposal comparison and composition | Manifest domain; explicit branch validator |
+| `syncwheel_coordination_state` | Immutable remote state, control-manifest integrity and exclusive ownership evidence | Git observations, manifest inputs and state witnesses |
 | `syncwheel_journal` | File admission, status decoding, safe content observation | Shared errors; explicit status and reader inputs |
 | `syncwheel_journal_workflow` | Snapshot, publish, pull and recovery sequencing | Journal policy; explicit repository I/O port |
 | `syncwheel_ledger` | Event reduction into lifecycle state | Standard library |

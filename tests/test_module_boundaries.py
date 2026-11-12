@@ -98,7 +98,7 @@ assert module.build_parser().parse_args(['status']).func is module.command_statu
                 module.coordination_public_remote_ref_parts(ref, 'base')
 
     def test_domains_do_not_import_the_cli_facade(self):
-        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees')
+        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees', 'coordination_state')
         for name in modules:
             with self.subTest(module=name):
                 tree = ast.parse((SCRIPTS / f'syncwheel_{name}.py').read_text())
