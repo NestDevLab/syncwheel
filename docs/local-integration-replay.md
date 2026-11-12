@@ -172,6 +172,8 @@ are refused before cached tracking or last-seen data is used. New acknowledgment
 use Git administrative metadata to observe registered configurations, including
 worktrees whose checkout is absent. The registration remains retained. They
 bind their last-seen entry to the endpoint digest. A detected endpoint change
+is checked against both administrative registration and the `.git` directory
+actually used by each present checkout. Inconsistent links are refused. It
 requires governed shared-metadata reconciliation before reusing provenance,
 including when an explicit snapshot was supplied. Legacy last-seen state or local
 overrides without an endpoint witness are held for governed reconciliation;

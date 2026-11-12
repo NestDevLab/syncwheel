@@ -3231,6 +3231,16 @@ def derived_provenance_store_lock(repo_root):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def require_coordination_checkout_binding(location, admin):
+    if not os.path.lexists(location):
+        return
+    if not location.is_dir():
+        raise SyncwheelError('registered worktree checkout is not a directory')
+    result = git(location, 'rev-parse', '--absolute-git-dir', check=False)
+    if result.returncode != 0 or Path(result.stdout.rstrip('\n')).resolve() != admin.resolve():
+        raise SyncwheelError('registered checkout points to another Git directory')
+
+
 def coordination_fetch_endpoint_digest(repo_root, remote, *, worktree=None):
     location = Path(worktree) if worktree is not None else Path(repo_root)
     if worktree is None:
@@ -3242,12 +3252,14 @@ def coordination_fetch_endpoint_digest(repo_root, remote, *, worktree=None):
             admin = common
         if admin is None:
             raise SyncwheelError('cannot establish the registered worktree Git directory')
+        require_coordination_checkout_binding(location, admin)
         # Administrative metadata retains worktree-specific configuration even
         # when its checkout is absent. Observing it never prunes registration.
         result = git(repo_root, '--git-dir', str(admin), 'remote', 'get-url', remote, check=False)
         current_admin = governed_worktree_admin_dir_for_path(repo_root, location)
         if admin != common and current_admin != admin:
             raise SyncwheelError('worktree registration changed during endpoint observation')
+        require_coordination_checkout_binding(location, admin)
     endpoint, _newline, remainder = result.stdout.partition('\n')
     if result.returncode != 0 or not endpoint or remainder or '\r' in endpoint:
         raise SyncwheelError('cannot establish the coordination fetch endpoint')

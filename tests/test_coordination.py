@@ -13563,6 +13563,27 @@ sys.exit(module.main())
             module.coordination_state_observation_key(repo, module.coordination_config(manifest))
         self.assertEqual(self.git(repo, 'worktree', 'list', '--porcelain').stdout, before)
 
+    def test_registered_checkout_redirected_to_another_git_directory_is_refused(self):
+        origin = self.create_remote('redirected-peer')
+        repo = self.clone(origin, 'redirected-peer')
+        self.init_coordinated(repo)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        peer = self.tmp / 'redirected-checkout'
+        self.git(repo, 'worktree', 'add', '-q', '-b', 'redirected-peer', str(peer), 'HEAD')
+        other_origin = self.create_remote('redirected-peer-other-origin')
+        other = self.clone(other_origin, 'redirected-other-repo')
+        (peer / '.git').write_text('gitdir: ' + str(other / '.git') + '\n')
+        admin = module.governed_worktree_admin_dir_for_path(repo, peer)
+        before = (self.git(repo, 'worktree', 'list', '--porcelain').stdout,
+                  {str(p.relative_to(admin)): p.read_bytes() for p in admin.rglob('*') if p.is_file()},
+                  (peer / '.git').read_bytes(), self.git(repo, 'show-ref').stdout)
+        with self.assertRaisesRegex(module.SyncwheelError, 'another Git directory'):
+            module.coordination_state_observation_key(repo, module.coordination_config(manifest))
+        self.assertEqual((self.git(repo, 'worktree', 'list', '--porcelain').stdout,
+                          {str(p.relative_to(admin)): p.read_bytes() for p in admin.rglob('*') if p.is_file()},
+                          (peer / '.git').read_bytes(), self.git(repo, 'show-ref').stdout), before)
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']
