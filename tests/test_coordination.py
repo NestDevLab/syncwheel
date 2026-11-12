@@ -5530,6 +5530,57 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual((repo / '.git/index').read_bytes(), before[1])
         self.assertEqual((repo / '.syncwheel/manifest.json').stat().st_mode & 0o777, 0o664)
 
+    def test_local_declaration_preserves_group_writable_index_and_recovers(self):
+        for phase in [None, 'index-aligned', 'declaration-ref-committed']:
+            with self.subTest(phase=phase):
+                name = 'group-index-' + (phase or 'complete')
+                repo, source, module, backend = self.declaration_fixture(name)
+                index = repo / '.git/index'
+                index.chmod(0o664)
+                original = index.read_bytes()
+                old = self.git(repo, 'rev-parse', 'HEAD').stdout
+                def interrupted(current):
+                    if phase and current == phase:
+                        raise SystemExit(87)
+                argv = ['syncwheel', 'stack', 'create', name, source, '--repo', str(repo), '--preserve-lanes']
+                with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=interrupted):
+                    if phase:
+                        with self.assertRaises(SystemExit): module.main()
+                    else:
+                        self.assertEqual(module.main(), 0)
+                operation = next(p for p in (repo / '.git/syncwheel-local-declarations').iterdir() if p.is_dir())
+                args = ['stack', 'recover-declaration', '--plan-digest', operation.name,
+                        '--apply', '--reason', 'synthetic shared-index recovery']
+                expected = 'aborted' if phase == 'index-aligned' else 'completed'
+                self.assertEqual(index.stat().st_mode & 0o777, 0o664)
+                for _ in range(2):
+                    self.assertEqual(json.loads(self.run_cli(repo, *args).stdout)['status'], expected)
+                    self.assertEqual(index.stat().st_mode & 0o777, 0o664)
+                    self.assertEqual(self.git(repo, '--no-optional-locks', 'status', '--porcelain').stdout, '')
+                if expected == 'aborted':
+                    self.assertEqual(index.read_bytes(), original)
+                    self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, old)
+                # Exact journal permissions remain part of terminal evidence.
+                index.chmod(0o644)
+                before = index.read_bytes()
+                self.run_cli(repo, *args, expected=2)
+                self.assertEqual(index.read_bytes(), before)
+                self.assertEqual(index.stat().st_mode & 0o777, 0o644)
+
+    def test_local_declaration_refuses_world_writable_index_before_intent(self):
+        repo, source, module, _ = self.declaration_fixture('unsafe-index')
+        index = repo / '.git/index'
+        index.chmod(0o666)
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), index.read_bytes()
+        head = self.git(repo, 'rev-parse', 'HEAD').stdout
+        events = module.load_ledger_events(repo)
+        self.run_cli(repo, 'stack', 'create', 'unsafe-index', source, '--preserve-lanes', expected=2)
+        self.assertEqual(((repo / '.syncwheel/manifest.json').read_bytes(), index.read_bytes()), before)
+        self.assertEqual(index.stat().st_mode & 0o777, 0o666)
+        self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, head)
+        self.assertEqual(module.load_ledger_events(repo), events)
+        self.assertFalse((repo / '.git/syncwheel-local-declarations').exists())
+
     def test_local_declaration_refuses_control_intents_before_startup_recovery(self):
         repo, source, module, _ = self.declaration_fixture('declaration-pending-control')
         before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()

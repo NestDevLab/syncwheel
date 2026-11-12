@@ -137,9 +137,14 @@ manifest receipt payload, including the original actor. A crash after ledger
 append does not create another `manifest_saved` event on recovery.
 Unchanged tracked files may retain group-writable modes during read-only
 verification. Their bytes, executable bit and exact permissions are witnessed.
-The manifest and index exchanged by the declaration retain the strict image
-contract. The operation preserves file permissions.
-Ref-only materialization uses the same read-only checkout verification.
+The manifest exchanged by the declaration retains the strict image contract.
+A group-writable Git index is supported by declarations and ref-only
+materialization. Its exact permissions are witnessed and preserved. Declaration
+alignment and recovery compare both index images under the native index and ref
+leases; the explicit exclusive direct-filesystem-writer contract still applies.
+World-writable, aliased and extended-attribute index files remain unsupported.
+Ref-only materialization leaves the index intact and rejects permission drift.
+Other replay operations retain their stricter index contract.
 Terminal declaration recovery checks the manifest image and index permissions
 against its original journal. Declaration startup leaves pending control intents
 to their owners and checks them under the metadata lock.

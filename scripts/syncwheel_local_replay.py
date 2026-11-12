@@ -155,8 +155,8 @@ def file_image(fd, name, *, allow_group_write=False):
     return data, stat.S_IMODE(before.st_mode)
 
 
-def image(fd, name):
-    data, mode = file_image(fd, name)
+def image(fd, name, *, allow_group_write=False):
+    data, mode = file_image(fd, name, allow_group_write=allow_group_write)
     return {"sha256": digest(data), "mode": mode}
 
 
@@ -764,15 +764,17 @@ def switch_addition(parent, name, journal, spec, *, forward, replace):
             == (want, previous), "local replay addition changed during adoption; journal retained")
 
 
-def switch_image(parent, name, journal, slot, before, after, *, forward, replace=True):
-    current, retained = image(parent, name), image(journal, slot)
+def switch_image(parent, name, journal, slot, before, after, *, forward, replace=True, allow_group_write=False):
+    current = image(parent, name, allow_group_write=allow_group_write)
+    retained = image(journal, slot, allow_group_write=allow_group_write)
     want, previous = (after, before) if forward else (before, after)
     if (current, retained) == (want, previous):
         return
     require(replace and (current, retained) == (previous, want),
             "local replay checkout or staged bytes changed; preserving the journal")
     exchange(parent, name, journal, slot)
-    require((image(parent, name), image(journal, slot)) == (want, previous),
+    require((image(parent, name, allow_group_write=allow_group_write),
+             image(journal, slot, allow_group_write=allow_group_write)) == (want, previous),
             "local replay file changed during exchange; both images retained")
 
 
@@ -865,7 +867,8 @@ def aligned_files(work, meta, journal, record, *, forward, replace=True):
                              forward=forward, replace=replace)
         checkpoint("checkout-file-aligned")
     switch_image(meta, "index", journal, "prepared-index", record["plan"]["index"],
-                 record["indexAfter"], forward=forward, replace=replace)
+                 record["indexAfter"], forward=forward, replace=replace,
+                 allow_group_write=record.get("kind") == "localManifestDeclaration")
     checkpoint("index-aligned")
 
 
@@ -1085,7 +1088,7 @@ def local_source_plan(root, stack_id, api):
     require_clean_index(root, baseline)
     with directory(root) as work, directory(meta) as metadata:
         observed = checkout(work, baseline, allow_group_write=True)
-        index = image(metadata, "index")
+        index = image(metadata, "index", allow_group_write=True)
         with parent_dir(work, MANIFEST) as (parent, name):
             manifest_image = image(parent, name)
     existing = git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", target, allowed=(0, 1)).decode().strip() or None
@@ -1279,11 +1282,11 @@ def declaration_observation(root, api):
     require_clean_index(root, expected)
     with directory(root) as work, directory(meta) as metadata:
         observed = checkout(work, expected, allow_group_write=True)
-        # Only untouched tracked files use the broader read-only mode. Images
-        # exchanged by this operation retain the strict mutation contract.
+        # The manifest keeps its strict image contract. A shared Git index
+        # retains its witnessed permissions under the native writer leases.
         with parent_dir(work, MANIFEST) as (parent, name):
             require(image(parent, name) == observed[MANIFEST], "local declaration manifest image drifted")
-        index = image(metadata, "index")
+        index = image(metadata, "index", allow_group_write=True)
     require(symbolic(root, "HEAD") == target and head(root, target) == tip,
             "local declaration HEAD drifted while observing")
     return {"targetRef": target, "integrationTip": tip, "index": index,
@@ -1333,7 +1336,7 @@ def finish_declaration(root, operation, record, api, *, recover=False):
                 require(image(parent, name) == expected_manifest,
                         "local declaration terminal manifest image changed")
             expected_index = record["indexAfter"] if record["state"] == "completed" else plan["index"]
-            require(image(metadata, "index")["mode"] == expected_index["mode"],
+            require(image(metadata, "index", allow_group_write=True)["mode"] == expected_index["mode"],
                     "local declaration terminal index mode changed")
             # A terminal-record crash may leave our own index lease. Native
             # ref locks still have no recoverable ownership proof.
@@ -1417,7 +1420,7 @@ def apply_manifest_declaration(root, updated, stack_id, api):
                 (stage / "prepared-index").chmod(plan["index"]["mode"])
                 with directory(stage) as fd:
                     with (stage / "prepared-index").open("rb") as stream: os.fsync(stream.fileno())
-                    index_after = image(fd, "prepared-index")
+                    index_after = image(fd, "prepared-index", allow_group_write=True)
                 record = {"kind": "localManifestDeclaration", "schemaVersion": 1, "state": "prepared",
                           "actor": api.governed_worktree_owner(),
                           "plan": plan, "final": final, "indexAfter": index_after,

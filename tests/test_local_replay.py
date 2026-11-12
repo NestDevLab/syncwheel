@@ -171,6 +171,23 @@ class LocalReplayTest(unittest.TestCase):
         self.assertEqual((current.st_dev, current.st_ino, current.st_mode, current.st_mtime_ns),
                          (original[1].st_dev, original[1].st_ino, original[1].st_mode, original[1].st_mtime_ns))
 
+    def test_local_source_materialization_preserves_group_writable_index_and_rejects_mode_drift(self):
+        self.local_source_setup()
+        index = self.root / '.git/index'
+        index.chmod(0o664)
+        before = index.read_bytes(), index.stat()
+        plan = self.materialize_cli()
+        self.assertEqual(plan['index']['mode'], 0o664)
+        index.chmod(0o644)
+        self.materialize_apply(plan, expected=2)
+        self.git('rev-parse', '--verify', '--quiet', self.materialized_ref, expected=1)
+        index.chmod(0o664)
+        self.assertTrue(self.materialize_apply(plan)['created'])
+        current = index.stat()
+        self.assertEqual(index.read_bytes(), before[0])
+        self.assertEqual((current.st_dev, current.st_ino, current.st_mode, current.st_mtime_ns),
+                         (before[1].st_dev, before[1].st_ino, before[1].st_mode, before[1].st_mtime_ns))
+
     def test_local_source_materialization_rejects_drift_and_dirty_checkout(self):
         self.local_source_setup()
         plan = self.materialize_cli()
