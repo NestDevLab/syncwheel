@@ -2,6 +2,7 @@
 import argparse
 import copy
 import contextlib
+import contextvars
 import datetime
 import errno
 import fnmatch
@@ -64,6 +65,9 @@ class ControlManifestAlignmentDrift(SyncwheelError):
 
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
+_COORDINATION_STATE_OBSERVATIONS = contextvars.ContextVar(
+    'syncwheel_coordination_state_observations', default=None
+)
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
 ENV_UPDATE_MODE = 'SYNCWHEEL_UPDATE_MODE'
@@ -206,6 +210,7 @@ MANAGED_PUSH_AUTH_TTL_SECONDS = 60
 MANAGED_REF_MOVE_AUTH_ENV = 'SYNCWHEEL_REF_MOVE_AUTH'
 SYNCWHEEL_OWNS_REF_MOVES = False
 SYNCWHEEL_REF_AUTH_REPO = None
+SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS = {}
 SYNCWHEEL_REF_AUTH_TTL_SECONDS = 30
 SYNCWHEEL_REF_AUTH_OPERATION_TTL_SECONDS = 3600
 FALLBACK_GIT_IDENTITY_CONFIG = [
@@ -1124,6 +1129,7 @@ def authorize_ref_move(repo_root, reusable=False):
     }
     path = directory / nonce
     atomic_write_private_json(path, payload)
+    SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS.setdefault(str(directory), set()).add(nonce)
     return nonce
 
 
@@ -1133,7 +1139,9 @@ def ref_move_authorization(repo_root, reusable=False):
     try:
         yield nonce
     finally:
-        (ref_auth_dir(repo_root) / nonce).unlink(missing_ok=True)
+        directory = ref_auth_dir(repo_root)
+        (directory / nonce).unlink(missing_ok=True)
+        SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS.get(str(directory), set()).discard(nonce)
 
 
 def ref_move_authorized(repo_root, event):
@@ -1222,13 +1230,16 @@ def discard_stale_ref_authorization(repo_root, path, now):
     return True
 
 
-def clear_ref_authorizations(repo_root):
+def clear_ref_authorizations(repo_root, *, only_current_process=False):
     owner_pid = os.getpid()
     owner_start = process_start_identity(owner_pid)
     now = time.time()
     directory = ref_auth_dir(repo_root)
+    issued = SYNCWHEEL_ISSUED_REF_AUTHORIZATIONS.get(str(directory), set())
     if directory.exists():
         for path in directory.iterdir():
+            if only_current_process and (path.name not in issued or path.is_symlink()):
+                continue
             try:
                 payload = json.loads(path.read_text())
                 nonce_pid = int(payload['pid'])
@@ -1240,20 +1251,27 @@ def clear_ref_authorizations(repo_root):
                 ):
                     raise ValueError('invalid ref authorization owner')
             except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
-                discard_stale_ref_authorization(repo_root, path, now)
+                if not only_current_process:
+                    discard_stale_ref_authorization(repo_root, path, now)
                 continue
-            current_start = process_start_identity(nonce_pid)
             owned = (
                 nonce_pid == owner_pid
                 and owner_start is not None
                 and nonce_start == owner_start
             )
+            if only_current_process:
+                if owned and payload.get('nonce') == path.name:
+                    path.unlink(missing_ok=True)
+                    issued.discard(path.name)
+                continue
+            current_start = process_start_identity(nonce_pid)
             owner_is_gone = not process_is_alive(nonce_pid)
             owner_was_recycled = (
                 current_start is not None and current_start != nonce_start
             )
             if owned or owner_is_gone or owner_was_recycled:
                 path.unlink(missing_ok=True)
+                issued.discard(path.name)
 
 
 def active_hooks_dir(repo_root):
@@ -2435,6 +2453,8 @@ def maybe_handle_startup_update_policy(args):
     if getattr(args, 'command', None) == 'self':
         return
     try:
+        if load_update_settings()['mode'] == 'off':
+            return
         status, settings, _, _ = refresh_cached_self_update_status(force=False)
     except SyncwheelError:
         return
@@ -3211,19 +3231,128 @@ def derived_provenance_store_lock(repo_root):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def require_coordination_checkout_binding(location, admin):
+    if not os.path.lexists(location):
+        return
+    if not location.is_dir():
+        raise SyncwheelError('registered worktree checkout is not a directory')
+    result = git(location, 'rev-parse', '--absolute-git-dir', check=False)
+    if result.returncode != 0 or Path(result.stdout.rstrip('\n')).resolve() != admin.resolve():
+        raise SyncwheelError('registered checkout points to another Git directory')
+
+
+def coordination_fetch_endpoint_digest(repo_root, remote, *, worktree=None):
+    location = Path(worktree) if worktree is not None else Path(repo_root)
+    if worktree is None:
+        result = git(repo_root, 'remote', 'get-url', remote, check=False)
+    else:
+        common = git_common_dir(repo_root).resolve()
+        admin = governed_worktree_admin_dir_for_path(repo_root, location)
+        if admin is None and (location.resolve() == common or (location / '.git').resolve() == common):
+            admin = common
+        if admin is None:
+            raise SyncwheelError('cannot establish the registered worktree Git directory')
+        require_coordination_checkout_binding(location, admin)
+        # Administrative metadata retains worktree-specific configuration even
+        # when its checkout is absent. Observing it never prunes registration.
+        result = git(repo_root, '--git-dir', str(admin), 'remote', 'get-url', remote, check=False)
+        current_admin = governed_worktree_admin_dir_for_path(repo_root, location)
+        if admin != common and current_admin != admin:
+            raise SyncwheelError('worktree registration changed during endpoint observation')
+        require_coordination_checkout_binding(location, admin)
+    endpoint, _newline, remainder = result.stdout.partition('\n')
+    if result.returncode != 0 or not endpoint or remainder or '\r' in endpoint:
+        raise SyncwheelError('cannot establish the coordination fetch endpoint')
+    scp_url = re.match(r'^(?:[^/@]+@)?[^/:]+:.+', endpoint)
+    if os.path.splitdrive(endpoint)[0] or ('://' not in endpoint and not scp_url):
+        endpoint = str((location / endpoint).resolve())
+    return hashlib.sha256(endpoint.encode()).hexdigest()
+
+
+def coordination_state_observation_key(repo_root, config):
+    endpoint = coordination_fetch_endpoint_digest(repo_root, config['remote'])
+    for worktree in get_worktrees(repo_root):
+        path = Path(worktree['path'])
+        if coordination_fetch_endpoint_digest(repo_root, config['remote'], worktree=path) != endpoint:
+            raise SyncwheelError('coordination refuses divergent fetch endpoints across registered worktrees')
+    return (str(git_common_dir(repo_root).resolve()), config['remote'],
+            config['id'], config['state_branch'], endpoint)
+
+
+def remember_coordination_state_observation(repo_root, config, tip, *, expected_key):
+    key = coordination_state_observation_key(repo_root, config)
+    if key != expected_key:
+        raise SyncwheelError('coordination fetch endpoint changed during observation')
+    observations = dict(_COORDINATION_STATE_OBSERVATIONS.get() or {})
+    observations[key] = tip
+    _COORDINATION_STATE_OBSERVATIONS.set(observations)
+
+
+def coordination_provenance_observation(repo_root, config):
+    """Validate the namespace before combining shared provenance metadata."""
+    observation_key = coordination_state_observation_key(repo_root, config)
+    observations = _COORDINATION_STATE_OBSERVATIONS.get() or {}
+    _profile, local_coordination = coordination_profile(repo_root)
+    seen = local_coordination.get('last_seen_state') or {}
+    if seen.get('coordination_id') != config['id']:
+        seen = {}
+    seen_endpoint = seen.get('endpoint_digest')
+    if seen_endpoint is None and seen:
+        if coordination_legacy_binding_receipt(repo_root, observation_key, seen) is None:
+            raise SyncwheelError('legacy coordination provenance has no endpoint witness; shared metadata requires governed reconciliation')
+        seen = {**seen, 'endpoint_digest': observation_key[-1]}
+        seen_endpoint = observation_key[-1]
+    if not seen and load_derived_provenance_store(repo_root)['overrides']:
+        raise SyncwheelError('local derived provenance has no endpoint witness; shared metadata requires governed reconciliation')
+    changed_endpoint = (
+        any(key[:4] == observation_key[:4] and key != observation_key for key in observations)
+        or (seen_endpoint is not None and seen_endpoint != observation_key[-1])
+    )
+    if changed_endpoint:
+        raise SyncwheelError('coordination provenance endpoint changed; shared metadata requires governed reconciliation')
+    return observations.get(observation_key), seen
+
+
+def coordination_profile_digest(repo_root):
+    from syncwheel_local_replay import directory, file_image, LocalReplayError
+    try:
+        with directory(Path(repo_root) / '.syncwheel') as parent:
+            data, _info = file_image(parent, PROFILE_FILENAME)
+        return hashlib.sha256(data).hexdigest()
+    except (OSError, LocalReplayError) as exc:
+        raise SyncwheelError('cannot witness the existing coordination profile') from exc
+
+
+def coordination_legacy_binding_receipt(repo_root, observation_key, seen):
+    """Resolve only an explicit empty-store binding of these exact profile bytes."""
+    if load_derived_provenance_store(repo_root)['overrides']:
+        return None
+    profile_digest = coordination_profile_digest(repo_root)
+    namespace = canonical_json_digest(list(observation_key))
+    for event in reversed(load_ledger_events(repo_root)):
+        if event.get('type') != 'coordination_provenance_bound':
+            continue
+        plan = (event.get('payload') or {}).get('plan') or {}
+        unsigned = {key: value for key, value in plan.items() if key != 'planDigest'}
+        if (plan.get('operation') == 'bind-empty-legacy-provenance'
+                and plan.get('planDigest') == canonical_json_digest(unsigned)
+                and plan.get('namespaceDigest') == namespace
+                and plan.get('profileDigest') == profile_digest
+                and plan.get('stateTip') == seen.get('state_tip')):
+            return event
+    return None
+
+
 def local_coordination_provenance_state(repo_root, manifest):
     """Return the newest locally available published coordination state."""
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         return None
-    candidates = []
-    remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
-    remote_tip = ref_tip(repo_root, remote_state_ref)
-    if remote_tip:
-        candidates.append(remote_tip)
-    _profile, local_coordination = coordination_profile(repo_root)
-    seen = local_coordination.get('last_seen_state') or {}
-    if seen.get('coordination_id') == config['id'] and isinstance(seen.get('state_tip'), str):
+    observed_tip, seen = coordination_provenance_observation(repo_root, config)
+    candidates = [observed_tip] if observed_tip else []
+    # Tracking refs have no endpoint provenance of their own. Only an actual
+    # observation or an endpoint-bound acknowledgment can select a state.
+    if isinstance(seen.get('state_tip'), str):
         candidates.append(seen['state_tip'])
     candidates = list(dict.fromkeys(candidates))
     available = [tip for tip in candidates if commit_exists(repo_root, tip)]
@@ -3249,6 +3378,8 @@ def shared_derived_provenance_records(repo_root, manifest, coordination_state=No
     state = coordination_state if active else None
     if active and state is None:
         state = local_coordination_provenance_state(repo_root, manifest)
+    elif active and repo_root is not None:
+        coordination_provenance_observation(repo_root, coordination_config(manifest))
     if state:
         shared = (state.get('manifest', {}).get('integration', {}).get(
             'derived_provenance'
@@ -12484,19 +12615,30 @@ def coordination_state_from_commit(
     return validate_coordination_state(state, expected_id, claims_mode)
 
 
+def fetch_coordination_state_object(repo_root, remote, tip):
+    """Read the observed object without changing tracking refs or FETCH_HEAD."""
+    if not isinstance(tip, str) or not re.fullmatch(r'[0-9a-f]{40}', tip):
+        raise SyncwheelError('coordination state fetch requires an exact observed commit')
+    result = git(
+        repo_root, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head',
+        '--no-recurse-submodules', '--no-prune', '--no-auto-maintenance',
+        '--refmap=', remote, tip, check=False,
+    )
+    if result.returncode != 0:
+        raise SyncwheelError(
+            result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
+        )
+
+
 def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest_version=None):
+    observation_key = coordination_state_observation_key(repo_root, config)
     state_ref = coordination_state_ref(config)
     tip = remote_ref_tips(repo_root, config['remote'], [state_ref])[state_ref]
     if not tip:
         return {'tip': None, 'state': None}
     if fetch:
-        result = git(repo_root, 'fetch', '--quiet', config['remote'], state_ref, check=False)
-        if result.returncode != 0:
-            raise SyncwheelError(
-                result.stderr.strip() or result.stdout.strip() or 'failed to fetch coordination state'
-            )
-        # FETCH_HEAD is clone-global and another fetch may replace it before
-        # the read. Keep the state paired with the remote tip we observed.
+        fetch_coordination_state_object(repo_root, config['remote'], tip)
+        # Keep the state paired with the remote tip we observed.
         commit = tip
     else:
         commit = tip
@@ -12517,6 +12659,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
             f"remote coordination manifest version {remote_manifest_version} is incompatible "
             f'with local manifest version {local_manifest_version}; migrate explicitly'
         )
+    remember_coordination_state_observation(repo_root, config, tip, expected_key=observation_key)
     return {
         'tip': tip,
         'state': state,
@@ -12524,6 +12667,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
 
 
 def read_remote_coordination_states(repo_root, config, *, fetch=True):
+    observation_key = coordination_state_observation_key(repo_root, config)
     result = git(
         repo_root,
         'ls-remote',
@@ -12540,9 +12684,7 @@ def read_remote_coordination_states(repo_root, config, *, fetch=True):
         if not separator:
             continue
         if fetch:
-            fetched = git(repo_root, 'fetch', '--quiet', config['remote'], ref, check=False)
-            if fetched.returncode != 0:
-                raise SyncwheelError(fetched.stderr.strip() or f'failed to fetch coordination state {ref}')
+            fetch_coordination_state_object(repo_root, config['remote'], tip)
         state = coordination_state_from_commit(repo_root, tip)
         expected_ref = f"refs/heads/{default_coordination_state_branch(state['coordination_id'])}"
         if ref != expected_ref:
@@ -12550,6 +12692,14 @@ def read_remote_coordination_states(repo_root, config, *, fetch=True):
                 f'coordination state branch mismatch: {ref} declares {state["coordination_id"]!r}'
             )
         states.append({'ref': ref, 'tip': tip, 'state': state})
+    for item in states:
+        observed_config = {
+            **config, 'id': item['state']['coordination_id'],
+            'state_branch': item['ref'][len('refs/heads/'):],
+        }
+        expected_key = (*observation_key[:2], observed_config['id'],
+                        observed_config['state_branch'], observation_key[-1])
+        remember_coordination_state_observation(repo_root, observed_config, item['tip'], expected_key=expected_key)
     return states
 
 
@@ -14407,9 +14557,11 @@ def clear_pending_coordination_merge(repo_root, config):
 
 
 def record_coordination_state_seen(repo_root, config, state_tip):
+    coordination_provenance_observation(repo_root, config)
     profile, coordination = coordination_profile(repo_root)
     coordination['last_seen_state'] = {
         'coordination_id': config['id'],
+        'endpoint_digest': coordination_state_observation_key(repo_root, config)[-1],
         'state_tip': state_tip,
         'seen_at': iso_utc_now(),
     }
@@ -16341,6 +16493,9 @@ def coordinated_publish_cycle(
         raise SyncwheelError('coordinated publish requires an active-active manifest version 2 coordination block')
     if config['remote'] != manifest['defaults']['publication_remote']:
         raise SyncwheelError('coordination.remote must match defaults.publication_remote')
+    # Publication acknowledgment must never bind historical local data merely
+    # because the current (including version 2) manifest omits its provenance.
+    coordination_provenance_observation(repo_root, config)
     recovery_state = {}
     if not dry_run:
         source_manifest, _ = load_manifest(repo_root, manifest_path)
@@ -20405,11 +20560,14 @@ def observe_published_integration_tip(repo_root, manifest, *, fetch=True):
     )
     if not remote['tip'] or not remote['state']:
         return None
-    if fetch and ref_tip(repo_root, 'FETCH_HEAD') != remote['tip']:
-        return {'status': 'stale'}
     state = remote['state']
     expected_refs = dict(state.get('managed_refs') or {})
-    observed_refs = remote_ref_tips(repo_root, config['remote'], expected_refs)
+    state_ref = coordination_state_ref(config)
+    refs_to_observe = [*expected_refs, state_ref] if fetch else expected_refs
+    observed = remote_ref_tips(repo_root, config['remote'], refs_to_observe)
+    if fetch and observed.get(state_ref) != remote['tip']:
+        return {'status': 'stale'}
+    observed_refs = {ref: observed.get(ref) for ref in expected_refs}
     if observed_refs != expected_refs:
         return {'status': 'stale'}
     integration_ref = f"refs/heads/{manifest['integration']['branch']}"
@@ -21225,6 +21383,116 @@ def command_coordination_disable(args):
     )
     print('coordination disabled; no remote state branch was deleted')
     return 0
+
+
+def coordination_legacy_binding_plan(repo_root):
+    """Prove equivalence to the currently served state with no local overrides."""
+    import syncwheel_local_replay as backend
+    try:
+        witness, manifest = backend.declaration_observation(repo_root, sys.modules[__name__])
+    except backend.LocalReplayError as exc:
+        raise SyncwheelError(str(exc)) from exc
+    config = coordination_config(manifest)
+    if not coordination_is_active(manifest):
+        raise SyncwheelError('legacy binding requires active-active coordination')
+    key = coordination_state_observation_key(repo_root, config)
+    profile_digest = coordination_profile_digest(repo_root)
+    _profile, coordination = coordination_profile(repo_root)
+    seen = coordination.get('last_seen_state') or {}
+    if (seen.get('coordination_id') != config['id'] or seen.get('endpoint_digest') is not None
+            or not re.fullmatch(r'[0-9a-f]{40}', str(seen.get('state_tip', '')))):
+        raise SyncwheelError('legacy binding requires an existing unbound exact last-seen state')
+    store = load_derived_provenance_store(repo_root)
+    if store['overrides']:
+        raise SyncwheelError('legacy binding refuses nonempty local overrides')
+    events = load_ledger_events(repo_root)
+    if pending_control_manifest_intents(events) or pending_coordination_publications(repo_root, repo_root / '.syncwheel/manifest.json'):
+        raise SyncwheelError('legacy binding refuses pending control or publication intents')
+    observed = read_remote_coordination_state(repo_root, config)
+    if not observed or observed.get('tip') != seen['state_tip']:
+        raise SyncwheelError('legacy last-seen state differs from the currently served state')
+    if (coordination_state_observation_key(repo_root, config) != key
+            or coordination_profile_digest(repo_root) != profile_digest
+            or load_derived_provenance_store(repo_root) != store):
+        raise SyncwheelError('legacy binding inputs changed during observation')
+    plan = {
+        'operation': 'bind-empty-legacy-provenance',
+        'namespaceDigest': canonical_json_digest(list(key)),
+        'profileDigest': profile_digest,
+        'stateTip': observed['tip'],
+        'storeDigest': canonical_json_digest(store),
+        'manifestDigest': manifest_digest(manifest),
+        'sourceWitness': witness,
+    }
+    plan['planDigest'] = canonical_json_digest(plan)
+    return plan
+
+
+def command_coordination_provenance_bind(args):
+    """Append one explicit namespace receipt, retaining the legacy profile."""
+    import syncwheel_local_replay as backend
+    try:
+        backend.require_ambient_location()
+    except backend.LocalReplayError as exc:
+        raise SyncwheelError(str(exc)) from exc
+    repo_root = resolve_repo_root(args.repo)
+    if args.manifest or args.personal:
+        raise SyncwheelError('legacy binding requires the primary manifest')
+    if not args.apply:
+        if args.plan_file or args.reason:
+            raise SyncwheelError('legacy binding preview does not accept an apply plan or reason')
+        print(json.dumps(coordination_legacy_binding_plan(repo_root), indent=2, sort_keys=True))
+        return 0
+    if not args.plan_file or not args.reason or not args.reason.strip() or len(args.reason) > 512:
+        raise SyncwheelError('legacy binding apply requires --plan-file and a bounded --reason')
+    try:
+        plan = json.loads(Path(args.plan_file).read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SyncwheelError('cannot read the legacy binding plan') from exc
+    if not isinstance(plan, dict):
+        raise SyncwheelError('legacy binding plan must be an object')
+    digest = plan.get('planDigest')
+    if (not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
+            or canonical_json_digest({key: value for key, value in plan.items() if key != 'planDigest'}) != digest):
+        raise SyncwheelError('legacy binding plan digest differs')
+    manifest_path = repo_root / '.syncwheel/manifest.json'
+    idempotency = 'coordination-provenance-binding:' + digest
+    with manifest_write_transaction(repo_root, manifest_path, 'legacy-provenance-binding', commit_tracked_changes=False):
+        active_manifest_write_transaction(manifest_path)['preserveGitignore'] = True
+        with derived_provenance_store_lock(repo_root):
+            matches = [event for event in load_ledger_events(repo_root, manifest_path)
+                       if event.get('type') == 'coordination_provenance_bound'
+                       and event.get('idempotency_key') == idempotency]
+            if matches:
+                if len(matches) != 1 or matches[0].get('payload', {}).get('plan') != plan:
+                    raise SyncwheelError('legacy binding receipt differs from the requested plan')
+                event = matches[0]
+            else:
+                if coordination_legacy_binding_plan(repo_root) != plan:
+                    raise SyncwheelError('legacy binding plan is stale')
+                event = append_ledger_event(repo_root, 'coordination_provenance_bound', {
+                    'plan': plan, 'reason': args.reason.strip(), 'actor': governed_worktree_owner(),
+                }, manifest_path, idempotency_key=idempotency)
+    usable = False
+    try:
+        current, _ = load_manifest(repo_root, manifest_path)
+        if current and coordination_is_active(current):
+            config = coordination_config(current)
+            coordination_provenance_observation(repo_root, config)
+            key = coordination_state_observation_key(repo_root, config)
+            _profile, coordination = coordination_profile(repo_root)
+            usable = coordination_legacy_binding_receipt(
+                repo_root, key, coordination.get('last_seen_state') or {},
+            ) == event
+    except SyncwheelError:
+        # The durable receipt remains inspectable when its current inputs fail
+        # validation. It must not authorize continuation in that condition.
+        usable = False
+    print(json.dumps({'status': 'recorded' if usable else 'held', 'planDigest': digest,
+                      'bindingUsable': usable,
+                      'receiptSequence': event['seq'],
+                      'reason': event['payload']['reason']}, indent=2, sort_keys=True))
+    return 0 if usable else 2
 
 
 def command_coordination_provenance_reset(args):
@@ -26169,6 +26437,14 @@ def preflight_active_draft_create(repo_root, manifest, manifest_path, stack):
 def command_stack_create(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    preserve_lanes = bool(getattr(args, 'preserve_lanes', False))
+    if preserve_lanes and args.draft:
+        raise SyncwheelError('--preserve-lanes declares local metadata only; omit --draft')
+    if manifest.get('syncwheel_tracking') == SYNCWHEEL_TRACKING_GIT_TRACKED and primary_guard_path(repo_root).exists():
+        guard = require_primary_guard(repo_root)
+        primary = primary_checkout_state(repo_root, manifest)
+        if guard['enabled'] and (not primary['compliant'] or primary['branch'] != guard['integrationBranch']):
+            raise SyncwheelError('primary checkout and configured guard must match before a tracked stack declaration')
     if args.draft and coordination_is_active(manifest):
         create_remote = coordination_config(manifest)['remote']
         if not coordination_remote_is_reachable(repo_root, create_remote):
@@ -26177,7 +26453,11 @@ def command_stack_create(args):
                 'restore remote access, then retry:\n  '
                 f'{draft_create_retry_command(args)}'
             )
-    complete_pending_promote_intents(repo_root, manifest, manifest_path)
+    if preserve_lanes:
+        if pending_coordination_publications(repo_root, manifest_path) or pending_control_manifest_intents(load_ledger_events(repo_root, manifest_path)):
+            raise SyncwheelError('local declaration refuses pending operations; resolve them with their owners first')
+    else:
+        complete_pending_promote_intents(repo_root, manifest, manifest_path)
     stacks = stack_map(manifest)
     if args.stack in stacks:
         existing = stacks[args.stack]
@@ -26370,25 +26650,32 @@ def command_stack_create(args):
                     f'{exc}\nRetry this exact, idempotent create command after resolving the named condition:\n  '
                     f'{draft_create_retry_command(args)}'
                 ) from exc
-    save_manifest_with_ledger(
-        repo_root,
-        manifest_path,
-        manifest,
-        'stack_create',
-        {
+    creation_context = {
             'stack': args.stack,
             'branch': branch,
             'operation_token': operation_token,
             'coordination_state': coordination_result.get('state_tip') if coordination_result else None,
             'actor': governed_worktree_owner(),
-        },
-    )
-    capture_governed_worktrees_for_stack(
-        repo_root,
-        manifest,
-        args.stack,
-        manifest_path=manifest_path,
-    )
+    }
+    if preserve_lanes:
+        if is_external_manifest_path(repo_root, manifest_path) or args.personal:
+            raise SyncwheelError('--preserve-lanes requires the primary tracked manifest')
+        try:
+            from syncwheel_local_replay import LocalReplayError, apply_manifest_declaration
+            creation_context['declaration_receipt'] = apply_manifest_declaration(
+                Path(repo_root).resolve(), manifest, args.stack, sys.modules[__name__],
+            )
+        except (LocalReplayError, OSError) as exc:
+            raise SyncwheelError(str(exc)) from exc
+    else:
+        save_manifest_with_ledger(repo_root, manifest_path, manifest, 'stack_create', creation_context)
+    if not preserve_lanes:
+        capture_governed_worktrees_for_stack(
+            repo_root,
+            manifest,
+            args.stack,
+            manifest_path=manifest_path,
+        )
     print(f"{args.stack}: created {branch} with {len(stack['commits'])} commits (state={stack['state']})")
     if coordination_result:
         print(f"  coordination state: {coordination_result['status']}")
@@ -26434,19 +26721,16 @@ def cleanup_interrupted_draft_materialization(
             f"{stack['id']}: deterministic create worktree registration does not "
             'belong to the pending stack_create_intent'
         )
-    removed = git(
-        repo_root, 'worktree', 'remove', '--force', str(path), check=False
+    raise SyncwheelError(
+        f"{stack['id']}: legacy temporary create worktree preserved at {path}; "
+        'inspect its tracked, untracked and ignored data before separate native recovery'
     )
-    if removed.returncode != 0:
-        raise SyncwheelError(
-            f"{stack['id']}: could not remove interrupted create worktree {path}"
-        )
 
 
 def materialize_new_stack_branch(
     repo_root, stack, planned_tip=None, operation_token=None
 ):
-    """Create a draft ref with create-only CAS and leave no worktree on failure."""
+    """Create the projected draft ref with create-only CAS, without a checkout."""
     planned_tip = planned_tip or deterministic_stack_replay_tip(
         repo_root, stack['base'], stack['commits']
     )
@@ -26470,30 +26754,11 @@ def materialize_new_stack_branch(
             f"{stack['id']}: draft ref {branch_ref} appeared concurrently; "
             'the existing ref was preserved. Inspect it, then retry with a new stack id.'
         )
-    deterministic_worktree = draft_materialization_worktree(
-        repo_root, operation_token
-    )
-    temporary = (
-        None if deterministic_worktree
-        else tempfile.TemporaryDirectory(prefix='syncwheel-stack-create-')
-    )
-    worktree = deterministic_worktree or Path(temporary.name)
-    try:
-        try:
-            git(repo_root, 'worktree', 'add', str(worktree), stack['branch'])
-            if ref_tip(repo_root, stack['branch']) != planned_tip:
-                raise SyncwheelError(
-                    f"{stack['id']}: materialized draft tip differs from its reviewed projection"
-                )
-        except BaseException:
-            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
-            git(repo_root, 'update-ref', '-d', branch_ref, planned_tip, check=False)
-            raise
-        else:
-            git(repo_root, 'worktree', 'remove', '--force', str(worktree), check=False)
-    finally:
-        if temporary:
-            temporary.cleanup()
+    if ref_tip(repo_root, stack['branch']) != planned_tip:
+        raise SyncwheelError(
+            f"{stack['id']}: draft ref changed after create-only CAS; "
+            'the current ref was preserved for inspection'
+        )
 
 
 def coordination_draft_recovery_ref(stack_id):
@@ -29635,6 +29900,58 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
     return result
 
 
+def command_stack_materialize_local(args):
+    try:
+        from syncwheel_local_replay import LocalReplayError, execute_source_materialization, sanitized_cli_environment
+    except ModuleNotFoundError as exc:
+        raise SyncwheelError('local materialization needs the matching companion module') from exc
+    if args.personal or args.manifest:
+        raise SyncwheelError('local materialization requires the primary tracked manifest')
+    try:
+        with sanitized_cli_environment():
+            root = Path(resolve_repo_root(args.repo)).resolve()
+            result = execute_source_materialization(root, args, sys.modules[__name__])
+    except (LocalReplayError, OSError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def command_stack_recover_declaration(args):
+    from syncwheel_local_replay import LocalReplayError, recover_manifest_declaration, sanitized_cli_environment
+    if args.personal or args.manifest:
+        raise SyncwheelError('declaration recovery requires the primary tracked manifest')
+    try:
+        with sanitized_cli_environment():
+            result = recover_manifest_declaration(Path(resolve_repo_root(args.repo)).resolve(), args, sys.modules[__name__])
+    except (LocalReplayError, OSError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def command_int_replay_local(args):
+    # Deliberately enter before generic startup recovery and reaping. The
+    # executor owns the only journal, lock, and ref authorization it may use.
+    try:
+        from syncwheel_local_replay import LocalReplayError, execute_local_replay, sanitized_cli_environment
+    except ModuleNotFoundError as exc:
+        if exc.name != 'syncwheel_local_replay':
+            raise
+        raise SyncwheelError('int replay-local needs the matching syncwheel_local_replay.py beside the CLI') from exc
+
+    if args.personal or args.manifest:
+        raise SyncwheelError('local replay requires the primary tracked manifest')
+    try:
+        with sanitized_cli_environment():
+            root = Path(resolve_repo_root(args.repo)).resolve()
+            result = execute_local_replay(root, args, sys.modules[__name__])
+    except (LocalReplayError, OSError) as exc:
+        raise SyncwheelError(str(exc)) from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -29890,6 +30207,8 @@ def command_int_rebuild(args):
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if coordination_is_active(manifest):
+        coordination_provenance_observation(repo_root, coordination_config(manifest))
     complete_pending_promote_intents(
         repo_root, manifest, manifest_path, apply=not args.dry_run
     )
@@ -35001,6 +35320,14 @@ def build_parser():
     coordination_provenance_sub = coordination_provenance_p.add_subparsers(
         dest='coordination_provenance_command', required=True
     )
+    coordination_provenance_bind_p = coordination_provenance_sub.add_parser(
+        'bind-empty', parents=[common],
+        help='explicitly bind an unchanged legacy state with no local overrides',
+    )
+    coordination_provenance_bind_p.add_argument('--plan-file')
+    coordination_provenance_bind_p.add_argument('--reason')
+    coordination_provenance_bind_p.add_argument('-a', '--apply', action='store_true')
+    coordination_provenance_bind_p.set_defaults(func=command_coordination_provenance_bind)
     coordination_provenance_reset_p = coordination_provenance_sub.add_parser(
         'reset',
         parents=[common],
@@ -35438,6 +35765,23 @@ def build_parser():
     stack_show_p.add_argument('stack')
     stack_show_p.set_defaults(func=command_stack_show)
 
+    stack_local_p = stack_sub.add_parser(
+        'materialize-local', parents=[common], help='plan or create a declared exact local source ref without replay or publication',
+    )
+    stack_local_p.add_argument('stack')
+    stack_local_p.add_argument('--plan-digest')
+    stack_local_p.add_argument('--reason')
+    source_local_mode = stack_local_p.add_mutually_exclusive_group()
+    source_local_mode.add_argument('--apply', action='store_true')
+    source_local_mode.add_argument('--recover', action='store_true')
+    stack_local_p.set_defaults(func=command_stack_materialize_local)
+
+    stack_declaration_p = stack_sub.add_parser('recover-declaration', parents=[common], help='inspect or recover one journal-owned local declaration')
+    stack_declaration_p.add_argument('--plan-digest', required=True)
+    stack_declaration_p.add_argument('--apply', action='store_true')
+    stack_declaration_p.add_argument('--reason')
+    stack_declaration_p.set_defaults(func=command_stack_recover_declaration)
+
     stack_create_p = stack_sub.add_parser('create', aliases=['new'], parents=[common])
     stack_create_p.add_argument('stack')
     stack_create_p.add_argument('specs', nargs='*', help='optional commit refs or ranges to seed the stack')
@@ -35450,6 +35794,10 @@ def build_parser():
     stack_create_p.add_argument(
         '--depends-on', action='append', default=[],
         help='declare one prerequisite stack; may be repeated',
+    )
+    stack_create_p.add_argument(
+        '--preserve-lanes', action='store_true',
+        help='declare local metadata without lane capture/recovery or remote publication; refuse pending operations',
     )
     stack_create_p.add_argument(
         '--draft',
@@ -35672,6 +36020,17 @@ def build_parser():
         ),
     )
     int_rebuild_p.set_defaults(func=command_int_rebuild)
+
+    int_local_p = int_sub.add_parser(
+        'replay-local', parents=[common], help='plan or adopt a witnessed local integration delta',
+    )
+    int_local_p.add_argument('stack')
+    int_local_p.add_argument('--plan-digest')
+    int_local_p.add_argument('--reason')
+    int_local_mode = int_local_p.add_mutually_exclusive_group()
+    int_local_mode.add_argument('--apply', action='store_true')
+    int_local_mode.add_argument('--recover', action='store_true')
+    int_local_p.set_defaults(func=command_int_replay_local)
 
     int_push_p = int_sub.add_parser('push', parents=[common])
     add_push_args(int_push_p)
@@ -36119,6 +36478,7 @@ def entrypoint_behavior_table():
     # inside the backend, after request and lease validation have completed.
     register((command_revision_provider,), mutates='always', manifest_mutates='internal')
     register((command_revision_provider_resolve_prepared,), mutates='apply', manifest_mutates='internal')
+    register((command_coordination_provenance_bind,), mutates='apply', manifest_mutates='internal')
     register((
         command_repo_add,
         command_repo_set_manifest,
@@ -36220,6 +36580,9 @@ def entrypoint_behavior_table():
         mutates='schedule-apply', manifest_mutates='internal',
     )
     register((command_stack_git, command_int_git), mutates='git-passthrough')
+    register((command_int_replay_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
+    register((command_stack_materialize_local,), mutates='apply-or-recover', manifest_mutates='apply-or-recover')
+    register((command_stack_recover_declaration,), mutates='apply', manifest_mutates='apply')
     register(
         (SyncwheelRevisionBackend.ensure_stack_owned,),
         manifest_mutates='internal',
@@ -36293,6 +36656,8 @@ def mutation_rule_requested(rule, args):
         return True
     if rule == 'apply':
         return bool(getattr(args, 'apply', False))
+    if rule == 'apply-or-recover':
+        return bool(getattr(args, 'apply', False) or getattr(args, 'recover', False))
     if rule == 'execute':
         return not bool(getattr(args, 'dry_run', False))
     if rule == 'update-manifest':
@@ -36697,6 +37062,10 @@ def recover_control_manifest_before_command(args):
     """Run FC4 recovery before an entrypoint can require its manifest source."""
     if not hasattr(args, 'repo') or bool(getattr(args, 'dry_run', False)):
         return None
+    if args.func == command_stack_create and bool(getattr(args, 'preserve_lanes', False)):
+        # The declaration checks pending intents under its metadata lock and
+        # refuses them. Startup must not recover another operation first.
+        return None
     if args.func == command_manifest_recover_control:
         # Only this command's fresh exact plan may authorize a quarantined
         # continuation. A preview remains read-only, including its ledger.
@@ -36727,6 +37096,30 @@ def recover_control_manifest_before_command(args):
     )
     args._control_manifest_recovery_state = recovery_state
     return recovered
+
+
+def coordination_provenance_before_command(args):
+    """Refuse unknown historical provenance before any CLI startup writes."""
+    if not coordination_publication_lock_requested(args) and args.func not in {
+        command_stack_push, command_int_push, command_int_rebuild,
+        command_reconcile, command_resume, command_sync, command_publish,
+        command_channel_publish, command_channel_close, command_stack_land,
+        command_coordination_claims_backfill, command_coordination_repair,
+        command_coordination_compose,
+    } or not hasattr(args, 'repo'):
+        return
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None),
+        getattr(args, 'personal', None),
+    )
+    manifest, _ = load_manifest(repo_root, manifest_path)
+    if manifest and coordination_is_active(manifest):
+        try:
+            coordination_provenance_observation(repo_root, coordination_config(manifest))
+        except SyncwheelError:
+            args._provenance_preflight_refused = True
+            raise
 
 
 def execute_parsed_command(args):
@@ -36799,6 +37192,15 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
+    if args.func in {command_int_replay_local, command_stack_materialize_local,
+                     command_stack_recover_declaration, command_coordination_provenance_bind}:
+        try:
+            if passthrough:
+                raise SyncwheelError('local replay does not accept Git passthrough')
+            return args.func(args)
+        except SyncwheelError as exc:
+            print(f'error: {exc}', file=sys.stderr)
+            return 2
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
     guard_callback = args.func in {
@@ -36811,7 +37213,13 @@ def main():
         SYNCWHEEL_OWNS_REF_MOVES = True
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
+    optional_lock_setting = os.environ.get('GIT_OPTIONAL_LOCKS')
+    if args.func == command_stack_create:
+        # Preflight reads must not refresh the real index before a declaration
+        # can refuse its branch/guard witness. Explicit mutation locks remain on.
+        os.environ['GIT_OPTIONAL_LOCKS'] = '0'
     try:
+        coordination_provenance_before_command(args)
         route_stack_add_from_governed_lane(args)
         # A guard callback runs inside a Git process that is mid-operation, so it
         # stays a decision about the incoming refs and skips the workspace-wide
@@ -36838,8 +37246,19 @@ def main():
         print(f'error: {exc}', file=sys.stderr)
         return 2
     finally:
+        if args.func == command_stack_create:
+            if optional_lock_setting is None:
+                os.environ.pop('GIT_OPTIONAL_LOCKS', None)
+            else:
+                os.environ['GIT_OPTIONAL_LOCKS'] = optional_lock_setting
         if SYNCWHEEL_REF_AUTH_REPO:
-            clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
+            scoped_cleanup = (
+                not syncwheel_mutation_requested(args)
+                or bool(getattr(args, '_provenance_preflight_refused', False))
+                or args.func == command_int_git
+                or (args.func == command_stack_create and bool(getattr(args, 'preserve_lanes', False)))
+            )
+            clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO, only_current_process=scoped_cleanup)
         SYNCWHEEL_REF_AUTH_REPO = None
 
 
