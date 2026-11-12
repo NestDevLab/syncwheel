@@ -159,6 +159,18 @@ class LocalReplayTest(unittest.TestCase):
         self.assertIn("existing different target", self.materialize_apply(plan, expected=2))
         self.assertEqual(self.git("rev-parse", self.materialized_ref), self.old)
 
+    def test_local_source_materialization_preserves_group_writable_read_only_files(self):
+        self.local_source_setup()
+        path = self.root / "unrelated.txt"
+        path.chmod(0o664)
+        original = path.read_bytes(), path.stat()
+        plan = self.materialize_cli()
+        self.assertTrue(self.materialize_apply(plan)["created"])
+        current = path.stat()
+        self.assertEqual(path.read_bytes(), original[0])
+        self.assertEqual((current.st_dev, current.st_ino, current.st_mode, current.st_mtime_ns),
+                         (original[1].st_dev, original[1].st_ino, original[1].st_mode, original[1].st_mtime_ns))
+
     def test_local_source_materialization_rejects_drift_and_dirty_checkout(self):
         self.local_source_setup()
         plan = self.materialize_cli()

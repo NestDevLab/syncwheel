@@ -139,3 +139,7 @@ Unchanged tracked files may retain group-writable modes during read-only
 verification. Their bytes, executable bit and exact permissions are witnessed.
 The manifest and index exchanged by the declaration retain the strict image
 contract. The operation preserves file permissions.
+Ref-only materialization uses the same read-only checkout verification.
+Terminal declaration recovery checks the manifest image and index permissions
+against its original journal. Declaration startup leaves pending control intents
+to their owners and checks them under the metadata lock.

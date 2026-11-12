@@ -1084,7 +1084,7 @@ def local_source_plan(root, stack_id, api):
     require_no_attributes(root, baseline)
     require_clean_index(root, baseline)
     with directory(root) as work, directory(meta) as metadata:
-        observed = checkout(work, baseline)
+        observed = checkout(work, baseline, allow_group_write=True)
         index = image(metadata, "index")
         with parent_dir(work, MANIFEST) as (parent, name):
             manifest_image = image(parent, name)
@@ -1328,6 +1328,13 @@ def finish_declaration(root, operation, record, api, *, recover=False):
             expected_tip = record["final"] if record["state"] == "completed" else plan["integrationTip"]
             require(current == expected_tip, "local declaration terminal ref drifted")
             require_clean_index(root, tree(root, current)); checkout(work, tree(root, current), allow_group_write=True)
+            expected_manifest = record["slots"][MANIFEST]["after" if record["state"] == "completed" else "before"]
+            with parent_dir(work, MANIFEST) as (parent, name):
+                require(image(parent, name) == expected_manifest,
+                        "local declaration terminal manifest image changed")
+            expected_index = record["indexAfter"] if record["state"] == "completed" else plan["index"]
+            require(image(metadata, "index")["mode"] == expected_index["mode"],
+                    "local declaration terminal index mode changed")
             # A terminal-record crash may leave our own index lease. Native
             # ref locks still have no recoverable ownership proof.
             with RefLease(root, meta, plan, current, verification_auth=True).hold(api):

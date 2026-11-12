@@ -5279,7 +5279,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         registry = repo / '.git/syncwheel/governed-worktrees.json'
         before, head = registry.read_bytes(), self.git(lane, 'rev-parse', 'HEAD').stdout
         argv = ['syncwheel', 'stack', 'create', 'local-declaration', source, '--repo', str(repo), '--preserve-lanes']
-        with mock.patch('sys.argv', argv), mock.patch.object(module, 'capture_governed_worktrees_for_stack', side_effect=AssertionError('capture forbidden')), mock.patch.object(module, 'complete_pending_promote_intents', side_effect=AssertionError('promotion recovery forbidden')):
+        with mock.patch('sys.argv', argv), mock.patch.object(module, 'capture_governed_worktrees_for_stack', side_effect=AssertionError('capture forbidden')), mock.patch.object(module, 'complete_pending_promote_intents', side_effect=AssertionError('promotion recovery forbidden')), mock.patch.object(module, 'recover_incomplete_control_manifest_persistence', side_effect=AssertionError('startup recovery forbidden')):
             self.assertEqual(module.main(), 0)
         self.assertEqual(registry.read_bytes(), before)
         self.assertEqual((lane / 'foreign.txt').read_bytes(), b'foreign untracked\x00')
@@ -5523,6 +5523,25 @@ with module.coordination_publication_lock(Path(repo_path)):
         (repo / '.syncwheel/manifest.json').chmod(0o664)
         with self.assertRaisesRegex(backend.LocalReplayError, 'bounded regular files'):
             backend.declaration_observation(repo, module)
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        self.run_cli(repo, 'stack', 'recover-declaration', '--plan-digest', operation.name,
+                     '--apply', '--reason', 'synthetic changed manifest mode', expected=2)
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), before[0])
+        self.assertEqual((repo / '.git/index').read_bytes(), before[1])
+        self.assertEqual((repo / '.syncwheel/manifest.json').stat().st_mode & 0o777, 0o664)
+
+    def test_local_declaration_refuses_control_intents_before_startup_recovery(self):
+        repo, source, module, _ = self.declaration_fixture('declaration-pending-control')
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        events = module.load_ledger_events(repo)
+        refs = self.git(repo, 'show-ref').stdout
+        argv = ['syncwheel', 'stack', 'create', 'pending-control', source, '--repo', str(repo), '--preserve-lanes']
+        with mock.patch('sys.argv', argv), mock.patch.object(module, 'pending_control_manifest_intents', return_value=[{'operation_id': 'foreign'}]), mock.patch.object(module, 'recover_incomplete_control_manifest_persistence', side_effect=AssertionError('startup recovery forbidden')):
+            self.assertEqual(module.main(), 2)
+        self.assertEqual((repo / '.syncwheel/manifest.json').read_bytes(), before[0])
+        self.assertEqual((repo / '.git/index').read_bytes(), before[1])
+        self.assertEqual(module.load_ledger_events(repo), events)
+        self.assertEqual(self.git(repo, 'show-ref').stdout, refs)
 
     def test_disabled_coordination_draft_creation_stays_local(self):
         origin = self.create_remote('disabled-draft')

@@ -36783,6 +36783,10 @@ def recover_control_manifest_before_command(args):
     """Run FC4 recovery before an entrypoint can require its manifest source."""
     if not hasattr(args, 'repo') or bool(getattr(args, 'dry_run', False)):
         return None
+    if args.func == command_stack_create and bool(getattr(args, 'preserve_lanes', False)):
+        # The declaration checks pending intents under its metadata lock and
+        # refuses them. Startup must not recover another operation first.
+        return None
     if args.func == command_manifest_recover_control:
         # Only this command's fresh exact plan may authorize a quarantined
         # continuation. A preview remains read-only, including its ledger.
