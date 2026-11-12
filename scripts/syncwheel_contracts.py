@@ -24,3 +24,8 @@ RECONCILE_MODES = {'standard', 'resume'}
 GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
 
 GITHUB_PR_MERGE_CHECKS = {'all', 'none'}
+
+
+PROFILE_FILENAME = 'profile.local.json'
+
+ZERO_OBJECT_ID = '0' * 40

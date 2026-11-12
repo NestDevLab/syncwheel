@@ -32,6 +32,7 @@ py-modules = [
   "syncwheel_ledger",
   "syncwheel_coordination",
   "syncwheel_journal_workflow",
+  "syncwheel_replay",
 ]
 package-dir = {"" = "scripts"}
 

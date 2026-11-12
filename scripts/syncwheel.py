@@ -34,6 +34,41 @@ _MODULE_DIRECTORY = str(Path(__file__).resolve().parent)
 if _MODULE_DIRECTORY not in sys.path:
     sys.path.insert(0, _MODULE_DIRECTORY)
 
+from syncwheel_replay import (
+    ReplayEngine,
+    replay_hygiene_env,
+    requested_replay_mode,
+    integration_supports_plumbing,
+    require_nonempty_desk_stack_rebuild,
+    replay_step,
+    replay_exec_step,
+    replay_shell_step,
+    replay_step_render,
+    quoted,
+    quoted_with_env,
+    git_command_cwd,
+    shell_ref,
+    empty_replay_shell_error,
+    merge_tree_conflict_paths,
+    replay_conflict_retry_command,
+    require_replay_success,
+    replay_target,
+    bind_ephemeral_worktree,
+    syncwheel_timestamp,
+    backup_branch_name,
+    EPHEMERAL_WORKTREE_PLACEHOLDER,
+    EMPTY_REPLAY_MESSAGE,
+)
+from syncwheel_manifest import (
+    stack_integration_base_commits,
+    bound_merge_stack_resolution_commits,
+    stack_integration_only_commits,
+    stack_integration_commits,
+    stack_delivery_identity,
+    stack_map,
+)
+from syncwheel_contracts import PROFILE_FILENAME, ZERO_OBJECT_ID
+
 from syncwheel_journal_workflow import JournalWorkflow
 
 import syncwheel_journal as _journal
@@ -204,7 +239,6 @@ ENV_TEST_CONTROL_MANIFEST_SIGKILL = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL'
 ENV_TEST_CONTROL_MANIFEST_PAUSE = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_PAUSE'
 ENV_TEST_CONTROL_MANIFEST_READY = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_READY'
 ENV_TEST_CONTROL_MANIFEST_RELEASE = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_RELEASE'
-PROFILE_FILENAME = 'profile.local.json'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 MANIFEST_VERSION_LEGACY = 1
 COORDINATION_STATE_FILE = '.syncwheel/coordination-state.json'
@@ -331,7 +365,6 @@ GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
     'registration_mismatch',
     'ledger_pending',
 })
-ZERO_OBJECT_ID = '0' * 40
 _REGISTRY_EXPECTED_DIGEST_UNSET = object()
 DERIVED_PROJECTION_TRAILER = 'syncwheel-derived-projection'
 DERIVED_PATHS_TRAILER = 'syncwheel-derived-paths'
@@ -470,17 +503,6 @@ def git(repo_root, *args, check=True, input_text=None, env=None):
     return run(['git', *args], cwd=repo_root, check=check, input_text=input_text, env=env)
 
 
-def git_command_cwd(default_cwd, command):
-    if not command or command[0] != 'git':
-        return Path(default_cwd)
-    index = 1
-    while index < len(command):
-        if command[index] == '-C' and index + 1 < len(command):
-            return Path(command[index + 1])
-        index += 1
-    return Path(default_cwd)
-
-
 def git_command_creates_commit(command):
     return bool(command and command[0] == 'git' and any(part in COMMIT_CREATING_GIT_ACTIONS for part in command[1:]))
 
@@ -544,20 +566,10 @@ def commit_identity_env(repo_root, commit):
     }
 
 
-def replay_hygiene_env():
-    return {
-        'GIT_CONFIG_COUNT': '2',
-        'GIT_CONFIG_KEY_0': 'rerere.enabled',
-        'GIT_CONFIG_VALUE_0': 'false',
-        'GIT_CONFIG_KEY_1': 'commit.gpgsign',
-        'GIT_CONFIG_VALUE_1': 'false',
-    }
-
-
 def replay_commit_env(repo_root, commit):
-    env = replay_hygiene_env()
-    env.update(commit_identity_env(repo_root, commit))
-    return env
+    return _replay_engine(repo_root).replay_commit_env(
+        commit,
+    )
 
 
 def control_manifest_commit_env(repo_root, parent, identity_version):
@@ -4085,18 +4097,10 @@ def manifest_policy_from_file(manifest_path):
     return tracking, worktree_root
 
 
-def syncwheel_timestamp():
-    return datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-
-
-def backup_branch_name(branch, timestamp):
-    return f'backup/{branch}-before-syncwheel-{timestamp}'
-
-
 def backup_branch_command(repo_root, branch, timestamp):
-    if not branch_exists(repo_root, branch):
-        return None
-    return ['git', 'branch', backup_branch_name(branch, timestamp), branch]
+    return _replay_engine(repo_root).backup_branch_command(
+        branch, timestamp,
+    )
 
 
 def ensure_in_place_target(
@@ -4178,22 +4182,6 @@ def save_manifest(path, manifest):
             temporary_path.unlink(missing_ok=True)
 
 
-def stack_integration_base_commits(stack):
-    """Return the source or resolved commits that materialize a stack on integration.
-
-    Source commits remain authoritative for rebuilding the stack branch. A resolved
-    integration projection can be recorded separately after conflict resolution so
-    validation never asks Syncwheel to rewrite that source branch with integration
-    commits.
-    """
-    return list(stack.get('integration_commits', stack['commits']))
-
-
-def bound_merge_stack_resolution_commits(stack):
-    """Only input-bound replacements participate in merge-stack replay."""
-    return stack_integration_base_commits(stack) if stack.get('integration_resolution') else None
-
-
 def merge_stack_resolution_commits(repo_root, stack, stack_ref):
     """A reviewed integration replacement never rewrites the source branch."""
     resolved = bound_merge_stack_resolution_commits(stack)
@@ -4206,35 +4194,6 @@ def merge_stack_resolution_commits(repo_root, stack, stack_ref):
             'run syncwheel int rebuild --replay-mode desk --reason "review changed source"'
         )
     return resolved
-
-
-def stack_integration_only_commits(stack):
-    """Return commits owned by a stack only in its integration projection."""
-    return list(stack.get('integration_only_commits') or [])
-
-
-def stack_integration_commits(stack):
-    """Return every commit owned by a stack in the integration projection."""
-    return list(dict.fromkeys([
-        *stack_integration_base_commits(stack),
-        *stack_integration_only_commits(stack),
-    ]))
-
-
-def stack_delivery_identity(stack):
-    """Return fields that determine which product a stack revision delivers."""
-    return {
-        'branch': stack.get('branch'),
-        'base': stack.get('base'),
-        'state': stack.get('state', 'published'),
-        'target_remote': stack.get('target_remote'),
-        'target_branch': stack.get('target_branch'),
-        'integration_branch': stack.get('integration_branch'),
-        'depends_on': list(stack.get('depends_on') or []),
-        'commits': list(stack.get('commits') or []),
-        'integration_commits': stack_integration_base_commits(stack),
-        'integration_only_commits': stack_integration_only_commits(stack),
-    }
 
 
 def external_ledger_root(manifest_path):
@@ -7773,10 +7732,6 @@ def ref_tip(repo_root, ref):
     if result.returncode != 0:
         return None
     return result.stdout.strip()
-
-
-def stack_map(manifest):
-    return {stack['id']: stack for stack in manifest.get('stacks', [])}
 
 
 def channel_ids_referencing_stack(manifest, stack_id):
@@ -13624,71 +13579,15 @@ def coordination_ref_is_safe_successor(repo_root, config, ref, remote_tip, candi
 
 
 def deterministic_stack_replay_tip(repo_root, base, commits):
-    """Return the exact tip produced by replaying commits onto base, or None."""
-    projection = deterministic_stack_projection(repo_root, base, commits)
-    return projection.get('tip') if projection['status'] == 'projected' else None
+    return _replay_engine(repo_root).deterministic_stack_replay_tip(
+        base, commits,
+    )
 
 
 def deterministic_stack_projection(repo_root, base, commits):
-    """Construct a stack projection entirely in the object database.
-
-    The detailed status lets callers distinguish an empty projection from a
-    conflicting one without falling back to a temporary worktree.
-    """
-    head = base
-    for declared_commit in commits:
-        commit = commit_full_sha(repo_root, declared_commit)
-        if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) > 2:
-            return {'status': 'unsupported', 'commit': commit, 'base': head,
-                    'detail': 'merge commit replay would rewrite its ancestry'}
-        merge = git(
-            repo_root,
-            'merge-tree',
-            '--write-tree',
-            f'--merge-base={commit}^',
-            head,
-            commit,
-            check=False,
-        )
-        if merge.returncode != 0:
-            detail = (merge.stderr.strip() or merge.stdout.strip())[:2000]
-            named = git(
-                repo_root,
-                'merge-tree',
-                '--write-tree',
-                '--name-only',
-                '-z',
-                '--no-messages',
-                f'--merge-base={commit}^',
-                head,
-                commit,
-                check=False,
-            )
-            paths = [
-                path for path in named.stdout.split('\0')
-                if path and not re.fullmatch(r'[0-9a-f]{40,64}', path)
-            ]
-            return {
-                'status': 'conflict',
-                'commit': commit,
-                'base': head,
-                'paths': paths,
-                'detail': detail,
-            }
-        tree = merge.stdout.strip()
-        if not tree or tree == ref_tree(repo_root, head):
-            return {'status': 'empty', 'commit': commit, 'base': head}
-        head = git(
-            repo_root,
-            'commit-tree',
-            tree,
-            '-p',
-            head,
-            '-m',
-            replay_commit_message(repo_root, commit),
-            env=replay_commit_env(repo_root, commit),
-        ).stdout.strip()
-    return {'status': 'projected', 'tip': head, 'tree': ref_tree(repo_root, head)}
+    return _replay_engine(repo_root).deterministic_stack_projection(
+        base, commits,
+    )
 
 
 def coordination_stack_ref_is_exact_rebase(
@@ -15989,40 +15888,14 @@ def resolve_int_rebuild_location(repo_root, manifest, args):
     ), False
 
 
-EPHEMERAL_WORKTREE_PLACEHOLDER = '<syncwheel-ephemeral-worktree>'
-EMPTY_REPLAY_MESSAGE = (
-    'The previous cherry-pick is now empty, possibly due to conflict resolution.\n'
-    'If you wish to commit it anyway, use:\n\n'
-    '    git commit --allow-empty\n\n'
-    "Otherwise, please use 'git cherry-pick --skip'"
-)
-
-
 def git_supports_write_tree(repo_root):
-    """Detect whether this Git can run ``merge-tree --write-tree``."""
-    result = git(repo_root, '--version', check=False)
-    if result.returncode != 0:
-        return False
-    parts = result.stdout.strip().split()
-    if len(parts) < 3 or parts[0] != 'git' or parts[1] != 'version':
-        return False
-    version_parts = parts[2].split('.')
-    try:
-        major, minor = (int(part) for part in version_parts[:2])
-    except (TypeError, ValueError):
-        return False
-    return (major, minor) >= (2, 38)
+    return _replay_engine(repo_root).git_supports_write_tree()
 
 
 def configured_replay_mode(repo_root, manifest):
-    """Return the configured default and where it came from, most specific first."""
-    profile_mode = load_repo_profile(repo_root).get('replay_mode')
-    if profile_mode is not None:
-        return normalize_replay_mode(profile_mode, f'{PROFILE_FILENAME} replay_mode'), 'profile'
-    manifest_mode = ((manifest or {}).get('defaults') or {}).get('replay_mode')
-    if manifest_mode is not None:
-        return normalize_replay_mode(manifest_mode, 'manifest defaults.replay_mode'), 'manifest'
-    return 'auto', 'builtin'
+    return _replay_engine(repo_root).configured_replay_mode(
+        manifest,
+    )
 
 
 def auto_replay_mode(
@@ -16033,15 +15906,9 @@ def auto_replay_mode(
     explicit_worktree=False,
     plumbing_supported=True,
 ):
-    """Pick the cheapest mode that applies. Unavailability falls back, never fails."""
-    _worktree, in_place = location
-    if in_place:
-        return 'in-place'
-    if explicit_worktree or find_worktree_for_branch(repo_root, branch):
-        return 'desk'
-    if plumbing_supported and git_supports_write_tree(repo_root):
-        return 'plumbing'
-    return 'ephemeral'
+    return _replay_engine(repo_root).auto_replay_mode(
+        branch, location, explicit_worktree=explicit_worktree, plumbing_supported=plumbing_supported,
+    )
 
 
 def select_replay_mode(
@@ -16053,78 +15920,14 @@ def select_replay_mode(
     *,
     plumbing_supported=True,
 ):
-    """Four-tier selection: command flags, repo profile, manifest default, auto."""
-    mode = requested_replay_mode(args)
-    explicit_worktree = bool(getattr(args, 'worktree', None))
-    if mode is None and (explicit_worktree or getattr(args, 'in_place', False)):
-        # --worktree and --in-place are command flags too, so they outrank a
-        # configured default and let auto read the location they asked for.
-        mode = 'auto'
-    if mode is None:
-        mode = configured_replay_mode(repo_root, manifest)[0]
-    if mode == 'auto':
-        mode = auto_replay_mode(
-            repo_root,
-            branch,
-            location,
-            explicit_worktree=explicit_worktree,
-            plumbing_supported=plumbing_supported,
-        )
-    return resolve_replay_mode(repo_root, location, mode)
-
-
-def integration_supports_plumbing(manifest):
-    return manifest['integration'].get('strategy', 'cherry-pick') == 'cherry-pick'
+    return _replay_engine(repo_root).select_replay_mode(
+        manifest, args, branch, location, plumbing_supported=plumbing_supported,
+    )
 
 
 def resolve_replay_mode(repo_root, location, requested_mode):
-    """Map an already-resolved replay location to an available execution mode."""
-    if requested_mode not in REPLAY_MODE_CHOICES:
-        raise SyncwheelError(f'unsupported replay mode: {requested_mode}')
-    if requested_mode == 'auto':
-        raise SyncwheelError('replay mode auto must be resolved before this point')
-    if requested_mode == 'plumbing':
-        if git_supports_write_tree(repo_root):
-            return 'plumbing', None
-        return 'ephemeral', None
-    if requested_mode == 'ephemeral':
-        return 'ephemeral', None
-
-    worktree, in_place = location
-    if requested_mode == 'in-place':
-        if not in_place:
-            raise SyncwheelError('replay mode in-place requires the target branch to be checked out')
-        return 'in-place', None
-    if requested_mode == 'desk':
-        if in_place:
-            raise SyncwheelError('replay mode desk requires a separate worktree')
-        return 'desk', worktree
-    if in_place:
-        return 'in-place', None
-    return 'desk', worktree
-
-
-def requested_replay_mode(args):
-    """Read and validate the explicit --replay-mode flag; None when unset."""
-    mode = getattr(args, 'replay_mode', None)
-    if mode is None:
-        return None
-    normalize_replay_mode(mode, '--replay-mode')
-    if mode in ('ephemeral', 'plumbing'):
-        if getattr(args, 'in_place', False):
-            raise SyncwheelError(f'use either --replay-mode {mode} or --in-place, not both')
-        if getattr(args, 'worktree', None):
-            raise SyncwheelError(f'use either --replay-mode {mode} or --worktree, not both')
-    return mode
-
-
-def require_nonempty_desk_stack_rebuild(stack, mode):
-    """Reject desk rebuilds before an empty stack can materialize a branch."""
-    if mode != 'desk' or stack['commits']:
-        return
-    raise SyncwheelError(
-        f"stack {stack['id']!r} has no declared commits; cannot rebuild it with replay mode desk. "
-        'Author on the integration branch, then capture the integration commit(s) into the stack.'
+    return _replay_engine(repo_root).resolve_replay_mode(
+        location, requested_mode,
     )
 
 
@@ -16817,15 +16620,8 @@ def validate_manifest(repo_root, manifest):
 
 
 def planned_replay_mode(repo_root, manifest, branch, plumbing_supported=True):
-    """Name the mode a rebuild of ``branch`` would take, for plan output."""
-    mode = configured_replay_mode(repo_root, manifest)[0]
-    if mode != 'auto':
-        return mode
-    return auto_replay_mode(
-        repo_root,
-        branch,
-        (None, get_current_branch(repo_root) == branch),
-        plumbing_supported=plumbing_supported,
+    return _replay_engine(repo_root).planned_replay_mode(
+        manifest, branch, plumbing_supported,
     )
 
 
@@ -17321,15 +17117,6 @@ def print_integration_commit_diagnostics(diagnostics):
             print(f'      - {command}')
 
 
-def quoted(parts):
-    return ' '.join(shlex.quote(part) for part in parts)
-
-
-def quoted_with_env(env, argv):
-    assignments = [] if not env else [f'{key}={shlex.quote(value)}' for key, value in env.items()]
-    return ' '.join([*assignments, quoted(argv)])
-
-
 def command_argv_env(command):
     if isinstance(command, tuple):
         return command
@@ -17337,642 +17124,81 @@ def command_argv_env(command):
 
 
 def worktree_matches_branch(repo_root, branch, worktree):
-    if worktree is None:
-        return False
-    found = find_worktree_for_branch(repo_root, branch)
-    if not found:
-        return False
-    return found.resolve() == Path(worktree).resolve()
-
-
-def replay_step(kind, argv=None, env=None, render=None):
-    return {
-        'kind': kind,
-        'argv': argv,
-        'env': env,
-        'render': render,
-    }
-
-
-def replay_exec_step(argv, env=None, stack_id=None):
-    step = replay_step('exec', argv=argv, env=env, render=quoted(argv))
-    if stack_id is not None:
-        step['stack_id'] = stack_id
-    return step
-
-
-def replay_shell_step(render, **details):
-    step = replay_step('shell', render=render)
-    step.update(details)
-    return step
-
-
-def replay_step_render(step):
-    render = step.get('render')
-    if step['kind'] == 'exec':
-        render = render if render is not None else quoted(step['argv'])
-        env = step.get('env')
-        if not env:
-            return render
-        assignments = [f'{key}={shlex.quote(value)}' for key, value in env.items()]
-        return ' '.join([*assignments, render])
-    return render or ''
+    return _replay_engine(repo_root).worktree_matches_branch(
+        branch, worktree,
+    )
 
 
 def replay_commit_message(repo_root, commit):
-    return git(repo_root, 'show', '-s', '--format=%B', commit).stdout.rstrip('\n')
+    return _replay_engine(repo_root).replay_commit_message(
+        commit,
+    )
 
 
 def replay_cherry_pick_args(repo_root, commit, base, *, projection):
-    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()[1:]
-    if len(parents) <= 1:
-        return ['cherry-pick', commit]
-    if not projection:
-        raise SyncwheelError(
-            f'merge commit {commit} cannot be rebuilt by cherry-pick without losing its '
-            'fast-forward ancestry; preserve the declared merge tip and publish it directly'
-        )
-    contained = [index for index, parent in enumerate(parents, 1)
-                 if branch_contains(repo_root, base, parent)]
-    if len(contained) != 1:
-        raise SyncwheelError(
-            f'merge commit {commit} has no unique parent contained in stack base {base}; '
-            'cannot project its tree safely'
-        )
-    return ['cherry-pick', '-m', str(contained[0]), commit]
-
-
-def shell_ref(reference):
-    if reference.startswith('$'):
-        return f'"{reference}"'
-    return shlex.quote(reference)
-
-
-def empty_replay_shell_error():
-    lines = []
-    for line in EMPTY_REPLAY_MESSAGE.splitlines():
-        lines.append(f"  printf '%s\\n' {shlex.quote(line)} >&2")
-    return lines
+    return _replay_engine(repo_root).replay_cherry_pick_args(
+        commit, base, projection=projection,
+    )
 
 
 def plumbing_replay_script(repo_root, branch, base, commits, expected_tip=None):
-    """Render an object-only replay as one POSIX shell transaction."""
-    lines = ['set -e']
-    head = base
-    for declared_commit in commits:
-        commit = commit_full_sha(repo_root, declared_commit)
-        replay_cherry_pick_args(repo_root, commit, base, projection=False)
-        parent = shell_ref(head)
-        merge_tree = ' '.join([
-            quoted(['git', 'merge-tree', '--write-tree', f'--merge-base={commit}^']),
-            parent,
-            shlex.quote(commit),
-        ])
-        lines.append(f'T=$({merge_tree}) || {{')
-        lines.append('  status=$?')
-        lines.append('  printf \'%s\\n\' "$T" >&2')
-        lines.append('  exit "$status"')
-        lines.append('}')
-        lines.append(f'if test "$T" = "$(git rev-parse {parent}^{{tree}})"; then')
-        lines.extend(empty_replay_shell_error())
-        lines.append('  exit 1')
-        lines.append('fi')
-        commit_tree = quoted_with_env(replay_commit_env(repo_root, commit), ['git', 'commit-tree'])
-        lines.append(
-            f'N=$({commit_tree} "$T" -p {parent} -m {shlex.quote(replay_commit_message(repo_root, commit))})'
-        )
-        head = '$N'
-    update = f'git update-ref refs/heads/{branch} {shell_ref(head)}'
-    if expected_tip is not None:
-        update += f' {shell_ref(expected_tip)}'
-    lines.append(update)
-    return '\n'.join(lines)
-
-
-def merge_tree_conflict_paths(output):
-    """Extract conflict paths from the documented human-readable merge-tree output."""
-    paths = []
-    for line in output.splitlines():
-        metadata, separator, path = line.partition('\t')
-        fields = metadata.split()
-        if separator and len(fields) == 3 and fields[-1] in {'1', '2', '3'}:
-            paths.append(path)
-        marker = 'Merge conflict in '
-        if marker in line:
-            paths.append(line.split(marker, 1)[1].rstrip('.'))
-    return list(dict.fromkeys(paths))
-
-
-def replay_conflict_retry_command(target):
-    if target['kind'] == 'stack':
-        return f"syncwheel stack rebuild {target['stack_id']} --replay-mode desk"
-    return (
-        'syncwheel int rebuild --replay-mode desk '
-        '--reason "resolve reviewed integration replay conflict"'
+    return _replay_engine(repo_root).plumbing_replay_script(
+        branch, base, commits, expected_tip,
     )
-
-
-def require_replay_success(result):
-    """Turn a structured plumbing conflict into the explicit CLI escalation."""
-    if result['status'] != 'conflict':
-        return
-    paths = result['conflict']['paths']
-    print(f"replay mode: {result['mode']}", file=sys.stderr)
-    print('replay conflict paths:', file=sys.stderr)
-    for path in paths:
-        print(f'  {path}', file=sys.stderr)
-    print('retry with a desk worktree:', file=sys.stderr)
-    print(f"  {replay_conflict_retry_command(result['target'])}", file=sys.stderr)
-    raise SyncwheelError('plumbing replay stopped before updating the target ref')
 
 
 def ensure_plumbing_target_is_unchecked_out(repo_root, branch):
-    worktree = find_worktree_for_branch(repo_root, branch)
-    if worktree:
-        raise SyncwheelError(
-            f"replay mode plumbing requires target branch {branch!r} to be unchecked out; "
-            'use --replay-mode ephemeral or desk'
-        )
-
-
-def replay_target(
-    stack=None,
-    integration=None,
-    worktree=None,
-    return_tree=False,
-    skip_contained=False,
-    stack_ref_overrides=None,
-    expected_tip=None,
-):
-    # Projections skip contained commits; rebuilds replay their declared history.
-    if stack is not None:
-        return {
-            'kind': 'stack',
-            'stack_id': stack['id'],
-            'stack': stack,
-            'worktree': worktree,
-            'return_tree': return_tree,
-            'skip_contained': skip_contained,
-        }
-    return {
-        'kind': 'integration',
-        'integration': integration,
-        'worktree': worktree,
-        'return_tree': return_tree,
-        'skip_contained': skip_contained,
-        'stack_ref_overrides': stack_ref_overrides or {},
-        'expected_tip': expected_tip,
-    }
+    return _replay_engine(repo_root).ensure_plumbing_target_is_unchecked_out(
+        branch,
+    )
 
 
 def replay_plan(repo_root, manifest, target, mode):
-    """Build one replay plan without executing it."""
-    if mode not in ('desk', 'in-place', 'ephemeral', 'plumbing'):
-        raise SyncwheelError(f'unsupported replay mode: {mode}')
-
-    projection = target.get('return_tree', False)
-    worktree = target.get('worktree')
-    if mode == 'ephemeral':
-        worktree = EPHEMERAL_WORKTREE_PLACEHOLDER
-    if target['kind'] == 'stack':
-        stack = target['stack']
-        branch = stack['branch']
-        base = stack['base']
-        replay_kind = 'stack'
-        commits = stack['commits']
-        integration = None
-    elif target['kind'] == 'integration':
-        integration = target['integration']
-        branch = integration['branch']
-        base = integration['base']
-        replay_kind = 'integration'
-        commits = None
-    else:
-        raise SyncwheelError(f"unsupported replay target: {target['kind']}")
-
-    plan_target = {
-        'kind': replay_kind,
-        'stack_id': target.get('stack_id'),
-        'branch': branch,
-        'base': base,
-        'worktree': str(worktree) if worktree is not None else None,
-        'return_tree': projection,
-        'skip_contained': target.get('skip_contained', False),
-        'expected_tip': target.get('expected_tip'),
-        'source_reset_lease': target.get('source_reset_lease'),
-        'reset_destination_lease': target.get('reset_destination_lease'),
-        'emit_output': not projection,
-    }
-    steps = []
-    stacks = {}
-    if projection:
-        if mode != 'desk' or worktree is None:
-            raise SyncwheelError('tree projection requires a desk worktree')
-        steps.append(replay_exec_step([
-            'git', 'worktree', 'add', '--detach', '--quiet', str(worktree), base,
-        ]))
-    else:
-        timestamp = syncwheel_timestamp()
-        steps.append(replay_exec_step(['git', 'fetch', '--all', '--prune']))
-        backup = backup_branch_command(repo_root, branch, timestamp)
-        if backup:
-            steps.append(replay_exec_step(backup))
-        if mode == 'plumbing':
-            pass
-        elif mode == 'in-place':
-            steps.append(replay_exec_step(['git', 'reset', '--hard', base]))
-        elif mode == 'ephemeral':
-            steps.append(replay_exec_step([
-                'git', 'worktree', 'add', '--detach', '--quiet', str(worktree), base,
-            ]))
-        elif worktree_matches_branch(repo_root, branch, worktree):
-            steps.append(replay_exec_step(['git', '-C', str(worktree), 'reset', '--hard', base]))
-        elif worktree is not None:
-            expected_tip = ref_tip(repo_root, branch) or ZERO_OBJECT_ID
-            steps.append(replay_exec_step([
-                'git', 'update-ref', f'refs/heads/{branch}', base, expected_tip,
-            ]))
-            steps.append(replay_exec_step(['git', 'worktree', 'add', str(worktree), branch]))
-        else:
-            raise SyncwheelError('desk replay requires a worktree path')
-
-    if mode == 'plumbing':
-        if replay_kind == 'stack':
-            plumbing_commits = commits
-        elif integration.get('strategy', 'cherry-pick') == 'cherry-pick':
-            stacks_by_id = stack_map(manifest)
-            plumbing_commits = [
-                commit
-                for stack_id in integration['stacks']
-                for commit in stack_integration_base_commits(stacks_by_id[stack_id])
-            ] + [
-                commit
-                for stack_id in integration['stacks']
-                for commit in stack_integration_only_commits(stacks_by_id[stack_id])
-            ]
-        else:
-            raise SyncwheelError('replay mode plumbing supports cherry-pick integration only')
-        if target.get('skip_contained'):
-            plumbing_commits = [
-                commit for commit in plumbing_commits
-                if not branch_contains(repo_root, base, commit)
-            ]
-        steps.append(replay_shell_step(
-            plumbing_replay_script(
-                repo_root,
-                branch,
-                base,
-                plumbing_commits,
-                expected_tip=target.get('expected_tip'),
-            ),
-            plumbing=True,
-        ))
-        return {
-            'mode': mode,
-            'target': plan_target,
-            'steps': steps,
-            'fallback_from': None,
-        }
-
-    prefix = ['git'] if mode == 'in-place' else ['git', '-C', str(worktree)]
-    if replay_kind == 'stack':
-        for commit in commits:
-            steps.append(replay_exec_step(
-                [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
-                replay_commit_env(repo_root, commit),
-            ))
-    elif integration.get('strategy', 'cherry-pick') == 'cherry-pick':
-        stacks_by_id = stacks = stack_map(manifest)
-        for stack_id in integration['stacks']:
-            for commit in stack_integration_base_commits(stacks_by_id[stack_id]):
-                steps.append(replay_exec_step(
-                    [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
-                    replay_commit_env(repo_root, commit),
-                    stack_id=stack_id,
-                ))
-        for stack_id in integration['stacks']:
-            for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
-                steps.append(replay_exec_step(
-                    [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
-                    replay_commit_env(repo_root, commit),
-                    stack_id=stack_id,
-                ))
-    elif integration.get('strategy') == 'merge-stacks':
-        stacks_by_id = stacks = stack_map(manifest)
-        stack_ref_overrides = target.get('stack_ref_overrides') or {}
-        for stack_id in integration['stacks']:
-            stack = stacks_by_id[stack_id]
-            stack_ref = stack_ref_overrides.get(stack_id, stack['branch'])
-            resolved = merge_stack_resolution_commits(repo_root, stack, stack_ref)
-            if resolved is not None:
-                for commit in resolved:
-                    steps.append(replay_exec_step(
-                        [*prefix, *replay_cherry_pick_args(repo_root, commit, base, projection=projection)],
-                        replay_commit_env(repo_root, commit), stack_id=stack_id,
-                    ))
-                continue
-            steps.append(replay_exec_step(
-                [
-                    *prefix,
-                    'merge',
-                    '--no-ff',
-                    stack_ref,
-                    '-m',
-                    f"Merge stack '{stack_id}' into {branch}",
-                ],
-                replay_commit_env(repo_root, stack_ref),
-                stack_id=stack_id,
-            ))
-        for stack_id in integration['stacks']:
-            for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
-                step = replay_exec_step(
-                    [*prefix, 'cherry-pick', commit],
-                    replay_commit_env(repo_root, commit), stack_id=stack_id,
-                )
-                step['integration_only'] = True
-                steps.append(step)
-    else:
-        raise SyncwheelError(f"unsupported integration strategy: {integration.get('strategy')}")
-
-    if mode == 'ephemeral':
-        update_ref = [
-            'git', '-C', str(worktree), 'update-ref', f'refs/heads/{branch}', 'HEAD',
-        ]
-        if target.get('expected_tip') is not None:
-            update_ref.append(target['expected_tip'])
-        steps.append(replay_exec_step(update_ref))
-
-    return {
-        'mode': mode,
-        'target': plan_target,
-        'steps': steps,
-        'fallback_from': None,
-        'stacks': stacks,
-    }
-
-
-def bind_ephemeral_worktree(plan, worktree):
-    """Replace the dry-run-only ephemeral path with one temporary worktree."""
-    worktree = str(worktree)
-    target = dict(plan['target'])
-    target['worktree'] = worktree
-    steps = []
-    for step in plan['steps']:
-        bound = dict(step)
-        if step['kind'] == 'exec':
-            bound['argv'] = [
-                worktree if value == EPHEMERAL_WORKTREE_PLACEHOLDER else value
-                for value in step['argv']
-            ]
-            bound['render'] = quoted(bound['argv'])
-        steps.append(bound)
-    return {**plan, 'target': target, 'steps': steps}
+    return _replay_engine(repo_root).replay_plan(
+        manifest, target, mode,
+    )
 
 
 def replay_stacks_touching(repo_root, steps, stack_id, paths):
-    """Other stacks whose already replayed commits change any of ``paths``."""
-    touching = []
-    for step in steps:
-        other = step.get('stack_id')
-        if other in (None, stack_id) or other in touching or 'cherry-pick' not in step['argv']:
-            continue
-        if set(commit_changed_files(repo_root, step['argv'][-1])) & set(paths):
-            touching.append(other)
-    return touching
+    return _replay_engine(repo_root).replay_stacks_touching(
+        steps, stack_id, paths,
+    )
 
 
 def integration_replay_step_failure(repo_root, plan, index, exc):
-    target = plan['target']
-    step = plan['steps'][index]
-    stack_id = step['stack_id']
-    label = 'integration projection' if target.get('return_tree') else 'integration replay'
-    base = target['base']
-    argv = step['argv']
-    commit = argv[-1]
-    short = commit_short_sha(repo_root, commit)
-    if stack_content_absorbed_at(repo_root, plan['stacks'][stack_id], base):
-        return SyncwheelError(
-            f'{label}: stack {stack_id} is already contained in {base} (stopped at '
-            f'commit {short}); close it with syncwheel stack close {stack_id} '
-            '--reason absorbed, then retry'
-        )
-    command_cwd = git_command_cwd(repo_root, argv)
-    merge_base = f"{commit}^{argv[argv.index('-m') + 1] if '-m' in argv else ''}"
-    onto_head = git(
-        command_cwd, 'merge-tree', '--write-tree', f'--merge-base={merge_base}',
-        'HEAD', commit, check=False,
-    )
-    if onto_head.returncode == 1:
-        paths = merge_tree_conflict_paths(onto_head.stdout)
-    elif onto_head.returncode == 0 and onto_head.stdout.split()[:1] == [ref_tree(command_cwd, 'HEAD')]:
-        paths = commit_changed_files(repo_root, commit)
-    else:
-        paths = []
-    others = replay_stacks_touching(repo_root, plan['steps'][:index], stack_id, paths)
-    detail = (
-        f"stack(s) {', '.join(others)} already changed {', '.join(paths)}" if others
-        else f"conflict in {', '.join(paths)}" if onto_head.returncode == 1 and paths
-        else (str(exc).splitlines() or ['replay failed'])[0]
-    )
-    return SyncwheelError(
-        f'{label}: stack {stack_id} commit {short} does not replay onto {base} '
-        f'({detail})\nRetry with a desk worktree:\n  {replay_conflict_retry_command(target)}'
+    return _replay_engine(repo_root).integration_replay_step_failure(
+        plan, index, exc,
     )
 
 
 def execute_replay_steps(repo_root, plan):
-    """Execute an already-materialized replay plan."""
-    target = plan['target']
-    branch = target['branch']
-    before_tip = ref_tip(repo_root, branch)
-    result = {
-        'status': 'applied',
-        'mode': plan['mode'],
-        'branch': branch,
-        'before_tip': before_tip,
-        'after_tip': before_tip,
-        'conflict': None,
-    }
-    cleanup_worktree = target['worktree'] if target.get('return_tree') else None
-    try:
-        for index, step in enumerate(plan['steps']):
-            if step['kind'] == 'exec':
-                argv = step['argv']
-                env = step['env']
-                if target.get('skip_contained') and 'cherry-pick' in argv:
-                    command_cwd = git_command_cwd(repo_root, argv)
-                    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', argv[-1]).stdout.split()[1:]
-                    if len(parents) > 1 and ref_tree(command_cwd, 'HEAD') == ref_tree(repo_root, argv[-1]):
-                        continue
-                    if branch_contains(command_cwd, 'HEAD', argv[-1]):
-                        continue
-                effective_argv = argv if env is not None else with_git_identity(repo_root, argv)
-                try:
-                    run(effective_argv, cwd=repo_root, env=env)
-                except SyncwheelError as exc:
-                    if not (
-                        target.get('skip_contained')
-                        and step.get('stack_id')
-                        and 'cherry-pick' in argv
-                    ):
-                        raise
-                    raise integration_replay_step_failure(
-                        repo_root, plan, index, exc
-                    ) from exc
-            elif step['kind'] == 'shell':
-                process_env = managed_process_env(step['env'])
-                result_shell = subprocess.run(
-                    step['render'],
-                    cwd=repo_root,
-                    shell=True,
-                    text=True,
-                    capture_output=True,
-                    env=process_env,
-                )
-                if result_shell.returncode != 0:
-                    output = result_shell.stdout + result_shell.stderr
-                    if step.get('plumbing'):
-                        paths = merge_tree_conflict_paths(output)
-                        if paths:
-                            result['status'] = 'conflict'
-                            result['conflict'] = {'paths': paths}
-                            result['target'] = target
-                            return result
-                    raise SyncwheelError(result_shell.stderr.strip() or result_shell.stdout.strip())
-            elif step['kind'] != 'note':
-                raise SyncwheelError(f"unsupported replay step: {step['kind']}")
-            if target['emit_output']:
-                render = replay_step_render(step)
-                if render:
-                    print(render)
-        if plan['mode'] == 'ephemeral':
-            reset_destination_lease = target.get('reset_destination_lease')
-            if reset_destination_lease is None:
-                target_worktree = find_worktree_for_branch(repo_root, branch)
-            else:
-                observed_reset_destination = checkout_reset_destination_lease(
-                    repo_root,
-                    branch,
-                    status_base=reset_destination_lease.get('status_base'),
-                    allowed_paths=reset_destination_lease.get('allowed_paths'),
-                    allowed_path_prefixes=reset_destination_lease.get(
-                        'allowed_path_prefixes'
-                    ),
-                )
-                if observed_reset_destination != reset_destination_lease:
-                    raise SyncwheelError(
-                        'integration reset destination changed before published replay reset; '
-                        'refusing to overwrite it'
-                    )
-                observed_path = observed_reset_destination['worktree_path']
-                target_worktree = Path(observed_path) if observed_path else None
-            source_reset_lease = target.get('source_reset_lease')
-            if target_worktree and source_reset_lease:
-                observed_source_lease = checkout_source_lease(
-                    repo_root,
-                    Path(repo_root) / source_reset_lease['manifest_path'],
-                )
-                if (
-                    observed_source_lease is None
-                    or observed_source_lease['reset_guard_digest']
-                    != source_reset_lease['reset_guard_digest']
-                ):
-                    raise SyncwheelError(
-                        'source checkout changed before published integration replay reset; '
-                        'refusing to overwrite it'
-                    )
-            if target_worktree:
-                run(['git', '-C', str(target_worktree), 'reset', '--hard', branch], cwd=repo_root)
-        if target.get('return_tree'):
-            result['commit'] = ref_tip(target['worktree'], 'HEAD')
-            result['tree'] = ref_tree(repo_root, result['commit'])
-        result['after_tip'] = ref_tip(repo_root, branch)
-        return result
-    finally:
-        if cleanup_worktree:
-            git(repo_root, 'worktree', 'remove', '--force', cleanup_worktree, check=False)
+    return _replay_engine(repo_root).execute_replay_steps(
+        plan,
+    )
 
 
 def execute_replay(repo_root, plan, apply):
-    """Apply a replay plan or render its dry-run transcript.
-
-    Dry-run output is an executable POSIX shell transcript. Non-plumbing
-    ``exec`` steps retain ``quoted(argv)`` exactly; plumbing uses a shell step
-    because its object IDs flow through command substitutions.
-    """
-    if not apply:
-        target = plan['target']
-        branch = target['branch']
-        before_tip = ref_tip(repo_root, branch)
-        result = {
-            'status': 'planned',
-            'mode': plan['mode'],
-            'branch': branch,
-            'before_tip': before_tip,
-            'after_tip': before_tip,
-            'conflict': None,
-        }
-        for step in plan['steps']:
-            render = replay_step_render(step)
-            if render:
-                print(render)
-        return result
-
-    if plan['mode'] == 'plumbing':
-        ensure_plumbing_target_is_unchecked_out(repo_root, plan['target']['branch'])
-
-    if plan['mode'] == 'ephemeral':
-        with tempfile.TemporaryDirectory(prefix='syncwheel-replay-') as tmp:
-            worktree = Path(tmp)
-            bound_plan = bind_ephemeral_worktree(plan, worktree)
-            try:
-                return execute_replay_steps(repo_root, bound_plan)
-            finally:
-                git(repo_root, 'worktree', 'remove', '--force', worktree, check=False)
-    return execute_replay_steps(repo_root, plan)
+    return _replay_engine(repo_root).execute_replay(
+        plan, apply,
+    )
 
 
 def materialize_stack_projection(repo_root, stack):
-    with tempfile.TemporaryDirectory(prefix='syncwheel-stack-projection-') as tmp:
-        plan = replay_plan(
-            repo_root,
-            None,
-            replay_target(
-                stack=stack,
-                worktree=Path(tmp),
-                return_tree=True,
-                skip_contained=True,
-            ),
-            'desk',
-        )
-        return execute_replay(repo_root, plan, True)['tree']
+    return _replay_engine(repo_root).materialize_stack_projection(
+        stack,
+    )
 
 
 def materialize_integration_replay(repo_root, manifest, stack_ref_overrides=None):
-    """Build the ordinary replay commit without moving refs or the source index.
-
-    Keep the detached commit as well as its tree: ancestry reconciliation needs
-    the actual replay graph before deciding whether to move integration.
-    """
-    with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
-        plan = replay_plan(
-            repo_root,
-            manifest,
-            replay_target(
-                integration=manifest['integration'],
-                worktree=Path(tmp),
-                return_tree=True,
-                skip_contained=True,
-                stack_ref_overrides=stack_ref_overrides,
-            ),
-            'desk',
-        )
-        return execute_replay(repo_root, plan, True)['commit']
+    return _replay_engine(repo_root).materialize_integration_replay(
+        manifest, stack_ref_overrides,
+    )
 
 
 def materialize_integration_projection(repo_root, manifest, stack_ref_overrides=None):
-    commit = materialize_integration_replay(repo_root, manifest, stack_ref_overrides)
-    return ref_tree(repo_root, commit)
+    return _replay_engine(repo_root).materialize_integration_projection(
+        manifest, stack_ref_overrides,
+    )
 
 
 def checkout_path_observation(repo_root, relative):
@@ -33637,6 +32863,78 @@ add_git_args = _cli.add_git_args
 add_reconcile_args = _cli.add_reconcile_args
 
 command_parser_nodes = _cli.command_parser_nodes
+
+
+class _ReplayRepository:
+    """Bind replay I/O and safety queries to current application operations."""
+
+    def __init__(self, root):
+        self.root = root
+
+    def git(self, repo_root, *args, **kwargs):
+        return git(repo_root, *args, **kwargs)
+
+    def run(self, command, **kwargs):
+        return run(command, **kwargs)
+
+    def shell(self, command, **kwargs):
+        return subprocess.run(command, **kwargs)
+
+    def commit_identity_env(self, repo_root, commit):
+        return commit_identity_env(repo_root, commit)
+
+    def commit_full_sha(self, repo_root, ref):
+        return commit_full_sha(repo_root, ref)
+
+    def commit_short_sha(self, repo_root, ref):
+        return commit_short_sha(repo_root, ref)
+
+    def branch_contains(self, repo_root, branch, commit):
+        return branch_contains(repo_root, branch, commit)
+
+    def branch_exists(self, repo_root, branch):
+        return branch_exists(repo_root, branch)
+
+    def ref_tip(self, repo_root, ref):
+        return ref_tip(repo_root, ref)
+
+    def ref_tree(self, repo_root, ref):
+        return ref_tree(repo_root, ref)
+
+    def commit_changed_files(self, repo_root, commit, limit=None):
+        return commit_changed_files(repo_root, commit, limit)
+
+    def get_current_branch(self, repo_root):
+        return get_current_branch(repo_root)
+
+    def load_repo_profile(self, repo_root):
+        return load_repo_profile(repo_root)
+
+    def find_worktree_for_branch(self, repo_root, branch):
+        return find_worktree_for_branch(repo_root, branch)
+
+    def with_git_identity(self, repo_root, command):
+        return with_git_identity(repo_root, command)
+
+    def managed_process_env(self, extra=None, authorize=True):
+        return managed_process_env(extra, authorize=authorize)
+
+    def merge_stack_resolution_commits(self, repo_root, stack, stack_ref):
+        return merge_stack_resolution_commits(repo_root, stack, stack_ref)
+
+    def stack_content_absorbed_at(self, repo_root, stack, tip):
+        return stack_content_absorbed_at(repo_root, stack, tip)
+
+    def checkout_reset_destination_lease(self, repo_root, branch, **kwargs):
+        return checkout_reset_destination_lease(repo_root, branch, **kwargs)
+
+    def checkout_source_lease(self, repo_root, manifest_path):
+        return checkout_source_lease(repo_root, manifest_path)
+
+
+def _replay_engine(repo_root):
+    repository = _ReplayRepository(repo_root)
+    return ReplayEngine(repository, repository, repository)
 
 
 if __name__ == '__main__':
