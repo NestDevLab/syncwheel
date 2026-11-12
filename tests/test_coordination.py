@@ -5291,6 +5291,61 @@ with module.coordination_publication_lock(Path(repo_path)):
             integration_before,
         )
 
+    def test_new_stack_push_refuses_an_existing_unmanaged_remote_branch(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'new-stack-owner')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        _, state_before = self.remote_state(origin)
+
+        outsider = self.clone(origin, 'outsider')
+        outsider_tip = self.commit_on_branch(outsider, 'pr/new-owned', 'outsider.txt')
+        self.git(outsider, 'push', 'origin', 'pr/new-owned')
+        self.git(repo, 'fetch', 'origin')
+
+        stack_tip = self.commit_on_branch(repo, 'scratch/new-owned', 'owned.txt')
+        self.git(repo, 'branch', '-f', 'pr/new-owned', stack_tip)
+        self.run_cli(
+            repo, 'stack', 'create', 'new-owned', stack_tip,
+            '--branch', 'pr/new-owned',
+        )
+        result = self.run_cli(repo, 'stack', 'push', 'new-owned', expected=2)
+
+        self.assertIn('refs/heads/pr/new-owned already exists on origin', result.stderr)
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/new-owned').stdout.split()[0],
+            outsider_tip,
+        )
+        self.assertEqual(
+            self.git(
+                repo, 'ls-remote', 'origin',
+                'refs/heads/syncwheel/claim/heads/pr/new-owned',
+            ).stdout,
+            '',
+        )
+        _, state_after = self.remote_state(origin)
+        self.assertEqual(state_after, state_before)
+
+    def test_new_stack_push_leases_an_absent_remote_branch_as_absent(self):
+        origin = self.create_remote()
+        repo = self.clone(origin, 'new-stack-absent')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+
+        stack_tip = self.commit_on_branch(repo, 'scratch/new-absent', 'absent.txt')
+        self.git(repo, 'branch', 'pr/new-absent', stack_tip)
+        self.run_cli(
+            repo, 'stack', 'create', 'new-absent', stack_tip,
+            '--branch', 'pr/new-absent',
+        )
+        result = self.run_cli(repo, 'stack', 'push', 'new-absent')
+
+        self.assertIn('--force-with-lease=refs/heads/pr/new-absent: ', result.stdout + ' ')
+        self.assertEqual(
+            self.git(repo, 'ls-remote', 'origin', 'refs/heads/pr/new-absent').stdout.split()[0],
+            stack_tip,
+        )
+
     def test_publish_allows_an_exact_stack_rebase_after_the_base_advances(self):
         origin = self.create_remote()
         repo = self.clone(origin, 'exact-stack-rebase')

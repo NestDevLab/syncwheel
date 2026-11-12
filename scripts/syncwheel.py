@@ -15705,6 +15705,34 @@ def coordination_remote_is_reachable(repo_root, remote):
     ).returncode == 0
 
 
+def require_new_managed_refs_absent(config, state, changed_refs, observed_refs):
+    """Refuse to take over a remote branch the published state never managed.
+
+    The publication lease is the observed tip, so without this check a branch
+    pushed outside coordination would be silently replaced by a new stack.
+    """
+    if not state:
+        return
+    managed = state.get('managed_refs') or {}
+    closed_tips = {
+        coordination_tombstone_ref(item): item.get('remote_tip')
+        for item in state.get('tombstones') or []
+        if isinstance(item, dict)
+    }
+    for ref in sorted(changed_refs):
+        observed = observed_refs.get(ref)
+        if ref in managed or not observed or observed == changed_refs[ref]:
+            continue
+        if closed_tips.get(ref) and closed_tips[ref] == observed:
+            continue
+        raise SyncwheelError(
+            f'{ref} already exists on {config["remote"]} at {observed} but is not '
+            'managed by the published coordination state; refusing to replace it. '
+            'Pick another branch for the new stack, or delete the remote branch '
+            'after confirming nobody owns it'
+        )
+
+
 def coordinated_publish_retry_hint(scope):
     remedy = coordination_scope_remedy(scope)
     if not remedy:
@@ -16552,6 +16580,9 @@ def coordinated_publish_cycle(
             source_ref: planned_observations.get(claim_ref)
             for source_ref, claim_ref in claim_refs.items()
         }
+    require_new_managed_refs_absent(
+        config, expected.get('state'), changed_refs, observed_refs
+    )
     for source_ref, claim_tip in observed_claims.items():
         if not claim_tip:
             continue
