@@ -36921,7 +36921,7 @@ def recover_control_manifest_before_command(args):
 
 def coordination_provenance_before_command(args):
     """Refuse unknown historical provenance before any CLI startup writes."""
-    if args.func not in {
+    if not coordination_publication_lock_requested(args) and args.func not in {
         command_stack_push, command_int_push, command_int_rebuild,
         command_reconcile, command_resume, command_sync, command_publish,
         command_channel_publish, command_channel_close, command_stack_land,

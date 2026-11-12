@@ -182,6 +182,9 @@ publication is not a legacy-provenance reconciliation procedure.
 Publication-related CLI commands check this boundary before startup recovery,
 hook convergence, control bootstrap, or durable intent creation. Refused commands
 retain pre-existing authorization records as well as control and publication state.
+The preflight follows the central publication-lock command registry, including
+promote/demote and local stack mutations. A source call-graph regression checks
+every CLI entrypoint that transitively reaches publication or intent creation.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that

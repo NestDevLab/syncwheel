@@ -1,3 +1,4 @@
+import ast
 import contextlib
 import contextvars
 import importlib.util
@@ -13276,6 +13277,67 @@ sys.exit(module.main())
                                 extra_env={'GIT_OPTIONAL_LOCKS': '0'})
         self.assertIn('no endpoint witness', rejected.stderr)
         self.assertEqual(observed(), before)
+
+    def test_promote_legacy_refusal_precedes_publication_intent(self):
+        origin = self.create_remote('legacy-promote')
+        repo = self.clone(origin, 'legacy-promote')
+        self.init_coordinated(repo)
+        self.run_cli(repo, 'int', 'push')
+        source = self.commit_on_branch(repo, 'scratch/probe', 'probe.txt')
+        self.run_cli(repo, 'stack', 'create', 'probe', source, '--draft')
+        module = self.load_module()
+        profile = module.repo_profile_path(repo)
+        data = json.loads(profile.read_text())
+        data['coordination'].pop('last_seen_state', None)
+        profile.write_text(json.dumps(data, indent=2) + '\n')
+        record = self.derived_provenance_record(source)
+        module.save_derived_provenance_store(repo, {
+            'version': module.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{'paths': record['paths'], 'base_commit': None, 'record': record}],
+        })
+        def observed():
+            files = {}
+            for directory in (repo / '.syncwheel', repo / '.git/syncwheel'):
+                files.update({str(p.relative_to(repo)): p.read_bytes()
+                              for p in directory.rglob('*') if p.is_file()})
+            return (self.git(repo, 'rev-parse', 'HEAD').stdout,
+                    self.git(repo, 'show-ref').stdout,
+                    (repo / '.git/index').read_bytes(), files,
+                    self.git(origin, 'show-ref').stdout)
+        before = observed()
+        rejected = self.run_cli(repo, 'stack', 'promote', 'probe', expected=2,
+                                extra_env={'GIT_OPTIONAL_LOCKS': '0'})
+        self.assertIn('no endpoint witness', rejected.stderr)
+        self.assertEqual(observed(), before)
+
+    def test_provenance_preflight_covers_transitive_publication_entrypoints(self):
+        origin = self.create_remote('publication-entrypoint-audit')
+        repo = self.clone(origin, 'publication-entrypoint-audit')
+        self.init_coordinated(repo)
+        module = self.load_module()
+        tree = ast.parse(CLI.read_text())
+        calls = {
+            node.name: {call.func.id for call in ast.walk(node)
+                        if isinstance(call, ast.Call) and isinstance(call.func, ast.Name)}
+            for node in tree.body if isinstance(node, ast.FunctionDef)
+        }
+        reached = {'coordinated_publish', 'begin_coordination_publication'}
+        while True:
+            expanded = reached | {name for name, children in calls.items() if children & reached}
+            if expanded == reached:
+                break
+            reached = expanded
+        commands = sorted(name for name in reached if name.startswith('command_'))
+        self.assertIn('command_stack_promote', commands)
+        for name in commands:
+            with self.subTest(command=name):
+                args = SimpleNamespace(func=getattr(module, name), repo=str(repo),
+                                       manifest=None, personal=None, dry_run=False, apply=True)
+                with mock.patch.object(module, 'coordination_provenance_observation',
+                                       side_effect=module.SyncwheelError('namespace audit')):
+                    with self.assertRaisesRegex(module.SyncwheelError, 'namespace audit'):
+                        module.coordination_provenance_before_command(args)
+                self.assertTrue(args._provenance_preflight_refused)
 
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
