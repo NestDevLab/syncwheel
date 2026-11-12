@@ -8,6 +8,7 @@ remain in that facade, where `__file__` still identifies the entry script.
 
 | Module | Responsibility | Dependencies |
 | --- | --- | --- |
+| `syncwheel_manifest_store` | Manifest transactions, lifecycle ledger, durable control commits and crash recovery | Shared transaction state; explicit repository, projection, workspace tracking and lifecycle capabilities |
 | `syncwheel_manifest` | Manifest normalization, authority, stack dependencies, channel schema | Shared errors; standard library |
 | `syncwheel_coordination` | Snapshot validation, portable refs, proposal comparison and composition | Manifest domain; explicit branch validator |
 | `syncwheel_coordination_state` | Immutable remote state, control-manifest integrity and exclusive ownership evidence | Git observations, manifest inputs and state witnesses |
@@ -46,7 +47,7 @@ exceptions, handler replacement, journal reader replacement and Git validation.
 Existing integration suites continue to exercise journal, channel, coordination,
 ledger and index behavior through the supported facade.
 
-This is incremental modularization. Control-manifest persistence and remaining integration/channel command handlers still live in the
+This is incremental modularization. Integration reconciliation and remaining integration/channel command handlers still live in the
 composition root. Public backend constructors compose the implementation modules
 without changing the revision-provider wire protocol. Future extraction should introduce specific repository operations at
 those boundaries, preserve existing patch points, and run the corresponding

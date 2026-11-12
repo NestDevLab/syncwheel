@@ -1023,7 +1023,7 @@ class DeploymentChannelTest(unittest.TestCase):
             apply=True, plan_digest=plan['planDigest'], operation_id=None,
         )
         with mock.patch.object(
-            module, 'channel_mutation_checkpoint', side_effect=KeyboardInterrupt()
+            importlib.import_module('syncwheel_manifest_store'), 'channel_mutation_checkpoint', side_effect=KeyboardInterrupt()
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'cancelled before'):
                 module.command_channel_apply(args)
@@ -1258,7 +1258,7 @@ class DeploymentChannelTest(unittest.TestCase):
             self.repo, manifest_path, 'cas-pure-writer'
         ):
             with mock.patch.object(
-                module, 'save_manifest', side_effect=bypass_lock_then_save
+                importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=bypass_lock_then_save
             ):
                 with self.assertRaisesRegex(
                     module.SyncwheelError, 'changed outside the active transaction'
@@ -1364,9 +1364,9 @@ class DeploymentChannelTest(unittest.TestCase):
                         self.calls.append(('name', None, node.func.id))
                     elif isinstance(node.func, ast.Attribute):
                         value = node.func.value
-                        while isinstance(value, ast.Attribute):
-                            value = value.value
-                        root = value.id if isinstance(value, ast.Name) else None
+                        # Keep collaborator qualifiers distinct from direct
+                        # self.method calls; their owner is another domain.
+                        root = ast.unparse(value) if isinstance(value, (ast.Name, ast.Attribute)) else None
                         self.calls.append(('attribute', root, node.func.attr))
                     self.generic_visit(node)
 
@@ -1445,15 +1445,22 @@ class DeploymentChannelTest(unittest.TestCase):
                 if any(leaf in saver_names for _kind, _root, leaf in calls)
             }
 
-            def reaches_saver(key, trail=()):
-                if key in trail:
-                    return False
-                if key in direct_savers:
-                    return True
-                return any(
-                    reaches_saver(callee, (*trail, key))
-                    for callee in callees(key)
-                )
+            # Reverse reachability visits each edge once, including cycles. A
+            # recursive walk repeated every shared suffix as domains composed.
+            reverse_calls = {}
+            for caller in definitions:
+                for callee in callees(caller):
+                    reverse_calls.setdefault(callee, set()).add(caller)
+            saver_reachable = set(direct_savers)
+            frontier = list(direct_savers)
+            while frontier:
+                callee = frontier.pop()
+                for caller in reverse_calls.get(callee, set()) - saver_reachable:
+                    saver_reachable.add(caller)
+                    frontier.append(caller)
+
+            def reaches_saver(key):
+                return key in saver_reachable
 
             registered = {
                 ('syncwheel', entrypoint.__qualname__)
@@ -1780,7 +1787,7 @@ class DeploymentChannelTest(unittest.TestCase):
             delete_local=True, reason='fault', apply=True,
             plan_digest=preview['planDigest'], operation_id=None,
         )
-        with mock.patch.object(module, 'save_manifest', side_effect=OSError('pre-replace')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=OSError('pre-replace')):
             with mock.patch.object(
                 module, 'record_channel_operation_receipt',
                 side_effect=OSError('terminal receipt unavailable'),
@@ -1825,7 +1832,7 @@ class DeploymentChannelTest(unittest.TestCase):
             delete_local=True, reason='pre-failure', apply=True,
             plan_digest=preview['planDigest'], operation_id=None,
         )
-        with mock.patch.object(module, 'save_manifest', side_effect=OSError('pre-replace')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=OSError('pre-replace')):
             with self.assertRaisesRegex(module.SyncwheelError, 'outcome is partial'):
                 module.command_channel_close(args)
         terminal = module.channel_operation_events(
@@ -1858,7 +1865,7 @@ class DeploymentChannelTest(unittest.TestCase):
             real_save(path, manifest)
             raise module.ManifestDurabilityError('post-replace durability unknown')
 
-        with mock.patch.object(module, 'save_manifest', side_effect=replace_then_fail):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=replace_then_fail):
             with self.assertRaisesRegex(module.SyncwheelError, 'outcome is unknown'):
                 module.command_channel_close(args)
         terminal = module.channel_operation_events(

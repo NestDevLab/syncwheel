@@ -1,5 +1,6 @@
 """Compatibility at the CLI/domain boundaries, including isolated file loading."""
 import ast
+import contextlib
 import importlib.util
 import json
 import os
@@ -81,6 +82,26 @@ assert module.build_parser().parse_args(['status']).func is module.command_statu
         self.assertIs(journal.provider, provider)
         self.assertIsInstance(journal, module.SyncwheelRevisionBackend)
 
+    def test_manifest_transaction_scope_is_shared_across_store_instances(self):
+        module = load_facade()
+        storage = importlib.import_module('syncwheel_manifest_store')
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'manifest.json'
+            with mock.patch.object(
+                module.ManifestStore, 'channel_mutation_lock',
+                side_effect=lambda *args: contextlib.nullcontext(),
+            ), mock.patch.object(storage, 'load_manifest', return_value=({'version': 1}, path)):
+                with module.manifest_write_transaction(root, path, commit_tracked_changes=False):
+                    transaction = storage.active_manifest_write_transaction(path)
+                    with module._manifest_store().manifest_write_transaction(
+                        root, path, commit_tracked_changes=False,
+                    ):
+                        self.assertIs(storage.active_manifest_write_transaction(path), transaction)
+                        self.assertEqual(transaction['depth'], 2)
+                    self.assertEqual(transaction['depth'], 1)
+                self.assertIsNone(storage.active_manifest_write_transaction(path))
+
     def test_parser_binds_current_facade_handlers(self):
         module = load_facade()
         replacement = lambda args: 0
@@ -140,7 +161,7 @@ assert module.build_parser().parse_args(['status']).func is module.command_statu
                 module.coordination_public_remote_ref_parts(ref, 'base')
 
     def test_domains_do_not_import_the_cli_facade(self):
-        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication', 'revision_backend', 'files', 'provenance')
+        modules = ('manifest', 'index', 'journal', 'ledger', 'coordination', 'errors', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication', 'revision_backend', 'files', 'provenance', 'stacks', 'manifest_store')
         for name in modules:
             with self.subTest(module=name):
                 tree = ast.parse((SCRIPTS / f'syncwheel_{name}.py').read_text())

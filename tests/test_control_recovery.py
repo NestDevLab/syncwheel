@@ -1,4 +1,5 @@
 import json
+import importlib
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -243,7 +244,7 @@ class ControlReplayTest(unittest.TestCase):
             if stage == 'intent_saved':
                 ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
         with self.module.manifest_write_transaction(self.f.repo, self.path):
-            with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=edit):
+            with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=edit):
                 with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
                     self.module.command_manifest_recover_control(self.recovery_args(plan))
         self.assertEqual(self.f.git('rev-parse', 'HEAD'), head)
@@ -264,7 +265,7 @@ class ControlReplayTest(unittest.TestCase):
                 self.f.git('commit', '-qm', 'test: concurrent product writer')
                 observed.append(self.f.git('rev-parse', 'HEAD'))
         with self.module.manifest_write_transaction(self.f.repo, self.path):
-            with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=commit):
+            with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=commit):
                 with self.assertRaisesRegex(self.module.SyncwheelError, 'inputs changed before apply'):
                     self.module.command_manifest_recover_control(self.recovery_args(plan))
         self.assertEqual(self.f.git('rev-parse', 'HEAD'), observed[0])
@@ -337,7 +338,7 @@ class ControlReplayTest(unittest.TestCase):
                 raise RuntimeError('simulated process interruption')
         with self.assertRaisesRegex(RuntimeError, 'process interruption'):
             with self.module.manifest_write_transaction(self.f.repo, self.path):
-                with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+                with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
                     self.module.command_manifest_recover_control(self.recovery_args(plan))
         pending = self.module.control_recovery_pending(self.f.repo, self.path)
         self.assertIsNotNone(pending)
@@ -446,7 +447,7 @@ class ControlReplayTest(unittest.TestCase):
             if stage == 'intent_saved':
                 ignore.write_text(ignore.read_text() + '\nforeign-generated/\n')
         with self.module.manifest_write_transaction(self.f.repo, self.path):
-            with mock.patch.object(self.module, 'control_manifest_io_checkpoint', side_effect=foreign_edit):
+            with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=foreign_edit):
                 with self.assertRaisesRegex(self.module.SyncwheelError, 'quarantined'):
                     # Deliberately use the public API defaults, not identity3.
                     self.module.restore_control_manifest_after_integration_rebuild(

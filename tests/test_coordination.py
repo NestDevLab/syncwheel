@@ -171,7 +171,7 @@ elif checkpoint == 'save_manifest':
         result = original(manifest_path, manifest)
         os.kill(os.getpid(), signal.SIGKILL)
         return result
-    module.save_manifest = killed
+    importlib.import_module('syncwheel_manifest_store').save_manifest = killed
 elif checkpoint == 'publish_intent':
     original = module.begin_coordination_publication
     def killed(*call_args, **call_kwargs):
@@ -2797,7 +2797,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(repo, manifest_path):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.command_stack_push(args)
@@ -2861,7 +2861,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(repo, manifest_path):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -2920,7 +2920,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(repo, manifest_path):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.command_int_push(args)
@@ -8342,7 +8342,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             )
             return real_save(path, manifest)
 
-        with mock.patch.object(module, 'save_manifest', side_effect=save_after_remote):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=save_after_remote):
             module.command_stack_close(self.stack_close_args(repo, 'tombstone-first'))
 
         self.assertTrue(seen['claim'])
@@ -8391,7 +8391,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         source = self.commit_on_branch(repo, 'scratch/close-crash', 'close-crash.txt')
         self.add_legacy_unpublished_draft(repo, 'close-crash', source)
         module = self.load_module()
-        with mock.patch.object(module, 'save_manifest', side_effect=SystemExit('crash after push')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=SystemExit('crash after push')):
             with self.assertRaises(SystemExit):
                 module.command_stack_close(self.stack_close_args(repo, 'close-crash'))
 
@@ -8678,7 +8678,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         plan = json.loads(self.run_cli(repo, *request).stdout)
         module = self.load_module()
         args = self.archive_args(repo, plan)
-        with mock.patch.object(module, 'save_manifest', side_effect=OSError('save interrupted')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=OSError('save interrupted')):
             with self.assertRaisesRegex(OSError, 'save interrupted'):
                 module.command_stack_archive(args)
         with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(module.PublicationCoordinator, 'coordinated_publish') as publish:
@@ -10470,7 +10470,7 @@ sys.exit(module.main())
         def interrupt(stage):
             if stage == 'intent_saved':
                 raise module.SyncwheelError('test: interrupt after intent')
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
                 module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test recovery')
         pending = module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path))
@@ -10493,7 +10493,7 @@ sys.exit(module.main())
         def interrupt(stage):
             if stage == 'intent_saved':
                 raise module.SyncwheelError('test: interrupt after intent')
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
                 module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'old proposal')
         manifest['integration']['stacks'] = []
@@ -10522,7 +10522,7 @@ sys.exit(module.main())
         def interrupt(stage):
             if stage == 'ref_updated':
                 changed.write_text('later user proposal\n')
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'checkout changed'):
                 module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test drift')
         branch = manifest['integration']['branch']
@@ -11137,7 +11137,7 @@ sys.exit(module.main())
             proof = event.get('payload', {}).get('context', {}).get('empty_integration_only')
             if proof:
                 proof['tree'] = '0' * 40
-        with mock.patch.object(module, 'load_ledger_events', return_value=forged):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'load_ledger_events', return_value=forged):
             self.assertEqual(module.historically_empty_integration_only_commits(
                 repo, current, [fixture['duplicate'], second], path), set())
         self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
@@ -13269,7 +13269,7 @@ sys.exit(module.main())
         with self.assertRaisesRegex(RuntimeError, 'after control intent'):
             with module.manifest_write_transaction(second, manifest_path):
                 with mock.patch.object(
-                    module, 'control_manifest_io_checkpoint',
+                    importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint',
                     side_effect=interrupt_after_intent,
                 ):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -14650,7 +14650,7 @@ sys.exit(module.main())
                 def interrupt(stage):
                     if stage == checkpoint:
                         raise module.SyncwheelError('test: interrupted independent reconciliation')
-                with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+                with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
                     with self.assertRaisesRegex(module.SyncwheelError, 'interrupted independent'):
                         module.reconcile_integration_ancestry(
                             repo, path, fixture['manifest'], 'test', 'recover exact independent ancestry',
@@ -14830,7 +14830,7 @@ sys.exit(module.main())
                             self.git(repo, 'update-ref', ref, tip, parent)
                         injected.append(tip)
 
-                with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interfere):
+                with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interfere):
                     with self.assertRaises(module.SyncwheelError):
                         module.reconcile_integration_ancestry(
                             repo, path, fixture['manifest'], 'test', 'reject stale divergence',
@@ -14852,7 +14852,7 @@ sys.exit(module.main())
             if stage == 'ref_updated':
                 raise module.SyncwheelError('test: interrupted divergence')
 
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'interrupted divergence'):
                 module.reconcile_integration_ancestry(
                     repo, path, fixture['manifest'], 'test', 'retry qualified divergence',
