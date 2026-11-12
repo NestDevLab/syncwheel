@@ -1,25 +1,25 @@
 {
   "authority": {
-    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ]
+    ],
+    "mode": "ai-managed"
   },
   "channels": [],
   "coordination": {
-    "mode": "active-active",
-    "id": "default",
-    "remote": "origin",
-    "state_branch": "syncwheel/state/default",
     "gc": {
       "backup_keep": 2,
       "backup_retention_days": 30,
       "worktree_grace_days": 7
-    }
+    },
+    "id": "default",
+    "mode": "active-active",
+    "remote": "origin",
+    "state_branch": "syncwheel/state/default"
   },
   "defaults": {
     "base_branch": "main",
@@ -32,97 +32,27 @@
     "base": "origin/main",
     "branch": "main-integration",
     "stacks": [
-      "prepared-journal-recovery",
-      "local-replay-delivery",
-      "selective-coordination-projection",
-      "concurrency-guidance",
-      "pure-cherry-preview",
-      "mgt0249-maintenance-policy",
-      "local-replay-guarded",
-      "domain-modularization"
+      "new-stack-absent-lease"
     ],
     "strategy": "cherry-pick"
   },
   "landing": {
+    "checks": null,
     "mode": "disabled",
-    "strategy": "merge",
-    "checks": null
+    "strategy": "merge"
   },
   "repository_mode": "delivery",
   "stacks": [
     {
       "base": "origin/main",
-      "branch": "pr/prepared-journal-recovery",
+      "branch": "pr/new-stack-absent-lease",
       "commits": [
-        "c862379fac232e0d6faee3816f1d11c6b6f72ae9",
-        "5f1b6577d172b0b942a50c3921b652f456329bc1",
-        "4a87671f5a7584a766cbdc169dd9b9707ec14f20",
-        "4afbab5b8671d013c5dbb9fe5cc8885451bf80ac",
-        "51d878f1357de0667a77f1b7b23c79c394b8559f"
+        "711bb8ae0e1ae2778738bd0832174ac35a422091"
       ],
-      "id": "prepared-journal-recovery",
-      "integration_branch": "main-integration",
-      "target_branch": "main",
-      "target_remote": "origin",
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Audit linked supersession of unpublished prepared journal operations"
-      }
-    },
-    {
-      "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
-      "branch": "pr/local-replay-delivery",
-      "commits": [
-        "d08ee3c49ebf9955573d49565c0dcb348c857211",
-        "bcebb908e60054dd9071aaf95e8876c67eb5578c",
-        "e63527de261b64ae82dfba5c0f30ba177cf3b364",
-        "2a0b7ef1c185dde248bf6886f36ba3137d15eba0",
-        "aee2e8e080367c4b8ac52dad5bea61f2009e3b3c",
-        "ddba601807047d7329ac9a48665afaded3742c16",
-        "9e5f7b3194dd816e82cc63a013932bbb210aca74",
-        "4507d771385e61255bf7f2cd738cb783c60d56cb",
-        "9c9da54eefd8c2e0cd7b55ccee45d1ca09eb0235",
-        "e56474d5fff6702af50d6c5a26d1c0445c24acf0",
-        "d70dad8ba94438dbe8962cfc4bef713051bd143c",
-        "02bf973efd156dc8737ae2ff117e279abe8ebd12",
-        "6c9479015cea170ed5e28a44416d0960f18f6adf",
-        "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5",
-        "5319870403c9c23e7ad1f85a840e5107f6cbe3c7",
-        "54823aab64190db066f501b998839e52e9e5e944",
-        "918f4be221b603916056c359af0a66aa6ccc9cf5",
-        "edc6446f4d4c2ab461168bcb7d11880ff9ed5465",
-        "5ab4946fb594c453ee54dc72d5fcd511f97a2385",
-        "c097f039118696a22b2dcf759a35001d1b25ad18",
-        "6cb121fe3694d151cf32d59a50b5d0ccbbdda45a",
-        "0593da73388f615000cebd52f633780a3f4af5f9",
-        "706616c30da1ca30bb859aa1837c2d05714f9f95",
-        "3da38c9f22e16c6602a36babdf5012b55a17e881",
-        "feff6d8c7ff6d184d9784af51ad3bb16d8aa96b4",
-        "27a6a3a8c9d15a007695e17543880f5e0470cc88",
-        "c5a4f631a573eacb29796d2a0229f1a62bc0f9f7",
-        "1c297abf9b44b5db0b917b16a60f6dc149884754"
-      ],
-      "id": "local-replay-delivery",
-      "integration_branch": "main-integration",
-      "target_branch": "main",
-      "target_remote": "origin",
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {}
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/selective-coordination-projection",
-      "commits": [],
-      "id": "selective-coordination-projection",
+      "id": "new-stack-absent-lease",
       "integration_branch": "main-integration",
       "meta": {
-        "purpose": "Publish one additive stack while retaining unrelated local proposals"
+        "purpose": "Refuse new stack publication over an unmanaged remote branch"
       },
       "publication": {
         "enabled": true
@@ -130,109 +60,6 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/concurrency-guidance",
-      "commits": [
-        "793f9f580a5a5970fac9a42c3702adfddc815bba"
-      ],
-      "id": "concurrency-guidance",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Clarify independent lane authoring and bounded shared-state holds"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/pure-cherry-preview",
-      "commits": [
-        "ef101ae69b6ed2913f56935d5e2dfc90fbfb8dd8",
-        "3010bceac5bc05bfecafc4d330afb8fe88fe8fe3",
-        "20167314c1a83b5c339fe563bd9108d34af22069",
-        "a6251251b641b5a846a3488d88f7343dcba696fb",
-        "a0002301e2dce04e03c57df0c4c7be8725e66393"
-      ],
-      "id": "pure-cherry-preview",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/mgt0249-maintenance-policy",
-      "commits": [
-        "a2ebfd90fafef95562f59d2e4fb8c393317991a9"
-      ],
-      "id": "mgt0249-maintenance-policy",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
-      "branch": "pr/local-replay-guarded",
-      "commits": [
-        "d08ee3c49ebf9955573d49565c0dcb348c857211",
-        "bcebb908e60054dd9071aaf95e8876c67eb5578c",
-        "e63527de261b64ae82dfba5c0f30ba177cf3b364",
-        "2a0b7ef1c185dde248bf6886f36ba3137d15eba0",
-        "aee2e8e080367c4b8ac52dad5bea61f2009e3b3c",
-        "ddba601807047d7329ac9a48665afaded3742c16",
-        "9e5f7b3194dd816e82cc63a013932bbb210aca74",
-        "4507d771385e61255bf7f2cd738cb783c60d56cb",
-        "9c9da54eefd8c2e0cd7b55ccee45d1ca09eb0235",
-        "e56474d5fff6702af50d6c5a26d1c0445c24acf0",
-        "d70dad8ba94438dbe8962cfc4bef713051bd143c",
-        "02bf973efd156dc8737ae2ff117e279abe8ebd12",
-        "6c9479015cea170ed5e28a44416d0960f18f6adf",
-        "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5"
-      ],
-      "id": "local-replay-guarded",
-      "integration_branch": "main-integration",
-      "meta": {},
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "id": "domain-modularization",
-      "branch": "pr/domain-modularization",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Extract explicit domain modules while preserving CLI and I/O compatibility"
-      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
