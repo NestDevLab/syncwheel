@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.26 - 2026-11-12
+
+- Refuse to publish a new stack onto a remote branch that already exists but is not managed by the published coordination state. The publication lease used to be the observed tip, so such a branch was silently replaced. An absent branch is still leased as absent.
+
 ## 0.46.25 - 2026-11-08
 
 - Make `int rebuild --replay-mode desk` usable for a `cherry-pick` integration whose branch is already checked out, by preparing the same detached resolution desk that `merge-stacks` uses instead of refusing the only path the conflict remedy offers. A secondary checkout of the branch stays the desk.
