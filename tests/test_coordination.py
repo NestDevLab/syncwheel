@@ -13488,6 +13488,36 @@ sys.exit(module.main())
         self.assertFalse(held['bindingUsable'])
         self.assertEqual((profile.read_bytes(), module.load_ledger_events(repo)), before)
 
+    def test_empty_legacy_binding_usability_includes_context_endpoint_guard(self):
+        repo, module, _profile = self.legacy_binding_fixture('binding-context')
+        plan = module.coordination_legacy_binding_plan(repo)
+        path = self.tmp / 'context-binding-plan.json'
+        path.write_text(json.dumps(plan))
+        receipt = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                        '--apply', '--plan-file', str(path), '--reason', 'original context binding').stdout)
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        origin = self.git(repo, 'remote', 'get-url', 'origin').stdout.strip()
+        other = self.tmp / 'context-other.git'
+        self.git(repo, 'clone', '-q', '--bare', origin, str(other))
+        self.git(repo, 'remote', 'set-url', 'origin', str(other))
+        self.assertEqual(module.read_remote_coordination_state(repo, config)['tip'], plan['stateTip'])
+        self.git(repo, 'remote', 'set-url', 'origin', origin)
+        with self.assertRaisesRegex(module.SyncwheelError, 'governed reconciliation'):
+            module.coordination_provenance_observation(repo, config)
+        before = module.load_ledger_events(repo)
+        argv = ['syncwheel', 'coordination', 'provenance', 'bind-empty', '--repo', str(repo),
+                '--apply', '--plan-file', str(path), '--reason', 'retry mixed endpoint context']
+        output = io.StringIO()
+        with mock.patch('sys.argv', argv), contextlib.redirect_stdout(output):
+            self.assertEqual(module.main(), 2)
+        held = json.loads(output.getvalue())
+        self.assertEqual(held['status'], 'held')
+        self.assertFalse(held['bindingUsable'])
+        self.assertEqual(held['receiptSequence'], receipt['receiptSequence'])
+        self.assertEqual(held['reason'], receipt['reason'])
+        self.assertEqual(module.load_ledger_events(repo), before)
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']

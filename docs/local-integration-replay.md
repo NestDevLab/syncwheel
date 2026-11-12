@@ -211,6 +211,8 @@ historical receipt remains inspectable. Valid current inputs return
 `status=recorded`, `bindingUsable=true` and exit 0. Remote observation may acquire
 the exact state object using the governed object reader. The ledger and its
 standard private lock/checkpoint files constitute the local write footprint.
+Usability also applies the full ordinary provenance guard, including conflicting
+endpoint observations in the current execution context.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that

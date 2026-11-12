@@ -21451,6 +21451,7 @@ def command_coordination_provenance_bind(args):
         current, _ = load_manifest(repo_root, manifest_path)
         if current and coordination_is_active(current):
             config = coordination_config(current)
+            coordination_provenance_observation(repo_root, config)
             key = coordination_state_observation_key(repo_root, config)
             _profile, coordination = coordination_profile(repo_root)
             usable = coordination_legacy_binding_receipt(
