@@ -5947,12 +5947,12 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                 fixture = RevisionProviderRepository()
                 original = SYNCWHEEL.ledger_io_checkpoint
                 try:
-                    SYNCWHEEL.ledger_io_checkpoint = self._fault_once(stage)
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = self._fault_once(stage)
                     with self.assertRaisesRegex(RuntimeError, 'injected ledger fault'):
                         SYNCWHEEL.append_ledger_event(
                             fixture.repo, 'test_event', {'name': 'crashed'}
                         )
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     event = SYNCWHEEL.append_ledger_event(
                         fixture.repo, 'test_event', {'name': 'survivor'}
                     )
@@ -5969,7 +5969,7 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     )
                     self.assertTrue(segment.read_bytes().endswith(b'\n'))
                 finally:
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     fixture.close()
 
     def test_checkpoint_write_fault_never_hides_a_durable_event(self):
@@ -5983,12 +5983,12 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                 fixture = RevisionProviderRepository()
                 original = SYNCWHEEL.ledger_io_checkpoint
                 try:
-                    SYNCWHEEL.ledger_io_checkpoint = self._fault_once(stage)
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = self._fault_once(stage)
                     with self.assertRaisesRegex(RuntimeError, 'injected ledger fault'):
                         SYNCWHEEL.append_ledger_event(
                             fixture.repo, 'test_event', {'name': 'durable'}
                         )
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     state = SYNCWHEEL.load_ledger_state(fixture.repo)
                     self.assertEqual(state['last_seq'], 1)
                     self.assertEqual(state['event_count'], 1)
@@ -6006,7 +6006,7 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     )
                     self.assertEqual(checkpoint, SYNCWHEEL.reduce_ledger_state(events))
                 finally:
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     fixture.close()
 
     def test_provider_recovers_faults_inside_ownership_ledger_writes(self):
@@ -6030,12 +6030,12 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     )
                     (fixture.repo / 'feature.txt').write_text('feature\n')
                     protocol.handle_request(backend, request)
-                    SYNCWHEEL.ledger_io_checkpoint = self._fault_once(stage)
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = self._fault_once(stage)
                     with self.assertRaisesRegex(RuntimeError, 'injected ledger fault'):
                         protocol.handle_request(
                             backend, replace(request, action='finalize')
                         )
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     recovered = protocol.handle_request(
                         backend, replace(request, action='recover')
                     )
@@ -6048,7 +6048,7 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     ]
                     self.assertEqual(len(ownership), 1)
                 finally:
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     fixture.close()
 
 

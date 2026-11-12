@@ -3148,7 +3148,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
-        original_fsync = module._LEDGER_FSYNC
+        original_fsync = importlib.import_module('syncwheel_manifest_store')._LEDGER_FSYNC
         original_git = module.git
         ledger_fsyncs = []
         observed_refs = []
@@ -3181,12 +3181,12 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 observed_refs.append(args)
             return original_git(repo_root, *args, **kwargs)
 
-        module._LEDGER_FSYNC = record_ledger_fsync
+        importlib.import_module('syncwheel_manifest_store')._LEDGER_FSYNC = record_ledger_fsync
         module.git = inspect_first_ref_effect
         try:
             result = module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         finally:
-            module._LEDGER_FSYNC = original_fsync
+            importlib.import_module('syncwheel_manifest_store')._LEDGER_FSYNC = original_fsync
             module.git = original_git
 
         self.assertTrue(observed_refs)
@@ -3832,13 +3832,13 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             injected['terminal'] = True
             return original_cleanup_append(*args, **kwargs)
 
-        module.ledger_io_checkpoint = fail_after_fsync
+        importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = fail_after_fsync
         module.append_governed_worktree_cleanup_event = mark_terminal
         try:
             with self.assertRaises(OSError):
                 module.reconcile_governed_worktrees(self.repo, self.read_manifest())
         finally:
-            module.ledger_io_checkpoint = original_checkpoint
+            importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original_checkpoint
             module.append_governed_worktree_cleanup_event = original_cleanup_append
 
         events = [
@@ -8284,7 +8284,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(self.repo, external):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -8329,7 +8329,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(self.repo, manifest_path):
             with mock.patch.object(
-                module, 'ledger_io_checkpoint', side_effect=crash_after_fsync,
+                importlib.import_module('syncwheel_manifest_store'), 'ledger_io_checkpoint', side_effect=crash_after_fsync,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ledger fsync'):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -8377,7 +8377,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(self.repo, external):
             with mock.patch.object(
-                module,
+                importlib.import_module('syncwheel_manifest_store'),
                 'control_manifest_io_checkpoint',
                 side_effect=crash_after_checkout,
             ):
@@ -8443,7 +8443,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(self.repo, external):
             with mock.patch.object(
-                module,
+                importlib.import_module('syncwheel_manifest_store'),
                 'control_manifest_io_checkpoint',
                 side_effect=advance_before_alignment,
             ):
@@ -8638,7 +8638,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(self.repo, external):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -8690,7 +8690,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(self.repo, external):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.restore_control_manifest_after_integration_rebuild(

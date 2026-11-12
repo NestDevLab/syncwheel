@@ -34,6 +34,71 @@ _MODULE_DIRECTORY = str(Path(__file__).resolve().parent)
 if _MODULE_DIRECTORY not in sys.path:
     sys.path.insert(0, _MODULE_DIRECTORY)
 
+import syncwheel_manifest_store as _manifest_storage
+from syncwheel_manifest_store import (
+    ManifestStore,
+    CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION,
+    CONTROL_MANIFEST_IDENTITY_VERSION,
+    CONTROL_MANIFEST_IDENTITY_VERSIONS,
+    CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
+    ENV_TEST_CONTROL_MANIFEST_PAUSE,
+    ENV_TEST_CONTROL_MANIFEST_READY,
+    ENV_TEST_CONTROL_MANIFEST_RELEASE,
+    ENV_TEST_CONTROL_MANIFEST_SIGKILL,
+    LEDGER_SEGMENT_MAX_EVENTS,
+    _recover_ledger_tail_unlocked,
+    _repair_incomplete_ledger_tail,
+    _write_ledger_checkpoint_unlocked,
+    active_manifest_write_transaction,
+    active_manifest_write_transaction_for_repo,
+    canonical_manifest_file_text,
+    channel_mutation_checkpoint,
+    control_manifest_difference,
+    control_manifest_divergence_remedy,
+    control_manifest_event_idempotency_key,
+    control_manifest_intent_idempotency_key,
+    control_manifest_io_checkpoint,
+    control_manifest_obstruction_refusal,
+    control_manifest_obstruction_warning,
+    control_manifest_operation_intent,
+    control_manifest_operation_records,
+    control_manifest_relative_path,
+    control_manifest_source_allowance,
+    ensure_directory_durable,
+    explicit_control_recovery_intent,
+    explicit_control_recovery_refusal,
+    external_ledger_root,
+    integration_manifest_path,
+    is_external_manifest_path,
+    is_personal_manifest_path,
+    ledger_checkpoint_path,
+    ledger_checkpoints_dir,
+    ledger_events_dir,
+    ledger_fsync_directory_path,
+    ledger_io_checkpoint,
+    ledger_root,
+    ledger_write_lock,
+    load_control_manifest_events,
+    load_ledger_events,
+    load_ledger_state,
+    load_manifest,
+    load_repaired_ledger_events,
+    manifest_policy_from_file,
+    next_ledger_segment_path,
+    pending_control_manifest_intents,
+    pending_explicit_control_recoveries,
+    preflight_control_manifest_digest,
+    recover_ledger_tail,
+    refuse_duplicate_terminal_publication_event,
+    repo_relative_path,
+    require_locked_manifest_observation,
+    require_manifest_transaction_current,
+    restore_guarded_control_manifests,
+    save_manifest,
+    status_line_paths,
+    write_ledger_checkpoint,
+)
+
 from syncwheel_stacks import (
     StackLifecycle,
     stack_closed_payload,
@@ -357,10 +422,6 @@ ENV_UPDATE_STATE_PATH = 'SYNCWHEEL_UPDATE_STATE_PATH'
 ENV_UPDATE_SETTINGS_PATH = 'SYNCWHEEL_UPDATE_SETTINGS_PATH'
 ENV_REMOTE_VERSION_URL = 'SYNCWHEEL_REMOTE_VERSION_URL'
 ENV_UV_TOOL_SOURCE = 'SYNCWHEEL_UV_TOOL_SOURCE'
-ENV_TEST_CONTROL_MANIFEST_SIGKILL = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_SIGKILL'
-ENV_TEST_CONTROL_MANIFEST_PAUSE = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_PAUSE'
-ENV_TEST_CONTROL_MANIFEST_READY = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_READY'
-ENV_TEST_CONTROL_MANIFEST_RELEASE = 'SYNCWHEEL_TEST_CONTROL_MANIFEST_RELEASE'
 INTEGRATION_STRATEGIES = {'cherry-pick', 'merge-stacks'}
 MANIFEST_VERSION_LEGACY = 1
 COORDINATION_REPAIR_PLAN_SCHEMA_VERSION = 1
@@ -385,15 +446,7 @@ CONTROL_MANIFEST_GIT_IDENTITY_ENV = {
     'GIT_COMMITTER_NAME': 'Syncwheel Control',
     'GIT_COMMITTER_EMAIL': 'control@syncwheel.invalid',
 }
-CONTROL_MANIFEST_IDENTITY_VERSION = 2
-CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION = 3
-CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION = 1
-CONTROL_MANIFEST_IDENTITY_VERSIONS = (
-    CONTROL_MANIFEST_IDENTITY_VERSION, CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
-    CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION,
-)
 LEGACY_SYNCWHEEL_WORKTREE_ROOTS = ('var/syncwheel',)
-LEDGER_SEGMENT_MAX_EVENTS = 256
 SYNCWHEEL_LOCAL_EXCLUDE_PATTERN = '.syncwheel/'
 SYNCWHEEL_LOCAL_EXCLUDE_MARKER = '# syncwheel local metadata'
 SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER = '# end syncwheel local metadata'
@@ -1960,7 +2013,7 @@ def remove_managed_push_hook(
             plan['guard'] = primary_guard_payload(
                 manifest, enabled=False, reason=reason
             )
-            plan['ledgerRoot'] = str(ledger_root(repo_root, manifest_path))
+            plan['ledgerRoot'] = str(_manifest_storage.ledger_root(repo_root, manifest_path))
         return plan
     if disable:
         if manifest is None or manifest_path is None:
@@ -2127,7 +2180,7 @@ def control_manifest_blob_matches_base(repo_root, manifest, entry):
     if resolved.returncode != 0:
         return False
     return tree_path_entry(
-        repo_root, resolved.stdout.strip(), control_manifest_relative_path(repo_root),
+        repo_root, resolved.stdout.strip(), _manifest_storage.control_manifest_relative_path(repo_root),
     ) == entry
 
 
@@ -2153,7 +2206,7 @@ def refuse_local_only_manifest_push(repo_root, manifest, command, remote):
         if resolved.returncode != 0:
             raise SyncwheelError(f'cannot inspect {source} before pushing it to {remote} {ref}')
         entry = tree_path_entry(
-            repo_root, resolved.stdout.strip(), control_manifest_relative_path(repo_root),
+            repo_root, resolved.stdout.strip(), _manifest_storage.control_manifest_relative_path(repo_root),
         )
         if entry is None or control_manifest_blob_matches_base(repo_root, manifest, entry):
             continue
@@ -3710,7 +3763,7 @@ def format_remedy_suffix(commands):
 
 def primary_checkout_state_entry(entry):
     """True for repo-local Syncwheel state, tracked or not."""
-    paths = status_line_paths(entry)
+    paths = _manifest_storage.status_line_paths(entry)
     return bool(paths) and all(path.startswith('.syncwheel/') for path in paths)
 
 
@@ -3763,13 +3816,6 @@ def require_clean_primary_checkout(repo_root, manifest):
     )
 
 
-def status_line_paths(line):
-    if len(line) < 4:
-        return set()
-    payload = line[3:]
-    if ' -> ' in payload:
-        return {part.strip('"') for part in payload.split(' -> ')}
-    return {payload.strip('"')}
 
 
 def ensure_clean_worktree(
@@ -3792,7 +3838,7 @@ def ensure_clean_worktree(
             continue
         if allowed_status_prefixes and any(entry.startswith(prefix) for prefix in allowed_status_prefixes):
             continue
-        paths = status_line_paths(line)
+        paths = _manifest_storage.status_line_paths(line)
         if allowed_paths and paths and paths <= allowed_paths:
             continue
         if allowed_path_prefixes and paths and all(
@@ -3978,7 +4024,7 @@ def ensure_syncwheel_metadata_excluded(repo_root, tracking=None, worktree_root=N
             syncwheel_gitignore_patterns(worktree_root),
             legacy_patterns,
         )
-        transaction = active_manifest_write_transaction_for_repo(repo_root)
+        transaction = _manifest_storage.active_manifest_write_transaction_for_repo(repo_root)
         if gitignore_updated and transaction is not None:
             transaction['gitignoreWritten'] = True
         path = git_info_exclude_path(repo_root)
@@ -4028,16 +4074,6 @@ def ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root):
     )
 
 
-def manifest_policy_from_file(manifest_path):
-    try:
-        data = json.loads(Path(manifest_path).read_text())
-    except (OSError, json.JSONDecodeError):
-        return None, DEFAULT_SYNCWHEEL_WORKTREE_ROOT
-    if not isinstance(data, dict):
-        return None, DEFAULT_SYNCWHEEL_WORKTREE_ROOT
-    tracking = normalize_syncwheel_tracking(data.get('syncwheel_tracking'), str(manifest_path))
-    worktree_root = normalize_syncwheel_worktree_root(data.get('syncwheel_worktree_root'), str(manifest_path))
-    return tracking, worktree_root
 
 
 def backup_branch_command(repo_root, branch, timestamp):
@@ -4063,66 +4099,8 @@ def ensure_in_place_target(
     )
 
 
-def load_manifest(repo_root, manifest_path=None):
-    path = Path(manifest_path) if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
-    if not path.exists():
-        return None, path
-    try:
-        data = json.loads(path.read_text())
-    except json.JSONDecodeError as exc:
-        raise SyncwheelError(f'invalid manifest JSON: {exc}') from exc
-    return normalize_manifest_data(data, path), path
 
 
-def save_manifest(path, manifest):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    existing_mode = None
-    if path.exists() or path.is_symlink():
-        existing = path.stat(follow_symlinks=False)
-        if not stat.S_ISREG(existing.st_mode):
-            raise SyncwheelError(f'manifest path is not a regular file: {path}')
-        existing_mode = stat.S_IMODE(existing.st_mode)
-    payload = (json.dumps(manifest, indent=2) + '\n').encode('utf-8')
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f'.{path.name}.tmp-', dir=str(path.parent)
-    )
-    temporary_path = Path(temporary_name)
-    replaced = False
-    try:
-        if existing_mode is not None:
-            os.fchmod(descriptor, existing_mode)
-        with os.fdopen(descriptor, 'wb') as handle:
-            descriptor = -1
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        require_manifest_transaction_current(path)
-        os.replace(temporary_path, path)
-        replaced = True
-        transaction = active_manifest_write_transaction(path)
-        if transaction is not None:
-            persisted, _ = load_manifest(transaction['repoRoot'], path)
-            transaction['expectedDigest'] = (
-                manifest_digest(persisted) if persisted is not None else None
-            )
-            transaction['manifestWritten'] = True
-        directory_flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0)
-        try:
-            directory_fd = os.open(path.parent, directory_flags)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError as exc:
-            raise ManifestDurabilityError(
-                f'manifest replace completed but parent directory durability check failed; '
-                f'outcome is unknown: {path}'
-            ) from exc
-    finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        if not replaced:
-            temporary_path.unlink(missing_ok=True)
 
 
 def merge_stack_resolution_commits(repo_root, stack, stack_ref):
@@ -4139,775 +4117,157 @@ def merge_stack_resolution_commits(repo_root, stack, stack_ref):
     return resolved
 
 
-def external_ledger_root(manifest_path):
-    path = Path(manifest_path).expanduser()
-    stem = path.stem
-    if stem.endswith('-manifest'):
-        trimmed = stem[:-len('-manifest')]
-        stem = trimmed or stem
-    return path.parent / f'{stem}-ledger'
 
 
-def is_external_manifest_path(repo_root, manifest_path):
-    if manifest_path is None:
-        return False
-    repo_root_path = Path(repo_root).expanduser().resolve(strict=False)
-    manifest_root = Path(manifest_path).expanduser().resolve(strict=False)
-    try:
-        manifest_root.relative_to(repo_root_path)
-        return False
-    except ValueError:
-        return True
 
 
-def is_personal_manifest_path(repo_root, manifest_path):
-    if manifest_path is None:
-        return False
-    repo_root_path = Path(repo_root).expanduser().resolve(strict=False)
-    manifest_root = Path(manifest_path).expanduser().resolve(strict=False)
-    try:
-        relative = manifest_root.relative_to(repo_root_path)
-    except ValueError:
-        return False
-    return (
-        relative.parent == Path('.syncwheel/manifests')
-        and relative.name.endswith('.local.json')
-    )
 
 
-def ledger_root(repo_root, manifest_path=None):
-    if manifest_path is None:
-        return repo_root / '.syncwheel' / 'ledger'
-    repo_root_path = Path(repo_root).expanduser().resolve(strict=False)
-    manifest_root = Path(manifest_path).expanduser().resolve(strict=False)
-    if is_external_manifest_path(repo_root_path, manifest_root) or is_personal_manifest_path(
-        repo_root_path, manifest_root
-    ):
-        return external_ledger_root(manifest_path)
-    return repo_root / '.syncwheel' / 'ledger'
 
 
-def ledger_events_dir(repo_root, manifest_path=None):
-    return ledger_root(repo_root, manifest_path) / 'events'
 
 
-def ledger_checkpoints_dir(repo_root, manifest_path=None):
-    return ledger_root(repo_root, manifest_path) / 'checkpoints'
 
 
-_CHANNEL_MUTATION_LOCK_STATE = threading.local()
-_MANIFEST_WRITE_TRANSACTION_STATE = threading.local()
-_CONTROL_MANIFEST_LOCK_STATE = threading.local()
 
 
 def control_manifest_lock_path(repo_root, branch):
-    """Return the clone-local lock shared by every manifest source for a branch."""
-    common_path = git_common_dir(repo_root)
-    lock_key = hashlib.sha256(
-        f'{common_path}\0{branch}'.encode('utf-8')
-    ).hexdigest()[:32]
-    return common_path / 'syncwheel-locks' / f'control-manifest-{lock_key}.lock'
+    return _manifest_store().control_manifest_lock_path(
+        repo_root, branch,
+    )
 
 
-@contextlib.contextmanager
 def control_manifest_branch_lock(repo_root, branch):
-    """Serialize control persistence by repository and integration branch."""
-    if fcntl is None:
-        raise SyncwheelError('control manifest persistence requires POSIX file locking support')
-    lock_path = control_manifest_lock_path(repo_root, branch)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    identity = str(lock_path)
-    held = getattr(_CONTROL_MANIFEST_LOCK_STATE, 'held', None)
-    if held is None:
-        held = {}
-        _CONTROL_MANIFEST_LOCK_STATE.held = held
-    if identity in held:
-        held[identity] += 1
-        try:
-            yield lock_path
-        finally:
-            held[identity] -= 1
-        return
-    with lock_path.open('a+') as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        held[identity] = 1
-        try:
-            yield lock_path
-        finally:
-            held.pop(identity, None)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return _manifest_store().control_manifest_branch_lock(
+        repo_root, branch,
+    )
 
 
-@contextlib.contextmanager
 def channel_mutation_lock(repo_root, manifest_path, channel_id):
-    if fcntl is None:
-        raise SyncwheelError('channel mutations require POSIX file locking support')
-    if is_external_manifest_path(repo_root, manifest_path):
-        lock_dir = ledger_root(repo_root, manifest_path) / 'locks'
-    else:
-        common_dir = git(repo_root, 'rev-parse', '--git-common-dir').stdout.strip()
-        common_path = Path(common_dir)
-        if not common_path.is_absolute():
-            common_path = repo_root / common_path
-        lock_dir = common_path.resolve(strict=False) / 'syncwheel-locks'
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_key = hashlib.sha256(
-        str(Path(manifest_path).resolve(strict=False)).encode('utf-8')
-    ).hexdigest()[:32]
-    lock_path = lock_dir / f'manifest-{lock_key}.lock'
-    held = getattr(_CHANNEL_MUTATION_LOCK_STATE, 'held', None)
-    if held is None:
-        held = {}
-        _CHANNEL_MUTATION_LOCK_STATE.held = held
-    lock_identity = str(lock_path.resolve(strict=False))
-    if lock_identity in held:
-        held[lock_identity] += 1
-        try:
-            yield lock_path
-        finally:
-            held[lock_identity] -= 1
-        return
-    with lock_path.open('a+') as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        held[lock_identity] = 1
-        try:
-            yield lock_path
-        finally:
-            held.pop(lock_identity, None)
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    return _manifest_store().channel_mutation_lock(
+        repo_root, manifest_path, channel_id,
+    )
 
 
-def active_manifest_write_transaction(manifest_path):
-    transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', {})
-    return transactions.get(str(Path(manifest_path).resolve(strict=False)))
 
 
-def active_manifest_write_transaction_for_repo(repo_root):
-    transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', {})
-    resolved_root = Path(repo_root).resolve()
-    matches = [
-        transaction for transaction in transactions.values()
-        if Path(transaction['repoRoot']).resolve() == resolved_root
-    ]
-    return matches[0] if len(matches) == 1 else None
 
 
-def require_manifest_transaction_current(manifest_path):
-    transaction = active_manifest_write_transaction(manifest_path)
-    if transaction is None:
-        return
-    current, _ = load_manifest(transaction['repoRoot'], manifest_path)
-    current_digest = manifest_digest(current) if current is not None else None
-    if current_digest != transaction['expectedDigest']:
-        raise SyncwheelError(
-            'manifest changed outside the active transaction; refusing stale write or side effect'
-        )
 
 
-@contextlib.contextmanager
 def manifest_write_transaction(
     repo_root, manifest_path, owner='manifest-command', *, commit_tracked_changes=True,
 ):
-    identity = str(Path(manifest_path).resolve(strict=False))
-    transactions = getattr(_MANIFEST_WRITE_TRANSACTION_STATE, 'transactions', None)
-    if transactions is None:
-        transactions = {}
-        _MANIFEST_WRITE_TRANSACTION_STATE.transactions = transactions
-    existing = transactions.get(identity)
-    if existing is not None:
-        existing['depth'] += 1
-        try:
-            yield
-        finally:
-            existing['depth'] -= 1
-        return
-    with channel_mutation_lock(repo_root, manifest_path, owner):
-        observed, _ = load_manifest(repo_root, manifest_path)
-        transaction = {
-            'repoRoot': repo_root,
-            'expectedDigest': manifest_digest(observed) if observed is not None else None,
-            'manifestWritten': False,
-            'gitignoreWritten': False,
-            'depth': 1,
-        }
-        transactions[identity] = transaction
-        try:
-            yield
-            if commit_tracked_changes and (
-                transaction['manifestWritten'] or transaction['gitignoreWritten']
-            ):
-                commit_git_tracked_manifest(
-                    repo_root,
-                    manifest_path,
-                    include_manifest=transaction['manifestWritten'],
-                    include_gitignore=transaction['gitignoreWritten'],
-                )
-        finally:
-            transactions.pop(identity, None)
-
-
-def require_locked_manifest_observation(repo_root, manifest_path, plan):
-    current, _ = load_manifest(repo_root, manifest_path)
-    if not current or manifest_digest(current) != plan.get('manifestDigestBefore'):
-        raise SyncwheelError(
-            'channel plan is stale under mutation lock; manifest changed before apply'
-        )
-    return current
-
-
-def channel_mutation_checkpoint():
-    """Fault-injection seam immediately before an authoritative channel mutation."""
-    return None
-
-
-def ledger_checkpoint_path(repo_root, manifest_path=None):
-    return ledger_checkpoints_dir(repo_root, manifest_path) / 'latest.json'
-
-
-def ledger_io_checkpoint(stage):
-    """Fault-injection seam around physically durable ledger writes."""
-    return None
-
-
-_LEDGER_FSYNC = os.fsync
-
-
-def ledger_fsync_directory_path(directory):
-    descriptor = os.open(str(directory), os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-    try:
-        _LEDGER_FSYNC(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def ensure_directory_durable(directory):
-    directory = Path(directory)
-    missing = []
-    cursor = directory
-    while not cursor.exists():
-        missing.append(cursor)
-        if cursor.parent == cursor:
-            break
-        cursor = cursor.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    for created in reversed(missing):
-        ledger_fsync_directory_path(created.parent)
-        ledger_fsync_directory_path(created)
-
-
-@contextlib.contextmanager
-def ledger_write_lock(repo_root, manifest_path=None):
-    if fcntl is None:
-        raise SyncwheelError('ledger writes require POSIX file locking support')
-    root = ledger_root(repo_root, manifest_path)
-    ensure_directory_durable(root)
-    lock_path = root / 'ledger.lock'
-    existed = lock_path.exists()
-    with lock_path.open('a+b') as handle:
-        if not existed:
-            handle.flush()
-            _LEDGER_FSYNC(handle.fileno())
-            ledger_fsync_directory_path(root)
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _repair_incomplete_ledger_tail(path):
-    """Repair only the final unterminated JSONL frame.
-
-    A complete JSON value without its delimiter is finished by appending the
-    delimiter. An invalid unterminated suffix is the only data we truncate;
-    newline-terminated corruption is never rewritten or hidden.
-    """
-    path = Path(path)
-    if not path.exists():
-        return 'unchanged'
-    payload = path.read_bytes()
-    if not payload or payload.endswith(b'\n'):
-        return 'unchanged'
-    boundary = payload.rfind(b'\n') + 1
-    tail = payload[boundary:]
-    try:
-        parsed = json.loads(tail.decode('utf-8'))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        with path.open('r+b') as handle:
-            handle.truncate(boundary)
-            handle.flush()
-            _LEDGER_FSYNC(handle.fileno())
-        ledger_fsync_directory_path(path.parent)
-        return 'truncated-incomplete-tail'
-    if not isinstance(parsed, dict):
-        raise SyncwheelError(
-            f'invalid unterminated ledger event in {path}: expected a JSON object'
-        )
-    with path.open('ab') as handle:
-        handle.write(b'\n')
-        handle.flush()
-        _LEDGER_FSYNC(handle.fileno())
-    ledger_fsync_directory_path(path.parent)
-    return 'completed-delimiter'
-
-
-def _recover_ledger_tail_unlocked(repo_root, manifest_path=None):
-    directory = ledger_events_dir(repo_root, manifest_path)
-    if not directory.exists():
-        return 'unchanged'
-    segments = sorted(directory.glob('*.jsonl'))
-    if not segments:
-        return 'unchanged'
-    return _repair_incomplete_ledger_tail(segments[-1])
-
-
-def recover_ledger_tail(repo_root, manifest_path=None):
-    with ledger_write_lock(repo_root, manifest_path):
-        return _recover_ledger_tail_unlocked(repo_root, manifest_path)
-
-
-def load_repaired_ledger_events(repo_root, manifest_path=None):
-    """Read ledger events only after repairing the durable tail under lock."""
-    with ledger_write_lock(repo_root, manifest_path):
-        _recover_ledger_tail_unlocked(repo_root, manifest_path)
-        return load_ledger_events(repo_root, manifest_path)
-
-
-def load_control_manifest_events(repo_root, manifest_path=None):
-    """Avoid creating ledger metadata when there is no control history to read."""
-    directory = ledger_events_dir(repo_root, manifest_path)
-    if not directory.exists() or not any(directory.glob('*.jsonl')):
-        return []
-    return load_repaired_ledger_events(repo_root, manifest_path)
-
-
-def canonical_manifest_file_text(manifest):
-    """Return deterministic, human-readable bytes for manifest-bearing commits."""
-    return json.dumps(manifest, indent=2, sort_keys=True) + '\n'
-
-
-def load_ledger_events(repo_root, manifest_path=None):
-    directory = ledger_events_dir(repo_root, manifest_path)
-    if not directory.exists():
-        return []
-    events = []
-    for path in sorted(directory.glob('*.jsonl')):
-        payload = path.read_bytes()
-        if payload and not payload.endswith(b'\n'):
-            raise SyncwheelError(
-                f'incomplete ledger tail in {path}; recover it before reading'
-            )
-        for line_number, raw_line in enumerate(payload.split(b'\n')[:-1], start=1):
-            if not raw_line.strip():
-                continue
-            try:
-                data = json.loads(raw_line.decode('utf-8'))
-            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-                raise SyncwheelError(
-                    f'invalid ledger event in {path}:{line_number}: {exc}'
-                ) from exc
-            if not isinstance(data, dict):
-                raise SyncwheelError(
-                    f'invalid ledger event in {path}:{line_number}: expected object'
-                )
-            events.append(data)
-    return events
-
-
-def load_ledger_state(repo_root, manifest_path=None):
-    reduced = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
-    path = ledger_checkpoint_path(repo_root, manifest_path)
-    if path.exists():
-        try:
-            data = json.loads(path.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = None
-        if isinstance(data, dict) and data == reduced:
-            return data
-    return reduced
-
-
-def _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path=None):
-    path = ledger_checkpoint_path(repo_root, manifest_path)
-    ensure_directory_durable(path.parent)
-    encoded = (json.dumps(state, indent=2, sort_keys=True) + '\n').encode('utf-8')
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix='.latest.', suffix='.tmp', dir=path.parent
+    return _manifest_store().manifest_write_transaction(
+        repo_root, manifest_path, owner, commit_tracked_changes=commit_tracked_changes,
     )
-    temporary = Path(temporary_name)
-    try:
-        midpoint = max(1, len(encoded) // 2)
-        _write_all(descriptor, encoded[:midpoint])
-        ledger_io_checkpoint('checkpoint_payload_half_written')
-        _write_all(descriptor, encoded[midpoint:])
-        ledger_io_checkpoint('checkpoint_payload_written')
-        _LEDGER_FSYNC(descriptor)
-        ledger_io_checkpoint('checkpoint_temp_fsynced')
-        os.close(descriptor)
-        descriptor = None
-        os.replace(temporary, path)
-        ledger_fsync_directory_path(path.parent)
-        ledger_io_checkpoint('checkpoint_replaced')
-    finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        temporary.unlink(missing_ok=True)
 
 
-def write_ledger_checkpoint(repo_root, state, manifest_path=None):
-    with ledger_write_lock(repo_root, manifest_path):
-        _recover_ledger_tail_unlocked(repo_root, manifest_path)
-        authoritative = reduce_ledger_state(
-            load_ledger_events(repo_root, manifest_path)
-        )
-        # The append-only event log is authoritative if the caller raced and
-        # supplied an older derived checkpoint state.
-        _write_ledger_checkpoint_unlocked(repo_root, authoritative, manifest_path)
 
 
-def next_ledger_segment_path(repo_root, manifest_path=None):
-    directory = ledger_events_dir(repo_root, manifest_path)
-    ensure_directory_durable(directory)
-    segments = sorted(directory.glob('*.jsonl'))
-    if not segments:
-        return directory / '000001.jsonl'
-    current = segments[-1]
-    with current.open() as handle:
-        line_count = sum(1 for _ in handle)
-    if line_count < LEDGER_SEGMENT_MAX_EVENTS:
-        return current
-    next_index = int(current.stem) + 1
-    return directory / f'{next_index:06d}.jsonl'
 
 
-def refuse_duplicate_terminal_publication_event(state, event_type, payload):
-    """Keep exactly one terminal event per operation token.
 
-    The refusal belongs to the write: a ledger that already carries two must
-    stay readable, or the command an operator would inspect it with is the one
-    that fails.
-    """
-    if event_type not in COORDINATION_PUBLICATION_TERMINAL_EVENT_TYPES:
-        return
-    token = (payload or {}).get('operation_token')
-    if not token:
-        return
-    record = (state.get('coordination_publications') or {}).get(token) or {}
-    if not record.get('terminal'):
-        return
-    raise SyncwheelError(
-        'coordinated publication ledger refuses a second terminal event for '
-        f'operation token {token}: {record["terminal"]} at seq '
-        f'{record.get("terminal_seq")} already stands\n'
-        'inspect the recorded terminal with:\n  syncwheel ledger show'
-    )
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 def require_ignored_ledger_paths(repo_root, paths):
-    """Verify frozen recovery metadata without rewriting exclusion files."""
-    relatives = [repo_relative_path(repo_root, path) for path in paths]
-    if not all(relatives) or git(repo_root, 'ls-files', '--stage', '--', *relatives).stdout:
-        raise SyncwheelError('control recovery requires untracked, already ignored ledger metadata')
-    ignored = git(repo_root, 'check-ignore', '--no-index', '-z', '--stdin',
-                  input_text='\0'.join(relatives) + '\0', check=False)
-    if ignored.returncode != 0 or set(ignored.stdout.strip('\0').split('\0')) != set(relatives):
-        raise SyncwheelError('control recovery requires untracked, already ignored ledger metadata')
+    return _manifest_store().require_ignored_ledger_paths(
+        repo_root, paths,
+    )
 
 
 def append_ledger_event(
     repo_root, event_type, payload, manifest_path=None, idempotency_key=None,
 ):
-    transaction = active_manifest_write_transaction_for_repo(repo_root)
-    preserve_ignore = transaction is not None and transaction.get('preserveGitignore') is True
-    if preserve_ignore:
-        require_ignored_ledger_paths(repo_root, [
-            ledger_root(repo_root, manifest_path) / 'ledger.lock',
-            ledger_checkpoint_path(repo_root, manifest_path),
-            ledger_events_dir(repo_root, manifest_path) / '000001.jsonl',
-        ])
-    elif not is_external_manifest_path(repo_root, manifest_path):
-        tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
-        ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
-    require_manifest_transaction_current(
-        manifest_path or repo_root / '.syncwheel' / 'manifest.json'
+    return _manifest_store().append_ledger_event(
+        repo_root, event_type, payload, manifest_path, idempotency_key,
     )
-    with ledger_write_lock(repo_root, manifest_path):
-        _recover_ledger_tail_unlocked(repo_root, manifest_path)
-        events = load_ledger_events(repo_root, manifest_path)
-        if idempotency_key is not None:
-            payload = dict(payload)
-            payload['idempotency_key'] = idempotency_key
-            matching = [
-                event for event in events
-                if event.get('type') == event_type
-                and (
-                    event.get('idempotency_key') == idempotency_key
-                    or (event.get('payload') or {}).get('idempotency_key')
-                    == idempotency_key
-                )
-            ]
-            if matching:
-                if len(matching) != 1:
-                    raise SyncwheelError(
-                        f'ledger idempotency collision: {idempotency_key}'
-                    )
-                return matching[0]
-        current = reduce_ledger_state(events)
-        refuse_duplicate_terminal_publication_event(current, event_type, payload)
-        event = {
-            'schema_version': LEDGER_SCHEMA_VERSION,
-            'seq': current['last_seq'] + 1,
-            'ts': iso_utc_now(),
-            'type': event_type,
-            'payload': payload,
-        }
-        if idempotency_key is not None:
-            event['idempotency_key'] = idempotency_key
-        path = next_ledger_segment_path(repo_root, manifest_path)
-        if preserve_ignore:
-            require_ignored_ledger_paths(repo_root, [path])
-        existed = path.exists()
-        encoded = json.dumps(event, sort_keys=True).encode('utf-8')
-        descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            midpoint = max(1, len(encoded) // 2)
-            _write_all(descriptor, encoded[:midpoint])
-            ledger_io_checkpoint('event_payload_half_written')
-            _write_all(descriptor, encoded[midpoint:])
-            ledger_io_checkpoint('event_payload_written')
-            _write_all(descriptor, b'\n')
-            ledger_io_checkpoint('event_record_written')
-            _LEDGER_FSYNC(descriptor)
-            if not existed:
-                ledger_fsync_directory_path(path.parent)
-            ledger_io_checkpoint('event_fsynced')
-        finally:
-            os.close(descriptor)
-        state = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
-        _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path)
-        return event
 
 
 def save_manifest_with_ledger(repo_root, manifest_path, manifest, reason, context=None, event_type='manifest_saved'):
-    if reason == 'stack_create' and context and context.get('operation_token'):
-        stack = stack_map(manifest).get(context.get('stack'))
-        if stack:
-            require_current_stack_create_operation(
-                repo_root,
-                manifest_path,
-                stack['id'],
-                stack['branch'],
-                ref_tip(repo_root, stack['branch']),
-                context['operation_token'],
-            )
-    save_manifest(manifest_path, manifest)
-    append_ledger_event(repo_root, event_type, manifest_event_payload(manifest_path, manifest, reason, context), manifest_path)
+    return _manifest_store().save_manifest_with_ledger(
+        repo_root, manifest_path, manifest, reason, context, event_type,
+    )
 
 
 def acknowledge_in_place_manifest_replay(repo_root, manifest_path, replay_tip):
-    """Accept only the manifest state written by a completed in-place replay."""
-    transaction = active_manifest_write_transaction(manifest_path)
-    if transaction is None or is_external_manifest_path(repo_root, manifest_path):
-        return
-    try:
-        relative_path = Path(manifest_path).resolve(strict=False).relative_to(
-            Path(repo_root).resolve()
-        ).as_posix()
-    except ValueError as exc:
-        raise SyncwheelError(
-            f'in-place replay cannot verify manifest outside repository: {manifest_path}'
-        ) from exc
-    expected_result = git(repo_root, 'show', f'{replay_tip}:{relative_path}', check=False)
-    if expected_result.returncode == 0:
-        try:
-            expected_manifest = json.loads(expected_result.stdout)
-        except json.JSONDecodeError as exc:
-            raise SyncwheelError(
-                f'in-place replay produced an invalid manifest at {replay_tip}:{relative_path}'
-            ) from exc
-        expected_digest = manifest_digest(expected_manifest)
-    else:
-        expected_digest = None
-    observed_manifest, _ = load_manifest(repo_root, manifest_path)
-    observed_normalized_digest = (
-        manifest_digest(observed_manifest) if observed_manifest is not None else None
-    )
-    if observed_manifest is None:
-        observed_digest = None
-    else:
-        try:
-            observed_digest = manifest_digest(json.loads(Path(manifest_path).read_text()))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SyncwheelError(
-                f'in-place replay left an unreadable manifest: {manifest_path}'
-            ) from exc
-    preserved_untracked_digest = None
-    if expected_digest is None and observed_normalized_digest == transaction['expectedDigest']:
-        preserved_untracked_digest = observed_digest
-    if observed_digest not in {expected_digest, preserved_untracked_digest}:
-        raise SyncwheelError(
-            'manifest changed unexpectedly during in-place replay; refusing stale write or side effect'
-        )
-    transaction['expectedDigest'] = observed_normalized_digest
-
-
-def control_manifest_difference(manifest, observed):
-    """Describe every material control-manifest difference for a safe retry."""
-    expected_stacks = list((manifest or {}).get('stacks') or [])
-    observed_stacks = list((observed or {}).get('stacks') or [])
-    expected_ids_in_order = [stack.get('id') for stack in expected_stacks]
-    observed_ids_in_order = [stack.get('id') for stack in observed_stacks]
-    expected_ids = set(expected_ids_in_order)
-    observed_ids = set(observed_ids_in_order)
-    parts = []
-    missing = sorted(expected_ids - observed_ids)
-    unexpected = sorted(observed_ids - expected_ids)
-    if missing:
-        parts.append('missing stacks: ' + ', '.join(missing))
-    if unexpected:
-        parts.append('unexpected stacks: ' + ', '.join(unexpected))
-    if expected_ids_in_order != observed_ids_in_order:
-        parts.append('stack order differs')
-    expected_by_id = stack_map(manifest or {})
-    observed_by_id = stack_map(observed or {})
-    for stack_id in sorted(expected_ids & observed_ids):
-        expected = expected_by_id[stack_id]
-        actual = observed_by_id[stack_id]
-        for field, label in (('base', 'base'), ('branch', 'branch'), ('commits', 'commits')):
-            if expected.get(field) != actual.get(field):
-                parts.append(f'{stack_id} {label} differs')
-        ignored = {'id', 'base', 'branch', 'commits'}
-        expected_config = {key: value for key, value in expected.items() if key not in ignored}
-        observed_config = {key: value for key, value in actual.items() if key not in ignored}
-        if expected_config != observed_config:
-            parts.append(f'{stack_id} configuration differs')
-    if (manifest or {}).get('integration') != (observed or {}).get('integration'):
-        parts.append('integration configuration differs')
-    return '; '.join(parts) or 'manifest definitions differ'
-
-
-def preflight_control_manifest_digest(repo_root, manifest_path, manifest):
-    """Fail closed if the on-disk manifest changed after command observation."""
-    observed, _ = load_manifest(repo_root, manifest_path)
-    expected_digest = manifest_digest(manifest)
-    observed_digest = manifest_digest(observed) if observed is not None else None
-    if observed_digest == expected_digest:
-        return
-    manifest_path = Path(manifest_path)
-    expected_payload = canonical_manifest_file_text(manifest)
-    remedy = (
-        'expected=$(mktemp "${TMPDIR:-/tmp}/syncwheel-expected-manifest.XXXXXX.json") '
-        f'&& printf %s {shlex.quote(expected_payload)} > "$expected" '
-        f'&& diff -u {shlex.quote(str(manifest_path))} "$expected"; '
-        'printf "expected manifest: %s\\n" "$expected"'
-    )
-    raise SyncwheelError(
-        'control manifest differs before integration rebuild: '
-        f'expected digest {expected_digest}, found {observed_digest}; '
-        + control_manifest_difference(manifest, observed)
-        + f'. Restore the control manifest before retrying: {remedy}'
+    return _manifest_store().acknowledge_in_place_manifest_replay(
+        repo_root, manifest_path, replay_tip,
     )
 
 
-def integration_manifest_path(repo_root):
-    """The manifest path carried by every integration projection."""
-    return Path(repo_root) / '.syncwheel' / 'manifest.json'
+
+
+
+
 
 
 def manifest_from_tree(repo_root, commit, path):
-    relative = Path(path).resolve(strict=False).relative_to(Path(repo_root).resolve()).as_posix()
-    result = git(repo_root, 'show', f'{commit}:{relative}', check=False)
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise SyncwheelError(f'integration control manifest is invalid at {commit}:{relative}') from exc
+    return _manifest_store().manifest_from_tree(
+        repo_root, commit, path,
+    )
 
 
 def materialize_control_manifest_commit(
     repo_root, manifest, parent, identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
 ):
-    """Build the manifest-only control commit without touching the real index.
-
-    Its identity is fixed and its timestamps inherit the deterministic replay
-    parent.  Therefore parent + manifest bytes always yields the same object.
-    """
-    target = integration_manifest_path(repo_root)
-    relative = target.relative_to(Path(repo_root)).as_posix()
-    payload = canonical_manifest_file_text(manifest)
-    with tempfile.NamedTemporaryFile(prefix='syncwheel-control-index-', delete=False) as handle:
-        index_path = Path(handle.name)
-    index_path.unlink(missing_ok=True)
-    environment = {'GIT_INDEX_FILE': str(index_path)}
-    try:
-        git(repo_root, 'read-tree', parent, env=environment)
-        blob = git(repo_root, 'hash-object', '-w', '--stdin', input_text=payload).stdout.strip()
-        git(
-            repo_root, 'update-index', '--add', '--cacheinfo',
-            f'100644,{blob},{relative}', env=environment,
-        )
-        tree = git(repo_root, 'write-tree', env=environment).stdout.strip()
-        if tree == ref_tree(repo_root, parent):
-            return parent
-        commit = git(
-            repo_root, 'commit-tree', tree, '-p', parent,
-            # A different object makes older consumers fail their deterministic
-            # object check instead of resuming this explicit-plan-only operation.
-            '-m', ('chore: restore guarded Syncwheel control manifest'
-                   if identity_version == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
-                   else 'chore: restore Syncwheel control manifest'),
-            env=control_manifest_commit_env(repo_root, parent, identity_version),
-        ).stdout.strip()
-    finally:
-        index_path.unlink(missing_ok=True)
-    committed = manifest_from_tree(repo_root, commit, target)
-    if manifest_digest(committed) != manifest_digest(manifest):
-        raise SyncwheelError(
-            'control manifest digest differs in the object prepared for integration publication'
-        )
-    return commit
+    return _manifest_store().materialize_control_manifest_commit(
+        repo_root, manifest, parent, identity_version,
+    )
 
 
 def control_manifest_commit_identity_version(repo_root, manifest, parent, commit):
-    """Return the identity formula that produced this control object, or None."""
-    for version in CONTROL_MANIFEST_IDENTITY_VERSIONS:
-        if materialize_control_manifest_commit(
-            repo_root, manifest, parent, version,
-        ) == commit:
-            return version
-    return None
+    return _manifest_store().control_manifest_commit_identity_version(
+        repo_root, manifest, parent, commit,
+    )
 
 
 def control_manifest_actor(repo_root):
-    name, email = git_identity(repo_root)
-    if not name or not email:
-        name, email = 'Syncwheel', 'syncwheel@example.com'
-    return f'{name} <{email}>'
+    return _manifest_store().control_manifest_actor(
+        repo_root,
+    )
 
 
 def control_manifest_event_payload(
     repo_root, manifest_path, manifest, control_commit, replay_mode, reason, command, context,
     operation_id=None,
 ):
-    payload = manifest_event_payload(
-        manifest_path, manifest, reason,
-        {
-            **(context or {}),
-            'replay_mode': replay_mode,
-            'control_commit': control_commit,
-            'control_manifest_digest': manifest_digest(manifest),
-        },
+    return _manifest_store().control_manifest_event_payload(
+        repo_root, manifest_path, manifest, control_commit, replay_mode, reason, command, context, operation_id,
     )
-    payload.update({
-        'actor': control_manifest_actor(repo_root),
-        'reason': reason,
-        'command': command,
-        'control_commit': control_commit,
-    })
-    if operation_id is not None:
-        payload['operation_id'] = operation_id
-    return payload
 
 
 def control_manifest_intent_payload(
@@ -4915,534 +4275,101 @@ def control_manifest_intent_payload(
     replay_mode, reason, command, operation_id,
     identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
 ):
-    return {
-        'operation_id': operation_id,
-        'integration_branch': manifest['integration']['branch'],
-        'source_manifest_digest': source_digest,
-        'expected_manifest_digest': manifest_digest(manifest),
-        'replay_tip': replay_tip,
-        'expected_control_commit': control_commit,
-        'control_identity': identity_version,
-        **({'recovery_policy': 'explicit-plan-only'}
-           if identity_version == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION else {}),
-        'replay_mode': replay_mode,
-        'actor': control_manifest_actor(repo_root),
-        'reason': reason,
-        'command': command,
-    }
+    return _manifest_store().control_manifest_intent_payload(
+        repo_root, manifest, source_digest, replay_tip, control_commit, replay_mode, reason, command, operation_id, identity_version,
+    )
 
 
-def control_manifest_intent_idempotency_key(operation_id):
-    return f'control-manifest-intent:{operation_id}'
 
 
-def control_manifest_event_idempotency_key(
-    manifest, replay_tip, control_commit, command, operation_id,
-):
-    identity = {
-        'operation_id': operation_id,
-        'integration_branch': manifest['integration']['branch'],
-        'command': command,
-        'parent': replay_tip,
-        'control_commit': control_commit,
-    }
-    return 'control-manifest:' + canonical_json_digest(identity)
 
 
 def abandon_control_manifest_intent(
     repo_root, manifest_path, intent, observed_tip, outcome,
 ):
-    payload = {
-        'operation_id': intent['operation_id'],
-        'integration_branch': intent['integration_branch'],
-        'replay_tip': intent['replay_tip'],
-        'expected_control_commit': intent['expected_control_commit'],
-        'observed_tip': observed_tip,
-        'outcome': outcome,
-        'actor': control_manifest_actor(repo_root),
-        'reason': intent['reason'],
-        'command': intent['command'],
-    }
-    append_ledger_event(
-        repo_root,
-        'control_manifest_persistence_abandoned',
-        payload,
-        manifest_path,
-        idempotency_key=f"control-manifest-abandoned:{intent['operation_id']}",
+    return _manifest_store().abandon_control_manifest_intent(
+        repo_root, manifest_path, intent, observed_tip, outcome,
     )
-    return payload
 
 
-def control_manifest_operation_records(events, control_commit):
-    intents = {}
-    receipts = {}
-    for event in events:
-        payload = event.get('payload') or {}
-        operation_id = payload.get('operation_id')
-        if not operation_id:
-            continue
-        if (
-            event.get('type') == 'control_manifest_persistence_intent'
-            and payload.get('expected_control_commit') == control_commit
-        ):
-            if operation_id in intents:
-                raise SyncwheelError(
-                    f'control manifest ledger contains duplicate intents for {operation_id}'
-                )
-            intents[operation_id] = event
-        if (
-            event.get('type') in {
-                'manifest_saved', 'control_manifest_persistence_abandoned',
-            }
-            and (
-                payload.get('control_commit') == control_commit
-                or payload.get('expected_control_commit') == control_commit
-            )
-        ):
-            if operation_id in receipts:
-                raise SyncwheelError(
-                    f'control manifest ledger contains duplicate terminal records for {operation_id}'
-                )
-            receipts[operation_id] = event
-    return intents, receipts
 
 
-def pending_control_manifest_intents(events, branch=None):
-    """Return intents without a receipt or explicit abandonment, independent of ref state."""
-    intents = {}
-    terminal = {}
-    for event in events:
-        payload = event.get('payload') or {}
-        operation_id = payload.get('operation_id')
-        if not operation_id:
-            continue
-        if event.get('type') == 'control_manifest_persistence_intent':
-            if operation_id in intents:
-                raise SyncwheelError(
-                    f'control manifest ledger contains duplicate intents for {operation_id}'
-                )
-            intents[operation_id] = event
-        elif event.get('type') in {
-            'manifest_saved', 'control_manifest_persistence_abandoned',
-        }:
-            if operation_id in terminal:
-                raise SyncwheelError(
-                    f'control manifest ledger contains duplicate terminal records for {operation_id}'
-                )
-            terminal[operation_id] = event
-    pending = [
-        event for operation_id, event in intents.items()
-        if operation_id not in terminal
-        and (
-            branch is None
-            or (event.get('payload') or {}).get('integration_branch') == branch
-        )
-    ]
-    return sorted(pending, key=lambda event: event.get('seq', 0))
 
 
-def control_manifest_operation_intent(
-    events, control_commit, replay_tip, expected_digest, branch, operation_id=None,
-):
-    intents, receipts = control_manifest_operation_records(events, control_commit)
-    matching = []
-    for candidate_id, event in intents.items():
-        payload = event['payload']
-        if operation_id is not None and candidate_id != operation_id:
-            continue
-        if (
-            payload.get('replay_tip') == replay_tip
-            and payload.get('expected_manifest_digest') == expected_digest
-            and payload.get('integration_branch') == branch
-        ):
-            matching.append(event)
-    pending = [
-        event for event in matching
-        if event['payload']['operation_id'] not in receipts
-    ]
-    if len(pending) > 1:
-        raise SyncwheelError(
-            f'control manifest ledger contains ambiguous incomplete intents for {control_commit}'
-        )
-    if operation_id is not None and not matching:
-        raise SyncwheelError(
-            f'control manifest ledger is missing intent {operation_id}'
-        )
-    return (pending[0] if pending else None), matching, receipts
 
 
-def control_manifest_io_checkpoint(stage):
-    """Fault-injection seam for the control-manifest commit transaction."""
-    if os.environ.get(ENV_TEST_CONTROL_MANIFEST_SIGKILL) == stage:
-        os.kill(os.getpid(), signal.SIGKILL)
-    if os.environ.get(ENV_TEST_CONTROL_MANIFEST_PAUSE) == stage:
-        ready = os.environ.get(ENV_TEST_CONTROL_MANIFEST_READY)
-        release = os.environ.get(ENV_TEST_CONTROL_MANIFEST_RELEASE)
-        if not ready or not release:
-            raise SyncwheelError(
-                'control-manifest pause checkpoint requires ready and release paths'
-            )
-        ready_path = Path(ready)
-        ready_path.write_text(stage + '\n')
-        deadline = time.monotonic() + 20
-        release_path = Path(release)
-        while not release_path.exists():
-            if time.monotonic() >= deadline:
-                raise SyncwheelError(
-                    f'control-manifest pause checkpoint timed out at {stage}'
-                )
-            time.sleep(0.01)
-    return None
 
 
-def control_manifest_relative_path(repo_root):
-    return integration_manifest_path(repo_root).relative_to(
-        Path(repo_root).resolve()
-    ).as_posix()
 
 
 def staged_control_manifest_migration(repo_root):
-    """Whether an untracking migration of the control manifest is still staged."""
-    relative = control_manifest_relative_path(repo_root)
-    staged = git(
-        repo_root, 'diff', '--cached', '--name-only', '--diff-filter=D', '--', relative,
-        check=False,
+    return _manifest_store().staged_control_manifest_migration(
+        repo_root,
     )
-    return staged.returncode == 0 and bool(staged.stdout.strip())
 
 
 def control_manifest_owns_the_blocking_dirt(repo_root):
-    """Whether the blocking dirt is Syncwheel's own metadata, not product work."""
-    result = run(['git', '-C', str(repo_root), 'status', '--porcelain'], check=False)
-    if result.returncode != 0:
-        return False
-    relative = control_manifest_relative_path(repo_root)
-    paths = set()
-    for line in result.stdout.splitlines():
-        paths |= status_line_paths(line)
-    return relative in paths and all(
-        path == '.gitignore' or path.startswith('.syncwheel/') for path in paths
+    return _manifest_store().control_manifest_owns_the_blocking_dirt(
+        repo_root,
     )
 
 
-def control_manifest_source_allowance(repo_root, manifest_path):
-    """The integration control manifest is a rebuild input, never blocking dirt."""
-    if manifest_path is None or is_external_manifest_path(repo_root, manifest_path):
-        return set()
-    relative = control_manifest_relative_path(repo_root)
-    try:
-        actual = Path(manifest_path).resolve(strict=False).relative_to(
-            Path(repo_root).resolve()
-        ).as_posix()
-    except ValueError:
-        return set()
-    if actual != relative:
-        return set()
-    return {relative, Path(relative).parent.as_posix() + '/'}
 
 
 def local_only_control_manifest_untrack_step(repo_root, manifest):
-    """The command that keeps a local-only manifest out of a rebuild's reset."""
-    if not control_manifest_stays_untracked(manifest):
-        return None
-    checkout = find_worktree_for_branch(repo_root, manifest['integration']['branch'])
-    if checkout is None:
-        return None
-    relative = control_manifest_relative_path(repo_root)
-    listed = git(checkout, 'ls-files', '-z', '--', relative, check=False)
-    if listed.returncode != 0 or not listed.stdout.strip('\0'):
-        return None
-    location = [] if Path(checkout) == Path(repo_root) else ['-C', str(checkout)]
-    # --force: the entry may differ from both HEAD and the worktree, which
-    # git rm refuses to discard without it.
-    return ['git', *location, 'rm', '--cached', '--force', '-q', '--', relative]
+    return _manifest_store().local_only_control_manifest_untrack_step(
+        repo_root, manifest,
+    )
 
 
 def untrack_local_only_control_manifest(repo_root, manifest):
-    """Drop the control manifest from the integration index, keeping the file."""
-    step = local_only_control_manifest_untrack_step(repo_root, manifest)
-    if step is None:
-        return False
-    removed = run(step, cwd=repo_root, check=False)
-    if removed.returncode != 0:
-        raise SyncwheelError(
-            'cannot untrack the local-only control manifest: '
-            + (removed.stderr.strip() or removed.stdout.strip() or 'git rm failed')
-        )
-    return True
+    return _manifest_store().untrack_local_only_control_manifest(
+        repo_root, manifest,
+    )
 
 
 def local_only_control_manifest_guard(repo_root, manifest, manifest_path):
-    """Keep a local-only manifest file across the reset a rebuild performs.
-
-    The file is tracked only because an earlier release committed it, so the
-    reset would delete it. Untrack it where the integration branch is checked
-    out, and remember the bytes for every source path the reset can reach.
-    """
-    if not control_manifest_stays_untracked(manifest):
-        return []
-    checkout = find_worktree_for_branch(repo_root, manifest['integration']['branch'])
-    candidates = [integration_manifest_path(repo_root)]
-    if checkout is not None:
-        candidates.append(integration_manifest_path(checkout))
-    if manifest_path is not None:
-        candidates.append(Path(manifest_path))
-    guarded = []
-    seen = set()
-    for path in candidates:
-        # Guard the path the command names, never a symlink's target.
-        key = str(path)
-        if key in seen or path.is_symlink():
-            continue
-        seen.add(key)
-        try:
-            guarded.append((path, path.read_bytes()))
-        except OSError:
-            continue
-    untrack_local_only_control_manifest(repo_root, manifest)
-    return guarded
+    return _manifest_store().local_only_control_manifest_guard(
+        repo_root, manifest, manifest_path,
+    )
 
 
-def restore_guarded_control_manifests(guarded):
-    """Put back only the guarded sources the replay removed."""
-    for path, payload in guarded or ():
-        if path.exists():
-            continue
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(payload)
 
 
 def control_manifest_checkout_obstruction(
     repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
 ):
-    """Name the checkout content a control-manifest alignment must not overwrite."""
-    integration_worktree = Path(integration_worktree).resolve()
-    status = git(
-        repo_root, '-C', str(integration_worktree), 'status', '--porcelain',
-        '--untracked-files=all',
-    ).stdout.splitlines()
-    if not status:
-        return None
-    expected_path = control_manifest_relative_path(repo_root)
-    material_status = [
-        line for line in status
-        if not line.startswith('?? ') or line[3:] == expected_path
-    ]
-    changed_paths = {line[3:] for line in material_status if len(line) >= 4}
-    index_tree = git(
-        repo_root, '-C', str(integration_worktree), 'write-tree'
-    ).stdout.strip()
-    worktree_manifest_path = integration_worktree / expected_path
-    try:
-        worktree_raw_manifest = json.loads(worktree_manifest_path.read_text())
-        worktree_manifest, _ = load_manifest(
-            integration_worktree, worktree_manifest_path
-        )
-    except FileNotFoundError:
-        worktree_raw_manifest = None
-        worktree_manifest = None
-    except (OSError, json.JSONDecodeError, SyncwheelError) as exc:
-        raise SyncwheelError(
-            'interrupted control-manifest checkout contains an unreadable manifest'
-        ) from exc
-    worktree_digests = {
-        manifest_digest(candidate)
-        for candidate in (worktree_raw_manifest, worktree_manifest)
-        if candidate is not None
-    }
-    replayed_manifest = manifest_from_tree(
-        repo_root, replay_tip, integration_manifest_path(repo_root)
-    )
-    replayed_digest = (
-        manifest_digest(replayed_manifest) if replayed_manifest is not None else None
-    )
-    allowed_index_trees = {
-        ref_tree(repo_root, replay_tip),
-        ref_tree(repo_root, control_commit),
-    }
-    allowed_worktree_digests = {expected_digest}
-    if replayed_digest is not None:
-        allowed_worktree_digests.add(replayed_digest)
-    worktree_manifest_is_allowed = (
-        bool(worktree_digests & allowed_worktree_digests)
-        or (not worktree_digests and replayed_digest is None)
-    )
-    blocking = sorted(changed_paths - {expected_path})
-    index_diverged = index_tree not in allowed_index_trees
-    manifest_diverged = not worktree_manifest_is_allowed
-    if not blocking and not index_diverged and not manifest_diverged:
-        return None
-    return {
-        'worktree': str(integration_worktree),
-        'paths': blocking,
-        'display': blocking or [expected_path],
-        'index_diverged': index_diverged,
-        'manifest_diverged': manifest_diverged,
-    }
-
-
-def control_manifest_obstruction_refusal(obstruction, command):
-    return (
-        f"integration checkout {obstruction['worktree']} carries changes the "
-        'control-manifest alignment must not overwrite ('
-        + ', '.join(obstruction['display'])
-        + '); the integration ref was not moved. Commit, stash or discard them '
-        f'there, then rerun: {command}'
+    return _manifest_store().control_manifest_checkout_obstruction(
+        repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
     )
 
 
-def control_manifest_obstruction_warning(obstruction, command):
-    return (
-        'the control manifest was persisted, but integration checkout '
-        f"{obstruction['worktree']} still carries uncommitted changes ("
-        + ', '.join(obstruction['display'])
-        + '); only the control manifest was aligned there. Commit, stash or '
-        f'discard them, then rerun: {command}'
-    )
+
+
 
 
 def align_control_manifest_worktree(
     repo_root, manifest, replay_tip, control_commit, expected_digest,
     obstruction_state=None, preserve_ignore=False,
 ):
-    """Align index/worktree to the control tree without ever moving its branch ref."""
-    branch = manifest['integration']['branch']
-    integration_ref = f'refs/heads/{branch}'
-    integration_worktree = find_worktree_for_branch(repo_root, branch)
-    if not integration_worktree:
-        return None
-    integration_worktree = Path(integration_worktree).resolve()
-    control_manifest_io_checkpoint('before_checkout_alignment')
-    observed_tip = ref_tip(repo_root, integration_ref)
-    if observed_tip != control_commit:
-        advanced = bool(
-            observed_tip
-            and git(
-                repo_root, 'merge-base', '--is-ancestor', control_commit, observed_tip,
-                check=False,
-            ).returncode == 0
-        )
-        relation = 'advanced beyond' if advanced else 'changed away from'
-        raise ControlManifestAlignmentDrift(
-            f'integration ref {relation} interrupted control commit '
-            f'{control_commit}; checkout alignment stopped without moving the ref '
-            f'(observed {observed_tip or "absent"})',
-            observed_tip,
-        )
-    obstruction = control_manifest_checkout_obstruction(
-        repo_root, integration_worktree, replay_tip, control_commit, expected_digest,
+    return _manifest_store().align_control_manifest_worktree(
+        repo_root, manifest, replay_tip, control_commit, expected_digest, obstruction_state, preserve_ignore,
     )
-    manifest_file_aligned = False
-    if obstruction is None and not preserve_ignore:
-        # read-tree updates only this worktree's index and files. Unlike reset it
-        # cannot move the checked-out branch ref and therefore cannot undo a CAS.
-        git(
-            repo_root, '-C', str(integration_worktree),
-            'read-tree', '--reset', '-u', control_commit,
-        )
-        manifest_file_aligned = True
-    else:
-        # The ref already carries the control commit, so the operation must end
-        # rather than stall: align the control manifest alone and leave every
-        # other path in the checkout to its owner. A checkout carrying a
-        # different manifest proposal keeps that file too.
-        if obstruction is None or not obstruction['manifest_diverged']:
-            git(
-                repo_root, '-C', str(integration_worktree),
-                'checkout', control_commit, '--',
-                control_manifest_relative_path(repo_root),
-            )
-            manifest_file_aligned = True
-        if obstruction_state is not None and obstruction is not None:
-            obstruction_state.update(obstruction)
-    observed_after = ref_tip(repo_root, integration_ref)
-    if observed_after != control_commit:
-        raise ControlManifestAlignmentDrift(
-            'integration ref changed during interrupted control-manifest checkout '
-            f'alignment; the ref was not moved (observed {observed_after or "absent"})',
-            observed_after,
-        )
-    aligned = manifest_from_tree(
-        repo_root, control_commit, integration_manifest_path(repo_root)
-    )
-    if manifest_digest(aligned) != expected_digest:
-        raise SyncwheelError('integration checkout did not align to the control manifest')
-    source_path = Path(integration_worktree) / integration_manifest_path(
-        repo_root
-    ).relative_to(Path(repo_root).resolve())
-    transaction = active_manifest_write_transaction(source_path)
-    if transaction is not None and manifest_file_aligned:
-        # A kept foreign manifest never gets rewritten here; only claim the
-        # baseline when the worktree file was actually made to match it.
-        transaction['expectedDigest'] = expected_digest
-    return integration_worktree
 
 
 def capture_checkout_source_lease(repo_root, manifest_path, target):
-    """Expose one exact post-restore source lease without changing bool results."""
-    if target is None:
-        return
-    observed = checkout_source_lease(repo_root, manifest_path)
-    if observed is None:
-        raise SyncwheelError(
-            'cannot capture the source checkout lease after control restoration'
-        )
-    target.clear()
-    target.update(observed)
+    return _manifest_store().capture_checkout_source_lease(
+        repo_root, manifest_path, target,
+    )
 
 
 def persist_local_only_control_manifest(
     repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command,
     operation_id, persist_source, source_lease_out,
 ):
-    """Record the rebuilt integration tip without putting the manifest in it.
-
-    The receipt names the replay tip as the control commit, so every consumer
-    of the ledger sees that this rebuild has no separate control object.
-    """
-    expected_digest = manifest_digest(manifest)
-    try:
-        source_file_manifest = json.loads(Path(manifest_path).read_text())
-    except FileNotFoundError:
-        source_file_manifest = None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SyncwheelError(f'control manifest source is unreadable: {manifest_path}') from exc
-    source_file_digest = (
-        manifest_digest(source_file_manifest) if source_file_manifest is not None else None
+    return _manifest_store().persist_local_only_control_manifest(
+        repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command, operation_id, persist_source, source_lease_out,
     )
-    saved = persist_source and source_file_digest != expected_digest
-    if saved:
-        require_manifest_transaction_current(manifest_path)
-        save_manifest(manifest_path, manifest)
-    control_manifest_io_checkpoint('manifest_saved')
-    if not saved and any(
-        event.get('type') == 'manifest_saved'
-        and (event.get('payload') or {}).get('control_commit') == replay_tip
-        and ((event.get('payload') or {}).get('context') or {}).get(
-            'control_manifest_digest'
-        ) == expected_digest
-        for event in load_control_manifest_events(repo_root, manifest_path)
-    ):
-        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
-        return False
-    operation_id = operation_id or str(uuid.uuid4())
-    payload = control_manifest_event_payload(
-        repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command,
-        {'replay_tip': replay_tip, 'syncwheel_tracking': SYNCWHEEL_TRACKING_LOCAL_ONLY},
-        operation_id=operation_id,
-    )
-    append_ledger_event(
-        repo_root,
-        'manifest_saved',
-        payload,
-        manifest_path,
-        idempotency_key=control_manifest_event_idempotency_key(
-            manifest, replay_tip, replay_tip, command, operation_id
-        ),
-    )
-    control_manifest_io_checkpoint('ledger_saved')
-    capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
-    return saved
 
 
 def restore_control_manifest_after_integration_rebuild(
@@ -5452,55 +4379,9 @@ def restore_control_manifest_after_integration_rebuild(
     identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
     preserved_ignore=None, pre_cas_check=None,
 ):
-    branch = manifest['integration']['branch']
-    with control_manifest_branch_lock(repo_root, branch):
-        # Check every explicit pending operation BEFORE deriving an object from
-        # caller defaults (or taking the local-only/no-op paths). A different
-        # identity/parent must not make the existing intent invisible.
-        explicit = pending_explicit_control_recoveries(repo_root, manifest_path)
-        if explicit:
-            transaction = active_manifest_write_transaction(manifest_path)
-            intent = explicit[0]
-            if (len(explicit) != 1 or transaction is None
-                    or transaction.get('explicitControlRecoveryOperation') != intent['operation_id']
-                    or transaction.get('preserveGitignore') is not True
-                    or command != 'syncwheel manifest recover-control'
-                    or operation_id != intent['operation_id']
-                    or branch != intent['integration_branch']
-                    or replay_tip != intent['replay_tip']
-                    or identity_version != intent.get('control_identity', CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION)
-                    or manifest_digest(manifest) != intent['expected_manifest_digest']
-                    or preserved_ignore is None or pre_cas_check is None
-                    or not persist_source):
-                raise SyncwheelError(explicit_control_recovery_refusal())
-        if control_manifest_stays_untracked(manifest):
-            return persist_local_only_control_manifest(
-                repo_root,
-                manifest_path,
-                manifest,
-                replay_tip,
-                replay_mode,
-                reason,
-                command,
-                operation_id,
-                persist_source,
-                source_lease_out,
-            )
-        return _restore_control_manifest_after_integration_rebuild_locked(
-            repo_root,
-            manifest_path,
-            manifest,
-            replay_tip,
-            replay_mode,
-            reason=reason,
-            command=command,
-            operation_id=operation_id,
-            persist_source=persist_source,
-            source_lease_out=source_lease_out,
-            identity_version=identity_version,
-            preserved_ignore=preserved_ignore,
-            pre_cas_check=pre_cas_check,
-        )
+    return _manifest_store().restore_control_manifest_after_integration_rebuild(
+        repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command, operation_id, persist_source, source_lease_out, identity_version, preserved_ignore, pre_cas_check,
+    )
 
 
 def integration_reconciliation_source(repo_root, manifest_path):
@@ -5683,7 +4564,7 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         return None
     if not isinstance(proof, dict) or proof.get('version') not in (2, 3) or not isinstance(proof.get('inputs'), dict):
         return None
-    control = manifest_from_tree(repo_root, commit, integration_manifest_path(repo_root))
+    control = manifest_from_tree(repo_root, commit, _manifest_storage.integration_manifest_path(repo_root))
     parents = git(repo_root, 'show', '-s', '--format=%P', commit).stdout.split()
     if control is None or len(parents) != (3 if proof['version'] == 3 else 2) or manifest_digest(control) != proof.get('manifest_digest'):
         return None
@@ -5713,8 +4594,8 @@ def _integration_reconciliation_proof(repo_root, commit, manifest_path, observat
         or integration_reconciliation_object(repo_root, control, *parents[:2], tree, inputs, published_parent) != commit
     ):
         return None
-    events = load_control_manifest_events(repo_root, manifest_path)
-    intents, receipts = control_manifest_operation_records(events, commit)
+    events = _manifest_storage.load_control_manifest_events(repo_root, manifest_path)
+    intents, receipts = _manifest_storage.control_manifest_operation_records(events, commit)
     local = any(
         event['payload'].get('version') == 2
         and event['payload'].get('inputs') == inputs
@@ -6449,7 +5330,7 @@ def historically_empty_integration_only_commits(repo_root, manifest, commits, ma
     """
     wanted, retired, previous = set(commits), set(), {}
     current = None
-    for event in load_ledger_events(repo_root, manifest_path):
+    for event in _manifest_storage.load_ledger_events(repo_root, manifest_path):
         if event.get('type') not in {'manifest_initialized', 'manifest_saved'}:
             continue
         payload = event.get('payload') or {}
@@ -6509,7 +5390,7 @@ def historically_reconciled_unmapped_commits(repo_root, manifest, commits):
             carried.add(commit)
     if carried == wanted:
         return carried
-    manifest_path = integration_manifest_path(repo_root)
+    manifest_path = _manifest_storage.integration_manifest_path(repo_root)
     base = manifest['integration']['base']
     for merge in git(repo_root, 'rev-list', '--merges', f'{base}..{tip}').stdout.splitlines():
         proof = integration_reconciliation_proof(
@@ -6771,7 +5652,7 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
                 'integration reconciliation lease changed before CAS; review inputs and '
                 'run int rebuild --reason to start a new operation'
             )
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         moved = git(
             repo_root, 'update-ref', f'refs/heads/{branch}', final_tip, local_tip,
             check=False,
@@ -6781,21 +5662,21 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
                 repo_root, manifest_path, intent, ref_tip(repo_root, branch), 'ref_cas_failed'
             )
             raise SyncwheelError('integration reconciliation CAS lost; competing work preserved')
-    control_manifest_io_checkpoint('ref_updated')
-    control_manifest_io_checkpoint('before_provenance_resolution')
+    _manifest_storage.control_manifest_io_checkpoint('ref_updated')
+    _manifest_storage.control_manifest_io_checkpoint('before_provenance_resolution')
     with derived_provenance_store_lock(repo_root):
         store = load_derived_provenance_store(repo_root)
         if store not in (intent['provenance_store'], intent['provenance_store_after']):
             raise SyncwheelError('integration reconciliation provenance changed; pending intent preserved')
         if store != intent['provenance_store_after']:
             save_derived_provenance_store(repo_root, intent['provenance_store_after'])
-    control_manifest_io_checkpoint('provenance_resolved')
+    _manifest_storage.control_manifest_io_checkpoint('provenance_resolved')
     worktree = find_worktree_for_branch(repo_root, branch)
     if (str(Path(worktree).resolve()) if worktree else None) != intent['destination_path']:
         raise SyncwheelError('integration reconciliation checkout moved; pending intent preserved')
     if worktree is not None:
         worktree = Path(worktree)
-        control_manifest_io_checkpoint('before_checkout_alignment')
+        _manifest_storage.control_manifest_io_checkpoint('before_checkout_alignment')
         guard = checkout_reset_guard(worktree)
         current_source = integration_reconciliation_source(repo_root, manifest_path)
         expected_source = dict(before_source)
@@ -6815,15 +5696,15 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
             git(worktree, 'read-tree', '--reset', '-u', final_tip)
         if ref_tip(repo_root, branch) != final_tip:
             raise SyncwheelError('integration reconciliation ref changed during checkout alignment')
-        transaction = active_manifest_write_transaction(manifest_path)
-        if transaction is not None and Path(manifest_path) == integration_manifest_path(worktree):
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+        if transaction is not None and Path(manifest_path) == _manifest_storage.integration_manifest_path(worktree):
             transaction['expectedDigest'] = intent['expected_manifest_digest']
     aligned_guard = checkout_reset_guard(worktree) if worktree else None
-    control_manifest_io_checkpoint('checkout_aligned')
-    source_manifest, _ = load_manifest(repo_root, manifest_path)
+    _manifest_storage.control_manifest_io_checkpoint('checkout_aligned')
+    source_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if source_manifest is None or manifest_digest(source_manifest) != manifest_digest(manifest):
         raise SyncwheelError('integration reconciliation source changed; pending intent preserved')
-    control_manifest_io_checkpoint('manifest_saved')
+    _manifest_storage.control_manifest_io_checkpoint('manifest_saved')
     if (
         ref_tip(repo_root, branch) != final_tip
         or (worktree and checkout_reset_guard(worktree) != aligned_guard)
@@ -6840,11 +5721,11 @@ def apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
             operation_id=intent['operation_id'],
         ),
         manifest_path,
-        idempotency_key=control_manifest_event_idempotency_key(
+        idempotency_key=_manifest_storage.control_manifest_event_idempotency_key(
             manifest, local_tip, final_tip, intent['command'], intent['operation_id']
         ),
     )
-    control_manifest_io_checkpoint('ledger_saved')
+    _manifest_storage.control_manifest_io_checkpoint('ledger_saved')
     return True
 
 
@@ -6866,7 +5747,7 @@ def integration_divergence_is_control_only(repo_root, local_tip, published_tip):
                 return False
             control = normalize_manifest_data(
                 integration_control_manifest_from_tree(repo_root, commit),
-                integration_manifest_path(repo_root),
+                _manifest_storage.integration_manifest_path(repo_root),
             )
             defaults, integration = control['defaults'], control['integration']
             if (
@@ -6949,7 +5830,7 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         inputs = integration_projection_input_snapshot(repo_root, manifest)
         destination = checkout_reset_destination_lease(
             repo_root, branch,
-            allowed_paths=control_manifest_source_allowance(
+            allowed_paths=_manifest_storage.control_manifest_source_allowance(
                 repo_root, manifest_path
             ),
         )
@@ -6991,7 +5872,7 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
             or store != load_derived_provenance_store(repo_root)
             or local_tip != ref_tip(repo_root, branch)
             or destination != checkout_reset_destination_lease(
-                repo_root, branch, allowed_paths=control_manifest_source_allowance(repo_root, manifest_path)
+                repo_root, branch, allowed_paths=_manifest_storage.control_manifest_source_allowance(repo_root, manifest_path)
             )
         ):
             raise SyncwheelError('integration reconciliation inputs changed during materialization')
@@ -7028,9 +5909,9 @@ def reconcile_integration_ancestry(repo_root, manifest_path, manifest, command, 
         }
         append_ledger_event(
             repo_root, 'control_manifest_persistence_intent', intent, manifest_path,
-            idempotency_key=control_manifest_intent_idempotency_key(intent['operation_id']),
+            idempotency_key=_manifest_storage.control_manifest_intent_idempotency_key(intent['operation_id']),
         )
-        control_manifest_io_checkpoint('intent_saved')
+        _manifest_storage.control_manifest_io_checkpoint('intent_saved')
         return apply_integration_reconciliation(repo_root, manifest_path, manifest, intent)
 
 
@@ -7041,328 +5922,18 @@ def _restore_control_manifest_after_integration_rebuild_locked(
     identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
     preserved_ignore=None, pre_cas_check=None,
 ):
-    """Publish an isolated manifest-only commit above a rebuilt integration tip.
-
-    The object is built and verified before the integration ref is compared and
-    moved. Only after the CAS and checkout alignment succeed do we save the
-    source (including an external manifest) and append its receipt.
-    """
-    target = integration_manifest_path(repo_root)
-    observed = manifest_from_tree(repo_root, replay_tip, target)
-    expected_digest = manifest_digest(manifest)
-    observed_digest = manifest_digest(observed) if observed is not None else None
-    integration_ref = f"refs/heads/{manifest['integration']['branch']}"
-    current_tip = ref_tip(repo_root, integration_ref)
-    control_commit = materialize_control_manifest_commit(
-        repo_root, manifest, replay_tip, identity_version,
+    return _manifest_store()._restore_control_manifest_after_integration_rebuild_locked(
+        repo_root, manifest_path, manifest, replay_tip, replay_mode, reason, command, operation_id, persist_source, source_lease_out, identity_version, preserved_ignore, pre_cas_check,
     )
-    # Semantic equality does not make differently formatted Git blobs equal.
-    # Canonicalize through the same durable transaction before relying on exact
-    # tree equivalence after another publisher wins a coordination race.
-    if observed_digest == expected_digest and current_tip == replay_tip and control_commit == replay_tip:
-        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
-        return False
-    transaction = active_manifest_write_transaction(manifest_path)
-    if transaction is not None:
-        replayed_source, _ = load_manifest(repo_root, manifest_path)
-        replayed_source_digest = (
-            manifest_digest(replayed_source) if replayed_source is not None else None
-        )
-        # An ephemeral or desk replay may reset the checkout that carries the
-        # integration branch. It is the one known in-command transition that
-        # may replace the source before the control CAS. Record that observed
-        # replay digest in the intent; every other change still fails closed.
-        if replayed_source_digest != transaction['expectedDigest']:
-            # Tree JSON may omit defaults that load_manifest normalizes. Compare
-            # the actual replay bytes through the same verified checkpoint used
-            # for in-place replay, rather than comparing raw and normalized data.
-            acknowledge_in_place_manifest_replay(repo_root, manifest_path, replay_tip)
-    events = load_control_manifest_events(repo_root, manifest_path)
-    pending_intent, matching_intents, receipts = control_manifest_operation_intent(
-        events,
-        control_commit,
-        replay_tip,
-        expected_digest,
-        manifest['integration']['branch'],
-        operation_id=operation_id,
-    )
-    if pending_intent is not None and explicit_control_recovery_intent(pending_intent['payload']):
-        transaction = active_manifest_write_transaction(manifest_path)
-        if (transaction is None or transaction.get('explicitControlRecoveryOperation')
-                != pending_intent['payload']['operation_id']):
-            raise SyncwheelError(explicit_control_recovery_refusal())
-    if current_tip == control_commit and pending_intent is None:
-        # A completed local operation is an idempotent retry. A deterministic
-        # control commit with no local intent belongs to some other operation
-        # and must never be claimed as this clone's persistence receipt.
-        capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
-        return False
-    if current_tip != control_commit:
-        # FC3: probe the checkout the alignment will touch before the intent and
-        # the CAS, so unrelated work there can never leave an advanced ref behind.
-        integration_worktree = find_worktree_for_branch(
-            repo_root, manifest['integration']['branch']
-        )
-        obstruction = (
-            control_manifest_checkout_obstruction(
-                repo_root, integration_worktree, replay_tip, control_commit,
-                expected_digest,
-            )
-            if integration_worktree else None
-        )
-        ignore_is_preserved = bool(
-            obstruction is not None
-            and obstruction['paths'] == ['.gitignore']
-            and not obstruction['index_diverged']
-            and not obstruction['manifest_diverged']
-            and preserved_ignore is not None
-            and checkout_path_fingerprint(integration_worktree, '.gitignore') == preserved_ignore
-        )
-        if obstruction is not None and obstruction['paths'] and not ignore_is_preserved:
-            raise SyncwheelError(control_manifest_obstruction_refusal(
-                obstruction,
-                pending_intent['payload']['command'] if pending_intent else command,
-            ))
-    if pending_intent is not None:
-        intent = pending_intent['payload']
-        operation_id = intent['operation_id']
-        replay_mode = intent['replay_mode']
-        reason = intent['reason']
-        command = intent['command']
-        source_manifest, _ = load_manifest(repo_root, manifest_path)
-        source_digest = (
-            manifest_digest(source_manifest) if source_manifest is not None else None
-        )
-        try:
-            source_file_manifest = json.loads(Path(manifest_path).read_text())
-        except FileNotFoundError:
-            source_file_manifest = None
-        except (OSError, json.JSONDecodeError) as exc:
-            raise SyncwheelError(
-                f'control manifest source is unreadable: {manifest_path}'
-            ) from exc
-        source_file_digest = (
-            manifest_digest(source_file_manifest)
-            if source_file_manifest is not None else None
-        )
-        if {source_digest, source_file_digest}.isdisjoint({
-            intent.get('source_manifest_digest'),
-            intent.get('expected_manifest_digest'),
-        }):
-            raise SyncwheelError(
-                'control manifest changed after the interrupted persistence intent; '
-                'refusing to replace the newer local proposal. Review the proposal, then run: '
-                + control_manifest_divergence_remedy(repo_root, manifest_path)
-            )
-    else:
-        if current_tip != replay_tip:
-            raise SyncwheelError(
-                'integration ref changed before control manifest publication; '
-                'rerun the rebuild from a fresh plan'
-            )
-        operation_id = str(uuid.uuid4())
-        transaction = active_manifest_write_transaction(manifest_path)
-        source_digest = (
-            transaction.get('expectedDigest') if transaction is not None else None
-        )
-        intent = control_manifest_intent_payload(
-            repo_root,
-            manifest,
-            source_digest,
-            replay_tip,
-            control_commit,
-            replay_mode,
-            reason,
-            command,
-            operation_id,
-            identity_version=identity_version,
-        )
-        append_ledger_event(
-            repo_root,
-            'control_manifest_persistence_intent',
-            intent,
-            manifest_path,
-            idempotency_key=control_manifest_intent_idempotency_key(operation_id),
-        )
-        control_manifest_io_checkpoint('intent_saved')
-    # The object has already been checked above.  This one-shot CAS protects a
-    # concurrent integration writer without ever involving hooks or the index.
-    if pre_cas_check is not None:
-        try:
-            pre_cas_check()
-        except SyncwheelError:
-            abandon_control_manifest_intent(
-                repo_root, manifest_path, intent, ref_tip(repo_root, integration_ref),
-                'recovery_source_changed_before_cas',
-            )
-            raise
-    require_manifest_transaction_current(manifest_path)
-    if current_tip == replay_tip:
-        moved = git(
-            repo_root, 'update-ref', integration_ref, control_commit, replay_tip,
-            check=False,
-        )
-        if moved.returncode != 0:
-            current_tip = ref_tip(repo_root, integration_ref)
-            if current_tip != control_commit:
-                abandon_control_manifest_intent(
-                    repo_root,
-                    manifest_path,
-                    intent,
-                    current_tip,
-                    'ref_cas_failed',
-                )
-                raise SyncwheelError(
-                    'control manifest persistence intent was abandoned because the '
-                    'integration ref changed before its CAS; rerun the rebuild from a fresh plan'
-                )
-    elif current_tip != control_commit:
-        abandon_control_manifest_intent(
-            repo_root,
-            manifest_path,
-            intent,
-            current_tip,
-            'ref_changed_before_alignment',
-        )
-        raise SyncwheelError(
-            'control manifest persistence intent was abandoned because the integration '
-            'ref changed before checkout alignment; the ref was not moved. '
-            'Rerun the rebuild from a fresh plan'
-        )
-    control_manifest_io_checkpoint('ref_updated')
-    alignment_obstruction = {}
-    try:
-        integration_worktree = align_control_manifest_worktree(
-            repo_root, manifest, replay_tip, control_commit, expected_digest,
-            obstruction_state=alignment_obstruction,
-            preserve_ignore=preserved_ignore is not None,
-        )
-    except ControlManifestAlignmentDrift as exc:
-        abandon_control_manifest_intent(
-            repo_root,
-            manifest_path,
-            intent,
-            exc.observed_tip,
-            'checkout_alignment_ref_drift',
-        )
-        raise
-    control_manifest_io_checkpoint('checkout_aligned')
-    try:
-        source_file_manifest = json.loads(Path(manifest_path).read_text())
-    except FileNotFoundError:
-        source_file_manifest = None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SyncwheelError(f'control manifest source is unreadable: {manifest_path}') from exc
-    source_file_digest = (
-        manifest_digest(source_file_manifest) if source_file_manifest is not None else None
-    )
-    if persist_source and source_file_digest != expected_digest:
-        save_manifest(manifest_path, manifest)
-    control_manifest_io_checkpoint('manifest_saved')
-    payload = control_manifest_event_payload(
-        repo_root, manifest_path, manifest, control_commit, replay_mode, reason, command,
-        {
-            'replay_tip': replay_tip,
-            'replayed_manifest_digest': observed_digest,
-            'difference': control_manifest_difference(manifest, observed),
-        },
-        operation_id=operation_id,
-    )
-    append_ledger_event(
-        repo_root,
-        'manifest_saved',
-        payload,
-        manifest_path,
-        idempotency_key=control_manifest_event_idempotency_key(
-            manifest, replay_tip, control_commit, command, operation_id
-        ),
-    )
-    control_manifest_io_checkpoint('ledger_saved')
-    if alignment_obstruction:
-        print(
-            'warning: '
-            + control_manifest_obstruction_warning(alignment_obstruction, command),
-            file=sys.stderr,
-        )
-    capture_checkout_source_lease(repo_root, manifest_path, source_lease_out)
-    return True
 
 
-def control_manifest_divergence_remedy(repo_root, manifest_path):
-    command = ['syncwheel', 'int', 'rebuild']
-    if is_external_manifest_path(repo_root, manifest_path):
-        command.extend(['--manifest', str(manifest_path)])
-    command.extend([
-        '--reason', 'adopt reviewed control manifest proposal',
-    ])
-    return quoted(command)
 
 
 def resolve_superseded_control_manifest_intent(
     repo_root, manifest_path, manifest, intent, branch, allow_new_operation,
 ):
-    """Close an interrupted intent whose source already carries a newer proposal."""
-    source_manifest, _ = load_manifest(repo_root, manifest_path)
-    try:
-        source_file_manifest = json.loads(Path(manifest_path).read_text())
-    except FileNotFoundError:
-        source_file_manifest = None
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SyncwheelError(
-            f'control manifest source is unreadable: {manifest_path}'
-        ) from exc
-    if source_manifest is None and source_file_manifest is None:
-        return None
-    source_digest = (
-        manifest_digest(source_manifest) if source_manifest is not None else None
-    )
-    source_file_digest = (
-        manifest_digest(source_file_manifest)
-        if source_file_manifest is not None else None
-    )
-    if not {source_digest, source_file_digest}.isdisjoint({
-        intent.get('source_manifest_digest'),
-        intent.get('expected_manifest_digest'),
-    }):
-        return None
-    control_commit = intent['expected_control_commit']
-    replay_tip = intent.get('replay_tip')
-    current_tip = ref_tip(repo_root, f'refs/heads/{branch}')
-    proposal = source_manifest or manifest
-    if current_tip == control_commit:
-        # The CAS already landed, so the operation owes only its terminal
-        # record. Write it against the proposal the source now holds, so the
-        # newer declarations are never replaced by the interrupted one.
-        payload = control_manifest_event_payload(
-            repo_root, manifest_path, proposal, control_commit,
-            intent.get('replay_mode'), intent['reason'], intent['command'],
-            {
-                'replay_tip': replay_tip,
-                'persisted_manifest_digest': intent.get('expected_manifest_digest'),
-                'source_superseded': True,
-            },
-            operation_id=intent['operation_id'],
-        )
-        append_ledger_event(
-            repo_root,
-            'manifest_saved',
-            payload,
-            manifest_path,
-            idempotency_key=control_manifest_event_idempotency_key(
-                proposal, replay_tip, control_commit, intent['command'],
-                intent['operation_id'],
-            ),
-        )
-        return proposal
-    if allow_new_operation:
-        abandon_control_manifest_intent(
-            repo_root, manifest_path, intent, current_tip, 'superseded_local_proposal',
-        )
-        return proposal
-    raise SyncwheelError(
-        'control manifest changed after the interrupted persistence intent; '
-        'refusing to replace the newer local proposal. Review the proposal, then run: '
-        + control_manifest_divergence_remedy(repo_root, manifest_path)
+    return _manifest_store().resolve_superseded_control_manifest_intent(
+        repo_root, manifest_path, manifest, intent, branch, allow_new_operation,
     )
 
 
@@ -7370,211 +5941,9 @@ def recover_incomplete_control_manifest_persistence(
     repo_root, manifest_path, manifest, allow_new_operation=False,
     recovery_state=None, intents_only=False,
 ):
-    """Recover ledger intent before relying on the ref subject or source file."""
-    if recovery_state is not None:
-        recovery_state.update({'recovered': False, 'control_commit': None})
-
-    # FC4: the durable intent is authoritative even while the branch still
-    # points at the ordinary replay tip and even when replay removed the source.
-    events = load_control_manifest_events(repo_root, manifest_path)
-    branch = ((manifest or {}).get('integration') or {}).get('branch')
-    if pending_explicit_control_recoveries(repo_root, manifest_path):
-        raise SyncwheelError(explicit_control_recovery_refusal())
-    all_pending = pending_control_manifest_intents(events)
-    pending = (
-        all_pending
-        if len(all_pending) <= 1 or not branch
-        else [
-            event for event in all_pending
-            if (event.get('payload') or {}).get('integration_branch') == branch
-        ]
+    return _manifest_store().recover_incomplete_control_manifest_persistence(
+        repo_root, manifest_path, manifest, allow_new_operation, recovery_state, intents_only,
     )
-    if len(pending) > 1:
-        raise SyncwheelError(
-            'control manifest ledger contains ambiguous incomplete intents for '
-            + (branch or str(manifest_path))
-        )
-    pending_intent = pending[0] if pending else None
-    if pending_intent is None and intents_only:
-        return manifest
-    if pending_intent is not None:
-        branch = pending_intent['payload'].get('integration_branch')
-    if not branch:
-        symbolic = git(
-            repo_root, 'symbolic-ref', '--quiet', '--short', 'HEAD', check=False
-        )
-        branch = symbolic.stdout.strip() or None
-    if not branch:
-        return manifest
-    if pending_intent is None and not ref_tip(repo_root, branch):
-        return manifest
-
-    with control_manifest_branch_lock(repo_root, branch):
-        events = load_control_manifest_events(repo_root, manifest_path)
-        if pending_intent is not None:
-            operation_id = pending_intent['payload']['operation_id']
-            pending = [
-                event for event in pending_control_manifest_intents(events, branch=branch)
-                if event['payload']['operation_id'] == operation_id
-            ]
-            if not pending:
-                current, _ = load_manifest(repo_root, manifest_path)
-                return current or manifest
-            intent = pending[0]['payload']
-            # A scoped recovery grant never survives as permission for an
-            # unrelated command. This refusal precedes alignment and ledger writes.
-            if explicit_control_recovery_intent(intent):
-                raise SyncwheelError(explicit_control_recovery_refusal())
-            if intent.get('version') == 2:
-                committed = manifest_from_tree(
-                    repo_root, intent['expected_control_commit'], integration_manifest_path(repo_root)
-                )
-                if committed is None:
-                    raise SyncwheelError('integration reconciliation control manifest is missing')
-                try:
-                    apply_integration_reconciliation(repo_root, manifest_path, committed, intent)
-                except IntegrationReconciliationLeaseDrift:
-                    # Explicit re-planning may retire only an operation whose CAS
-                    # never landed. Post-CAS drift always keeps its pending intent.
-                    if not allow_new_operation or ref_tip(repo_root, branch) != intent['replay_tip']:
-                        raise
-                    current, _ = load_manifest(repo_root, manifest_path)
-                    if current is None:
-                        raise
-                    abandon_control_manifest_intent(
-                        repo_root, manifest_path, intent, intent['replay_tip'], 'superseded_before_cas'
-                    )
-                    return current
-                if recovery_state is not None:
-                    recovery_state.update({'recovered': True, 'control_commit': intent['expected_control_commit']})
-                return committed
-            control_commit = intent.get('expected_control_commit')
-            replay_tip = intent.get('replay_tip')
-            identity_version = intent.get(
-                'control_identity', CONTROL_MANIFEST_LEGACY_IDENTITY_VERSION,
-            )
-            parents = git(
-                repo_root, 'show', '-s', '--format=%P', control_commit, check=False
-            ).stdout.split()
-            committed = manifest_from_tree(
-                repo_root, control_commit, integration_manifest_path(repo_root)
-            )
-            if (
-                len(parents) != 1
-                or parents[0] != replay_tip
-                or committed is None
-                or (committed.get('integration') or {}).get('branch') != branch
-                or manifest_digest(committed) != intent.get('expected_manifest_digest')
-                or materialize_control_manifest_commit(
-                    repo_root, committed, replay_tip, identity_version,
-                ) != control_commit
-            ):
-                raise SyncwheelError(
-                    f'control manifest intent {intent["operation_id"]} references an '
-                    'invalid expected control object; refusing recovery'
-                )
-            if control_manifest_stays_untracked(committed):
-                abandon_control_manifest_intent(
-                    repo_root, manifest_path, intent, ref_tip(repo_root, branch),
-                    'local_only_control_manifest',
-                )
-                return committed
-            superseded = resolve_superseded_control_manifest_intent(
-                repo_root, manifest_path, manifest, intent, branch, allow_new_operation,
-            )
-            if superseded is not None:
-                if recovery_state is not None:
-                    recovery_state.update({
-                        'recovered': True,
-                        'control_commit': control_commit,
-                    })
-                return superseded
-            restore_control_manifest_after_integration_rebuild(
-                repo_root,
-                manifest_path,
-                committed,
-                replay_tip,
-                'recovery',
-                reason=intent['reason'],
-                command=intent['command'],
-                operation_id=intent['operation_id'],
-                identity_version=identity_version,
-            )
-            if recovery_state is not None:
-                recovery_state.update({
-                    'recovered': True,
-                    'control_commit': control_commit,
-                })
-            return committed
-
-        source_manifest, _ = load_manifest(repo_root, manifest_path)
-        manifest = source_manifest or manifest
-        control_commit = ref_tip(repo_root, branch)
-        if not control_commit:
-            return manifest
-        subject = git(
-            repo_root, 'show', '-s', '--format=%s', control_commit, check=False
-        ).stdout.strip()
-        if subject != 'chore: restore Syncwheel control manifest':
-            return manifest
-        parents = git(
-            repo_root, 'show', '-s', '--format=%P', control_commit, check=False
-        ).stdout.split()
-        if len(parents) != 1:
-            return manifest
-        replay_tip = parents[0]
-        committed = manifest_from_tree(
-            repo_root, control_commit, integration_manifest_path(repo_root)
-        )
-        if committed is None or (committed.get('integration') or {}).get('branch') != branch:
-            return manifest
-        if control_manifest_commit_identity_version(
-            repo_root, committed, replay_tip, control_commit,
-        ) is None:
-            return manifest
-        committed_digest = manifest_digest(committed)
-
-        # A receipt for this exact control object proves that its local
-        # persistence operation is already complete. A different source is
-        # therefore a subsequent local proposal, not incomplete recovery.
-        # Do not use any historical source digest as proof for an unreceipted
-        # control object: only its current intent can authorize recovery.
-        _intents, terminal = control_manifest_operation_records(
-            events, control_commit
-        )
-        if any(
-            event.get('type') == 'manifest_saved'
-            for event in terminal.values()
-        ):
-            return manifest
-
-        # A checked-out control tip can repair an absent in-repository source
-        # without claiming a foreign operation or writing an external proposal.
-        if manifest is None:
-            internal = integration_manifest_path(repo_root).resolve(strict=False)
-            if Path(manifest_path).resolve(strict=False) == internal:
-                if control_manifest_stays_untracked(committed):
-                    # The same bytes, without letting a checkout alignment put a
-                    # local-only manifest back into the index.
-                    save_manifest(manifest_path, committed)
-                else:
-                    align_control_manifest_worktree(
-                        repo_root, committed, replay_tip, control_commit, committed_digest
-                    )
-                return committed
-            return manifest
-
-        source_digest = manifest_digest(manifest)
-        if source_digest != committed_digest:
-            if allow_new_operation:
-                return manifest
-            raise SyncwheelError(
-                'control manifest divergence has no local persistence intent; '
-                'refusing to replace the local proposal with a control commit '
-                'that may belong to another clone. Review the proposal, then run: '
-                + control_manifest_divergence_remedy(repo_root, manifest_path)
-            )
-        return manifest
 
 
 def ref_tip(repo_root, ref):
@@ -7588,7 +5957,7 @@ def ref_tip(repo_root, ref):
 
 def require_manifest(repo_root, repo_value=None, manifest_override=None, personal=None):
     manifest_path = resolve_manifest_path(repo_root, repo_value, manifest_override, personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     return manifest, manifest_path
@@ -7989,7 +6358,7 @@ def verify_channel_plan_digest(
 
 
 def latest_channel_event(repo_root, manifest_path, channel_id, event_type):
-    for event in reversed(load_ledger_events(repo_root, manifest_path)):
+    for event in reversed(_manifest_storage.load_ledger_events(repo_root, manifest_path)):
         if event.get('type') != event_type:
             continue
         payload = event.get('payload') or {}
@@ -8176,7 +6545,7 @@ def load_repo_profile(repo_root):
 
 
 def save_repo_profile(repo_root, profile):
-    tracking, worktree_root = manifest_policy_from_file(repo_root / '.syncwheel' / 'manifest.json')
+    tracking, worktree_root = _manifest_storage.manifest_policy_from_file(repo_root / '.syncwheel' / 'manifest.json')
     ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
     path = repo_profile_path(repo_root)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -8881,7 +7250,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
 
 def github_pr_merge_events(repo_root, manifest_path, operation_id):
     return [
-        event for event in load_ledger_events(repo_root, manifest_path)
+        event for event in _manifest_storage.load_ledger_events(repo_root, manifest_path)
         if event.get('type') in {'github_pr_merge_started', 'github_pr_merge_prepared', 'github_pr_merge_receipt'}
         and (event.get('payload') or {}).get('operationId') == operation_id
     ]
@@ -11190,7 +9559,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         observed = remote_ref_tips(repo_root, config['remote'], state['managed_refs'])
         if observed != state['managed_refs']:
             raise SyncwheelError('coordination compose post-verification failed: managed refs drifted')
-    observed_manifest, _ = load_manifest(repo_root, manifest_path)
+    observed_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not observed_manifest or manifest_digest(observed_manifest) != plan['localProposalDigest']:
         raise SyncwheelError(
             'coordination compose local adoption pending: manifest drifted after remote publication'
@@ -11215,7 +9584,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
             'coordination compose local adoption pending; do not retry publication, replan: '
             + str(exc)
         ) from exc
-    verified_manifest, _ = load_manifest(repo_root, manifest_path)
+    verified_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not verified_manifest or manifest_digest(verified_manifest) != plan['proposedManifestDigest']:
         raise SyncwheelError('coordination compose local adoption verification failed')
     if publication_operation:
@@ -13344,7 +11713,7 @@ def plan_resume_mutations(repo_root, manifest, diagnostics, selected_stack_ids=N
 
 
 def integration_commit_diagnostics(repo_root, manifest, validation, manifest_path=None):
-    ledger_state = load_ledger_state(repo_root, manifest_path)
+    ledger_state = _manifest_storage.load_ledger_state(repo_root, manifest_path)
     unmapped = validation['details']['integration'].get('unmapped_commits') or []
     diagnostics = []
     for commit in unmapped:
@@ -13856,7 +12225,7 @@ def materialize_control_manifest_projection_tree(
     repo_root, manifest, replay_tree, gitignore_bytes=None, manifest_bytes=None,
 ):
     """Overlay exact local control bytes on a projected tree without moving a ref."""
-    relative = control_manifest_relative_path(repo_root)
+    relative = _manifest_storage.control_manifest_relative_path(repo_root)
     with tempfile.NamedTemporaryFile(
         prefix='syncwheel-control-projection-index-', delete=False
     ) as handle:
@@ -13866,7 +12235,7 @@ def materialize_control_manifest_projection_tree(
     try:
         git(repo_root, 'read-tree', replay_tree, env=environment)
         manifest_payload = (
-            canonical_manifest_file_text(manifest).encode('utf-8')
+            _manifest_storage.canonical_manifest_file_text(manifest).encode('utf-8')
             if manifest_bytes is None else manifest_bytes
         )
         result = subprocess.run(
@@ -14342,7 +12711,7 @@ def published_integration_tip_reuse_is_current(
         or observed['published_tip'] != plan['publishedTip']
     ):
         return False
-    observed_manifest, _ = load_manifest(repo_root, manifest_path)
+    observed_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if (
         observed_manifest is None
         or manifest_digest(observed_manifest) != plan['manifestDigest']
@@ -14428,9 +12797,9 @@ def published_integration_replay_is_current(
     if local_tree != plan['projectedTree']:
         return False
     committed = manifest_from_tree(
-        repo_root, local_tip, integration_manifest_path(repo_root)
+        repo_root, local_tip, _manifest_storage.integration_manifest_path(repo_root)
     )
-    source, _ = load_manifest(repo_root, manifest_path)
+    source, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if (
         committed is None
         or source is None
@@ -14462,12 +12831,12 @@ def unpublished_local_integration_control_tip(repo_root, manifest, manifest_path
     if not local_tip or local_tip == observation['published_tip']:
         return None
     committed = manifest_from_tree(
-        repo_root, local_tip, integration_manifest_path(repo_root)
+        repo_root, local_tip, _manifest_storage.integration_manifest_path(repo_root)
     )
     if committed is None or manifest_digest(committed) != manifest_digest(manifest):
         return None
-    events = load_control_manifest_events(repo_root, manifest_path)
-    intents, receipts = control_manifest_operation_records(events, local_tip)
+    events = _manifest_storage.load_control_manifest_events(repo_root, manifest_path)
+    intents, receipts = _manifest_storage.control_manifest_operation_records(events, local_tip)
     completed = sorted(set(intents) & set(receipts))
     if len(completed) != 1:
         return None
@@ -14631,7 +13000,7 @@ def command_init(args):
         print(output, end='')
         return 0
     if manifest_path.exists():
-        existing_manifest, _ = load_manifest(repo_root, manifest_path)
+        existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
         if existing_manifest and existing_manifest.get('version') == MANIFEST_VERSION_CHANNELS:
             raise SyncwheelError(
                 'init refuses to replace an existing manifest version 3; '
@@ -14641,7 +13010,7 @@ def command_init(args):
             raise SyncwheelError(f'manifest already exists: {manifest_path}')
     shared_manifest = not args.personal and not args.manifest
     if shared_manifest:
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         primary = get_worktrees(repo_root)[0]
         primary_path = Path(primary['path'])
         current_branch = primary.get('branch', 'DETACHED')
@@ -14655,7 +13024,7 @@ def command_init(args):
             acknowledge_in_place_manifest_replay(
                 repo_root, manifest_path, ref_tip(repo_root, integration_branch)
             )
-    save_manifest(manifest_path, manifest)
+    _manifest_storage.save_manifest(manifest_path, manifest)
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
     return 0
@@ -15686,7 +14055,7 @@ def command_replay_mode(args):
             profile['replay_mode'] = normalize_replay_mode(args.mode, '--replay-mode')
         save_repo_profile(repo_root, profile)
         profile = load_repo_profile(repo_root)
-    manifest, _manifest_path = load_manifest(
+    manifest, _manifest_path = _manifest_storage.load_manifest(
         repo_root, resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
     )
     mode, source = configured_replay_mode(repo_root, manifest)
@@ -15711,7 +14080,7 @@ def command_status(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     snapshot = collect_repo_snapshot(repo_root, manifest)
     output = {'snapshot': snapshot, 'manifest_path': str(manifest_path), 'manifest_present': manifest is not None}
     if manifest:
@@ -15803,7 +14172,7 @@ def command_status(args):
 def command_validate(args):
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     validation = validate_manifest(repo_root, manifest)
@@ -15822,7 +14191,7 @@ def command_validate(args):
 def command_plan(args):
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     validation = validate_manifest(repo_root, manifest)
@@ -15842,7 +14211,7 @@ def command_check(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     snapshot = collect_repo_snapshot(repo_root, manifest)
@@ -16085,7 +14454,7 @@ def channel_operation_payload(plan, channel=None, mutation=None):
 def record_channel_operation_prepared(repo_root, manifest_path, plan, channel=None, mutation=None):
     payload = channel_operation_payload(plan, channel, mutation)
     existing = [
-        event for event in load_ledger_events(repo_root, manifest_path)
+        event for event in _manifest_storage.load_ledger_events(repo_root, manifest_path)
         if event.get('type') in {
             'channel_operation_started', 'channel_operation_prepared',
             'channel_operation_receipt',
@@ -16222,7 +14591,7 @@ def record_channel_operation_receipt(
     prepared = next(
         (
             event.get('payload') or {}
-            for event in reversed(load_ledger_events(repo_root, manifest_path))
+            for event in reversed(_manifest_storage.load_ledger_events(repo_root, manifest_path))
             if event.get('type') == 'channel_operation_prepared'
             and (event.get('payload') or {}).get('operationId') == plan['operationId']
         ),
@@ -16231,7 +14600,7 @@ def record_channel_operation_receipt(
     started = next(
         (
             event.get('payload') or {}
-            for event in load_ledger_events(repo_root, manifest_path)
+            for event in _manifest_storage.load_ledger_events(repo_root, manifest_path)
             if event.get('type') == 'channel_operation_started'
             and (event.get('payload') or {}).get('operationId') == plan['operationId']
         ),
@@ -16281,12 +14650,12 @@ def finish_channel_manifest_mutation(
     }
     channel_id = channel['id'] if channel else (plan.get('context') or {}).get('channel')
     with manifest_write_transaction(repo_root, manifest_path, channel_id or 'manifest'):
-        require_locked_manifest_observation(repo_root, manifest_path, plan)
+        _manifest_storage.require_locked_manifest_observation(repo_root, manifest_path, plan)
         if locked_check:
             locked_check()
         record_channel_operation_prepared(repo_root, manifest_path, plan, channel, mutation)
         try:
-            channel_mutation_checkpoint()
+            _manifest_storage.channel_mutation_checkpoint()
         except (KeyboardInterrupt, SystemExit) as exc:
             record_channel_operation_receipt(
                 repo_root, manifest_path, plan, 'cancelled', channel,
@@ -16294,14 +14663,14 @@ def finish_channel_manifest_mutation(
                 evidence={'manifestDigest': plan['manifestDigestBefore']},
             )
             raise SyncwheelError('channel mutation cancelled before authoritative change') from exc
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         try:
-            save_manifest(manifest_path, manifest)
+            _manifest_storage.save_manifest(manifest_path, manifest)
         except (KeyboardInterrupt, SystemExit) as exc:
             record_channel_operation_receipt(
                 repo_root, manifest_path, plan, 'unknown', channel,
                 'interrupted after authoritative manifest mutation began',
-                evidence={'manifestDigest': manifest_digest(load_manifest(repo_root, manifest_path)[0])},
+                evidence={'manifestDigest': manifest_digest(_manifest_storage.load_manifest(repo_root, manifest_path)[0])},
             )
             raise SyncwheelError(
                 f'channel mutation outcome is unknown; operation {plan["operationId"]} '
@@ -16309,7 +14678,7 @@ def finish_channel_manifest_mutation(
             ) from exc
         except Exception as exc:
             if isinstance(exc, ManifestDurabilityError):
-                observed_manifest, _ = load_manifest(repo_root, manifest_path)
+                observed_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                 record_channel_operation_receipt(
                     repo_root, manifest_path, plan, 'unknown', channel,
                     str(exc)[:400],
@@ -16690,7 +15059,7 @@ def channel_operation_events(repo_root, manifest_path, operation_id=None):
         'channel_operation_receipt',
     }
     return [
-        event for event in load_ledger_events(repo_root, manifest_path)
+        event for event in _manifest_storage.load_ledger_events(repo_root, manifest_path)
         if event.get('type') in allowed
         and (
             operation_id is None
@@ -16754,7 +15123,7 @@ def command_channel_receipt_show(args):
         repo_root, args.repo, args.manifest, args.personal
     )
     receipts = []
-    for event in load_ledger_events(repo_root, manifest_path):
+    for event in _manifest_storage.load_ledger_events(repo_root, manifest_path):
         if event.get('type') not in {
             'channel_operation_receipt', 'channel_applied', 'channel_published',
             'channel_closed',
@@ -17225,7 +15594,7 @@ def command_channel_apply(args):
         channel_operation_id_from_args(args),
     )
     with manifest_write_transaction(repo_root, manifest_path, channel['id']):
-        fresh_manifest = require_locked_manifest_observation(repo_root, manifest_path, plan)
+        fresh_manifest = _manifest_storage.require_locked_manifest_observation(repo_root, manifest_path, plan)
         fresh_channel = require_channel(fresh_manifest, args.channel)
         fresh_plan = build_channel_plan(
             repo_root, fresh_manifest, fresh_channel, 'apply',
@@ -17247,7 +15616,7 @@ def command_channel_apply(args):
             },
         )
         try:
-            channel_mutation_checkpoint()
+            _manifest_storage.channel_mutation_checkpoint()
         except (KeyboardInterrupt, SystemExit) as exc:
             record_channel_operation_receipt(
                 repo_root, manifest_path, plan, 'cancelled', channel,
@@ -17255,7 +15624,7 @@ def command_channel_apply(args):
                 evidence={'localRevision': plan['currentRevision']},
             )
             raise SyncwheelError('channel apply cancelled before authoritative change') from exc
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         try:
             updated = git(repo_root, 'update-ref', ref, tip, expected, check=False)
         except (KeyboardInterrupt, SystemExit) as exc:
@@ -17331,7 +15700,7 @@ def command_channel_publish(args):
         channel_operation_id_from_args(args),
     )
     with manifest_write_transaction(repo_root, manifest_path, channel['id']):
-        fresh_manifest = require_locked_manifest_observation(repo_root, manifest_path, plan)
+        fresh_manifest = _manifest_storage.require_locked_manifest_observation(repo_root, manifest_path, plan)
         fresh_channel = require_channel(fresh_manifest, args.channel)
         fresh_plan = build_channel_plan(
             repo_root, fresh_manifest, fresh_channel, 'publish',
@@ -17377,7 +15746,7 @@ def command_channel_publish(args):
             },
         )
         try:
-            channel_mutation_checkpoint()
+            _manifest_storage.channel_mutation_checkpoint()
         except (KeyboardInterrupt, SystemExit) as exc:
             record_channel_operation_receipt(
                 repo_root, manifest_path, plan, 'cancelled', channel,
@@ -17385,7 +15754,7 @@ def command_channel_publish(args):
                 evidence={'remoteRevision': plan['remoteRevision']},
             )
             raise SyncwheelError('channel publish cancelled before authoritative change') from exc
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         try:
             if coordination_is_active(manifest):
                 with open(os.devnull, 'w') as sink, contextlib.redirect_stdout(sink):
@@ -17696,7 +16065,7 @@ def command_channel_close(args):
         return 0
     verify_channel_mutation_plan(args, output)
     with manifest_write_transaction(repo_root, manifest_path, channel['id']):
-        require_locked_manifest_observation(repo_root, manifest_path, output)
+        _manifest_storage.require_locked_manifest_observation(repo_root, manifest_path, output)
         if ref_tip(repo_root, branch) != current:
             raise SyncwheelError('channel close plan is stale under mutation lock')
         locked_remote_observation = channel_remote_observation(repo_root, channel)
@@ -17738,7 +16107,7 @@ def command_channel_close(args):
             },
         )
         try:
-            channel_mutation_checkpoint()
+            _manifest_storage.channel_mutation_checkpoint()
         except (KeyboardInterrupt, SystemExit) as exc:
             record_channel_operation_receipt(
                 repo_root, manifest_path, output, 'cancelled', channel,
@@ -17750,7 +16119,7 @@ def command_channel_close(args):
                 },
             )
             raise SyncwheelError('channel close cancelled before authoritative change') from exc
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         coordination_state = None
         manifest_saved = False
         local_deleted = False
@@ -17773,7 +16142,7 @@ def command_channel_close(args):
                     )
                 coordination_state = result.get('state_tip')
             manifest_attempted = True
-            save_manifest(manifest_path, manifest)
+            _manifest_storage.save_manifest(manifest_path, manifest)
             manifest_saved = True
             append_ledger_event(
                 repo_root, 'manifest_saved',
@@ -17792,7 +16161,7 @@ def command_channel_close(args):
                 local_deleted = True
         except (KeyboardInterrupt, SystemExit) as exc:
             try:
-                observed_manifest, _ = load_manifest(repo_root, manifest_path)
+                observed_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                 observed_after = {
                     'manifestDigest': manifest_digest(observed_manifest),
                     'localRevision': ref_tip(repo_root, ref),
@@ -17832,7 +16201,7 @@ def command_channel_close(args):
             ) from exc
         except Exception as exc:
             durability_unknown = isinstance(exc, ManifestDurabilityError)
-            observed_manifest, _ = load_manifest(repo_root, manifest_path)
+            observed_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
             observed_after = {
                 'manifestDigest': (
                     manifest_digest(observed_manifest) if observed_manifest else None
@@ -18389,7 +16758,7 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
 
 def stack_land_events(repo_root, manifest_path, operation_id):
     return [
-        event for event in load_ledger_events(repo_root, manifest_path)
+        event for event in _manifest_storage.load_ledger_events(repo_root, manifest_path)
         if event.get('type') in {'stack_land_started', 'stack_land_prepared', 'stack_land_receipt'}
         and (event.get('payload') or {}).get('operationId') == operation_id
     ]
@@ -18495,7 +16864,7 @@ def command_stack_land(args):
     if args.plan_digest != plan['planDigest']:
         raise SyncwheelError('stack land plan is stale; generate a new preview and use its exact planDigest')
     with manifest_write_transaction(repo_root, manifest_path, f'stack-land-{args.stack}'):
-        manifest = require_locked_manifest_observation(repo_root, manifest_path, {'manifestDigestBefore': plan['manifestDigest']})
+        manifest = _manifest_storage.require_locked_manifest_observation(repo_root, manifest_path, {'manifestDigestBefore': plan['manifestDigest']})
         current = build_stack_land_plan(repo_root, manifest, manifest_path, args.stack, args)
         if current['planDigest'] != args.plan_digest:
             raise SyncwheelError('stack land plan is stale after revalidation; generate a new preview')
@@ -19539,7 +17908,7 @@ def format_reconcile_action(action):
 def command_ledger_show(args):
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    state = load_ledger_state(repo_root, manifest_path)
+    state = _manifest_storage.load_ledger_state(repo_root, manifest_path)
     if args.json:
         print(json.dumps(state, indent=2))
         return 0
@@ -19703,9 +18072,9 @@ def command_reconcile(args):
 
     preflight_empty_desk_stack_rebuilds(repo_root, manifest, actions, args, worktree_root)
     preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root)
-    preflight_control_manifest_digest(repo_root, manifest_path, preflight_manifest)
-    require_manifest_transaction_current(manifest_path)
-    if is_external_manifest_path(repo_root, manifest_path):
+    _manifest_storage.preflight_control_manifest_digest(repo_root, manifest_path, preflight_manifest)
+    _manifest_storage.require_manifest_transaction_current(manifest_path)
+    if _manifest_storage.is_external_manifest_path(repo_root, manifest_path):
         ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
     else:
         ensure_syncwheel_metadata_excluded(repo_root, manifest.get('syncwheel_tracking'), worktree_root)
@@ -19831,7 +18200,7 @@ def command_reconcile(args):
             ):
                 control_manifest_restored = True
                 continue
-            reset_destination_allowed_paths = control_manifest_source_allowance(
+            reset_destination_allowed_paths = _manifest_storage.control_manifest_source_allowance(
                 repo_root, manifest_path
             )
             reset_destination_allowed_prefixes = []
@@ -19926,7 +18295,7 @@ def command_reconcile(args):
                     True,
                 )
             finally:
-                restore_guarded_control_manifests(guarded)
+                _manifest_storage.restore_guarded_control_manifests(guarded)
             require_replay_success(result)
             if result['mode'] == 'in-place':
                 acknowledge_in_place_manifest_replay(
@@ -20000,7 +18369,7 @@ def command_reconcile(args):
             try:
                 run_command_list(commands, repo_root, True)
             finally:
-                restore_guarded_control_manifests(guarded)
+                _manifest_storage.restore_guarded_control_manifests(guarded)
             if use_primary_checkout:
                 acknowledge_in_place_manifest_replay(repo_root, manifest_path, remote_tip)
             append_ledger_event(
@@ -20053,7 +18422,7 @@ def command_reconcile(args):
             raise SyncwheelError(
                 'full coordinated publish requires every managed local ref to match the manifest projection'
             )
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         publication_scope = 'full' if full_scope else 'partial'
         projection_status = 'convergent' if full_scope else 'partial'
         adoptable = {
@@ -20286,7 +18655,7 @@ def command_int_align_remote(args):
     try:
         run_command_list(commands, repo_root, not args.dry_run)
     finally:
-        restore_guarded_control_manifests(guarded)
+        _manifest_storage.restore_guarded_control_manifests(guarded)
     if not args.dry_run:
         append_ledger_event(
             repo_root,
@@ -20372,7 +18741,7 @@ def finish_integration_desk_capture(repo_root, manifest, manifest_path, receipt_
         and event.get('payload', {}).get('reason') == 'stack_resolve_integration'
         and event['payload'].get('manifest_hash') == manifest_digest(manifest)
         and event['payload'].get('context') == context
-        for event in load_ledger_events(repo_root, manifest_path)
+        for event in _manifest_storage.load_ledger_events(repo_root, manifest_path)
     ):
         append_ledger_event(repo_root, 'manifest_saved', manifest_event_payload(
             manifest_path, manifest, 'stack_resolve_integration', context,
@@ -20452,7 +18821,7 @@ def capture_integration_desk(repo_root, manifest, manifest_path, stack, args):
             'inputs': integration_desk_inputs(repo_root, manifest, manifest_path),
         }
         atomic_write_private_json(receipt_path, receipt, indent=2)
-        require_manifest_transaction_current(manifest_path)
+        _manifest_storage.require_manifest_transaction_current(manifest_path)
         save_manifest_with_ledger(
             repo_root, manifest_path, manifest, 'stack_resolve_integration',
             context,
@@ -20574,8 +18943,8 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
                         raise
                     # Recheck the full source/ref/manifest lease after Git failed,
                     # including a legacy ready receipt with CHERRY_PICK_HEAD.
-                    require_manifest_transaction_current(manifest_path)
-                    preflight_control_manifest_digest(repo_root, manifest_path, manifest)
+                    _manifest_storage.require_manifest_transaction_current(manifest_path)
+                    _manifest_storage.preflight_control_manifest_digest(repo_root, manifest_path, manifest)
                     read_integration_desk(repo_root, manifest, manifest_path, desk)
                     operation_ref = 'MERGE_HEAD' if 'merge' in argv else 'CHERRY_PICK_HEAD'
                     receipt.update(status='conflict', operation={
@@ -20621,7 +18990,7 @@ def command_int_rebuild(args):
             manifest,
             allow_new_operation=bool(args.reason),
         )
-    preflight_control_manifest_digest(repo_root, manifest_path, manifest)
+    _manifest_storage.preflight_control_manifest_digest(repo_root, manifest_path, manifest)
     if getattr(args, 'replay_mode', None) == 'desk' and integration_desk_is_detached(repo_root, manifest, args):
         if args.dry_run:
             desk = Path(args.worktree).resolve() if args.worktree else configured_worktree_path(
@@ -20670,7 +19039,7 @@ def command_int_rebuild(args):
         resolve_int_rebuild_location(repo_root, manifest, args),
         plumbing_supported=integration_supports_plumbing(manifest),
     )
-    source_allowance = control_manifest_source_allowance(repo_root, manifest_path)
+    source_allowance = _manifest_storage.control_manifest_source_allowance(repo_root, manifest_path)
     if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(
             repo_root, manifest['integration']['branch'], manifest,
@@ -20795,7 +19164,7 @@ def command_int_rebuild(args):
             not args.dry_run,
         )
     finally:
-        restore_guarded_control_manifests(guarded)
+        _manifest_storage.restore_guarded_control_manifests(guarded)
     require_replay_success(result)
     if not args.dry_run:
         reconciled = []
@@ -21009,7 +19378,7 @@ def load_other_manifest(repo_root, args):
         path = Path(args.other_manifest).expanduser()
     else:
         raise SyncwheelError('manifest compare requires --other-manifest or --other-personal')
-    manifest, path = load_manifest(repo_root, path)
+    manifest, path = _manifest_storage.load_manifest(repo_root, path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {path}')
     return manifest, path
@@ -21049,44 +19418,19 @@ def compare_manifests(left, right):
     }
 
 
-def explicit_control_recovery_intent(intent):
-    # Also quarantine older, unscoped recover-control intents. They must not
-    # silently regain the ordinary metadata writer on a newer client either.
-    return (intent.get('command') == 'syncwheel manifest recover-control'
-            or intent.get('control_identity') == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
-            or intent.get('recovery_policy') == 'explicit-plan-only')
 
 
-def explicit_control_recovery_refusal():
-    return ('interrupted explicit control recovery is quarantined; requested command '
-            'was not executed. Preserve the checkout and obtain a fresh '
-            'manifest recover-control --from-backup BACKUP plan before explicit apply')
 
 
-def pending_explicit_control_recoveries(repo_root, manifest_path):
-    # An alternate/personal control source cannot hide a canonical operation
-    # that protects this repository's integration checkout. De-duplicate ledger
-    # locations, not caller-selected candidate objects or operation identities.
-    seen = set()
-    explicit = []
-    for source in (integration_manifest_path(repo_root), manifest_path):
-        location = ledger_root(repo_root, source).resolve()
-        if location in seen:
-            continue
-        seen.add(location)
-        explicit.extend(event['payload'] for event in pending_control_manifest_intents(
-            load_control_manifest_events(repo_root, source)
-        ) if explicit_control_recovery_intent(event['payload']))
-    return explicit
 
 
 def control_recovery_pending(repo_root, manifest_path):
     # A preview must not acquire a write lock, repair/truncate a ledger tail or
     # create metadata. Incomplete input is held for explicit ledger recovery.
-    pending = pending_control_manifest_intents(load_ledger_events(repo_root, manifest_path))
+    pending = _manifest_storage.pending_control_manifest_intents(_manifest_storage.load_ledger_events(repo_root, manifest_path))
     if not pending:
         return None
-    if len(pending) != 1 or not explicit_control_recovery_intent(pending[0]['payload']):
+    if len(pending) != 1 or not _manifest_storage.explicit_control_recovery_intent(pending[0]['payload']):
         raise SyncwheelError('control recovery refuses unrelated or ambiguous pending intents')
     return pending[0]['payload']
 
@@ -21108,9 +19452,9 @@ def control_recovery_observation(repo_root):
 
 def control_recovery_plan(repo_root, manifest_path, backup_ref):
     """Prove a local failed replay before restoring its declared control input."""
-    if Path(manifest_path).resolve() != integration_manifest_path(repo_root).resolve():
+    if Path(manifest_path).resolve() != _manifest_storage.integration_manifest_path(repo_root).resolve():
         raise SyncwheelError('control recovery requires the canonical repository manifest')
-    current, _ = load_manifest(repo_root, manifest_path)
+    current, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not current:
         raise SyncwheelError('control recovery requires a readable replay manifest')
     branch = current['integration']['branch']
@@ -21120,7 +19464,7 @@ def control_recovery_plan(repo_root, manifest_path, backup_ref):
     source = ref_tip(repo_root, f'refs/heads/{backup_ref}')
     if not source:
         raise SyncwheelError('control recovery backup ref is missing')
-    original = manifest_from_tree(repo_root, source, integration_manifest_path(repo_root))
+    original = manifest_from_tree(repo_root, source, _manifest_storage.integration_manifest_path(repo_root))
     if original is None:
         raise SyncwheelError('control recovery backup has no tracked manifest')
     desired = normalize_manifest_data(original, manifest_path)
@@ -21208,7 +19552,7 @@ def command_manifest_recover_control(args):
         require_frozen_source()
         if control_recovery_pending(repo_root, manifest_path) != plan['pendingIntent']:
             raise SyncwheelError('control recovery pending intent changed before apply')
-        transaction = active_manifest_write_transaction(manifest_path)
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
         if transaction is None:
             raise SyncwheelError('control recovery requires its native manifest transaction')
         previous = transaction.get('preserveGitignore')
@@ -21239,7 +19583,7 @@ def command_manifest_recover_control(args):
                 transaction['explicitControlRecoveryOperation'] = previous_operation
         # The isolated control CAS owns the manifest. Never let transaction exit
         # stage a preserved or late-edited ignore file through the ordinary writer.
-        transaction = active_manifest_write_transaction(manifest_path)
+        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
         if transaction is not None:
             transaction['manifestWritten'] = False
             transaction['gitignoreWritten'] = False
@@ -21255,7 +19599,7 @@ def command_manifest_recover_control(args):
                 or observed['status'] != plan['observation']['status']
                 or observed['paths']['.gitignore'] != plan['observation']['paths']['.gitignore']
                 or regular_checkout_path_bytes(repo_root, '.syncwheel/manifest.json')
-                   != canonical_manifest_file_text(desired).encode()):
+                   != _manifest_storage.canonical_manifest_file_text(desired).encode()):
             raise SyncwheelError(
                 'control recovery inputs changed after control publication; '
                 'concurrent state preserved; inspect the control receipt before recovery'
@@ -21326,15 +19670,10 @@ def command_manifest_require_integration(args):
     return 0
 
 
-def repo_relative_path(repo_root, path):
-    try:
-        return Path(path).resolve().relative_to(Path(repo_root).resolve()).as_posix()
-    except ValueError:
-        return None
 
 
 def git_path_is_tracked(repo_root, path):
-    relative = repo_relative_path(repo_root, path)
+    relative = _manifest_storage.repo_relative_path(repo_root, path)
     if not relative:
         return False
     return git(repo_root, 'ls-files', '--error-unmatch', '--', relative, check=False).returncode == 0
@@ -21369,14 +19708,14 @@ def managed_block_exists(path, marker):
 
 
 def syncwheel_tracking_report(repo_root, manifest_path):
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     manifest_present = manifest is not None
     tracking = manifest.get('syncwheel_tracking') if manifest else None
     worktree_root = syncwheel_worktree_root(manifest)
     effective_root = resolve_worktree_root_path(repo_root, worktree_root)
     info_exclude = git_info_exclude_path(repo_root)
     gitignore = repo_root / '.gitignore'
-    manifest_relative = repo_relative_path(repo_root, manifest_path)
+    manifest_relative = _manifest_storage.repo_relative_path(repo_root, manifest_path)
     manifest_tracked = git_path_is_tracked(repo_root, manifest_path)
     warnings = []
     actions = []
@@ -21454,7 +19793,7 @@ def format_authority_policy(policy):
 
 
 def authority_report(repo_root, manifest_path):
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     present = bool(manifest and 'authority' in manifest)
     policy = manifest_authority(manifest) if manifest else None
     warnings = []
@@ -21496,7 +19835,7 @@ def command_repo_authority_status(args):
 def command_repo_authority_set(args):
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     ensure_manifest_in_repo(repo_root, manifest_path)
@@ -21530,7 +19869,7 @@ def restore_pending_mode_migration(root, path, pending_path):
     dirty = {entry['path'] for entry in journal_status_entries(root)}
     if dirty - {'.syncwheel/manifest.json', '.gitignore'}:
         raise SyncwheelError('mode migration recovery refuses unrelated working changes: ' + ', '.join(sorted(dirty)))
-    observed, _ = load_manifest(root, path)
+    observed, _ = _manifest_storage.load_manifest(root, path)
     if manifest_digest(observed) not in {pending['beforeDigest'], pending['afterDigest']}:
         raise SyncwheelError('mode migration recovery manifest lease lost')
     if get_current_branch(root) not in {pending['branch'], pending['targetBranch']}:
@@ -21556,7 +19895,7 @@ def restore_pending_mode_migration(root, path, pending_path):
             env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
     # Restore through the canonical transaction writer, then retain the exact
     # committed bytes from the initially clean checkout.
-    save_manifest(path, original_data)
+    _manifest_storage.save_manifest(path, original_data)
     with ref_move_authorization(root) as authorization:
         git(root, '--literal-pathspecs', 'restore', '--source=' + pending['originalHead'],
             '--worktree', '--', '.syncwheel/manifest.json',
@@ -21635,7 +19974,7 @@ def command_repo_mode_set(args):
     with tempfile.NamedTemporaryFile(mode='w', suffix='.json') as candidate:
         json.dump(updated, candidate)
         candidate.flush()
-        normalized, _ = load_manifest(root, candidate.name)
+        normalized, _ = _manifest_storage.load_manifest(root, candidate.name)
     archive_id = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
     archive = git_common_dir(root) / 'syncwheel' / 'mode-migrations' / archive_id
     refs = {f'refs/archive/syncwheel-mode/{archive_id}/head': ref_tip(root, 'HEAD')}
@@ -21699,7 +20038,7 @@ def command_repo_mode_set(args):
             )
             with ref_move_authorization(root) as authorization:
                 git(root, 'switch', branch, env={MANAGED_REF_MOVE_AUTH_ENV: authorization})
-            save_manifest(path, updated)
+            _manifest_storage.save_manifest(path, updated)
             append_ledger_event(root, 'repository_mode_migrated', {
                 'from': 'delivery', 'to': 'journal', 'reason': args.reason,
                 'archive': str(archive), 'archive_refs': refs,
@@ -21730,7 +20069,7 @@ def command_repo_tracking_status(args):
 
 
 def ensure_manifest_in_repo(repo_root, manifest_path):
-    relative = repo_relative_path(repo_root, manifest_path)
+    relative = _manifest_storage.repo_relative_path(repo_root, manifest_path)
     if not relative:
         raise SyncwheelError('syncwheel_tracking setup requires a manifest path inside the target repo')
     return relative
@@ -21753,7 +20092,7 @@ def git_add_paths(repo_root, paths, force_paths=None):
     force_paths = {Path(path).resolve() for path in (force_paths or [])}
     for path in paths:
         resolved = Path(path).resolve()
-        relative = repo_relative_path(repo_root, resolved)
+        relative = _manifest_storage.repo_relative_path(repo_root, resolved)
         if not relative or not resolved.exists():
             continue
         if resolved in force_paths:
@@ -21769,11 +20108,11 @@ def git_add_paths(repo_root, paths, force_paths=None):
 def commit_git_tracked_manifest(
     repo_root, manifest_path, include_manifest=True, include_gitignore=False,
 ):
-    if is_external_manifest_path(repo_root, manifest_path) or is_personal_manifest_path(
+    if _manifest_storage.is_external_manifest_path(repo_root, manifest_path) or _manifest_storage.is_personal_manifest_path(
         repo_root, manifest_path
     ):
         return None
-    manifest, _ = load_manifest(repo_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest or manifest.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED:
         return None
     paths = [manifest_path] if include_manifest else []
@@ -21781,7 +20120,7 @@ def commit_git_tracked_manifest(
         paths.append(repo_root / '.gitignore')
     relatives = [
         relative for path in paths
-        if (relative := repo_relative_path(repo_root, path))
+        if (relative := _manifest_storage.repo_relative_path(repo_root, path))
     ]
     if not relatives:
         return None
@@ -21812,7 +20151,7 @@ def commit_git_tracked_manifest(
 def git_rm_cached_paths(repo_root, paths):
     relatives = []
     for path in paths:
-        relative = repo_relative_path(repo_root, path)
+        relative = _manifest_storage.repo_relative_path(repo_root, path)
         if relative:
             relatives.append(relative)
     if relatives:
@@ -21822,7 +20161,7 @@ def git_rm_cached_paths(repo_root, paths):
 def command_repo_tracking_set(args):
     repo_root = resolve_repo_root(args.repo)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     ensure_manifest_in_repo(repo_root, manifest_path)
@@ -22220,7 +20559,7 @@ def command_hooks_worktree_guard(args):
     guard, guard_error = inspect_primary_guard(repo_root)
     branch = get_current_branch(primary_root)
     manifest_path = resolve_manifest_path(primary_root, str(primary_root), args.manifest, args.personal)
-    manifest, _ = load_manifest(primary_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(primary_root, manifest_path)
     remedies = primary_checkout_remedy_commands(manifest) if manifest else [
         'syncwheel worktree open <lane> --into <stack>',
         'syncwheel stack capture-integration <stack> HEAD',
@@ -22459,7 +20798,7 @@ def primary_checkout_preflight(args):
     manifest_path = resolve_manifest_path(
         primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
     )
-    manifest, _ = load_manifest(primary_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(primary_root, manifest_path)
     if manifest is None:
         return
     # Journal repositories deliberately turn tracked working-tree changes into
@@ -22506,7 +20845,7 @@ def primary_checkout_preflight(args):
                 raise SyncwheelError('primary checkout has index changes or conflicts')
             if '.syncwheel/manifest.json' in {
                 path for entry in primary_checkout_dirty_entries(primary_root)
-                for path in status_line_paths(entry)
+                for path in _manifest_storage.status_line_paths(entry)
             }:
                 raise SyncwheelError('primary checkout control manifest is dirty')
             return
@@ -22527,7 +20866,7 @@ def primary_checkout_preflight(args):
                                      + ', '.join(sorted(staged)))
             if '.syncwheel/manifest.json' in {
                 path for entry in primary_checkout_dirty_entries(primary_root)
-                for path in status_line_paths(entry)
+                for path in _manifest_storage.status_line_paths(entry)
             }:
                 raise SyncwheelError('primary checkout control manifest is dirty')
             return
@@ -22547,7 +20886,7 @@ def converge_default_repository_hooks(args):
     )
     if not manifest_path.exists():
         return None
-    manifest, _ = load_manifest(repo_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         return None
     return ensure_managed_repository_hooks(repo_root, manifest)
@@ -22598,7 +20937,7 @@ def governed_worktree_preflight(args):
     manifest_path = resolve_manifest_path(
         repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
     )
-    manifest, _ = load_manifest(repo_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         return
     if args.func == command_worktree_open:
@@ -22751,7 +21090,7 @@ def coordination_publication_lock_for_command(args):
         getattr(args, 'personal', None),
     )
     manifest, _ = (
-        load_manifest(repo_root, manifest_path) if manifest_path.exists() else (None, None)
+        _manifest_storage.load_manifest(repo_root, manifest_path) if manifest_path.exists() else (None, None)
     )
     if manifest is None or not coordination_is_active(manifest):
         yield None
@@ -22787,7 +21126,7 @@ def recover_control_manifest_before_command(args):
         getattr(args, 'manifest', None),
         getattr(args, 'personal', None),
     )
-    manifest, _ = load_manifest(repo_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     recovery_state = {}
     recovered = recover_incomplete_control_manifest_persistence(
         repo_root,
@@ -22810,7 +21149,7 @@ def execute_parsed_command(args):
         manifest_path = resolve_manifest_path(
             repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
         )
-        manifest, _ = load_manifest(repo_root, manifest_path)
+        manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
         if manifest and manifest.get('repository_mode') == 'journal':
             raise SyncwheelError(
                 f'{args.command} is forbidden for repository_mode="journal"; use journal commands'
@@ -22902,7 +21241,7 @@ def main():
                     repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
                 )
                 if args.func != command_init and manifest_path.exists():
-                    existing_manifest, _ = load_manifest(repo_root, manifest_path)
+                    existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
                         ensure_managed_repository_hooks(repo_root, existing_manifest)
                 with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
@@ -23193,13 +21532,13 @@ class _GovernedWorktreeRepository:
         return append_ledger_event(*args, **kwargs)
 
     def ledger_events_dir(self, *args, **kwargs):
-        return ledger_events_dir(*args, **kwargs)
+        return _manifest_storage.ledger_events_dir(*args, **kwargs)
 
     def load_ledger_events(self, *args, **kwargs):
-        return load_ledger_events(*args, **kwargs)
+        return _manifest_storage.load_ledger_events(*args, **kwargs)
 
     def recover_ledger_tail(self, *args, **kwargs):
-        return recover_ledger_tail(*args, **kwargs)
+        return _manifest_storage.recover_ledger_tail(*args, **kwargs)
 
     def load_json_file(self, *args, **kwargs):
         return load_json_file(*args, **kwargs)
@@ -23260,7 +21599,7 @@ class _CoordinationStateRepository:
         return manifest_from_tree(*args, **kwargs)
 
     def integration_manifest_path(self, *args, **kwargs):
-        return integration_manifest_path(*args, **kwargs)
+        return _manifest_storage.integration_manifest_path(*args, **kwargs)
 
     def manifest_digest(self, *args, **kwargs):
         return manifest_digest(*args, **kwargs)
@@ -23311,7 +21650,7 @@ class _PublicationIntentRepository:
         return ref_tip(*args, **kwargs)
 
     def load_ledger_events(self, *args, **kwargs):
-        return load_ledger_events(*args, **kwargs)
+        return _manifest_storage.load_ledger_events(*args, **kwargs)
 
     def append_ledger_event(self, *args, **kwargs):
         return append_ledger_event(*args, **kwargs)
@@ -23405,13 +21744,13 @@ class _PublicationStorage:
         return save_repo_profile(*args, **kwargs)
 
     def load_manifest(self, *args, **kwargs):
-        return load_manifest(*args, **kwargs)
+        return _manifest_storage.load_manifest(*args, **kwargs)
 
     def manifest_from_tree(self, *args, **kwargs):
         return manifest_from_tree(*args, **kwargs)
 
     def integration_manifest_path(self, *args, **kwargs):
-        return integration_manifest_path(*args, **kwargs)
+        return _manifest_storage.integration_manifest_path(*args, **kwargs)
 
     def exclusive_metadata_lock(self, *args, **kwargs):
         return exclusive_metadata_lock(*args, **kwargs)
@@ -23454,7 +21793,7 @@ class _PublicationLedger:
         return append_ledger_event(*args, **kwargs)
 
     def load_ledger_events(self, *args, **kwargs):
-        return load_ledger_events(*args, **kwargs)
+        return _manifest_storage.load_ledger_events(*args, **kwargs)
 
     def latest_channel_event(self, *args, **kwargs):
         return latest_channel_event(*args, **kwargs)
@@ -23468,6 +21807,64 @@ def _publication_coordinator(repo_root):
         _replay_engine(repo_root),
     )
 
+
+
+
+class _ManifestRepository:
+    def control_manifest_commit_env(self, *args, **kwargs):
+        return control_manifest_commit_env(*args, **kwargs)
+
+    def find_worktree_for_branch(self, *args, **kwargs):
+        return find_worktree_for_branch(*args, **kwargs)
+
+    def git(self, *args, **kwargs):
+        return git(*args, **kwargs)
+
+    def git_common_dir(self, *args, **kwargs):
+        return git_common_dir(*args, **kwargs)
+
+    def git_identity(self, *args, **kwargs):
+        return git_identity(*args, **kwargs)
+
+    def ref_tip(self, *args, **kwargs):
+        return ref_tip(*args, **kwargs)
+
+    def ref_tree(self, *args, **kwargs):
+        return ref_tree(*args, **kwargs)
+
+    def run(self, *args, **kwargs):
+        return run(*args, **kwargs)
+
+
+class _ManifestProjection:
+    def apply_integration_reconciliation(self, *args, **kwargs):
+        return apply_integration_reconciliation(*args, **kwargs)
+
+    def checkout_path_fingerprint(self, *args, **kwargs):
+        return checkout_path_fingerprint(*args, **kwargs)
+
+    def checkout_source_lease(self, *args, **kwargs):
+        return checkout_source_lease(*args, **kwargs)
+
+
+class _ManifestWorkspace:
+    def commit_git_tracked_manifest(self, *args, **kwargs):
+        return commit_git_tracked_manifest(*args, **kwargs)
+
+    def ensure_syncwheel_metadata_excluded(self, *args, **kwargs):
+        return ensure_syncwheel_metadata_excluded(*args, **kwargs)
+
+
+class _ManifestLifecycle:
+    def require_current_stack_create_operation(self, *args, **kwargs):
+        return require_current_stack_create_operation(*args, **kwargs)
+
+
+def _manifest_store():
+    return ManifestStore(
+        _ManifestRepository(), _ManifestProjection(),
+        _ManifestWorkspace(), _ManifestLifecycle(),
+    )
 
 
 class _StackRepository:
@@ -23548,7 +21945,7 @@ class _StackControl:
         return ensure_syncwheel_worktree_root_excluded(*args, **kwargs)
 
     def is_external_manifest_path(self, *args, **kwargs):
-        return is_external_manifest_path(*args, **kwargs)
+        return _manifest_storage.is_external_manifest_path(*args, **kwargs)
 
     def manifest_write_transaction(self, *args, **kwargs):
         return manifest_write_transaction(*args, **kwargs)
@@ -23557,19 +21954,19 @@ class _StackControl:
         return recover_incomplete_control_manifest_persistence(*args, **kwargs)
 
     def require_locked_manifest_observation(self, *args, **kwargs):
-        return require_locked_manifest_observation(*args, **kwargs)
+        return _manifest_storage.require_locked_manifest_observation(*args, **kwargs)
 
     def require_manifest(self, *args, **kwargs):
         return require_manifest(*args, **kwargs)
 
     def require_manifest_transaction_current(self, *args, **kwargs):
-        return require_manifest_transaction_current(*args, **kwargs)
+        return _manifest_storage.require_manifest_transaction_current(*args, **kwargs)
 
     def restore_control_manifest_after_integration_rebuild(self, *args, **kwargs):
         return restore_control_manifest_after_integration_rebuild(*args, **kwargs)
 
     def save_manifest(self, *args, **kwargs):
-        return save_manifest(*args, **kwargs)
+        return _manifest_storage.save_manifest(*args, **kwargs)
 
     def save_manifest_with_ledger(self, *args, **kwargs):
         return save_manifest_with_ledger(*args, **kwargs)
@@ -23579,7 +21976,7 @@ class _StackLedger:
         return append_ledger_event(*args, **kwargs)
 
     def load_ledger_events(self, *args, **kwargs):
-        return load_ledger_events(*args, **kwargs)
+        return _manifest_storage.load_ledger_events(*args, **kwargs)
 
 class _StackProjections:
     def capture_integration_desk(self, *args, **kwargs):
@@ -23668,13 +22065,13 @@ class _RevisionManifestStore:
         return require_manifest(*args, **kwargs)
 
     def save_manifest(self, *args, **kwargs):
-        return save_manifest(*args, **kwargs)
+        return _manifest_storage.save_manifest(*args, **kwargs)
 
     def manifest_write_transaction(self, *args, **kwargs):
         return manifest_write_transaction(*args, **kwargs)
 
     def require_manifest_transaction_current(self, *args, **kwargs):
-        return require_manifest_transaction_current(*args, **kwargs)
+        return _manifest_storage.require_manifest_transaction_current(*args, **kwargs)
 
     def validate_manifest(self, *args, **kwargs):
         return validate_manifest(*args, **kwargs)
@@ -23691,13 +22088,13 @@ class _RevisionLedger:
         return append_ledger_event(*args, **kwargs)
 
     def load_ledger_events(self, *args, **kwargs):
-        return load_ledger_events(*args, **kwargs)
+        return _manifest_storage.load_ledger_events(*args, **kwargs)
 
     def recover_ledger_tail(self, *args, **kwargs):
-        return recover_ledger_tail(*args, **kwargs)
+        return _manifest_storage.recover_ledger_tail(*args, **kwargs)
 
     def write_ledger_checkpoint(self, *args, **kwargs):
-        return write_ledger_checkpoint(*args, **kwargs)
+        return _manifest_storage.write_ledger_checkpoint(*args, **kwargs)
 
     def historically_abandoned_unmapped_commits(self, *args, **kwargs):
         return historically_abandoned_unmapped_commits(*args, **kwargs)

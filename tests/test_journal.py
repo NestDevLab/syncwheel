@@ -946,7 +946,7 @@ class JournalScopedOperationsTest(unittest.TestCase):
             real(*positional, **keywords)
             raise RuntimeError('simulated abrupt interruption')
         with mock.patch.dict(os.environ, {'PATH': str(self.stable_cli_dir) + os.pathsep + os.environ['PATH']}):
-            with mock.patch.object(module, 'save_manifest', side_effect=interrupt_after_save), mock.patch.object(
+            with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=interrupt_after_save), mock.patch.object(
                 module, 'restore_pending_mode_migration', side_effect=RuntimeError('process stopped')
             ):
                 with self.assertRaisesRegex(module.SyncwheelError, 'pending recovery retained'):

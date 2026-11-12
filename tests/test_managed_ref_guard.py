@@ -2284,18 +2284,23 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
 
     def test_every_manifest_or_ledger_writer_command_has_mutation_metadata(self):
-        module_paths = (MODULE_PATH, PROVIDER_MODULE_PATH)
+        module_paths = sorted(MODULE_PATH.parent.glob('syncwheel*.py'))
         functions = {}
         definitions_by_name = {}
+
+        def collect(module, nodes, scope=()):
+            for node in nodes:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    qualified = '.'.join((*scope, node.name))
+                    key = (module, qualified)
+                    functions[key] = node
+                    definitions_by_name.setdefault(node.name, set()).add(key)
+                    collect(module, node.body, (*scope, node.name))
+                elif isinstance(node, ast.ClassDef):
+                    collect(module, node.body, (*scope, node.name))
+
         for path in module_paths:
-            module = path.stem
-            tree = ast.parse(path.read_text())
-            for node in tree.body:
-                if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                key = (module, node.name)
-                functions[key] = node
-                definitions_by_name.setdefault(node.name, set()).add(key)
+            collect(path.stem, ast.parse(path.read_text()).body)
 
         calls = {}
         direct_command_writers = set()
@@ -2308,14 +2313,14 @@ class ManagedRefGuardTests(unittest.TestCase):
                 if isinstance(child.func, ast.Name):
                     called.add(child.func.id)
                     if (
-                        key[1].startswith('command_')
+                        key[1].rsplit('.', 1)[-1].startswith('command_')
                         and child.func.id in direct_private_savers
                     ):
                         direct_command_writers.add(key)
                 elif isinstance(child.func, ast.Attribute):
                     called.add(child.func.attr)
                     if (
-                        key[1].startswith('command_')
+                        key[1].rsplit('.', 1)[-1].startswith('command_')
                         and child.func.attr in {
                             'atomic_write_private_json', 'write_text', 'write_bytes'
                         }
@@ -2331,7 +2336,7 @@ class ManagedRefGuardTests(unittest.TestCase):
         }
         method_savers = {'delete_journal', 'save_journal'}
         writers = {
-            key for key in functions if key[1] in saver_names
+            key for key in functions if key[1].rsplit('.', 1)[-1] in saver_names
         } | {
             key for key, called in calls.items() if called.intersection(method_savers)
         } | direct_command_writers
@@ -2345,6 +2350,13 @@ class ManagedRefGuardTests(unittest.TestCase):
                 if key not in writers and callees.intersection(writers):
                     writers.add(key)
                     changed = True
+
+        self.assertIn(
+            ('syncwheel_manifest_store', 'ManifestStore.append_ledger_event'), writers,
+        )
+        self.assertIn(
+            ('syncwheel_stacks', 'StackLifecycle.command_stack_create'), writers,
+        )
 
         writer_commands = {
             getattr(syncwheel, name)

@@ -39,6 +39,7 @@ py-modules = [
   "syncwheel_publication",
   "syncwheel_revision_backend",
   "syncwheel_stacks",
+  "syncwheel_manifest_store",
   "syncwheel_files",
   "syncwheel_provenance",
 ]
