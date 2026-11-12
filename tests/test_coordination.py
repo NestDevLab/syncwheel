@@ -1,4 +1,5 @@
 import contextlib
+import contextvars
 import importlib.util
 import io
 import json
@@ -13121,6 +13122,43 @@ sys.exit(module.main())
             'origin': origin, 'repo': repo, 'other': other,
             'module': module, 'record': record,
         }
+
+    def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
+        fixture = self.prepare_v3_provenance_divergence('observed-provenance')
+        repo, module = fixture['repo'], fixture['module']
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        old_state = module.local_coordination_provenance_state(repo, manifest)
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [])
+        profile = module.repo_profile_path(repo)
+        fetch_head = repo / '.git/FETCH_HEAD'
+        fetch_head.write_bytes(b'foreign fetch receipt\n')
+        before = self.git(repo, 'show-ref').stdout, profile.read_bytes(), fetch_head.read_bytes()
+        isolated = contextvars.Context()
+        observed = isolated.run(module.read_remote_coordination_state, repo, config)
+        self.assertEqual(isolated.run(module.local_coordination_provenance_state, repo, manifest),
+                         observed['state'])
+        self.assertEqual(isolated.run(module.derived_provenance_records, repo, manifest), [fixture['record']])
+        # A different execution context still has only its prior local knowledge.
+        self.assertEqual(module.local_coordination_provenance_state(repo, manifest), old_state)
+        other_manifest = json.loads(json.dumps(manifest))
+        other_manifest['coordination'].update(id='unobserved', state_branch='syncwheel/state/unobserved')
+        self.assertIsNone(isolated.run(module.local_coordination_provenance_state, repo, other_manifest))
+        module.read_remote_coordination_states(repo, config)
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [fixture['record']])
+        self.assertEqual(module.derived_provenance_records(repo, manifest, old_state), [])
+        self.assertEqual((self.git(repo, 'show-ref').stdout, profile.read_bytes(), fetch_head.read_bytes()), before)
+        # A later acknowledged publication remains newer than this context's
+        # earlier observation, even though neither read updated tracking refs.
+        newer_record = {**fixture['record'], 'operation_id': 'newer-seen-provenance'}
+        newer_state = json.loads(json.dumps(observed['state']))
+        newer_state.update(parent_state=observed['tip'], publication_id=str(uuid.uuid4()))
+        newer_state['manifest']['integration']['derived_provenance'] = [newer_record]
+        newer_tip = module.create_coordination_state_commit(fixture['other'], newer_state, observed['tip'])
+        self.git(fixture['other'], 'push', 'origin', f'{newer_tip}:refs/heads/syncwheel/state/default')
+        module.fetch_coordination_state_object(repo, config['remote'], newer_tip)
+        module.record_coordination_state_seen(repo, config, newer_tip)
+        self.assertEqual(module.derived_provenance_records(repo, manifest), [newer_record])
 
     def test_the_operation_fingerprint_ignores_derived_provenance(self):
         fixture = self.prepare_v3_provenance_divergence('round10-provenance')

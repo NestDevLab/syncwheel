@@ -2,6 +2,7 @@
 import argparse
 import copy
 import contextlib
+import contextvars
 import datetime
 import errno
 import fnmatch
@@ -64,6 +65,9 @@ class ControlManifestAlignmentDrift(SyncwheelError):
 
 
 ENV_REGISTRY_PATH = 'SYNCWHEEL_REPO_REGISTRY'
+_COORDINATION_STATE_OBSERVATIONS = contextvars.ContextVar(
+    'syncwheel_coordination_state_observations', default=None
+)
 ENV_REPO = 'SYNCWHEEL_REPO'
 ENV_PERSONAL = 'SYNCWHEEL_PERSONAL'
 ENV_UPDATE_MODE = 'SYNCWHEEL_UPDATE_MODE'
@@ -3227,12 +3231,27 @@ def derived_provenance_store_lock(repo_root):
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def coordination_state_observation_key(repo_root, config):
+    return (str(git_common_dir(repo_root).resolve()), config['remote'],
+            config['id'], config['state_branch'])
+
+
+def remember_coordination_state_observation(repo_root, config, tip):
+    observations = dict(_COORDINATION_STATE_OBSERVATIONS.get() or {})
+    observations[coordination_state_observation_key(repo_root, config)] = tip
+    _COORDINATION_STATE_OBSERVATIONS.set(observations)
+
+
 def local_coordination_provenance_state(repo_root, manifest):
     """Return the newest locally available published coordination state."""
     config = coordination_config(manifest)
     if not config or config.get('mode') != 'active-active':
         return None
     candidates = []
+    observations = _COORDINATION_STATE_OBSERVATIONS.get() or {}
+    observed_tip = observations.get(coordination_state_observation_key(repo_root, config))
+    if observed_tip:
+        candidates.append(observed_tip)
     remote_state_ref = f"refs/remotes/{config['remote']}/{config['state_branch']}"
     remote_tip = ref_tip(repo_root, remote_state_ref)
     if remote_tip:
@@ -12543,6 +12562,7 @@ def read_remote_coordination_state(repo_root, config, fetch=True, local_manifest
             f"remote coordination manifest version {remote_manifest_version} is incompatible "
             f'with local manifest version {local_manifest_version}; migrate explicitly'
         )
+    remember_coordination_state_observation(repo_root, config, tip)
     return {
         'tip': tip,
         'state': state,
@@ -12574,6 +12594,12 @@ def read_remote_coordination_states(repo_root, config, *, fetch=True):
                 f'coordination state branch mismatch: {ref} declares {state["coordination_id"]!r}'
             )
         states.append({'ref': ref, 'tip': tip, 'state': state})
+    for item in states:
+        observed_config = {
+            **config, 'id': item['state']['coordination_id'],
+            'state_branch': item['ref'][len('refs/heads/'):],
+        }
+        remember_coordination_state_observation(repo_root, observed_config, item['tip'])
     return states
 
 

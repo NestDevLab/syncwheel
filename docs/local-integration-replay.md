@@ -161,6 +161,11 @@ Planning can still populate the shared patch-ID cache through normal validation.
 Published-integration observations recheck the state ref alongside managed refs.
 An absent or unrelated FETCH_HEAD does not determine freshness; a changed remote
 state or managed tip makes the observation stale.
+Successful state reads retain their observed OIDs in the current execution
+context, scoped by Git common directory, remote and coordination domain. Derived
+provenance considers these immutable objects alongside locally cached states.
+Parallel execution contexts keep separate observations. Explicit snapshot
+arguments continue to select their own provenance revision.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that
