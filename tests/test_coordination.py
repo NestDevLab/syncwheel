@@ -13249,6 +13249,34 @@ sys.exit(module.main())
         with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
             module.derived_provenance_records(repo, manifest)
 
+    def test_unpublished_v2_legacy_refusal_precedes_all_cli_startup_writes(self):
+        origin = self.create_remote('unpublished-legacy-v2')
+        repo = self.clone(origin, 'unpublished-legacy-v2')
+        self.init_coordinated(repo)
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        self.assertEqual(manifest['version'], 2)
+        record = self.derived_provenance_record(self.git(repo, 'rev-parse', 'HEAD').stdout.strip())
+        module.save_derived_provenance_store(repo, {
+            'version': module.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{'paths': record['paths'], 'base_commit': None, 'record': record}],
+        })
+        def observed():
+            files = {}
+            for directory in (repo / '.syncwheel', repo / '.git/syncwheel'):
+                if directory.exists():
+                    files.update({str(p.relative_to(repo)): p.read_bytes()
+                                  for p in directory.rglob('*') if p.is_file()})
+            return (self.git(repo, 'rev-parse', 'HEAD').stdout,
+                    self.git(repo, 'show-ref').stdout,
+                    (repo / '.git/index').read_bytes(), files,
+                    self.git(origin, 'show-ref').stdout)
+        before = observed()
+        rejected = self.run_cli(repo, 'int', 'push', expected=2,
+                                extra_env={'GIT_OPTIONAL_LOCKS': '0'})
+        self.assertIn('no endpoint witness', rejected.stderr)
+        self.assertEqual(observed(), before)
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']

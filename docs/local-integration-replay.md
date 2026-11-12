@@ -179,6 +179,9 @@ use a newly observed state without adopting its unbound tracking cache.
 The same namespace check runs before any coordinated publication (including
 version 2 manifests) and before recording its acknowledgment. An ordinary
 publication is not a legacy-provenance reconciliation procedure.
+Publication-related CLI commands check this boundary before startup recovery,
+hook convergence, control bootstrap, or durable intent creation. Refused commands
+retain pre-existing authorization records as well as control and publication state.
 
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that

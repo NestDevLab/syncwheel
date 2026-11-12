@@ -30037,6 +30037,8 @@ def command_int_rebuild(args):
 def command_int_push(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    if coordination_is_active(manifest):
+        coordination_provenance_observation(repo_root, coordination_config(manifest))
     complete_pending_promote_intents(
         repo_root, manifest, manifest_path, apply=not args.dry_run
     )
@@ -36917,6 +36919,30 @@ def recover_control_manifest_before_command(args):
     return recovered
 
 
+def coordination_provenance_before_command(args):
+    """Refuse unknown historical provenance before any CLI startup writes."""
+    if args.func not in {
+        command_stack_push, command_int_push, command_int_rebuild,
+        command_reconcile, command_resume, command_sync, command_publish,
+        command_channel_publish, command_channel_close, command_stack_land,
+        command_coordination_claims_backfill, command_coordination_repair,
+        command_coordination_compose,
+    } or not hasattr(args, 'repo'):
+        return
+    repo_root = resolve_repo_root(args.repo)
+    manifest_path = resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None),
+        getattr(args, 'personal', None),
+    )
+    manifest, _ = load_manifest(repo_root, manifest_path)
+    if manifest and coordination_is_active(manifest):
+        try:
+            coordination_provenance_observation(repo_root, coordination_config(manifest))
+        except SyncwheelError:
+            args._provenance_preflight_refused = True
+            raise
+
+
 def execute_parsed_command(args):
     recover_control_manifest_before_command(args)
     if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
@@ -37013,6 +37039,7 @@ def main():
         # can refuse its branch/guard witness. Explicit mutation locks remain on.
         os.environ['GIT_OPTIONAL_LOCKS'] = '0'
     try:
+        coordination_provenance_before_command(args)
         route_stack_add_from_governed_lane(args)
         # A guard callback runs inside a Git process that is mid-operation, so it
         # stays a decision about the incoming refs and skips the workspace-wide
@@ -37047,6 +37074,7 @@ def main():
         if SYNCWHEEL_REF_AUTH_REPO:
             scoped_cleanup = (
                 not syncwheel_mutation_requested(args)
+                or bool(getattr(args, '_provenance_preflight_refused', False))
                 or args.func == command_int_git
                 or (args.func == command_stack_create and bool(getattr(args, 'preserve_lanes', False)))
             )
