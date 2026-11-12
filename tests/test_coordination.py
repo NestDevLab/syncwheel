@@ -13339,6 +13339,137 @@ sys.exit(module.main())
                         module.coordination_provenance_before_command(args)
                 self.assertTrue(args._provenance_preflight_refused)
 
+    def legacy_binding_fixture(self, name):
+        repo, _source, module, _backend = self.declaration_fixture(name)
+        self.run_cli(repo, 'int', 'push')
+        profile = module.repo_profile_path(repo)
+        data = json.loads(profile.read_text())
+        data['coordination']['last_seen_state'].pop('endpoint_digest')
+        profile.write_text(json.dumps(data, indent=2) + '\n')
+        return repo, module, profile
+
+    def test_empty_legacy_binding_native_preview_apply_and_repeated_receipt(self):
+        repo, module, profile = self.legacy_binding_fixture('empty-binding')
+        manifest, _ = module.load_manifest(repo)
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            module.local_coordination_provenance_state(repo, manifest)
+        def protected():
+            return (self.git(repo, 'rev-parse', 'HEAD').stdout,
+                    self.git(repo, 'show-ref').stdout, (repo / '.git/index').read_bytes(),
+                    profile.read_bytes(), (repo / '.gitignore').read_bytes(),
+                    (repo / '.syncwheel/manifest.json').read_bytes())
+        before, events = protected(), module.load_ledger_events(repo)
+        plan = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty').stdout)
+        self.assertEqual(protected(), before)
+        self.assertEqual(module.load_ledger_events(repo), events)
+        path = self.tmp / 'binding-plan.json'
+        path.write_text(json.dumps(plan))
+        result = json.loads(self.run_cli(
+            repo, 'coordination', 'provenance', 'bind-empty', '--apply',
+            '--plan-file', str(path), '--reason', 'verify identical published state').stdout)
+        repeated = json.loads(self.run_cli(
+            repo, 'coordination', 'provenance', 'bind-empty', '--apply',
+            '--plan-file', str(path), '--reason', 'retry receipt lookup').stdout)
+        self.assertEqual(result, repeated)
+        self.assertEqual(protected(), before)
+        bindings = [event for event in module.load_ledger_events(repo)
+                    if event['type'] == 'coordination_provenance_bound']
+        self.assertEqual(len(bindings), 1)
+        self.assertEqual(bindings[0]['payload']['plan'], plan)
+        self.assertEqual(module.local_coordination_provenance_state(repo, manifest)['manifest_digest'],
+                         module.coordination_state_from_commit(repo, plan['stateTip'], 'default')['manifest_digest'])
+        self.run_cli(repo, 'int', 'push', '--dry-run', extra_env={'GIT_OPTIONAL_LOCKS': '0'})
+        self.assertEqual(protected(), before)
+
+    def test_empty_legacy_binding_refuses_overrides_and_profile_drift(self):
+        repo, module, profile = self.legacy_binding_fixture('binding-drift')
+        plan = module.coordination_legacy_binding_plan(repo)
+        path = self.tmp / 'drift-plan.json'
+        path.write_text(json.dumps(plan))
+        before = module.load_ledger_events(repo)
+        original = profile.read_bytes()
+        data = json.loads(original)
+        data['unrelated'] = 'concurrent owner edit'
+        profile.write_text(json.dumps(data) + '\n')
+        rejected = self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                '--apply', '--plan-file', str(path), '--reason', 'stale plan', expected=2)
+        self.assertIn('stale', rejected.stderr)
+        self.assertEqual(profile.read_text(), json.dumps(data) + '\n')
+        self.assertEqual(module.load_ledger_events(repo), before)
+        profile.write_bytes(original)
+        record = self.derived_provenance_record(self.git(repo, 'rev-parse', 'HEAD').stdout.strip())
+        module.save_derived_provenance_store(repo, {
+            'version': module.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{'paths': record['paths'], 'base_commit': None, 'record': record}],
+        })
+        rejected = self.run_cli(repo, 'coordination', 'provenance', 'bind-empty', expected=2)
+        self.assertIn('nonempty', rejected.stderr)
+        self.assertEqual(module.load_ledger_events(repo), before)
+
+    def test_empty_legacy_binding_lost_append_receipt_and_later_profile_drift(self):
+        repo, module, profile = self.legacy_binding_fixture('binding-lost-receipt')
+        plan = module.coordination_legacy_binding_plan(repo)
+        path = self.tmp / 'lost-binding-plan.json'
+        path.write_text(json.dumps(plan))
+        original = module.append_ledger_event
+        def lose_receipt(*args, **kwargs):
+            original(*args, **kwargs)
+            raise SystemExit(19)
+        argv = ['syncwheel', 'coordination', 'provenance', 'bind-empty', '--repo', str(repo),
+                '--apply', '--plan-file', str(path), '--reason', 'original binding']
+        with mock.patch.object(module, 'append_ledger_event', side_effect=lose_receipt), mock.patch('sys.argv', argv):
+            with self.assertRaises(SystemExit):
+                module.main()
+        result = json.loads(self.run_cli(repo, 'coordination', 'provenance', 'bind-empty',
+                                        '--apply', '--plan-file', str(path), '--reason', 'retry').stdout)
+        self.assertEqual(result['reason'], 'original binding')
+        events = [event for event in module.load_ledger_events(repo)
+                  if event['type'] == 'coordination_provenance_bound']
+        self.assertEqual(len(events), 1)
+        data = json.loads(profile.read_text())
+        data['unrelated'] = 'new edit'
+        profile.write_text(json.dumps(data) + '\n')
+        manifest, _ = module.load_manifest(repo)
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            module.local_coordination_provenance_state(repo, manifest)
+
+    def test_empty_legacy_binding_refuses_nonmatching_published_state(self):
+        repo, module, profile = self.legacy_binding_fixture('binding-state-mismatch')
+        manifest, _ = module.load_manifest(repo)
+        config = module.coordination_config(manifest)
+        observed = module.read_remote_coordination_state(repo, config)
+        data = json.loads(profile.read_text())
+        data['coordination']['last_seen_state']['state_tip'] = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
+        profile.write_text(json.dumps(data) + '\n')
+        before = profile.read_bytes(), module.load_ledger_events(repo)
+        rejected = self.run_cli(repo, 'coordination', 'provenance', 'bind-empty', expected=2)
+        self.assertIn('differs from the currently served state', rejected.stderr)
+        self.assertEqual((profile.read_bytes(), module.load_ledger_events(repo)), before)
+
+    def test_empty_legacy_binding_receipt_refuses_later_overrides_or_endpoint_change(self):
+        repo, module, profile = self.legacy_binding_fixture('binding-scope')
+        plan = module.coordination_legacy_binding_plan(repo)
+        path = self.tmp / 'scope-plan.json'
+        path.write_text(json.dumps(plan))
+        self.run_cli(repo, 'coordination', 'provenance', 'bind-empty', '--apply',
+                     '--plan-file', str(path), '--reason', 'bind exact empty state')
+        manifest, _ = module.load_manifest(repo)
+        self.assertIsNotNone(module.local_coordination_provenance_state(repo, manifest))
+        record = self.derived_provenance_record(self.git(repo, 'rev-parse', 'HEAD').stdout.strip())
+        module.save_derived_provenance_store(repo, {
+            'version': module.DERIVED_PROVENANCE_STORE_VERSION,
+            'overrides': [{'paths': record['paths'], 'base_commit': None, 'record': record}],
+        })
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            module.local_coordination_provenance_state(repo, manifest)
+        module.save_derived_provenance_store(repo, module.default_derived_provenance_store())
+        other = self.create_remote('binding-other-endpoint')
+        self.git(repo, 'remote', 'set-url', 'origin', str(other))
+        before = profile.read_bytes(), module.load_ledger_events(repo)
+        with self.assertRaisesRegex(module.SyncwheelError, 'no endpoint witness'):
+            contextvars.Context().run(module.local_coordination_provenance_state, repo, manifest)
+        self.assertEqual((profile.read_bytes(), module.load_ledger_events(repo)), before)
+
     def test_observed_provenance_is_fresh_scoped_and_preserves_git_cache_state(self):
         fixture = self.prepare_v3_provenance_divergence('observed-provenance')
         repo, module = fixture['repo'], fixture['module']

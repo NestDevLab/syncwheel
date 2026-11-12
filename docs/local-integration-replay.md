@@ -186,6 +186,30 @@ The preflight follows the central publication-lock command registry, including
 promote/demote and local stack mutations. A source call-graph regression checks
 every CLI entrypoint that transitively reaches publication or intent creation.
 
+### Explicit binding of an empty legacy store
+
+`coordination provenance bind-empty` prepares an exact plan for a clean governed
+primary with source-change authority. Its legacy last-seen OID must equal the
+state currently served by the configured endpoint, and the local override store
+must be empty. The plan binds the profile bytes, endpoint namespace, manifest and
+observed checkout/index. Coordinate the writer window before applying it.
+
+```sh
+BIND_PLAN=$(mktemp)
+syncwheel coordination provenance bind-empty > "$BIND_PLAN"
+syncwheel coordination provenance bind-empty --apply --plan-file "$BIND_PLAN" \
+  --reason "Verify identical published state for an empty legacy store"
+```
+
+Apply revalidates the plan under the existing manifest and provenance locks and
+appends an idempotent binding receipt to the Syncwheel ledger. The legacy profile
+bytes are retained. A lost acknowledgment can be inspected by repeating the same
+plan, which returns the original receipt and reason. Receipt use requires the
+same profile bytes and endpoint namespace with an empty override store. Changes
+to those inputs require a fresh reconciliation. Remote observation may acquire
+the exact state object using the governed object reader. The ledger and its
+standard private lock/checkpoint files constitute the local write footprint.
+
 Read-only commands, `int git` and lane-preserving declarations limit exit-time
 authorization cleanup to the current process identity and matching nonce that
 the invocation actually issued.

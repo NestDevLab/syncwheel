@@ -3271,7 +3271,10 @@ def coordination_provenance_observation(repo_root, config):
         seen = {}
     seen_endpoint = seen.get('endpoint_digest')
     if seen_endpoint is None and seen:
-        raise SyncwheelError('legacy coordination provenance has no endpoint witness; shared metadata requires governed reconciliation')
+        if coordination_legacy_binding_receipt(repo_root, observation_key, seen) is None:
+            raise SyncwheelError('legacy coordination provenance has no endpoint witness; shared metadata requires governed reconciliation')
+        seen = {**seen, 'endpoint_digest': observation_key[-1]}
+        seen_endpoint = observation_key[-1]
     if not seen and load_derived_provenance_store(repo_root)['overrides']:
         raise SyncwheelError('local derived provenance has no endpoint witness; shared metadata requires governed reconciliation')
     changed_endpoint = (
@@ -3281,6 +3284,36 @@ def coordination_provenance_observation(repo_root, config):
     if changed_endpoint:
         raise SyncwheelError('coordination provenance endpoint changed; shared metadata requires governed reconciliation')
     return observations.get(observation_key), seen
+
+
+def coordination_profile_digest(repo_root):
+    from syncwheel_local_replay import directory, file_image, LocalReplayError
+    try:
+        with directory(Path(repo_root) / '.syncwheel') as parent:
+            data, _info = file_image(parent, PROFILE_FILENAME)
+        return hashlib.sha256(data).hexdigest()
+    except (OSError, LocalReplayError) as exc:
+        raise SyncwheelError('cannot witness the existing coordination profile') from exc
+
+
+def coordination_legacy_binding_receipt(repo_root, observation_key, seen):
+    """Resolve only an explicit empty-store binding of these exact profile bytes."""
+    if load_derived_provenance_store(repo_root)['overrides']:
+        return None
+    profile_digest = coordination_profile_digest(repo_root)
+    namespace = canonical_json_digest(list(observation_key))
+    for event in reversed(load_ledger_events(repo_root)):
+        if event.get('type') != 'coordination_provenance_bound':
+            continue
+        plan = (event.get('payload') or {}).get('plan') or {}
+        unsigned = {key: value for key, value in plan.items() if key != 'planDigest'}
+        if (plan.get('operation') == 'bind-empty-legacy-provenance'
+                and plan.get('planDigest') == canonical_json_digest(unsigned)
+                and plan.get('namespaceDigest') == namespace
+                and plan.get('profileDigest') == profile_digest
+                and plan.get('stateTip') == seen.get('state_tip')):
+            return event
+    return None
 
 
 def local_coordination_provenance_state(repo_root, manifest):
@@ -21325,6 +21358,100 @@ def command_coordination_disable(args):
     return 0
 
 
+def coordination_legacy_binding_plan(repo_root):
+    """Prove equivalence to the currently served state with no local overrides."""
+    import syncwheel_local_replay as backend
+    try:
+        witness, manifest = backend.declaration_observation(repo_root, sys.modules[__name__])
+    except backend.LocalReplayError as exc:
+        raise SyncwheelError(str(exc)) from exc
+    config = coordination_config(manifest)
+    if not coordination_is_active(manifest):
+        raise SyncwheelError('legacy binding requires active-active coordination')
+    key = coordination_state_observation_key(repo_root, config)
+    profile_digest = coordination_profile_digest(repo_root)
+    _profile, coordination = coordination_profile(repo_root)
+    seen = coordination.get('last_seen_state') or {}
+    if (seen.get('coordination_id') != config['id'] or seen.get('endpoint_digest') is not None
+            or not re.fullmatch(r'[0-9a-f]{40}', str(seen.get('state_tip', '')))):
+        raise SyncwheelError('legacy binding requires an existing unbound exact last-seen state')
+    store = load_derived_provenance_store(repo_root)
+    if store['overrides']:
+        raise SyncwheelError('legacy binding refuses nonempty local overrides')
+    events = load_ledger_events(repo_root)
+    if pending_control_manifest_intents(events) or pending_coordination_publications(repo_root, repo_root / '.syncwheel/manifest.json'):
+        raise SyncwheelError('legacy binding refuses pending control or publication intents')
+    observed = read_remote_coordination_state(repo_root, config)
+    if not observed or observed.get('tip') != seen['state_tip']:
+        raise SyncwheelError('legacy last-seen state differs from the currently served state')
+    if (coordination_state_observation_key(repo_root, config) != key
+            or coordination_profile_digest(repo_root) != profile_digest
+            or load_derived_provenance_store(repo_root) != store):
+        raise SyncwheelError('legacy binding inputs changed during observation')
+    plan = {
+        'operation': 'bind-empty-legacy-provenance',
+        'namespaceDigest': canonical_json_digest(list(key)),
+        'profileDigest': profile_digest,
+        'stateTip': observed['tip'],
+        'storeDigest': canonical_json_digest(store),
+        'manifestDigest': manifest_digest(manifest),
+        'sourceWitness': witness,
+    }
+    plan['planDigest'] = canonical_json_digest(plan)
+    return plan
+
+
+def command_coordination_provenance_bind(args):
+    """Append one explicit namespace receipt, retaining the legacy profile."""
+    import syncwheel_local_replay as backend
+    try:
+        backend.require_ambient_location()
+    except backend.LocalReplayError as exc:
+        raise SyncwheelError(str(exc)) from exc
+    repo_root = resolve_repo_root(args.repo)
+    if args.manifest or args.personal:
+        raise SyncwheelError('legacy binding requires the primary manifest')
+    if not args.apply:
+        if args.plan_file or args.reason:
+            raise SyncwheelError('legacy binding preview does not accept an apply plan or reason')
+        print(json.dumps(coordination_legacy_binding_plan(repo_root), indent=2, sort_keys=True))
+        return 0
+    if not args.plan_file or not args.reason or not args.reason.strip() or len(args.reason) > 512:
+        raise SyncwheelError('legacy binding apply requires --plan-file and a bounded --reason')
+    try:
+        plan = json.loads(Path(args.plan_file).read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SyncwheelError('cannot read the legacy binding plan') from exc
+    if not isinstance(plan, dict):
+        raise SyncwheelError('legacy binding plan must be an object')
+    digest = plan.get('planDigest')
+    if (not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest)
+            or canonical_json_digest({key: value for key, value in plan.items() if key != 'planDigest'}) != digest):
+        raise SyncwheelError('legacy binding plan digest differs')
+    manifest_path = repo_root / '.syncwheel/manifest.json'
+    idempotency = 'coordination-provenance-binding:' + digest
+    with manifest_write_transaction(repo_root, manifest_path, 'legacy-provenance-binding', commit_tracked_changes=False):
+        active_manifest_write_transaction(manifest_path)['preserveGitignore'] = True
+        with derived_provenance_store_lock(repo_root):
+            matches = [event for event in load_ledger_events(repo_root, manifest_path)
+                       if event.get('type') == 'coordination_provenance_bound'
+                       and event.get('idempotency_key') == idempotency]
+            if matches:
+                if len(matches) != 1 or matches[0].get('payload', {}).get('plan') != plan:
+                    raise SyncwheelError('legacy binding receipt differs from the requested plan')
+                event = matches[0]
+            else:
+                if coordination_legacy_binding_plan(repo_root) != plan:
+                    raise SyncwheelError('legacy binding plan is stale')
+                event = append_ledger_event(repo_root, 'coordination_provenance_bound', {
+                    'plan': plan, 'reason': args.reason.strip(), 'actor': governed_worktree_owner(),
+                }, manifest_path, idempotency_key=idempotency)
+    print(json.dumps({'status': 'recorded', 'planDigest': digest,
+                      'receiptSequence': event['seq'],
+                      'reason': event['payload']['reason']}, indent=2, sort_keys=True))
+    return 0
+
+
 def command_coordination_provenance_reset(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(
@@ -35150,6 +35277,14 @@ def build_parser():
     coordination_provenance_sub = coordination_provenance_p.add_subparsers(
         dest='coordination_provenance_command', required=True
     )
+    coordination_provenance_bind_p = coordination_provenance_sub.add_parser(
+        'bind-empty', parents=[common],
+        help='explicitly bind an unchanged legacy state with no local overrides',
+    )
+    coordination_provenance_bind_p.add_argument('--plan-file')
+    coordination_provenance_bind_p.add_argument('--reason')
+    coordination_provenance_bind_p.add_argument('-a', '--apply', action='store_true')
+    coordination_provenance_bind_p.set_defaults(func=command_coordination_provenance_bind)
     coordination_provenance_reset_p = coordination_provenance_sub.add_parser(
         'reset',
         parents=[common],
@@ -36300,6 +36435,7 @@ def entrypoint_behavior_table():
     # inside the backend, after request and lease validation have completed.
     register((command_revision_provider,), mutates='always', manifest_mutates='internal')
     register((command_revision_provider_resolve_prepared,), mutates='apply', manifest_mutates='internal')
+    register((command_coordination_provenance_bind,), mutates='apply', manifest_mutates='internal')
     register((
         command_repo_add,
         command_repo_set_manifest,
@@ -37013,7 +37149,8 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
-    if args.func in {command_int_replay_local, command_stack_materialize_local, command_stack_recover_declaration}:
+    if args.func in {command_int_replay_local, command_stack_materialize_local,
+                     command_stack_recover_declaration, command_coordination_provenance_bind}:
         try:
             if passthrough:
                 raise SyncwheelError('local replay does not accept Git passthrough')
