@@ -149,15 +149,19 @@ def file_image(fd, name, *, allow_group_write=False):
         data = stream.read(MAX_BYTES + 1)
         after = os.fstat(stream.fileno())
         at_name = os.stat(name, dir_fd=fd, follow_symlinks=False)
-    identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mode, s.st_mtime_ns, s.st_ctime_ns)
+    identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mode, s.st_uid, s.st_gid,
+                          s.st_mtime_ns, s.st_ctime_ns)
     require(identity(before) == identity(after) == identity(at_name) and len(data) == before.st_size,
             "local replay file changed during observation")
-    return data, stat.S_IMODE(before.st_mode)
+    return data, before
 
 
-def image(fd, name, *, allow_group_write=False):
-    data, mode = file_image(fd, name, allow_group_write=allow_group_write)
-    return {"sha256": digest(data), "mode": mode}
+def image(fd, name, *, allow_group_write=False, include_ownership=False):
+    data, info = file_image(fd, name, allow_group_write=allow_group_write)
+    result = {"sha256": digest(data), "mode": stat.S_IMODE(info.st_mode)}
+    if include_ownership:
+        result.update(uid=info.st_uid, gid=info.st_gid)
+    return result
 
 
 def tree(root, commit):
@@ -213,7 +217,8 @@ def checkout(root_fd, expected, *, allow_group_write=False):
     for path in sorted(expected):
         mode, object_id = expected[path]
         with parent_dir(root_fd, path) as (parent, name):
-            data, permissions = file_image(parent, name, allow_group_write=allow_group_write)
+            data, info = file_image(parent, name, allow_group_write=allow_group_write)
+            permissions = stat.S_IMODE(info.st_mode)
         require(blob_oid(data) == object_id and bool(permissions & 0o100) == (mode == "100755"),
                 f"local replay checkout differs at {path}")
         total += len(data)
@@ -271,7 +276,8 @@ def added_image(parent, name, kind):
                 with directory(child, fd) as nested:
                     visit(nested, relative)
             else:
-                data, permissions = file_image(fd, child)
+                data, info = file_image(fd, child)
+                permissions = stat.S_IMODE(info.st_mode)
                 total += len(data)
                 require(total <= 8 * MAX_BYTES, "local replay addition exceeds its byte limit")
                 entries[relative] = {"sha256": digest(data), "mode": permissions}
@@ -609,8 +615,8 @@ def private_directory(path):
 def journal_record(operation):
     private_directory(operation)
     with directory(operation) as fd:
-        data, mode = file_image(fd, "journal.json")
-    require(mode == 0o600, "local replay journal has unexpected permissions")
+        data, info = file_image(fd, "journal.json")
+    require(stat.S_IMODE(info.st_mode) == 0o600, "local replay journal has unexpected permissions")
     try:
         return json.loads(data)
     except ValueError as exc:
@@ -764,17 +770,19 @@ def switch_addition(parent, name, journal, spec, *, forward, replace):
             == (want, previous), "local replay addition changed during adoption; journal retained")
 
 
-def switch_image(parent, name, journal, slot, before, after, *, forward, replace=True, allow_group_write=False):
-    current = image(parent, name, allow_group_write=allow_group_write)
-    retained = image(journal, slot, allow_group_write=allow_group_write)
+def switch_image(parent, name, journal, slot, before, after, *, forward, replace=True,
+                 allow_group_write=False, include_ownership=False):
+    current = image(parent, name, allow_group_write=allow_group_write, include_ownership=include_ownership)
+    retained = image(journal, slot, allow_group_write=allow_group_write, include_ownership=include_ownership)
     want, previous = (after, before) if forward else (before, after)
     if (current, retained) == (want, previous):
         return
     require(replace and (current, retained) == (previous, want),
             "local replay checkout or staged bytes changed; preserving the journal")
     exchange(parent, name, journal, slot)
-    require((image(parent, name, allow_group_write=allow_group_write),
-             image(journal, slot, allow_group_write=allow_group_write)) == (want, previous),
+    require((image(parent, name, allow_group_write=allow_group_write, include_ownership=include_ownership),
+             image(journal, slot, allow_group_write=allow_group_write, include_ownership=include_ownership))
+            == (want, previous),
             "local replay file changed during exchange; both images retained")
 
 
@@ -868,7 +876,8 @@ def aligned_files(work, meta, journal, record, *, forward, replace=True):
         checkpoint("checkout-file-aligned")
     switch_image(meta, "index", journal, "prepared-index", record["plan"]["index"],
                  record["indexAfter"], forward=forward, replace=replace,
-                 allow_group_write=record.get("kind") == "localManifestDeclaration")
+                 allow_group_write=record.get("kind") == "localManifestDeclaration",
+                 include_ownership=record.get("kind") == "localManifestDeclaration")
     checkpoint("index-aligned")
 
 
@@ -1088,7 +1097,7 @@ def local_source_plan(root, stack_id, api):
     require_clean_index(root, baseline)
     with directory(root) as work, directory(meta) as metadata:
         observed = checkout(work, baseline, allow_group_write=True)
-        index = image(metadata, "index", allow_group_write=True)
+        index = image(metadata, "index", allow_group_write=True, include_ownership=True)
         with parent_dir(work, MANIFEST) as (parent, name):
             manifest_image = image(parent, name)
     existing = git(root, "rev-parse", "--verify", "--quiet", "--end-of-options", target, allowed=(0, 1)).decode().strip() or None
@@ -1286,7 +1295,7 @@ def declaration_observation(root, api):
         # retains its witnessed permissions under the native writer leases.
         with parent_dir(work, MANIFEST) as (parent, name):
             require(image(parent, name) == observed[MANIFEST], "local declaration manifest image drifted")
-        index = image(metadata, "index", allow_group_write=True)
+        index = image(metadata, "index", allow_group_write=True, include_ownership=True)
     require(symbolic(root, "HEAD") == target and head(root, target) == tip,
             "local declaration HEAD drifted while observing")
     return {"targetRef": target, "integrationTip": tip, "index": index,
@@ -1302,6 +1311,10 @@ def verify_declaration_record(root, operation, api):
     require(plan["planDigest"] == operation.name
             and api.canonical_json_digest({k: v for k, v in plan.items() if k != "planDigest"}) == operation.name,
             "local declaration journal digest differs")
+    require(all(type(item.get(key)) is int and item[key] >= 0
+                for item in (plan["index"], record["indexAfter"]) for key in ("uid", "gid"))
+            and all(plan["index"][key] == record["indexAfter"][key] for key in ("uid", "gid")),
+            "local declaration journal lacks matching index ownership witnesses")
     before = tree(root, plan["integrationTip"])
     after = tree(root, record["final"])
     require(git(root, "rev-list", "--parents", "-n", "1", record["final"]).decode().split()
@@ -1336,8 +1349,9 @@ def finish_declaration(root, operation, record, api, *, recover=False):
                 require(image(parent, name) == expected_manifest,
                         "local declaration terminal manifest image changed")
             expected_index = record["indexAfter"] if record["state"] == "completed" else plan["index"]
-            require(image(metadata, "index", allow_group_write=True)["mode"] == expected_index["mode"],
-                    "local declaration terminal index mode changed")
+            current_index = image(metadata, "index", allow_group_write=True, include_ownership=True)
+            require(all(current_index[key] == expected_index[key] for key in ("mode", "uid", "gid")),
+                    "local declaration terminal index permissions or ownership changed")
             # A terminal-record crash may leave our own index lease. Native
             # ref locks still have no recoverable ownership proof.
             with RefLease(root, meta, plan, current, verification_auth=True).hold(api):
@@ -1417,10 +1431,17 @@ def apply_manifest_declaration(root, updated, stack_id, api):
                 create_file(stage, "manifest", encoded, plan["checkout"][MANIFEST]["mode"])
                 create_file(stage, "index-lease", b"", 0o600)
                 git(root, "read-tree", final, env={"GIT_INDEX_FILE": str(stage / "prepared-index")})
-                (stage / "prepared-index").chmod(plan["index"]["mode"])
+                with (stage / "prepared-index").open("rb") as stream:
+                    try:
+                        os.fchown(stream.fileno(), plan["index"]["uid"], plan["index"]["gid"])
+                        os.fchmod(stream.fileno(), plan["index"]["mode"])
+                    except OSError as exc:
+                        raise LocalReplayError("local declaration cannot preserve index ownership and permissions") from exc
+                    os.fsync(stream.fileno())
                 with directory(stage) as fd:
-                    with (stage / "prepared-index").open("rb") as stream: os.fsync(stream.fileno())
-                    index_after = image(fd, "prepared-index", allow_group_write=True)
+                    index_after = image(fd, "prepared-index", allow_group_write=True, include_ownership=True)
+                require(all(index_after[key] == plan["index"][key] for key in ("mode", "uid", "gid")),
+                        "local declaration prepared index permissions or ownership differ")
                 record = {"kind": "localManifestDeclaration", "schemaVersion": 1, "state": "prepared",
                           "actor": api.governed_worktree_owner(),
                           "plan": plan, "final": final, "indexAfter": index_after,

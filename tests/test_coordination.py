@@ -5531,12 +5531,17 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assertEqual((repo / '.syncwheel/manifest.json').stat().st_mode & 0o777, 0o664)
 
     def test_local_declaration_preserves_group_writable_index_and_recovers(self):
+        other_gid = next((gid for gid in os.getgroups() if gid != os.getegid()), None)
+        if other_gid is None:
+            self.skipTest('a supplementary group is required for the shared-index fixture')
         for phase in [None, 'index-aligned', 'declaration-ref-committed']:
             with self.subTest(phase=phase):
                 name = 'group-index-' + (phase or 'complete')
                 repo, source, module, backend = self.declaration_fixture(name)
                 index = repo / '.git/index'
+                os.chown(index, -1, other_gid)
                 index.chmod(0o664)
+                ownership = index.stat().st_uid, index.stat().st_gid
                 original = index.read_bytes()
                 old = self.git(repo, 'rev-parse', 'HEAD').stdout
                 def interrupted(current):
@@ -5556,16 +5561,57 @@ with module.coordination_publication_lock(Path(repo_path)):
                 for _ in range(2):
                     self.assertEqual(json.loads(self.run_cli(repo, *args).stdout)['status'], expected)
                     self.assertEqual(index.stat().st_mode & 0o777, 0o664)
+                    self.assertEqual((index.stat().st_uid, index.stat().st_gid), ownership)
                     self.assertEqual(self.git(repo, '--no-optional-locks', 'status', '--porcelain').stdout, '')
                 if expected == 'aborted':
                     self.assertEqual(index.read_bytes(), original)
                     self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout, old)
+                os.chown(index, -1, os.getegid())
+                ownership_drift = index.read_bytes()
+                self.run_cli(repo, *args, expected=2)
+                self.assertEqual(index.read_bytes(), ownership_drift)
+                self.assertEqual(index.stat().st_gid, os.getegid())
+                os.chown(index, -1, other_gid)
                 # Exact journal permissions remain part of terminal evidence.
                 index.chmod(0o644)
                 before = index.read_bytes()
                 self.run_cli(repo, *args, expected=2)
                 self.assertEqual(index.read_bytes(), before)
                 self.assertEqual(index.stat().st_mode & 0o777, 0o644)
+
+    def test_local_declaration_preserves_an_ownership_change_after_prepare(self):
+        other_gid = next((gid for gid in os.getgroups() if gid != os.getegid()), None)
+        if other_gid is None:
+            self.skipTest('a supplementary group is required for the ownership-drift fixture')
+        repo, source, module, backend = self.declaration_fixture('index-owner-drift')
+        index = repo / '.git/index'
+        os.chown(index, -1, other_gid)
+        index.chmod(0o664)
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), index.read_bytes()
+        refs = self.git(repo, 'show-ref').stdout
+        def drift(phase):
+            if phase == 'declaration-before-leases':
+                os.chown(index, -1, os.getegid())
+        argv = ['syncwheel', 'stack', 'create', 'owner-drift', source, '--repo', str(repo), '--preserve-lanes']
+        with mock.patch('sys.argv', argv), mock.patch.object(backend, 'checkpoint', side_effect=drift):
+            self.assertEqual(module.main(), 2)
+        self.assertEqual(((repo / '.syncwheel/manifest.json').read_bytes(), index.read_bytes()), before)
+        self.assertEqual(self.git(repo, 'show-ref').stdout, refs)
+        self.assertEqual(index.stat().st_gid, os.getegid())
+        self.assertFalse((repo / '.git/index.lock').exists())
+
+    def test_local_declaration_refuses_unpreservable_index_ownership_before_intent(self):
+        repo, source, module, backend = self.declaration_fixture('index-owner-refused')
+        before = (repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()
+        refs, events = self.git(repo, 'show-ref').stdout, module.load_ledger_events(repo)
+        argv = ['syncwheel', 'stack', 'create', 'owner-refused', source, '--repo', str(repo), '--preserve-lanes']
+        with mock.patch('sys.argv', argv), mock.patch.object(backend.os, 'fchown', side_effect=PermissionError('fixture')):
+            self.assertEqual(module.main(), 2)
+        self.assertEqual(((repo / '.syncwheel/manifest.json').read_bytes(), (repo / '.git/index').read_bytes()), before)
+        self.assertEqual(self.git(repo, 'show-ref').stdout, refs)
+        self.assertEqual(module.load_ledger_events(repo), events)
+        store = repo / '.git/syncwheel-local-declarations'
+        self.assertFalse(any(p.is_dir() for p in store.iterdir()))
 
     def test_local_declaration_refuses_world_writable_index_before_intent(self):
         repo, source, module, _ = self.declaration_fixture('unsafe-index')

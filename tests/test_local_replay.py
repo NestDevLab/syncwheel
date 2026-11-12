@@ -172,12 +172,22 @@ class LocalReplayTest(unittest.TestCase):
                          (original[1].st_dev, original[1].st_ino, original[1].st_mode, original[1].st_mtime_ns))
 
     def test_local_source_materialization_preserves_group_writable_index_and_rejects_mode_drift(self):
+        other_gid = next((gid for gid in os.getgroups() if gid != os.getegid()), None)
+        if other_gid is None:
+            self.skipTest('a supplementary group is required for the shared-index fixture')
         self.local_source_setup()
         index = self.root / '.git/index'
+        os.chown(index, -1, other_gid)
         index.chmod(0o664)
         before = index.read_bytes(), index.stat()
         plan = self.materialize_cli()
         self.assertEqual(plan['index']['mode'], 0o664)
+        self.assertEqual((plan['index']['uid'], plan['index']['gid']),
+                         (before[1].st_uid, before[1].st_gid))
+        os.chown(index, -1, os.getegid())
+        self.materialize_apply(plan, expected=2)
+        self.git('rev-parse', '--verify', '--quiet', self.materialized_ref, expected=1)
+        os.chown(index, -1, other_gid)
         index.chmod(0o644)
         self.materialize_apply(plan, expected=2)
         self.git('rev-parse', '--verify', '--quiet', self.materialized_ref, expected=1)
@@ -187,6 +197,7 @@ class LocalReplayTest(unittest.TestCase):
         self.assertEqual(index.read_bytes(), before[0])
         self.assertEqual((current.st_dev, current.st_ino, current.st_mode, current.st_mtime_ns),
                          (before[1].st_dev, before[1].st_ino, before[1].st_mode, before[1].st_mtime_ns))
+        self.assertEqual((current.st_uid, current.st_gid), (before[1].st_uid, before[1].st_gid))
 
     def test_local_source_materialization_rejects_drift_and_dirty_checkout(self):
         self.local_source_setup()

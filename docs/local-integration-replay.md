@@ -139,11 +139,15 @@ Unchanged tracked files may retain group-writable modes during read-only
 verification. Their bytes, executable bit and exact permissions are witnessed.
 The manifest exchanged by the declaration retains the strict image contract.
 A group-writable Git index is supported by declarations and ref-only
-materialization. Its exact permissions are witnessed and preserved. Declaration
+materialization. Its UID, GID and exact permissions are witnessed and preserved.
+The prepared declaration index must acquire the original ownership and mode
+before its intent is published; failure preserves the primary. Declaration
 alignment and recovery compare both index images under the native index and ref
 leases; the explicit exclusive direct-filesystem-writer contract still applies.
 World-writable, aliased and extended-attribute index files remain unsupported.
-Ref-only materialization leaves the index intact and rejects permission drift.
+Ref-only materialization leaves the index intact and rejects ownership or
+permission drift. Declaration recovery refuses older journals without index
+ownership witnesses and refuses ownership drift in both retained images.
 Other replay operations retain their stricter index contract.
 Terminal declaration recovery checks the manifest image and index permissions
 against its original journal. Declaration startup leaves pending control intents
