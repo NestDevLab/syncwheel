@@ -5346,7 +5346,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             stack_tip,
         )
 
-    def assert_lane_push_with_older_manifest_refuses_before_any_write(self, name, *push):
+    def prepare_lane_with_older_manifest(self, name):
         origin = self.create_remote(name)
         repo = self.clone(origin, name)
         self.init_coordinated(repo)
@@ -5366,26 +5366,34 @@ with module.coordination_publication_lock(Path(repo_path)):
         lane_tip = self.git(lane, 'rev-parse', 'HEAD').stdout.strip()
         self.git(lane, 'branch', 'pr/lane-work', lane_tip)
         self.run_cli(lane, 'stack', 'create', 'lane-work', lane_tip, '--branch', 'pr/lane-work')
+        return origin, repo, lane
+
+    def assert_lane_push_with_older_manifest_refuses_before_any_write(self, name, *push):
+        origin, repo, lane = self.prepare_lane_with_older_manifest(name)
         module = self.load_module()
         integration = module.load_manifest(repo)[0]['integration']['branch']
-        lane_ledger = lane / '.syncwheel' / 'ledger' / 'events'
 
-        def lane_events():
-            return [path.read_text() for path in sorted(lane_ledger.glob('*.jsonl'))]
+        def ledger_events(root):
+            events = root / '.syncwheel' / 'ledger' / 'events'
+            return [path.read_text() for path in sorted(events.glob('*.jsonl'))]
 
         integration_before = self.git(repo, 'rev-parse', integration).stdout.strip()
+        primary_head_before = self.git(repo, 'rev-parse', 'HEAD').stdout.strip()
         primary_manifest_before = (repo / '.syncwheel' / 'manifest.json').read_bytes()
         remote_state_before = self.remote_state(origin)
         remote_heads_before = self.git(repo, 'ls-remote', 'origin').stdout
-        lane_events_before = lane_events()
+        lane_events_before = ledger_events(lane)
+        primary_events_before = ledger_events(repo)
         result = self.run_cli(lane, *push, expected=2)
         self.assertIn(f"{' '.join(push[:2])} from worktree", result.stderr)
         self.assertIn('differs from the primary checkout', result.stderr)
         self.assertEqual(self.git(repo, 'rev-parse', integration).stdout.strip(), integration_before)
+        self.assertEqual(self.git(repo, 'rev-parse', 'HEAD').stdout.strip(), primary_head_before)
         self.assertEqual((repo / '.syncwheel' / 'manifest.json').read_bytes(), primary_manifest_before)
         self.assertEqual(self.remote_state(origin), remote_state_before)
         self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_heads_before)
-        self.assertEqual(lane_events(), lane_events_before)
+        self.assertEqual(ledger_events(lane), lane_events_before)
+        self.assertEqual(ledger_events(repo), primary_events_before)
 
     def test_stack_push_from_lane_with_older_manifest_refuses_before_any_write(self):
         self.assert_lane_push_with_older_manifest_refuses_before_any_write(
@@ -5396,6 +5404,27 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.assert_lane_push_with_older_manifest_refuses_before_any_write(
             'lane-int-push', 'int', 'push'
         )
+
+    def test_lane_push_with_explicit_manifest_still_compares_the_primary_default(self):
+        origin, repo, lane = self.prepare_lane_with_older_manifest('lane-explicit-manifest')
+        primary_manifest_before = (repo / '.syncwheel' / 'manifest.json').read_bytes()
+        remote_heads_before = self.git(repo, 'ls-remote', 'origin').stdout
+        result = self.run_cli(
+            lane, 'stack', 'push', 'lane-work',
+            '--manifest', str(lane / '.syncwheel' / 'manifest.json'),
+            expected=2,
+        )
+        self.assertIn('stack push from worktree', result.stderr)
+        self.assertIn('differs from the primary checkout', result.stderr)
+        self.assertEqual((repo / '.syncwheel' / 'manifest.json').read_bytes(), primary_manifest_before)
+        self.assertEqual(self.git(repo, 'ls-remote', 'origin').stdout, remote_heads_before)
+
+    def test_lane_push_with_the_primary_manifest_is_not_refused(self):
+        origin, repo, lane = self.prepare_lane_with_older_manifest('lane-matching-manifest')
+        (lane / '.syncwheel' / 'manifest.json').write_bytes((repo / '.syncwheel' / 'manifest.json').read_bytes())
+        result = self.run_cli_unchecked(lane, 'int', 'push')
+        self.assertNotIn('differs from the primary checkout', result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_publish_allows_an_exact_stack_rebase_after_the_base_advances(self):
         origin = self.create_remote()

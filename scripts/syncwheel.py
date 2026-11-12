@@ -36816,10 +36816,9 @@ def lane_stack_push_manifest_refusal(args):
         repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
     )
     manifest, _ = load_manifest(repo_root, manifest_path)
-    primary_path = resolve_manifest_path(
-        primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
-    )
-    primary_manifest, _ = load_manifest(primary_root, primary_path)
+    # Compare against the primary's own default manifest: an explicit --manifest
+    # or alias would otherwise load the same file on both sides.
+    primary_manifest, _ = load_manifest(primary_root, primary_root / '.syncwheel' / 'manifest.json')
     if not any(item and coordination_is_active(item) for item in (manifest, primary_manifest)):
         return None
     if manifest and primary_manifest and manifest_digest(manifest) == manifest_digest(primary_manifest):
