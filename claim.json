@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/concurrency-guidance"
+  ],
+  "claimed_at": "2026-11-13T07:53:34+00:00",
+  "coordination_id": "default",
+  "operation_token": "a4403bc4-6db6-43b3-a906-35aacf253343",
+  "publication_scope": "compose-stack:concurrency-guidance",
+  "source_ref": "refs/heads/pr/concurrency-guidance",
+  "syncwheel_version": "0.46.27"
+}
