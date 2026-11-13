@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
+      "worktree_grace_days": 7
     }
   },
   "defaults": {
@@ -201,12 +201,12 @@
       }
     },
     {
-      "id": "selective-coordination-projection",
-      "branch": "pr/selective-coordination-projection",
       "base": "origin/main",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/selective-coordination-projection",
       "commits": [],
+      "id": "selective-coordination-projection",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
       "target_remote": "origin",
       "state": "published",
       "publication": {
@@ -217,20 +217,20 @@
       }
     },
     {
-      "base": "origin/main",
-      "branch": "pr/mgt0249-maintenance-policy",
-      "commits": [],
       "id": "mgt0249-maintenance-policy",
+      "branch": "pr/mgt0249-maintenance-policy",
+      "base": "origin/main",
+      "target_branch": "main",
       "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
-      },
+      "commits": [],
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
+      "meta": {
+        "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
