@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
+      "worktree_grace_days": 7
     }
   },
   "defaults": {
@@ -34,8 +34,8 @@
     "stacks": [
       "prepared-journal-recovery",
       "local-replay-delivery",
-      "selective-coordination-projection",
       "concurrency-guidance",
+      "selective-coordination-projection",
       "pure-cherry-preview",
       "mgt0249-maintenance-policy",
       "local-replay-guarded",
@@ -116,6 +116,24 @@
       "meta": {}
     },
     {
+      "id": "concurrency-guidance",
+      "branch": "pr/concurrency-guidance",
+      "base": "origin/main",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "793f9f580a5a5970fac9a42c3702adfddc815bba"
+      ],
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Clarify independent lane authoring and bounded shared-state holds"
+      }
+    },
+    {
       "base": "origin/main",
       "branch": "pr/selective-coordination-projection",
       "commits": [],
@@ -123,24 +141,6 @@
       "integration_branch": "main-integration",
       "meta": {
         "purpose": "Publish one additive stack while retaining unrelated local proposals"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/concurrency-guidance",
-      "commits": [
-        "793f9f580a5a5970fac9a42c3702adfddc815bba"
-      ],
-      "id": "concurrency-guidance",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Clarify independent lane authoring and bounded shared-state holds"
       },
       "publication": {
         "enabled": true
