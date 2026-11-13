@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/domain-modularization": "602f07c1a785d6f06d1c720d182c411b3de8e080"
+    "refs/heads/pr/selective-coordination-projection": "c3109e4ef1724e5a391eba2d7aa3b1f1ee96e7f8"
   },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
@@ -73,6 +73,7 @@
     "refs/heads/pr/revision-ref-guard-batching": "9ec874da7ba3782fd4ebc8a1dc18b154f73d5042",
     "refs/heads/pr/scoped-integration-resolution": "3bad2de14f60dd123005c9f69f8c4d546fe5bfe1",
     "refs/heads/pr/scoped-stack-add": "a13fd09b3f3bb0a122784232b7ac4035f53de5c1",
+    "refs/heads/pr/selective-coordination-projection": "ba46f577a3cf7a347039aea8818150873178b37f",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/skill-staging-rule": "cedf54616ca332343c08812026ce97283bda86a6",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
@@ -116,7 +117,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-13T08:01:41+00:00",
+  "created_at": "2026-11-13T10:34:07+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -207,6 +208,7 @@
     "refs/heads/pr/revision-ref-guard-batching": "186267b551ce8e16df90aa7b3df01b7417304d29",
     "refs/heads/pr/scoped-integration-resolution": "257cc025e05a570e4a97111df5b2b109004896b0",
     "refs/heads/pr/scoped-stack-add": "74561e7e4f4b17eb5a7097b76e6bc8767b9bf2ea",
+    "refs/heads/pr/selective-coordination-projection": "c3109e4ef1724e5a391eba2d7aa3b1f1ee96e7f8",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/skill-staging-rule": "5f514b397d8f386fa8a205eb198d974dc28bfb98",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
@@ -288,7 +290,8 @@
         "concurrency-guidance",
         "pure-cherry-preview",
         "local-replay-guarded",
-        "domain-modularization"
+        "domain-modularization",
+        "selective-coordination-projection"
       ],
       "strategy": "cherry-pick"
     },
@@ -419,16 +422,28 @@
         "id": "domain-modularization",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/selective-coordination-projection",
+        "commits": [],
+        "id": "selective-coordination-projection",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "f82faded-06da-46a2-bc49-46793cce72de",
-  "parent_state": "8b60f6b7b421bb16bfdde56ae2a409553a4f8cdf",
+  "operation_token": "71586f11-64ce-4842-99d2-54bf015f7f52",
+  "parent_state": "9bd1f02cf3366431fcad602eb12af37505e7deb8",
   "projection_status": "partial",
-  "publication_id": "978048d9-b827-4bd6-9008-fc422bd1f878",
-  "publication_scope": "compose-stack:domain-modularization",
+  "publication_id": "72521cc3-06d7-4e66-a557-8772117fda43",
+  "publication_scope": "compose-stack:selective-coordination-projection",
   "schema_version": 2,
   "syncwheel_version": "0.46.27",
   "tombstones": [
