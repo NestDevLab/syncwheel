@@ -185,12 +185,12 @@
       "meta": {}
     },
     {
-      "id": "domain-modularization",
-      "branch": "pr/domain-modularization",
       "base": "origin/main",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/domain-modularization",
       "commits": [],
+      "id": "domain-modularization",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
       "target_remote": "origin",
       "state": "published",
       "publication": {
@@ -201,20 +201,20 @@
       }
     },
     {
-      "base": "origin/main",
-      "branch": "pr/selective-coordination-projection",
-      "commits": [],
       "id": "selective-coordination-projection",
+      "branch": "pr/selective-coordination-projection",
+      "base": "origin/main",
+      "target_branch": "main",
       "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Publish one additive stack while retaining unrelated local proposals"
-      },
+      "commits": [],
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
+      "meta": {
+        "purpose": "Publish one additive stack while retaining unrelated local proposals"
+      }
     },
     {
       "base": "origin/main",
