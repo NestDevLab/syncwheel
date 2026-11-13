@@ -1,0 +1,11 @@
+{
+  "changed_refs": [],
+  "claimed_at": "2026-11-13T00:05:05+00:00",
+  "closed": true,
+  "coordination_id": "default",
+  "operation_token": "2bdc2598-8240-4a5f-83e5-27801c026705",
+  "publication_scope": "close:new-stack-absent-lease",
+  "reason": "archived",
+  "source_ref": "refs/heads/pr/new-stack-absent-lease",
+  "syncwheel_version": "0.46.25"
+}
