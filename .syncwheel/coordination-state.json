@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/local-replay-guarded": "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5"
+    "refs/heads/pr/domain-modularization": "602f07c1a785d6f06d1c720d182c411b3de8e080"
   },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
@@ -14,6 +14,7 @@
     "refs/heads/pr/desk-empty-step": "2ca9797e4f9b42c4623f0df166ae099ab2af3ff9",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
+    "refs/heads/pr/domain-modularization": "baf330ca11766557e1f21326015ae5110e15a949",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/ephemeral-control-replay": "d7de8ccf7413c689c6d51c583e14b2861135cf91",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -115,7 +116,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-13T07:59:01+00:00",
+  "created_at": "2026-11-13T08:01:41+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -135,6 +136,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
+    "refs/heads/pr/domain-modularization": "602f07c1a785d6f06d1c720d182c411b3de8e080",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
     "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480",
@@ -285,7 +287,8 @@
         "local-replay-delivery",
         "concurrency-guidance",
         "pure-cherry-preview",
-        "local-replay-guarded"
+        "local-replay-guarded",
+        "domain-modularization"
       ],
       "strategy": "cherry-pick"
     },
@@ -404,16 +407,28 @@
         "id": "local-replay-guarded",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/domain-modularization",
+        "commits": [],
+        "id": "domain-modularization",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "187d4593-e58f-4bba-98c0-32ee8f25fe0f",
-  "parent_state": "c2afadc8f63a22433cb66c88ea4a545cdf33f846",
+  "operation_token": "f82faded-06da-46a2-bc49-46793cce72de",
+  "parent_state": "8b60f6b7b421bb16bfdde56ae2a409553a4f8cdf",
   "projection_status": "partial",
-  "publication_id": "d863df8e-a5b8-4f91-bb7e-7965ff0401d2",
-  "publication_scope": "compose-stack:local-replay-guarded",
+  "publication_id": "978048d9-b827-4bd6-9008-fc422bd1f878",
+  "publication_scope": "compose-stack:domain-modularization",
   "schema_version": 2,
   "syncwheel_version": "0.46.27",
   "tombstones": [
