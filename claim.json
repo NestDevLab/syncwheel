@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/pure-cherry-preview"
+  ],
+  "claimed_at": "2026-11-13T07:57:48+00:00",
+  "coordination_id": "default",
+  "operation_token": "139de7db-0b3e-4c76-9e6f-f286a64716e0",
+  "publication_scope": "compose-stack:pure-cherry-preview",
+  "source_ref": "refs/heads/pr/pure-cherry-preview",
+  "syncwheel_version": "0.46.27"
+}
