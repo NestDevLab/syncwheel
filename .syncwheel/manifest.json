@@ -36,9 +36,9 @@
       "local-replay-delivery",
       "concurrency-guidance",
       "pure-cherry-preview",
+      "local-replay-guarded",
       "selective-coordination-projection",
       "mgt0249-maintenance-policy",
-      "local-replay-guarded",
       "domain-modularization"
     ],
     "strategy": "cherry-pick"
@@ -134,11 +134,8 @@
       }
     },
     {
-      "id": "pure-cherry-preview",
-      "branch": "pr/pure-cherry-preview",
       "base": "origin/main",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/pure-cherry-preview",
       "commits": [
         "ef101ae69b6ed2913f56935d5e2dfc90fbfb8dd8",
         "3010bceac5bc05bfecafc4d330afb8fe88fe8fe3",
@@ -146,6 +143,9 @@
         "a6251251b641b5a846a3488d88f7343dcba696fb",
         "a0002301e2dce04e03c57df0c4c7be8725e66393"
       ],
+      "id": "pure-cherry-preview",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
       "target_remote": "origin",
       "state": "published",
       "publication": {
@@ -154,6 +154,35 @@
       "meta": {
         "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
       }
+    },
+    {
+      "id": "local-replay-guarded",
+      "branch": "pr/local-replay-guarded",
+      "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "d08ee3c49ebf9955573d49565c0dcb348c857211",
+        "bcebb908e60054dd9071aaf95e8876c67eb5578c",
+        "e63527de261b64ae82dfba5c0f30ba177cf3b364",
+        "2a0b7ef1c185dde248bf6886f36ba3137d15eba0",
+        "aee2e8e080367c4b8ac52dad5bea61f2009e3b3c",
+        "ddba601807047d7329ac9a48665afaded3742c16",
+        "9e5f7b3194dd816e82cc63a013932bbb210aca74",
+        "4507d771385e61255bf7f2cd738cb783c60d56cb",
+        "9c9da54eefd8c2e0cd7b55ccee45d1ca09eb0235",
+        "e56474d5fff6702af50d6c5a26d1c0445c24acf0",
+        "d70dad8ba94438dbe8962cfc4bef713051bd143c",
+        "02bf973efd156dc8737ae2ff117e279abe8ebd12",
+        "6c9479015cea170ed5e28a44416d0960f18f6adf",
+        "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5"
+      ],
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
     },
     {
       "base": "origin/main",
@@ -182,35 +211,6 @@
       "meta": {
         "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
       },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
-      "branch": "pr/local-replay-guarded",
-      "commits": [
-        "d08ee3c49ebf9955573d49565c0dcb348c857211",
-        "bcebb908e60054dd9071aaf95e8876c67eb5578c",
-        "e63527de261b64ae82dfba5c0f30ba177cf3b364",
-        "2a0b7ef1c185dde248bf6886f36ba3137d15eba0",
-        "aee2e8e080367c4b8ac52dad5bea61f2009e3b3c",
-        "ddba601807047d7329ac9a48665afaded3742c16",
-        "9e5f7b3194dd816e82cc63a013932bbb210aca74",
-        "4507d771385e61255bf7f2cd738cb783c60d56cb",
-        "9c9da54eefd8c2e0cd7b55ccee45d1ca09eb0235",
-        "e56474d5fff6702af50d6c5a26d1c0445c24acf0",
-        "d70dad8ba94438dbe8962cfc4bef713051bd143c",
-        "02bf973efd156dc8737ae2ff117e279abe8ebd12",
-        "6c9479015cea170ed5e28a44416d0960f18f6adf",
-        "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5"
-      ],
-      "id": "local-replay-guarded",
-      "integration_branch": "main-integration",
-      "meta": {},
       "publication": {
         "enabled": true
       },
