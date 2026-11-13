@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/mgt0249-maintenance-policy"
+  ],
+  "claimed_at": "2026-11-13T11:17:49+00:00",
+  "coordination_id": "default",
+  "operation_token": "7c967865-49e3-48bd-8812-0a96205bdbd2",
+  "publication_scope": "compose-stack:mgt0249-maintenance-policy",
+  "source_ref": "refs/heads/pr/mgt0249-maintenance-policy",
+  "syncwheel_version": "0.46.27"
+}
