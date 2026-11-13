@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/local-replay-delivery": "1c297abf9b44b5db0b917b16a60f6dc149884754"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -47,6 +45,7 @@
     "refs/heads/pr/missing-historical-integration-tip": "954deadca1c831d58beeff556c1e902130a33056",
     "refs/heads/pr/missing-managed-ref-repair": "111000f1ea8ce266d45291b9f9f01e705341d23d",
     "refs/heads/pr/missing-snapshot-commit": "5788d2973d306b487456301c86b2d72bb34be0cf",
+    "refs/heads/pr/new-stack-absent-lease": "2e74ec8059b61eaf6e9e03a18dca96f5859b0e06",
     "refs/heads/pr/o3-history-proof": "36bf233506fca6e5b3ca62ef1c5943fa0cd1ef0e",
     "refs/heads/pr/oikuma-control-divergence": "4f02732949e05ce756e36d9c1e5cbaa8ac68c234",
     "refs/heads/pr/oikuma-null-peer-repair": "35e4034cf121fcbfc7c1e028fda401b944b0effa",
@@ -111,7 +110,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-12T07:42:50+00:00",
+  "created_at": "2026-11-13T00:05:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -170,6 +169,7 @@
     "refs/heads/pr/missing-historical-integration-tip": "8a6ec195c47d279d15e5394898db4796c54e60cb",
     "refs/heads/pr/missing-managed-ref-repair": "7733738406a41ac5db22fc089b04079616e63c08",
     "refs/heads/pr/missing-snapshot-commit": "b245a58f626266f323ba2402f85b325e69ec6d61",
+    "refs/heads/pr/new-stack-absent-lease": null,
     "refs/heads/pr/o3-history-proof": "164d711c7fa5e3f39585c1b6d17aa1eca6252e8e",
     "refs/heads/pr/oikuma-control-divergence": "3e6492e2ecedc6ae4a748ddd2c3238af8d13368c",
     "refs/heads/pr/oikuma-null-peer-repair": "488ca3c567efa7ff6d8c20081d6d7fa429341990",
@@ -343,13 +343,13 @@
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "afc029ad-a389-40e6-8192-e333e7f58639",
-  "parent_state": "63232ffab20939a6247e21d73407788593be325b",
+  "operation_token": "2bdc2598-8240-4a5f-83e5-27801c026705",
+  "parent_state": "14255634f22fb7b0ba9af9d6b0ab81f1dade4365",
   "projection_status": "partial",
-  "publication_id": "ad48d6b8-d7f9-41bb-b254-883af7cebeec",
-  "publication_scope": "compose-stack:local-replay-delivery",
+  "publication_id": "de0abf8c-4bce-4076-9d8e-43fcf45b06ae",
+  "publication_scope": "close:new-stack-absent-lease",
   "schema_version": 2,
-  "syncwheel_version": "0.46.26",
+  "syncwheel_version": "0.46.25",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1386,6 +1386,18 @@
       "ref": "refs/heads/pr/skill-staging-rule",
       "remote_tip": null,
       "stack": "skill-staging-rule"
+    },
+    {
+      "archive": {
+        "planDigest": "e9a57e76a37249328db8878dc0aea992228e363bd9ac5728e6d4190ea178ee7e",
+        "retentionDays": 30
+      },
+      "branch": "pr/new-stack-absent-lease",
+      "closed_at": "2026-11-13T00:05:02+00:00",
+      "reason": "archived",
+      "ref": "refs/heads/pr/new-stack-absent-lease",
+      "remote_tip": null,
+      "stack": "new-stack-absent-lease"
     }
   ]
 }
