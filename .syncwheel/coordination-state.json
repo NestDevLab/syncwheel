@@ -1,5 +1,7 @@
 {
-  "changed_refs": {},
+  "changed_refs": {
+    "refs/heads/pr/concurrency-guidance": "e11395871dd14229d096a69a3ef247478f17a7c1"
+  },
   "claims": {
     "refs/heads/main-integration": "c1750f398ca6571609acf4c74947090412a9c71c",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -8,6 +10,7 @@
     "refs/heads/pr/cli-module-tests": "8c8daf672406d2987856d2a466ac16297e22d2f6",
     "refs/heads/pr/close-published-recovery": "62e672f48c6e5b4755b488ebc6f54ad578fdd15c",
     "refs/heads/pr/compose-update-published": "9d436926b4dfd34248f25a0be9fd99dfc87bd850",
+    "refs/heads/pr/concurrency-guidance": "a7e3f575f647250defc477ec93e09143bacafbd6",
     "refs/heads/pr/desk-empty-step": "2ca9797e4f9b42c4623f0df166ae099ab2af3ff9",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
@@ -110,7 +113,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-13T00:05:05+00:00",
+  "created_at": "2026-11-13T07:53:34+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -123,6 +126,7 @@
     "refs/heads/pr/close-historical-stack-manifest": "44e8600c859b5df7d27f036a9b28ca427cc0a7aa",
     "refs/heads/pr/close-published-recovery": "51416e3150206d76eda43ff61809a7301b346883",
     "refs/heads/pr/compose-update-published": "a08bfd297dc36ee79591aca54e5b6cb7cbf72b7f",
+    "refs/heads/pr/concurrency-guidance": "e11395871dd14229d096a69a3ef247478f17a7c1",
     "refs/heads/pr/coordination-repair": "f55445c9164864e9bca2848165e3da9f87beff16",
     "refs/heads/pr/deployment-channels": "a13b454c880ee9c40916712f0d255df6e7560608",
     "refs/heads/pr/desk-empty-step": "4c372531c85deae453f7a6f8ff53589d1637caad",
@@ -274,7 +278,8 @@
       "branch": "main-integration",
       "stacks": [
         "prepared-journal-recovery",
-        "local-replay-delivery"
+        "local-replay-delivery",
+        "concurrency-guidance"
       ],
       "strategy": "cherry-pick"
     },
@@ -338,18 +343,32 @@
         "id": "local-replay-delivery",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": {
+          "kind": "remote-ref",
+          "ref": "refs/heads/main",
+          "role": "canonical"
+        },
+        "branch": "pr/concurrency-guidance",
+        "commits": [
+          "793f9f580a5a5970fac9a42c3702adfddc815bba"
+        ],
+        "id": "concurrency-guidance",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "758051517fcafa7c3be3c9a3739ad9459a3b2b7c1cc71b1021d4e1e87e2605e0",
-  "operation_token": "2bdc2598-8240-4a5f-83e5-27801c026705",
-  "parent_state": "14255634f22fb7b0ba9af9d6b0ab81f1dade4365",
+  "operation_token": "a4403bc4-6db6-43b3-a906-35aacf253343",
+  "parent_state": "f9da81b3953770ae269a0901a250b5c7c7d34a5b",
   "projection_status": "partial",
-  "publication_id": "de0abf8c-4bce-4076-9d8e-43fcf45b06ae",
-  "publication_scope": "close:new-stack-absent-lease",
+  "publication_id": "b36c136b-9985-437c-9d3e-5e7fd124da47",
+  "publication_scope": "compose-stack:concurrency-guidance",
   "schema_version": 2,
-  "syncwheel_version": "0.46.25",
+  "syncwheel_version": "0.46.27",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
