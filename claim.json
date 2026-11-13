@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/selective-coordination-projection"
+  ],
+  "claimed_at": "2026-11-13T10:34:07+00:00",
+  "coordination_id": "default",
+  "operation_token": "71586f11-64ce-4842-99d2-54bf015f7f52",
+  "publication_scope": "compose-stack:selective-coordination-projection",
+  "source_ref": "refs/heads/pr/selective-coordination-projection",
+  "syncwheel_version": "0.46.27"
+}
