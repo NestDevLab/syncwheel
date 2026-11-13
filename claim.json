@@ -1,12 +1,11 @@
 {
   "changed_refs": [
-    "refs/heads/main-integration",
-    "refs/heads/pr/ephemeral-control-replay"
+    "refs/heads/main-integration"
   ],
-  "claimed_at": "2026-11-04T07:54:08+00:00",
+  "claimed_at": "2026-11-13T11:21:37+00:00",
   "coordination_id": "default",
-  "operation_token": "b7da5a9b-c1a1-47e6-9c86-ffad2273080d",
-  "publication_scope": "stack:ephemeral-control-replay",
+  "operation_token": "22bd4da8-b96b-496a-b166-a373c52da6fd",
+  "publication_scope": "integration",
   "source_ref": "refs/heads/main-integration",
-  "syncwheel_version": "0.46.19"
+  "syncwheel_version": "0.46.27"
 }
