@@ -37,9 +37,9 @@
       "concurrency-guidance",
       "pure-cherry-preview",
       "local-replay-guarded",
+      "domain-modularization",
       "selective-coordination-projection",
-      "mgt0249-maintenance-policy",
-      "domain-modularization"
+      "mgt0249-maintenance-policy"
     ],
     "strategy": "cherry-pick"
   },
@@ -156,11 +156,8 @@
       }
     },
     {
-      "id": "local-replay-guarded",
-      "branch": "pr/local-replay-guarded",
       "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/local-replay-guarded",
       "commits": [
         "d08ee3c49ebf9955573d49565c0dcb348c857211",
         "bcebb908e60054dd9071aaf95e8876c67eb5578c",
@@ -177,12 +174,31 @@
         "6c9479015cea170ed5e28a44416d0960f18f6adf",
         "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5"
       ],
+      "id": "local-replay-guarded",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
       "target_remote": "origin",
       "state": "published",
       "publication": {
         "enabled": true
       },
       "meta": {}
+    },
+    {
+      "id": "domain-modularization",
+      "branch": "pr/domain-modularization",
+      "base": "origin/main",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Extract explicit domain modules while preserving CLI and I/O compatibility"
+      }
     },
     {
       "base": "origin/main",
@@ -217,22 +233,6 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
-    },
-    {
-      "id": "domain-modularization",
-      "branch": "pr/domain-modularization",
-      "base": "origin/main",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {
-        "purpose": "Extract explicit domain modules while preserving CLI and I/O compatibility"
-      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
