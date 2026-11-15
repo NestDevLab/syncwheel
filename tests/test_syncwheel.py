@@ -2661,7 +2661,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['generation_token'], opened['lane']['generation_token'])
 
-    def test_missing_expired_directory_prunes_git_metadata_before_followup_rebuild(self):
+    def test_missing_expired_directory_is_pruned_by_gc_before_followup_rebuild(self):
         self.prepare_replay_stack()
         opened = json.loads(self.run_cli('worktree', 'open', 'missing-directory', '--json').stdout)
         lane_path = Path(opened['lane']['path'])
@@ -2673,6 +2673,14 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
 
         self.run_cli('worktree', 'lock', 'replay')
+
+        self.assertIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
+        self.assertEqual(
+            [lane['id'] for lane in module.load_governed_worktree_registry(self.repo)[0]['lanes']],
+            ['missing-directory'],
+        )
+
+        self.run_cli('gc', '--apply', '--no-fetch', '--lane', 'missing-directory')
 
         self.assertNotIn(str(lane_path), self.git('worktree', 'list', '--porcelain'))
         self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
