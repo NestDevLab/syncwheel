@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.19`
+Current version: `0.46.32`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1536,16 +1536,23 @@ syncwheel journal publish --committed-only --apply
 
 Recovery is journal-only. It fetches remote refs, reports in-sync, ahead-only,
 behind-only or diverged, and delegates behind-only updates to journal pull.
-Diverged recovery refuses snapshots reachable from any advertised remote ref,
-merge commits, and dirty or obstructing replay paths; it never stashes. It
+Diverged recovery normally refuses snapshots reachable from any advertised remote
+ref. It can absorb a published prefix whose complete tree equals the current
+remote journal tip, or a published snapshot whose isolated replay leaves that
+remote tree unchanged. Historical patch equivalence alone is insufficient: a
+later remote revert must not be undone. Other published snapshots, merge commits,
+and dirty or obstructing replay paths are refused; recovery never stashes. It
 replays single-parent snapshots in an isolated worktree, retaining author,
 committer, dates and message; signatures are removed because the commit changes.
+Plan mode performs the same absorption and replay proof before any local branch
+move. The plan lists absorbed snapshots separately from the remaining commits;
+unpublished empty snapshots are retained. Published refs are never changed.
 Conflicts name the original commit and paths, and leave the original branch,
 index and checkout unchanged. Unrelated local changes are preserved.
 
 Success moves only the local branch through the managed ref guard. A private
 JSON receipt under the Git directory records the old/new tips, ordered commit
-map, timestamp and exact rollback command. The rollback requires the exact
+map, absorption proofs, timestamp and exact rollback command. The rollback requires the exact
 recovered head and clean affected paths:
 
 ```bash
