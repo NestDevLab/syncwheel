@@ -5,6 +5,14 @@
 - Make `status` use the journal report in journal repositories instead of building a delivery integration plan and crashing. Both text and JSON output match `journal status`.
 - Keep delivery `check` unavailable in journal repositories, but print executable `validate` and `journal status` remedies that preserve the selected repository and manifest.
 
+## 0.46.30 - 2026-11-15
+
+- Keep the patch-ID cache warm across sessions. Its key used to hash the whole Git config and every `GIT_*` variable, so a different `user.email`, credential helper, remote, tracking branch or `GIT_TRACE2_EVENT` started an empty cache and the next `status` or `check` recomputed the patch ID of every commit. Sections and variables that cannot change `git log -p | git patch-id --stable` output are now left out of the key; all others, such as `diff.*` or `core.*`, still invalidate it. Patch IDs are now computed with `--no-textconv --no-ext-diff`, from Git's own diff, so a textconv filter or external diff driver, which may read any setting, can no longer shape them. The cache namespace moves to `v3`, so each clone recomputes once and rows from earlier seeds are never read.
+
+## 0.46.29 - 2026-11-15
+
+- Push a governed lane's tip to `refs/syncwheel/archive/lanes/<lane>-<time>` on the publication remote before its folder and branch are removed, so the work survives the loss of the local clone. The local recovery ref is kept as before, and the ledger event names both refs. The push goes to the publication remote, or to the canonical remote when the publication one is not configured. If the push fails, or neither remote is configured, the lane is kept with `archive_push_failed`; other mutating commands never stop on it, and the same `worktree release` or `gc --apply --lane` retries it. Only a repository with no remote at all keeps just the local recovery ref. Note that this publishes lane commits at removal time, including on `stack add` capture and `gc --apply`, before any `stack push`: on a public repository anyone who can fetch can read the archive refs. Uncommitted files are still never saved: a dirty lane is still refused.
+
 ## 0.46.28 - 2026-11-15
 
 - Stop removing governed lanes because their lease expired. A mutating command such as `stack set`, `stack sync`, `sync`, `publish`, `worktree lock` or `stack git --auto-worktree` used to remove every clean lane in the repository whose two-hour lease had passed, whoever owned it, even when the command itself was then refused. The preflight now only records moved lane paths and finishes cleanups that a capture or release already started. Expired lanes stay, are reported, and are removed only by `worktree release <lane>` or `gc --apply`.

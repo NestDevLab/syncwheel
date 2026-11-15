@@ -376,8 +376,15 @@ directory, never in the shared manifest. Use `--into <existing-stack>` when the
 destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
-the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
-worktree and local lane branch. A dirty, unavailable, or current-directory lane
+the lane tip under `refs/syncwheel/recovery/lanes/...` and pushes the same tip
+to `refs/syncwheel/archive/lanes/...` on the publication remote (or the
+canonical remote when the publication one is not configured) before reaping
+the clean worktree and local lane branch. The archive ref is outside
+`refs/heads`, so forges do not list it as a branch, but anyone who can fetch the
+repository can fetch it. If that push fails, or neither remote is
+configured, the lane is kept with `archive_push_failed` and other commands
+never stop on it; retry the same `worktree release` or `gc --apply --lane`.
+Only a repository with no remote at all keeps just the local recovery ref. A dirty, unavailable, or current-directory lane
 is retained and reported; it is never removed automatically. An expired lease
 or a dead owner PID never removes a lane either: other mutating commands only
 finish a capture or release that was already started, and report expired lanes.
@@ -434,8 +441,8 @@ syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --
 ```
 
 `release` is dry-run by default. With `--apply`, it creates a recovery ref for
-an existing lane-branch tip, removes the registry record, and appends a ledger
-event. An explicitly abandoned record whose path is already missing can still
+an existing lane-branch tip, pushes it to the remote archive ref, removes the
+registry record, and appends a ledger event that names both refs. An explicitly abandoned record whose path is already missing can still
 be released; any remaining Git worktree registration is removed before the
 registry record. It refuses an existing dirty lane and names the recovery
 remedy instead of removing it. Pending cleanup, including a branch that advanced
@@ -1297,6 +1304,11 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `tests/`: unit tests and fixture repositories
 - `VERSION`: current release version
 - `CHANGELOG.md`: release notes
+
+Syncwheel keeps a clone-local patch-ID cache in Git's common directory. Its key
+covers only the Git config and `GIT_*` environment that can change a diff, so a
+session with its own `user.*`, credential, remote or tracing settings reuses the
+same cache instead of recomputing every commit.
 
 ## Documentation map
 
