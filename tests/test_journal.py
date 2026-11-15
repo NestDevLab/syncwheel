@@ -201,6 +201,17 @@ class JournalModeTest(unittest.TestCase):
             self.git('rev-parse', 'HEAD~1'), self.git('rev-parse', 'origin/journal'),
         )
 
+    def test_recover_names_where_the_last_published_snapshot_lives(self):
+        merged = self.local_commit('merged.txt', 'merged by squash\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/375')
+        self.publish_from_other_clone({'merged.txt': 'merged by squash\n'})
+        later = self.local_commit('a.txt', 'a\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/sync/main')
+        result = self.cli('journal', 'recover', expected=2)
+        self.assertIn('already-published', result.stderr)
+        self.assertIn(later, result.stderr)
+        self.assertIn('refs/heads/sync/main', result.stderr)
+
     def test_recover_plan_and_receipt_list_absorbed_snapshots(self):
         first = self.local_commit('m.txt', 'v1\n')
         second = self.local_commit('m.txt', 'v2\n')

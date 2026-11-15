@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.32 - 2026-11-15
+
+- Make the `journal recover` refusal for published snapshots say why. It used to name only the first published snapshot, even when the snapshot that blocks recovery is a later one published on another ref, such as a sync branch that also carries the squash-merged one. The message now names the last published snapshot and its ref too, and says their change is not on the journal tip.
+
 ## 0.46.31 - 2026-11-15
 
 - Fix `syncwheel status` on a journal repository, which crashed with `KeyError: 'exists'` while building a plan. A journal repository has no stacks or integration branch to plan, so status now reports its validation and an empty plan.
