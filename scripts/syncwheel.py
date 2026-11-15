@@ -18505,19 +18505,43 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
     commits = git(repo_root, 'rev-list', '--reverse', '--topo-order', f'{tip}..{head}').stdout.splitlines()
     remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/').stdout.splitlines()
     published_tips.extend((ref, ref) for ref in remote_refs)
+    published = {}
     for commit in commits:
         if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
             raise SyncwheelError(f'journal recovery requires single-parent snapshots: {commit}')
         for remote_ref, remote_commit in published_tips:
             if git(repo_root, 'merge-base', '--is-ancestor', commit, remote_commit, check=False).returncode == 0:
-                raise SyncwheelError(f'journal recovery refuses already-published commit {commit} on {remote_ref}')
+                published[commit] = remote_ref
+                break
+    remote_tree = git(repo_root, 'rev-parse', tip + '^{tree}').stdout.strip()
+    # Squashing several snapshots can make intermediate patches conflict even
+    # though their complete, published prefix has exactly the remote tree.
+    # Never include an unpublished snapshot in this proof (including empty ones).
+    prefix_length = 0
+    for index, commit in enumerate(commits):
+        if commit not in published:
+            break
+        if git(repo_root, 'rev-parse', commit + '^{tree}').stdout.strip() == remote_tree:
+            prefix_length = index + 1
+    plan['absorbed'] = {
+        commit: {'proof': 'published-prefix-tree', 'prefix_tip': commits[prefix_length - 1],
+                 'remote_tip': tip, 'published_ref': published[commit]}
+        for commit in commits[:prefix_length]
+    }
+    replay_commits = commits[prefix_length:]
+
+    def published_error(commit):
+        return SyncwheelError(
+            f'journal recovery refuses already-published commit {commit} on {published[commit]}: '
+            f'its content is not proven absorbed by {remote}/{branch} at {tip}. '
+            'Complete or verify delivery through the normal review workflow, then rerun '
+            'syncwheel journal recover to preview. Keep published refs intact; '
+            'do not reset or merge the journal branch manually.'
+        )
     paths = {path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', head, tip).split(b'\0') if path}
     for commit in commits:
         paths.update(path.decode() for path in git_bytes(repo_root, 'diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-z', '-r', commit).split(b'\0') if path)
     journal_recover_clean_paths(repo_root, paths)
-    if not apply:
-        plan['commits'] = commits
-        return plan
     with journal_lock(repo_root):
         if ref_tip(repo_root, 'HEAD') != head:
             raise SyncwheelError('journal head changed during recovery; STOP')
@@ -18529,13 +18553,27 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
             git(repo_root, 'worktree', 'add', '--quiet', '--detach', str(worktree), tip)
             try:
                 parent = tip
-                for commit in commits:
+                replayed = {}
+                for commit in replay_commits:
                     picked = git(worktree, 'cherry-pick', '--no-commit', commit, check=False)
                     if picked.returncode:
+                        if commit in published:
+                            raise published_error(commit)
                         conflicts = [path.decode() for path in git_bytes(worktree, 'diff', '--name-only', '--diff-filter=U', '-z').split(b'\0') if path]
                         raise SyncwheelError(f'journal recovery conflict at {commit}: '
                                              + ', '.join(conflicts) + '; ' + picked.stderr.strip())
                     tree = git(worktree, 'write-tree').stdout.strip()
+                    if commit in published:
+                        # The witness is the frozen remote tree, never content
+                        # introduced by an unpublished snapshot in this replay.
+                        if parent != tip or tree != remote_tree:
+                            raise published_error(commit)
+                        plan['absorbed'][commit] = {
+                            'proof': 'empty-replay', 'remote_tip': tip,
+                            'published_ref': published[commit],
+                        }
+                        git(worktree, 'reset', '--quiet', '--hard', parent)
+                        continue
                     # Rebuild the commit from its raw headers/message to preserve
                     # author, committer, timestamps, encoding and message bytes.
                     raw = git_bytes(repo_root, 'cat-file', 'commit', commit)
@@ -18558,13 +18596,18 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
                     if result.returncode:
                         raise SyncwheelError(result.stderr.decode(errors='replace'))
                     parent = result.stdout.decode().strip()
-                    plan['replayed'][commit] = parent
+                    replayed[commit] = parent
                     git(worktree, 'reset', '--quiet', '--hard', parent)
+                plan['commits'] = list(replayed)
+                if not apply:
+                    return plan
+                plan['replayed'] = replayed
                 journal_recover_clean_paths(repo_root, paths)
                 stamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
                 receipt_path = directory / f'{head}-{parent}.json'
                 receipt = {'operation': 'journal-recover', 'branch': branch, 'before': head,
                            'after': parent, 'remote_tip': tip, 'replayed': plan['replayed'],
+                           'absorbed': plan['absorbed'],
                            'timestamp': stamp, 'status': 'prepared',
                            'rollback': 'syncwheel journal recover --rollback '
                                        + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root))
