@@ -4,6 +4,10 @@
 
 - Let the GitHub PR merge policy allow release branches by pattern. An entry in `base_branches` (`--base`) can now be `PREFIX/*`, such as `save/*` or `release/*`, which allows any branch under that prefix as a delivery base. Exact names keep matching exactly; bare `*`, other glob characters and patterns with `*` anywhere but the final segment are rejected.
 
+## 0.47.2 - 2026-11-15
+
+- Let the clone-local GitHub PR merge policy declare integration validation advisory (`repo pr-merge-policy set --integration advisory`, key `integration`). With it, `stack merge-pr` records the stack's commits that are missing from the integration branch as one `integration_not_validated` warning instead of blocking, so an integration that other stacks keep from being rebuilt no longer stops an unrelated PR. The PR is then validated by its own checks, pinned head and live base only. The default stays `required`, which blocks as before and now says how to proceed; membership rules (`integration_membership: required`, a missing integration branch) still block in both modes.
+
 ## 0.47.1 - 2026-11-15
 
 - Stop `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` from refusing because of lanes they do not work on. A governed lane that needs recovery (dirty, locked, outside the root, unregistered and so on) now blocks them when its target stack is still declared in the manifest, or when its folder is checked out on a branch other than its own lane branch, because gc may remove the worktree of a closed stack together with its ignored files. Any other lane, with no target or a closed or undeclared stack, is reported as a warning and left to `worktree release` or `gc --apply`. A captured lane whose cleanup fails, or that someone holds with their own `git worktree lock`, still stops these commands whatever its target. On one busy repository this cut the blocking lanes from 46 to 11.
