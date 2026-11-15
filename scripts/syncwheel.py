@@ -18451,16 +18451,31 @@ def journal_recover_move(repo_root, branch, before, after):
         raise SyncwheelError('journal recovery ref lease lost; checkout restored: ' + moved.stderr.strip())
 
 
-def journal_commit_absorbed(repo_root, commit, tip):
-    """Whether applying ``commit`` on ``tip`` changes nothing: its change is already there."""
-    result = git(
-        repo_root, 'merge-tree', '--write-tree', f'--merge-base={commit}^', tip, commit,
-        check=False,
-    )
-    if result.returncode != 0:
-        return False
-    merged = result.stdout.splitlines()[0].strip() if result.stdout else ''
-    return merged == git(repo_root, 'rev-parse', f'{tip}^{{tree}}').stdout.strip()
+def journal_prefix_absorbed(repo_root, first, last, tip):
+    """Whether the net change of the snapshots ``first``..``last`` is already on ``tip``.
+
+    Compares, path by path, the entry (mode and blob, or absence) that the
+    snapshots leave with the one on the tip. No merge runs, so merge drivers
+    and conflict styles cannot make missing work look absorbed.
+    """
+    changed = [path for path in git_bytes(
+        repo_root, 'diff', '--name-only', '--no-renames', '-z', f'{first}^', last,
+    ).split(b'\0') if path]
+    if not changed:
+        return True
+
+    def entries(commit):
+        listed = git_bytes(repo_root, 'ls-tree', '-z', '--full-tree', commit, '--', *changed)
+        result = {}
+        for record in listed.split(b'\0'):
+            if not record:
+                continue
+            meta, path = record.split(b'\t', 1)
+            mode, _kind, object_id = meta.split()
+            result[path] = (mode, object_id)
+        return result
+
+    return entries(last) == entries(tip)
 
 
 def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_path=None):
@@ -18517,22 +18532,27 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
     commits = git(repo_root, 'rev-list', '--reverse', '--topo-order', f'{tip}..{head}').stdout.splitlines()
     remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/').stdout.splitlines()
     published_tips.extend((ref, ref) for ref in remote_refs)
-    absorbed = []
+    published = []
     for commit in commits:
         if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
             raise SyncwheelError(f'journal recovery requires single-parent snapshots: {commit}')
         for remote_ref, remote_commit in published_tips:
             if git(repo_root, 'merge-base', '--is-ancestor', commit, remote_commit, check=False).returncode == 0:
-                if journal_commit_absorbed(repo_root, commit, tip):
-                    # Published elsewhere (for example a squash-merged pull
-                    # request) and its change is already on the journal tip:
-                    # dropping it from the replay rewrites nothing anyone needs.
-                    absorbed.append(commit)
-                    break
-                raise SyncwheelError(f'journal recovery refuses already-published commit {commit} on {remote_ref}')
-    if absorbed:
-        plan['absorbed'] = absorbed
-        commits = [commit for commit in commits if commit not in absorbed]
+                published.append((commit, remote_ref))
+                break
+    if published:
+        # Ancestors of a published snapshot are published too, so they form a
+        # prefix. When its net change is already on the tip (for example a
+        # squash-merged pull request), drop the prefix from the replay: it
+        # stays on its remote ref and nothing published is rewritten.
+        prefix = [commit for commit, _ref in published]
+        first, first_ref = published[0]
+        if prefix != commits[:len(prefix)] or not journal_prefix_absorbed(
+            repo_root, prefix[0], prefix[-1], tip,
+        ):
+            raise SyncwheelError(f'journal recovery refuses already-published commit {first} on {first_ref}')
+        plan['absorbed'] = prefix
+        commits = commits[len(prefix):]
     paths = {path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', head, tip).split(b'\0') if path}
     for commit in commits:
         paths.update(path.decode() for path in git_bytes(repo_root, 'diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-z', '-r', commit).split(b'\0') if path)
@@ -18587,6 +18607,7 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
                 receipt_path = directory / f'{head}-{parent}.json'
                 receipt = {'operation': 'journal-recover', 'branch': branch, 'before': head,
                            'after': parent, 'remote_tip': tip, 'replayed': plan['replayed'],
+                           'absorbed': plan.get('absorbed', []),
                            'timestamp': stamp, 'status': 'prepared',
                            'rollback': 'syncwheel journal recover --rollback '
                                        + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root))
@@ -18595,8 +18616,9 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
                 journal_recover_move(repo_root, branch, head, parent)
                 receipt['status'] = 'complete'
                 atomic_write_private_json(receipt_path, receipt)
-                plan.update({'after': parent, 'changed': True, 'receipt': str(receipt_path),
-                             'next': 'syncwheel journal publish --committed-only'})
+                plan.update({'after': parent, 'changed': True, 'receipt': str(receipt_path)})
+                if commits:
+                    plan['next'] = 'syncwheel journal publish --committed-only'
             finally:
                 # Only the isolated replay is disposable, including conflict state.
                 git(repo_root, 'worktree', 'remove', '--force', str(worktree))

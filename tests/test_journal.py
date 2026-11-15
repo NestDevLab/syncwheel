@@ -201,6 +201,48 @@ class JournalModeTest(unittest.TestCase):
             self.git('rev-parse', 'HEAD~1'), self.git('rev-parse', 'origin/journal'),
         )
 
+    def test_recover_plan_and_receipt_list_absorbed_snapshots(self):
+        first = self.local_commit('m.txt', 'v1\n')
+        second = self.local_commit('m.txt', 'v2\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/2')
+        self.publish_from_other_clone({'m.txt': 'v2\n'})
+
+        plan = json.loads(self.cli('journal', 'recover').stdout)
+        self.assertEqual(plan['absorbed'], [first, second])
+        self.assertEqual(plan['commits'], [])
+        applied = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+
+        self.assertEqual(self.git('rev-parse', 'HEAD'), self.git('rev-parse', 'origin/journal'))
+        self.assertNotIn('next', applied)
+        self.assertEqual(json.loads(Path(applied['receipt']).read_text())['absorbed'], [first, second])
+
+    def test_recover_refuses_a_published_snapshot_only_partly_on_the_tip(self):
+        (self.repo / 'a.txt').write_text('A\n')
+        (self.repo / 'b.txt').write_text('B\n')
+        self.git('add', 'a.txt', 'b.txt')
+        self.git('commit', '-q', '-m', 'two files')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/3')
+        self.publish_from_other_clone({'a.txt': 'A\n'})
+
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_recover_never_trusts_a_merge_driver_to_call_work_absorbed(self):
+        self.git('config', 'merge.keep.driver', 'true')
+        (self.repo / '.git' / 'info' / 'attributes').write_text('notes.txt merge=keep\n')
+        head = self.local_commit('notes.txt', 'LOCAL WORK\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/4')
+        self.publish_from_other_clone({'notes.txt': 'remote rewrite\n'})
+
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'LOCAL WORK\n')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
     def test_recover_refuses_commit_published_on_custom_remote_ref(self):
         self.publish_from_other_clone({'remote.txt': 'remote\n'})
         head = self.local_commit()
