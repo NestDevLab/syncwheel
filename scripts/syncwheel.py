@@ -4918,6 +4918,11 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
     ):
         raise SyncwheelError(f'{path}.repository must be an OWNER/REPO identifier')
     base_branches = string_list('base_branches', required=True)
+    for index, item in enumerate(base_branches):
+        if any(char in item for char in '?[]\\') or ('*' in item and not re.fullmatch(r'[^*]+/\*', item)):
+            raise SyncwheelError(
+                f'{path}.base_branches[{index}] must be a branch name or a PREFIX/* pattern'
+            )
     method = value.get('merge_method')
     if method not in GITHUB_PR_MERGE_METHODS:
         raise SyncwheelError(
@@ -4953,6 +4958,19 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
         if candidate is not None:
             normalized[field] = candidate
     return normalized
+
+
+def github_pr_merge_base_allowed(base_branch, allowed):
+    """Match a delivery base against exact names and PREFIX/* release patterns."""
+    if not isinstance(base_branch, str) or not base_branch:
+        return False
+    for item in allowed:
+        if item.endswith('/*'):
+            if base_branch.startswith(item[:-1]) and len(base_branch) > len(item) - 1:
+                return True
+        elif base_branch == item:
+            return True
+    return False
 
 
 def github_pr_merge_policy_from_profile(profile):
@@ -5357,7 +5375,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         github_blocker(blockers, 'manifest_invalid', error)
     source_revision, declared = github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings)
     base_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
-    if base_branch not in policy['base_branches']:
+    if not github_pr_merge_base_allowed(base_branch, policy['base_branches']):
         github_blocker(blockers, 'base_branch_not_allowed', f'base branch is not allowlisted: {base_branch}')
     pr_number = None
     github = stack.get('github')
