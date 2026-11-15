@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.46.31 - 2026-11-15
+
+- Fix `syncwheel status` on a journal repository, which crashed with `KeyError: 'exists'` while building a plan. A journal repository has no stacks or integration branch to plan, so status now reports its validation and an empty plan.
+- Let `journal recover` drop a local snapshot that is published on another ref but whose change is already on the journal tip, for example a pull request merged with squash. Such a commit used to make recover refuse with `already-published` forever. The check compares, path by path, what the published snapshots leave with what the tip holds, over the whole published prefix, so a squash of several commits is recognised and no merge driver can make missing work look absorbed. No path is passed to git as an argument, and no diff or submodule ignore setting can hide a gitlink bump from the check. A published snapshot whose change is not fully on the tip is still refused. The dropped commits are listed under `absorbed` in the output and in the recovery receipt.
+
 ## 0.46.30 - 2026-11-15
 
 - Keep the patch-ID cache warm across sessions. Its key used to hash the whole Git config and every `GIT_*` variable, so a different `user.email`, credential helper, remote, tracking branch or `GIT_TRACE2_EVENT` started an empty cache and the next `status` or `check` recomputed the patch ID of every commit. Sections and variables that cannot change `git log -p | git patch-id --stable` output are now left out of the key; all others, such as `diff.*` or `core.*`, still invalidate it. Patch IDs are now computed with `--no-textconv --no-ext-diff`, from Git's own diff, so a textconv filter or external diff driver, which may read any setting, can no longer shape them. The cache namespace moves to `v3`, so each clone recomputes once and rows from earlier seeds are never read.

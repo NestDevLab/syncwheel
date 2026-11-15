@@ -18451,6 +18451,25 @@ def journal_recover_move(repo_root, branch, before, after):
         raise SyncwheelError('journal recovery ref lease lost; checkout restored: ' + moved.stderr.strip())
 
 
+def journal_prefix_absorbed(repo_root, first, last, tip):
+    """Whether the net change of the snapshots ``first``..``last`` is already on ``tip``.
+
+    Every path the snapshots change must hold the same entry (mode and object,
+    or absence) on ``tip`` as on ``last``. No merge runs, so merge drivers and
+    conflict styles cannot make missing work look absorbed, and no path is
+    passed as an argument, so pathspec magic and path encoding cannot either.
+    """
+    def changed_paths(old, new):
+        # Plumbing with explicit flags: no diff.* or submodule ignore config may
+        # hide a changed path.
+        return {path for path in git_bytes(
+            repo_root, 'diff-tree', '-r', '-z', '--name-only', '--no-renames',
+            '--ignore-submodules=none', old, new,
+        ).split(b'\0') if path}
+
+    return not changed_paths(f'{first}^', last) & changed_paths(last, tip)
+
+
 def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_path=None):
     journal = manifest['journal']
     branch, remote = journal['branch'], journal['remote']
@@ -18505,12 +18524,27 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
     commits = git(repo_root, 'rev-list', '--reverse', '--topo-order', f'{tip}..{head}').stdout.splitlines()
     remote_refs = git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/remotes/').stdout.splitlines()
     published_tips.extend((ref, ref) for ref in remote_refs)
+    published = []
     for commit in commits:
         if len(git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()) != 2:
             raise SyncwheelError(f'journal recovery requires single-parent snapshots: {commit}')
         for remote_ref, remote_commit in published_tips:
             if git(repo_root, 'merge-base', '--is-ancestor', commit, remote_commit, check=False).returncode == 0:
-                raise SyncwheelError(f'journal recovery refuses already-published commit {commit} on {remote_ref}')
+                published.append((commit, remote_ref))
+                break
+    if published:
+        # Ancestors of a published snapshot are published too, so they form a
+        # prefix. When its net change is already on the tip (for example a
+        # squash-merged pull request), drop the prefix from the replay: it
+        # stays on its remote ref and nothing published is rewritten.
+        prefix = [commit for commit, _ref in published]
+        first, first_ref = published[0]
+        if prefix != commits[:len(prefix)] or not journal_prefix_absorbed(
+            repo_root, prefix[0], prefix[-1], tip,
+        ):
+            raise SyncwheelError(f'journal recovery refuses already-published commit {first} on {first_ref}')
+        plan['absorbed'] = prefix
+        commits = commits[len(prefix):]
     paths = {path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', head, tip).split(b'\0') if path}
     for commit in commits:
         paths.update(path.decode() for path in git_bytes(repo_root, 'diff-tree', '--no-commit-id', '--name-only', '--no-renames', '-z', '-r', commit).split(b'\0') if path)
@@ -18565,6 +18599,7 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
                 receipt_path = directory / f'{head}-{parent}.json'
                 receipt = {'operation': 'journal-recover', 'branch': branch, 'before': head,
                            'after': parent, 'remote_tip': tip, 'replayed': plan['replayed'],
+                           'absorbed': plan.get('absorbed', []),
                            'timestamp': stamp, 'status': 'prepared',
                            'rollback': 'syncwheel journal recover --rollback '
                                        + shlex.quote(str(receipt_path)) + ' -r ' + shlex.quote(str(repo_root))
@@ -18573,8 +18608,9 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
                 journal_recover_move(repo_root, branch, head, parent)
                 receipt['status'] = 'complete'
                 atomic_write_private_json(receipt_path, receipt)
-                plan.update({'after': parent, 'changed': True, 'receipt': str(receipt_path),
-                             'next': 'syncwheel journal publish --committed-only'})
+                plan.update({'after': parent, 'changed': True, 'receipt': str(receipt_path)})
+                if commits:
+                    plan['next'] = 'syncwheel journal publish --committed-only'
             finally:
                 # Only the isolated replay is disposable, including conflict state.
                 git(repo_root, 'worktree', 'remove', '--force', str(worktree))
@@ -19167,6 +19203,10 @@ def planned_replay_mode(repo_root, manifest, branch, plumbing_supported=True):
 
 
 def build_plan(repo_root, manifest, validation):
+    if manifest.get('repository_mode') == 'journal':
+        # A journal repository has no stacks or integration branch to plan;
+        # its only actions are journal recover and publish.
+        return []
     actions = []
     details = validation['details']
     integration = manifest['integration']
@@ -22512,7 +22552,8 @@ def command_status(args):
         output['authority'] = manifest_authority(manifest)
     if args.json:
         print(json.dumps(output, indent=2))
-        return 1 if manifest and not output['validation']['details']['primary_checkout']['compliant'] else 0
+        primary = output['validation']['details'].get('primary_checkout') if manifest else None
+        return 1 if primary and not primary['compliant'] else 0
     print(f"repo: {snapshot['repo_root']}")
     print(f"current_branch: {snapshot['current_branch']}")
     print(f"canonical_remote_head: {snapshot['canonical_remote_head'] or 'unknown'}")
@@ -22587,7 +22628,8 @@ def command_status(args):
                 print(f'  - {line}')
         else:
             print('  - no actions needed')
-    return 1 if manifest and not output['validation']['details']['primary_checkout']['compliant'] else 0
+    primary = output['validation']['details'].get('primary_checkout') if manifest else None
+    return 1 if primary and not primary['compliant'] else 0
 
 
 def command_validate(args):
