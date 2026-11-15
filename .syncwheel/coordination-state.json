@@ -1,7 +1,5 @@
 {
-  "changed_refs": {
-    "refs/heads/pr/domain-modularization": "7d224c75c1f69eb3db0d68ad63b4f4c2b4fe7382"
-  },
+  "changed_refs": {},
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
     "refs/heads/pr/abandoned-history-reconciliation": "3a9e51e0c7a5598150b3b2a19d5865264877de3e",
@@ -14,7 +12,7 @@
     "refs/heads/pr/desk-empty-step": "2ca9797e4f9b42c4623f0df166ae099ab2af3ff9",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
-    "refs/heads/pr/domain-modularization": "7047b137443882fc9714f41dab4ca37a4243e533",
+    "refs/heads/pr/domain-modularization": "9d8c4bc2d9a6386ff3a8e86261610dc2d029c673",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/ephemeral-control-replay": "d7de8ccf7413c689c6d51c583e14b2861135cf91",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -118,7 +116,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-15T15:32:43+00:00",
+  "created_at": "2026-11-15T15:51:25+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -292,7 +290,6 @@
         "concurrency-guidance",
         "pure-cherry-preview",
         "local-replay-guarded",
-        "domain-modularization",
         "selective-coordination-projection",
         "mgt0249-maintenance-policy"
       ],
@@ -420,34 +417,6 @@
           "ref": "refs/heads/main",
           "role": "canonical"
         },
-        "branch": "pr/domain-modularization",
-        "commits": [
-          "e2bc2a7d2e0c061062015b254836bd542034fd3e",
-          "6f0a0f43e5b692c0d02f96c657bdbb0181a22d6d",
-          "524f7a3ad02357065949a3d95922873efc7d4d3e",
-          "996d7e1c0d098b6a368d89e2486f210e43bc4baf",
-          "1b8bc220c79adf0ec6be68d8932bbd282d3486a7",
-          "ba84949e1daf03e0d09e5e7354625e855be4f075",
-          "e00f2fe18647829ea93cfdbdaf4e7e5245560660",
-          "ec989be9fb086406e176eb97bc41784c9aa5fd83",
-          "eaca99642a589f489d3d9e3d0b4b1650340ba58f",
-          "3ecdcaf2314fd2bf3eea5d0dac5406a66dc261aa",
-          "d7ebc027ba571cfd7af05f0b18c6124ceb2daeca",
-          "68daa5a997ea905153bbdd09c4f13d2d134f39ac",
-          "93f2f6775b14c81d304bdcb5896dca5b7ab8164a",
-          "c355edfccaf25162b7b6c1c1c8023207c7576788",
-          "2ebe3da86c49416392e6831889ad25613cfe1772"
-        ],
-        "id": "domain-modularization",
-        "integration_branch": "main-integration",
-        "target_branch": "main"
-      },
-      {
-        "base": {
-          "kind": "remote-ref",
-          "ref": "refs/heads/main",
-          "role": "canonical"
-        },
         "branch": "pr/selective-coordination-projection",
         "commits": [],
         "id": "selective-coordination-projection",
@@ -470,13 +439,13 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "c94d748d-f76b-42fd-9b03-65fc26dd7c54",
-  "parent_state": "24b9913e3528d614cd07b3f9f4e27efd193d1556",
+  "operation_token": "936e8e8b-de39-45ae-a5d8-2872e8dffd73",
+  "parent_state": "6022631ea9a9c845e5f839da53d21fc9719616f5",
   "projection_status": "partial",
-  "publication_id": "f8ee6848-07ad-4bac-b2ca-0204bb995d49",
-  "publication_scope": "stack:domain-modularization",
+  "publication_id": "23f6d931-b51b-4645-abeb-23a388daf9d5",
+  "publication_scope": "close:domain-modularization",
   "schema_version": 2,
-  "syncwheel_version": "0.46.33",
+  "syncwheel_version": "0.47.0",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
@@ -1525,6 +1494,14 @@
       "ref": "refs/heads/pr/new-stack-absent-lease",
       "remote_tip": null,
       "stack": "new-stack-absent-lease"
+    },
+    {
+      "branch": "pr/domain-modularization",
+      "closed_at": "2026-11-15T15:51:21+00:00",
+      "reason": "merged",
+      "ref": "refs/heads/pr/domain-modularization",
+      "remote_tip": null,
+      "stack": "domain-modularization"
     }
   ]
 }
