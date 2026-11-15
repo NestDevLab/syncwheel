@@ -64,7 +64,7 @@ class PatchIdCacheTest(unittest.TestCase):
     def legacy(self, commit):
         if len(self.git('rev-list', '--parents', '-n', '1', commit).split()) != 2:
             return None
-        shown = self.git('show', '--format=', commit)
+        shown = self.git('show', '--no-textconv', '--no-ext-diff', '--format=', commit)
         patch = subprocess.run(['git', 'patch-id', '--stable'], input=shown,
                                text=True, capture_output=True, check=True).stdout.strip()
         return patch.split()[0] if patch else None
@@ -96,6 +96,29 @@ class PatchIdCacheTest(unittest.TestCase):
         syncwheel.patch_id_semantics_key.cache_clear()
         self.assertEqual({commit: self.legacy(commit) for commit in self.commits},
                          syncwheel.commit_patch_ids(self.repo, self.commits))
+
+    def test_textconv_and_external_diff_drivers_never_shape_a_patch_id(self):
+        driver = Path(self.temp.name) / 'upper.sh'
+        driver.write_text('#!/bin/sh\ntr a-z A-Z < "$1"\n')
+        driver.chmod(0o755)
+        self.write('.gitattributes', '*.up diff=upper\n')
+        self.commit('attributes')
+        base = self.git('rev-parse', 'HEAD').strip()
+        self.write('word.up', 'hello\n')
+        self.commit('lower')
+        lower = self.git('rev-parse', 'HEAD').strip()
+        self.git('checkout', '-q', base)
+        self.write('word.up', 'HELLO\n')
+        self.git('commit', '-q', '-m', 'upper')
+        upper = self.git('rev-parse', 'HEAD').strip()
+        self.git('checkout', '-q', 'master')
+        self.git('config', 'diff.upper.textconv', str(driver))
+        self.git('config', 'diff.external', '/bin/false')
+
+        ids = syncwheel.batch_uncached_patch_ids(self.repo, [lower, upper])
+
+        self.assertNotEqual(ids[lower], ids[upper])
+        self.assertEqual(ids[lower], self.legacy(lower))
 
     def test_config_that_cannot_change_a_diff_keeps_the_namespace(self):
         before = syncwheel.patch_id_semantics_key(self.repo)

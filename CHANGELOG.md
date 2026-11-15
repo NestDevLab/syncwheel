@@ -2,7 +2,7 @@
 
 ## 0.46.30 - 2026-11-15
 
-- Keep the patch-ID cache warm across sessions. Its key used to hash the whole Git config and every `GIT_*` variable, so a different `user.email`, credential helper, remote, tracking branch or `GIT_TRACE2_EVENT` started an empty cache and the next `status` or `check` recomputed the patch ID of every commit. Sections and variables that cannot change `git log -p | git patch-id --stable` output are now left out of the key; all others, such as `diff.*` or `core.*`, still invalidate it. The cache namespace moves to `v2`, so each clone recomputes once.
+- Keep the patch-ID cache warm across sessions. Its key used to hash the whole Git config and every `GIT_*` variable, so a different `user.email`, credential helper, remote, tracking branch or `GIT_TRACE2_EVENT` started an empty cache and the next `status` or `check` recomputed the patch ID of every commit. Sections and variables that cannot change `git log -p | git patch-id --stable` output are now left out of the key; all others, such as `diff.*` or `core.*`, still invalidate it. Patch IDs are now computed with `--no-textconv --no-ext-diff`, from Git's own diff, so a textconv filter or external diff driver, which may read any setting, can no longer shape them. The cache namespace moves to `v2`, so each clone recomputes once.
 
 ## 0.46.29 - 2026-11-15
 

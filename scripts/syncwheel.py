@@ -2745,7 +2745,11 @@ def batch_uncached_patch_ids(repo_root, commits):
         revisions.write(''.join(commit + '\n' for commit in eligible))
         revisions.seek(0)
         log = subprocess.Popen(
-            ['git', 'log', '-p', '--no-walk=unsorted', '--no-merges', '--format=medium', '--stdin'],
+            # Git's own diff only: textconv filters and external diff drivers
+            # are programs that may read any config or environment, which the
+            # cache key deliberately leaves out.
+            ['git', 'log', '-p', '--no-textconv', '--no-ext-diff', '--no-walk=unsorted',
+             '--no-merges', '--format=medium', '--stdin'],
             cwd=repo_root, stdin=revisions, stdout=subprocess.PIPE, stderr=log_errors,
             text=True, env=managed_process_env(),
         )
