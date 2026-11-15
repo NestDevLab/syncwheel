@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/domain-modularization"
   ],
-  "claimed_at": "2026-11-13T08:01:41+00:00",
+  "claimed_at": "2026-11-15T15:29:05+00:00",
   "coordination_id": "default",
-  "operation_token": "f82faded-06da-46a2-bc49-46793cce72de",
-  "publication_scope": "compose-stack:domain-modularization",
+  "operation_token": "181616f5-1f3f-4ab6-952a-30183a0d1a65",
+  "publication_scope": "stack:domain-modularization",
   "source_ref": "refs/heads/pr/domain-modularization",
-  "syncwheel_version": "0.46.27"
+  "syncwheel_version": "0.46.33"
 }
