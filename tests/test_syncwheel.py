@@ -2003,15 +2003,23 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         # with its ignored files, so it still blocks even without a target.
         switched_lane = {'id': 'switched', 'branch': 'syncwheel/lane/switched', 'path': '/x/e',
                          'target': None, 'code': 'dirty'}
+        # Matching is on the lane's own branch, not on the lane prefix: a
+        # closed stack may itself use a syncwheel/lane/ branch name.
+        collided_lane = {'id': 'collided', 'branch': 'syncwheel/lane/collided', 'path': '/x/f',
+                         'target': None, 'code': 'dirty'}
         worktrees = [
             {'path': '/x/a', 'branch': 'syncwheel/lane/no-target'},
             {'path': '/x/e', 'branch': 'stack/closed-feature'},
+            {'path': '/x/f', 'branch': 'syncwheel/lane/zzz'},
         ]
         args = SimpleNamespace(
             func=module.command_sync, repo=str(self.repo), manifest=None, personal=None,
             stack=None, apply=True, dry_run=False, json=False,
         )
-        for extra, refused in (([], None), ([open_lane], 'open-stack'), ([switched_lane], 'switched')):
+        for extra, refused in (
+            ([], None), ([open_lane], 'open-stack'), ([switched_lane], 'switched'),
+            ([collided_lane], 'collided'),
+        ):
             with self.subTest(refused=refused), mock.patch.object(
                 module, 'governed_worktree_diagnostics', return_value={'lanes': lanes + extra},
             ), mock.patch.object(

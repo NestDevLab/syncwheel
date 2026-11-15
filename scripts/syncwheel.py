@@ -18754,7 +18754,9 @@ def governed_worktree_preflight(args):
     # when it works on a stack they can rebuild (one still declared in the
     # manifest) or when its folder is checked out on a branch other than its
     # own lane branch. Any other lane, with no target or a closed or undeclared
-    # stack, is reported and left to its own release or gc.
+    # stack, is reported and left to its own release or gc. A lane folder that
+    # was both moved and switched to another branch cannot be told apart from
+    # a deleted one, so it is not covered here.
     open_stacks = {stack.get('id') for stack in manifest.get('stacks', [])}
     checked_out = {
         str(Path(item['path']).resolve(strict=False)): item.get('branch') or ''
@@ -18766,7 +18768,7 @@ def governed_worktree_preflight(args):
             return True
         path = lane.get('path')
         branch = checked_out.get(str(Path(path).resolve(strict=False))) if path else None
-        return bool(branch) and not branch.startswith('syncwheel/lane/')
+        return bool(branch) and branch != lane.get('branch')
 
     needs_recovery = [
         lane for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
