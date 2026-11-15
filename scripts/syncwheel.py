@@ -18539,10 +18539,17 @@ def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_pa
         # stays on its remote ref and nothing published is rewritten.
         prefix = [commit for commit, _ref in published]
         first, first_ref = published[0]
-        if prefix != commits[:len(prefix)] or not journal_prefix_absorbed(
-            repo_root, prefix[0], prefix[-1], tip,
-        ):
-            raise SyncwheelError(f'journal recovery refuses already-published commit {first} on {first_ref}')
+        # The snapshots form one single-parent chain, so published ones are a prefix.
+        last, last_ref = published[-1]
+        if prefix != commits[:len(prefix)] or not journal_prefix_absorbed(repo_root, first, last, tip):
+            where = f'{first} on {first_ref}' if last == first else (
+                f'{first} on {first_ref}; the published snapshots run up to {last} on {last_ref}'
+            )
+            raise SyncwheelError(
+                f'journal recovery refuses already-published commit {where}, '
+                'and their change is not on the journal tip, so they cannot be dropped as absorbed '
+                'and must not be rewritten'
+            )
         plan['absorbed'] = prefix
         commits = commits[len(prefix):]
     paths = {path.decode() for path in git_bytes(repo_root, 'diff', '--name-only', '--no-renames', '-z', head, tip).split(b'\0') if path}
