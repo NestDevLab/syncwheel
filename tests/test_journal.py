@@ -721,6 +721,79 @@ class JournalModeTest(unittest.TestCase):
         result = self.cli('plan', expected=2)
         self.assertIn('forbidden', result.stderr)
 
+    @mock.patch.dict(os.environ, {'GIT_OPTIONAL_LOCKS': '0'})
+    def test_status_uses_journal_report_without_changing_local_work(self):
+        (self.repo / 'notes.txt').write_text('staged\n')
+        self.git('add', 'notes.txt')
+        (self.repo / 'notes.txt').write_text('unstaged\n')
+        (self.repo / 'untracked.txt').write_text('untracked\n')
+        index = self.repo / '.git' / 'index'
+        before = (index.read_bytes(), index.stat().st_mtime_ns,
+                  self.git('show-ref'), self.git('status', '--porcelain'))
+        env = {'GIT_OPTIONAL_LOCKS': '0'}
+        for json_args in ((), ('--json',)):
+            with self.subTest(json=bool(json_args)):
+                expected = self.cli('journal', 'status', *json_args, env=env)
+                actual = self.cli('status', *json_args, env=env)
+                self.assertEqual(actual.stdout, expected.stdout)
+                self.assertNotIn('Traceback', actual.stderr)
+        payload = json.loads(self.cli('status', '--json', env=env).stdout)
+        self.assertEqual(payload['repository_mode'], 'journal')
+        self.assertFalse(payload['index_clean'])
+        self.assertEqual((index.read_bytes(), index.stat().st_mtime_ns,
+                          self.git('show-ref'), self.git('status', '--porcelain')), before)
+        self.assertEqual((self.repo / 'notes.txt').read_text(), 'unstaged\n')
+        self.assertEqual((self.repo / 'untracked.txt').read_text(), 'untracked\n')
+
+    def test_status_respects_explicit_journal_manifest(self):
+        path = self.repo / '.syncwheel' / 'alternate journal.json'
+        manifest = json.loads((self.repo / '.syncwheel' / 'manifest.json').read_text())
+        manifest['journal']['interval'] = '45m'
+        path.write_text(json.dumps(manifest))
+        output = json.loads(self.cli('status', '--manifest', str(path), '--json').stdout)
+        self.assertEqual(output['interval'], '45m')
+
+    def test_check_names_executable_journal_remedies_with_same_target(self):
+        path = self.repo / '.syncwheel' / 'alternate journal.json'
+        path.write_bytes((self.repo / '.syncwheel' / 'manifest.json').read_bytes())
+        for command in ('check', 'ck'):
+            with self.subTest(command=command):
+                result = self.cli(command, '--manifest', str(path), expected=2)
+                self.assertNotIn('Traceback', result.stderr)
+                remedies = [line.strip() for line in result.stderr.splitlines()
+                            if line.strip().startswith('syncwheel ')]
+                self.assertEqual(len(remedies), 2)
+                self.assertEqual(shlex.split(remedies[0])[:2], ['syncwheel', 'validate'])
+                self.assertEqual(shlex.split(remedies[1])[:3], ['syncwheel', 'journal', 'status'])
+                for remedy in remedies:
+                    argv = shlex.split(remedy)[1:]
+                    self.assertEqual(argv[argv.index('--repo') + 1], str(self.repo))
+                    self.assertEqual(argv[argv.index('--manifest') + 1], str(path))
+                    self.cli(*argv)
+
+    def test_check_journal_remedies_preserve_personal_selectors(self):
+        module = self.load_module()
+        path = module.personal_manifest_path(self.repo, 'review')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((self.repo / '.syncwheel' / 'manifest.json').read_bytes())
+        for selection in ('flag', 'environment', 'profile'):
+            with self.subTest(selection=selection):
+                flags = ['--personal', 'review'] if selection == 'flag' else []
+                env = {'SYNCWHEEL_PERSONAL': 'review' if selection == 'environment' else ''}
+                profile = self.repo / '.syncwheel' / 'profile.local.json'
+                data = json.loads(profile.read_text())
+                data['personal'] = 'review' if selection == 'profile' else None
+                profile.write_text(json.dumps(data))
+                result = self.cli('check', *flags, expected=2, env=env)
+                remedies = [shlex.split(line.strip())[1:]
+                            for line in result.stderr.splitlines()
+                            if line.strip().startswith('syncwheel ')]
+                self.assertEqual(len(remedies), 2)
+                for argv in remedies:
+                    self.assertEqual(argv[argv.index('--personal') + 1], 'review')
+                    self.assertNotIn('--manifest', argv)
+                    self.cli(*argv, env=env)
+
     def test_manifest_requires_explicit_allowlist_and_size_but_defaults_interval(self):
         module = self.load_module()
         manifest_path = self.repo / '.syncwheel' / 'manifest.json'

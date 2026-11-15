@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.46.31 - 2026-11-15
+
+- Make `status` use the journal report in journal repositories instead of building a delivery integration plan and crashing. Both text and JSON output match `journal status`.
+- Keep delivery `check` unavailable in journal repositories, but print executable `validate` and `journal status` remedies that preserve the selected repository and manifest.
+
 ## 0.46.30 - 2026-11-15
 
 - Keep the patch-ID cache warm across sessions. Its key used to hash the whole Git config and every `GIT_*` variable, so a different `user.email`, credential helper, remote, tracking branch or `GIT_TRACE2_EVENT` started an empty cache and the next `status` or `check` recomputed the patch ID of every commit. Sections and variables that cannot change `git log -p | git patch-id --stable` output are now left out of the key; all others, such as `diff.*` or `core.*`, still invalidate it. Patch IDs are now computed with `--no-textconv --no-ext-diff`, from Git's own diff, so a textconv filter or external diff driver, which may read any setting, can no longer shape them. The cache namespace moves to `v3`, so each clone recomputes once and rows from earlier seeds are never read.
