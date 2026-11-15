@@ -36933,6 +36933,9 @@ def governed_worktree_preflight(args):
                 + ', '.join(lane['id'] for lane in blockers)
             )
         return
+    # A lane whose remote save failed is intact (branch and folder kept), so
+    # it never blocks an unrelated mutation; its own release or gc retries it.
+    tolerated = {'archive_push_failed'}
     if args.func == command_stack_add:
         # Capture below handles active lanes whose commits become owned by
         # this stack. Only finish pending cleanups for this stack; unrelated
@@ -36960,13 +36963,20 @@ def governed_worktree_preflight(args):
             repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
             repair_all_paths=True,
         )
+        # A lane someone else holds with its own Git worktree lock is intact:
+        # its cleanup stopped before touching anything. Leave it to its own
+        # release or gc instead of stopping every other mutation in the repo.
+        tolerated.add('lane_in_use')
     else:
         return
-    # A lane whose remote save failed is intact (branch and folder kept), so
-    # it never blocks an unrelated mutation; its own release or gc retries it.
-    failures = [
-        item for item in cleanup['failures'] if item.get('code') != 'archive_push_failed'
-    ]
+    for item in cleanup['failures']:
+        if item.get('code') == 'lane_in_use' and 'lane_in_use' in tolerated:
+            print(
+                f"warning: governed worktree lane {item['id']} is held by another Git worktree "
+                'lock; its cleanup is left for `syncwheel worktree release` or `syncwheel gc --apply`',
+                file=sys.stderr,
+            )
+    failures = [item for item in cleanup['failures'] if item.get('code') not in tolerated]
     if failures:
         details = ', '.join(
             f"{item['id']} [{item['code']}]" for item in failures

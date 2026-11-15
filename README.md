@@ -388,6 +388,9 @@ Only a repository with no remote at all keeps just the local recovery ref. A dir
 is retained and reported; it is never removed automatically. An expired lease
 or a dead owner PID never removes a lane either: other mutating commands only
 finish a capture or release that was already started, and report expired lanes.
+A lane that someone holds with their own `git worktree lock` is skipped by that
+finishing step with a warning, so it never stops unrelated commands; `stack add`
+for its own stack and whole-repository publication still refuse until it is released.
 Remove one with `worktree release <lane>`, or with `gc --apply`, which `--lane
 <lane>` (repeatable) limits to the named lanes; a missing lane whose lease
 expired, or whose local owner PID is known to be dead, is eligible for `gc`

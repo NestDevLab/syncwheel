@@ -154,6 +154,19 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertEqual((self.repo / '.syncwheel/manifest.json').read_bytes(), manifest_before)
         self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
 
+    def test_unrelated_mutation_skips_a_pending_lane_held_by_a_foreign_lock(self):
+        path, tip, _, _ = self.captured_push_copy()
+        module = self.load_syncwheel_module()
+        registry_path = module.governed_worktree_registry_path(self.repo)
+        before = registry_path.read_bytes()
+
+        result = self.run_cli('stack', 'set', 'feature-b', 'main')
+
+        self.assertIn('kept-validation is held by another Git worktree lock', result.stderr)
+        self.assertEqual(registry_path.read_bytes(), before)
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), tip)
+        self.assertIn('Keep validated source for inspection', self.git('worktree', 'list', '--porcelain'))
+
     def test_retained_captured_push_refuses_unlocked_or_dirty_copies(self):
         path, _, base, origin = self.captured_push_copy()
         args = ('stack', 'push', 'feature-a', '--remote', 'origin',
