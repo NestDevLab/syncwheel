@@ -14,6 +14,7 @@ from syncwheel_contracts import (
     COORDINATION_REPAIR_MISSING_REF_BACKEND,
     COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
     GITHUB_PR_MERGE_CHECKS,
+    GITHUB_PR_MERGE_INTEGRATION,
     GITHUB_PR_MERGE_METHODS,
     RECONCILE_MODES,
     UPDATE_MODES,
@@ -255,6 +256,7 @@ def build_parser(commands, version):
     repo_pr_merge_set_p.add_argument('--commit-author', action='append')
     repo_pr_merge_set_p.add_argument('--head-repository', action='append')
     repo_pr_merge_set_p.add_argument('--checks', choices=sorted(GITHUB_PR_MERGE_CHECKS), default='all')
+    repo_pr_merge_set_p.add_argument('--integration', choices=sorted(GITHUB_PR_MERGE_INTEGRATION), default='required')
     repo_pr_merge_set_p.add_argument('-a', '--apply', action='store_true')
     repo_pr_merge_set_p.add_argument('-j', '--json', action='store_true')
     repo_pr_merge_set_p.set_defaults(func=commands['command_repo_pr_merge_policy_set'])
