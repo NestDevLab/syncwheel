@@ -11427,6 +11427,18 @@ def delete_governed_worktree_branch_with_anchor(repo_root, lane, tip):
     }
 
 
+def governed_worktree_pending_cleanup_candidates(repo_root, manifest, registry=None):
+    """Cleanup candidates whose removal an explicit operation already started.
+
+    These are captured lanes and reaped lanes whose terminal ledger event is
+    still missing. Active lanes are never included, whatever their lease.
+    """
+    return [
+        lane for lane in governed_worktree_cleanup_candidates(repo_root, manifest, registry)
+        if lane['state'] != 'active'
+    ]
+
+
 def governed_worktree_cleanup_candidates(repo_root, manifest, registry=None):
     if registry is None:
         registry = load_governed_worktree_registry(repo_root)[0]
@@ -11736,7 +11748,9 @@ def completed_governed_worktree_lane(lane):
     return completed
 
 
-def reconcile_governed_worktrees(repo_root, manifest, manifest_path=None, candidate_ids=None):
+def reconcile_governed_worktrees(
+    repo_root, manifest, manifest_path=None, candidate_ids=None, repair_all_paths=False,
+):
     with governed_worktree_registry_lock(repo_root):
         prune_governed_worktree_stale_locks(repo_root, manifest_path)
         registry, _ = load_governed_worktree_registry(repo_root)
@@ -11752,7 +11766,7 @@ def reconcile_governed_worktrees(repo_root, manifest, manifest_path=None, candid
             status = governed_worktree_lane_status(repo_root, manifest, lane)
             if (
                 status.get('path_moved')
-                and (candidate_ids is None or lane['id'] in candidate_ids)
+                and (repair_all_paths or candidate_ids is None or lane['id'] in candidate_ids)
             ):
                 lane['path'] = status['path']
                 paths_updated = True
@@ -17157,15 +17171,45 @@ def command_gc(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     governed_candidates = governed_worktree_cleanup_candidates(repo_root, manifest)
+    named_lanes = list(dict.fromkeys(getattr(args, 'lanes', None) or []))
+    candidate_ids = None
+    if named_lanes:
+        eligible = {lane['id'] for lane in governed_candidates}
+        diagnostics = {
+            lane['id']: lane
+            for lane in governed_worktree_diagnostics(repo_root, manifest, manifest_path)['lanes']
+            if lane.get('id')
+        }
+        refused = []
+        for lane_id in named_lanes:
+            if lane_id in eligible:
+                continue
+            lane = diagnostics.get(lane_id)
+            refused.append(
+                f'{lane_id} [{lane["code"] or "active"}]' if lane else f'{lane_id} [unknown]'
+            )
+        if refused:
+            raise SyncwheelError(
+                'gc --lane names lanes that are not cleanup candidates: '
+                + ', '.join(refused)
+                + '; inspect them with syncwheel status, or use worktree release <lane>'
+            )
+        governed_candidates = [lane for lane in governed_candidates if lane['id'] in named_lanes]
+        candidate_ids = set(named_lanes)
     governed_result = (
         reconcile_governed_worktrees(
             repo_root,
             manifest,
             manifest_path,
+            candidate_ids=candidate_ids,
         )
         if args.apply else {'reaped': [], 'failures': []}
     )
-    plan = run_coordination_gc(repo_root, manifest, apply=args.apply, fetch=args.fetch)
+    # A gc that names its lanes removes only those lanes; other local
+    # artifacts are reported, never removed.
+    plan = run_coordination_gc(
+        repo_root, manifest, apply=args.apply and not named_lanes, fetch=args.fetch,
+    )
     plan['applied'] = bool(args.apply)
     plan['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
     plan['governed_worktree_candidates'] = governed_candidates
@@ -35139,6 +35183,10 @@ def build_parser():
     )
     gc_p.add_argument('-F', '--no-fetch', dest='fetch', action='store_false')
     gc_p.add_argument('-a', '--apply', action='store_true')
+    gc_p.add_argument(
+        '-l', '--lane', dest='lanes', action='append', metavar='LANE',
+        help='limit governed lane cleanup to this lane id (repeatable); other artifacts are only reported',
+    )
     gc_p.add_argument('-j', '--json', action='store_true')
     gc_p.set_defaults(func=command_gc, fetch=True)
 
@@ -36510,13 +36558,22 @@ def converge_default_repository_hooks(args):
     return ensure_managed_repository_hooks(repo_root, manifest)
 
 
-def governed_worktree_reaping_requested(args):
-    # Integration operations update the dedicated integration ref or its
-    # publication state, while stack creation claims a new stack id and branch.
-    # Governed lanes use independent syncwheel/lane/* refs, so an expired or
-    # dirty unrelated lane cannot conflict with these operations. Keep
-    # surfacing diagnostics as warnings and leave recovery to explicit
-    # release/gc.
+def governed_worktree_mutation_requested(args):
+    """Return whether this command checks governed lane health before mutating.
+
+    Such a command finishes cleanups that an explicit capture or release
+    already started, and the riskiest ones then refuse while a lane needs
+    recovery. It never selects an active lane for removal: an expired lease
+    is information, not consent. Removing an active lane belongs to
+    ``worktree release <lane>`` and ``gc --apply``.
+
+    Integration operations update the dedicated integration ref or its
+    publication state, while stack creation claims a new stack id and branch.
+    Governed lanes use independent syncwheel/lane/* refs, so an expired or
+    dirty unrelated lane cannot conflict with these operations. Keep
+    surfacing diagnostics as warnings and leave recovery to explicit
+    release/gc.
+    """
     if args.func in {
         command_int_align_remote,
         command_int_push,
@@ -36623,22 +36680,31 @@ def governed_worktree_preflight(args):
                 + ', '.join(lane['id'] for lane in blockers)
             )
         return
-    candidate_ids = None
     if args.func == command_stack_add:
         # Capture below handles active lanes whose commits become owned by
-        # this stack. Only recover existing cleanup candidates for this stack;
-        # unrelated retained copies belong to explicit release/gc.
+        # this stack. Only finish pending cleanups for this stack; unrelated
+        # retained copies belong to explicit release/gc.
         candidate_ids = {
-            lane['id'] for lane in governed_worktree_cleanup_candidates(repo_root, manifest)
+            lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
             if lane.get('target') == args.stack
         }
         if not candidate_ids:
             return
-    elif not governed_worktree_reaping_requested(args):
+        cleanup = reconcile_governed_worktrees(
+            repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
+        )
+    elif governed_worktree_mutation_requested(args):
+        # Record moved lane paths and finish cleanups already started, but
+        # never select an active lane: removal needs release or gc.
+        candidate_ids = {
+            lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
+        }
+        cleanup = reconcile_governed_worktrees(
+            repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
+            repair_all_paths=True,
+        )
+    else:
         return
-    cleanup = reconcile_governed_worktrees(
-        repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
-    )
     if cleanup['failures']:
         details = ', '.join(
             f"{item['id']} [{item['code']}]" for item in cleanup['failures']

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.46.28 - 2026-11-15
+
+- Stop removing governed lanes because their lease expired. A mutating command such as `stack set`, `stack sync`, `sync`, `publish`, `worktree lock` or `stack git --auto-worktree` used to remove every clean lane in the repository whose two-hour lease had passed, whoever owned it, even when the command itself was then refused. The preflight now only records moved lane paths and finishes cleanups that a capture or release already started. Expired lanes stay, are reported, and are removed only by `worktree release <lane>` or `gc --apply`.
+- Add `gc --lane <lane>` (repeatable) to limit a governed lane cleanup to the named lanes. Other local artifacts are then reported but not removed, and a named lane that is not a cleanup candidate is refused with its status.
+
 ## 0.46.27 - 2026-11-12
 
 - Refuse `stack push` and `int push` from a secondary worktree when coordination is active and its control manifest differs from the primary checkout's. Such a push used to write its older manifest onto the integration branch before the publication guards refused it. The refusal now comes before any write; run either push from the primary checkout.

@@ -1711,33 +1711,32 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), branch_tip)
         self.assertEqual(self.read_ledger_state()['recent_events'], [])
 
-    def test_stack_git_auto_worktree_is_an_explicit_reaping_mutation(self):
+    def test_stack_git_auto_worktree_keeps_an_expired_lane(self):
+        # A wrapped read-only git command once removed every expired lane in
+        # the repository. An expired lease is not consent to remove a lane.
         opened = json.loads(self.run_cli('worktree', 'open', 'before-stack-git', '--json').stdout)
         self.git('worktree', 'remove', opened['lane']['path'])
         module = self.load_syncwheel_module()
         registry, _ = module.load_governed_worktree_registry(self.repo)
         registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
         module.save_governed_worktree_registry(self.repo, registry)
+        branch_tip = module.ref_tip(self.repo, opened['lane']['branch'])
 
         self.run_cli('stack', 'git', 'feature-a', '--auto-worktree', '--', 'status', '--short')
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
-        self.assertFalse(any(lane['id'] == 'before-stack-git' for lane in registry['lanes']))
-        self.assertIsNone(module.ref_tip(self.repo, opened['lane']['branch']))
-        events = self.read_ledger_state()['recent_events']
-        self.assertEqual(
-            [event['type'] for event in events],
-            ['governed_worktree_cleanup_intent', 'governed_worktree_reaped'],
-        )
+        self.assertTrue(any(lane['id'] == 'before-stack-git' for lane in registry['lanes']))
+        self.assertEqual(module.ref_tip(self.repo, opened['lane']['branch']), branch_tip)
+        self.assertEqual(self.read_ledger_state()['recent_events'], [])
 
-    def test_reaping_gate_uses_apply_and_explicit_worktree_creation(self):
+    def test_mutation_gate_uses_apply_and_explicit_worktree_creation(self):
         module = self.load_syncwheel_module()
-        self.assertFalse(module.governed_worktree_reaping_requested(
+        self.assertFalse(module.governed_worktree_mutation_requested(
             SimpleNamespace(func=module.command_worktree_open)
         ))
         for command in (module.command_stack_push, module.command_stack_rebuild):
             with self.subTest(command=command.__name__):
-                self.assertFalse(module.governed_worktree_reaping_requested(
+                self.assertFalse(module.governed_worktree_mutation_requested(
                     SimpleNamespace(func=command, dry_run=False)
                 ))
         for command in (
@@ -1747,20 +1746,20 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             module.command_stack_land,
         ):
             with self.subTest(command=command.__name__, apply=False):
-                self.assertFalse(module.governed_worktree_reaping_requested(
+                self.assertFalse(module.governed_worktree_mutation_requested(
                     SimpleNamespace(func=command, apply=False)
                 ))
             with self.subTest(command=command.__name__, apply=True):
-                self.assertTrue(module.governed_worktree_reaping_requested(
+                self.assertTrue(module.governed_worktree_mutation_requested(
                     SimpleNamespace(func=command, apply=True)
                 ))
         for command in (module.command_stack_git, module.command_int_git):
             with self.subTest(command=command.__name__, existing=True):
-                self.assertFalse(module.governed_worktree_reaping_requested(
+                self.assertFalse(module.governed_worktree_mutation_requested(
                     SimpleNamespace(func=command, auto_worktree=False, worktree=None)
                 ))
             with self.subTest(command=command.__name__, auto=True):
-                self.assertTrue(module.governed_worktree_reaping_requested(
+                self.assertTrue(module.governed_worktree_mutation_requested(
                     SimpleNamespace(func=command, auto_worktree=True, worktree=None)
                 ))
 
@@ -2374,7 +2373,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         ).stdout)
         self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), opened['lane']['base'])
 
-    def test_automatic_reap_removes_the_record_and_writes_the_ledger(self):
+    def test_expired_lane_is_kept_by_mutations_and_removed_by_gc_with_a_ledger_event(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'automatic-ledger', '--json').stdout)
         self.git('worktree', 'remove', opened['lane']['path'])
         module = self.load_syncwheel_module()
@@ -2385,8 +2384,155 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.run_cli('worktree', 'lock', 'feature-a')
 
         registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual([lane['id'] for lane in registry['lanes']], ['automatic-ledger'])
+
+        self.run_cli('gc', '--apply', '--no-fetch', '--lane', 'automatic-ledger')
+
+        registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'], [])
         self.assertEqual(self.read_ledger_state()['recent_events'][-1]['type'], 'governed_worktree_reaped')
+
+    def open_expired_foreign_lanes(self, count=3):
+        """Open lanes owned by another agent whose leases expired long ago."""
+        module = self.load_syncwheel_module()
+        lanes = []
+        for index in range(count):
+            lanes.append(json.loads(self.run_cli(
+                'worktree', 'open', f'foreign-{index}', '--json'
+            ).stdout)['lane'])
+        committed = Path(lanes[-1]['path'])
+        (committed / 'foreign-work.txt').write_text('another agent wrote this\n')
+        subprocess.run(['git', 'add', 'foreign-work.txt'], cwd=committed, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: foreign lane work'], cwd=committed, check=True)
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        for lane in registry['lanes']:
+            lane['owner'] = 'other-agent@elsewhere:1'
+            lane['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        module.save_governed_worktree_registry(self.repo, registry)
+        tips = {lane['id']: module.ref_tip(self.repo, lane['branch']) for lane in lanes}
+        return module, lanes, tips
+
+    def assert_foreign_lanes_untouched(self, module, lanes, tips):
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        states = {lane['id']: lane['state'] for lane in registry['lanes']}
+        for lane in lanes:
+            self.assertTrue(Path(lane['path']).is_dir(), lane['id'])
+            self.assertEqual(states.get(lane['id']), 'active', lane['id'])
+            self.assertEqual(module.ref_tip(self.repo, lane['branch']), tips[lane['id']], lane['id'])
+        self.assertFalse(any(
+            event['type'] in {'governed_worktree_reaped', 'governed_worktree_cleanup_intent'}
+            for event in self.read_ledger_state()['recent_events']
+        ))
+
+    def test_mutations_never_remove_expired_lanes_of_other_agents(self):
+        beta = self.git('rev-parse', 'HEAD')
+        commands = {
+            'stack set': ('stack', 'set', 'feature-a', beta),
+            'stack sync': ('stack', 'sync', 'feature-a'),
+            'worktree lock': ('worktree', 'lock', 'feature-a'),
+            'worktree unlock': ('worktree', 'unlock', 'feature-a'),
+        }
+        module, lanes, tips = self.open_expired_foreign_lanes()
+        for name, argv in commands.items():
+            with self.subTest(command=name):
+                if name == 'stack sync':
+                    self.git('switch', '-q', 'pr/feature-a')
+                self.run_cli(*argv)
+                if name == 'stack sync':
+                    self.git('switch', '-q', '-')
+                self.assert_foreign_lanes_untouched(module, lanes, tips)
+                result = self.run_cli('status')
+                self.assertIn('governed worktree foreign-0: expired', result.stderr)
+
+    def test_preflight_never_selects_an_active_lane_for_cleanup(self):
+        module = self.load_syncwheel_module()
+        active = {
+            'id': 'expired-active', 'target': None, 'state': 'active', 'code': 'expired',
+        }
+        pending = {
+            'id': 'captured', 'target': 'feature-b', 'state': 'captured_pending_cleanup',
+            'code': 'captured_pending_cleanup',
+        }
+        for command in (
+            module.command_stack_set,
+            module.command_stack_sync,
+            module.command_worktree_lock,
+            module.command_sync,
+            module.command_publish,
+        ):
+            args = SimpleNamespace(
+                func=command, repo=str(self.repo), manifest=None, personal=None,
+                stack='feature-a', json=False, apply=True, retain_captured_worktrees=None,
+            )
+            with self.subTest(command=command.__name__), mock.patch.object(
+                module, 'emit_governed_worktree_warnings',
+            ), mock.patch.object(
+                module, 'governed_worktree_cleanup_candidates', return_value=[active, pending],
+            ), mock.patch.object(
+                module, 'governed_worktree_diagnostics', return_value={'lanes': []},
+            ), mock.patch.object(
+                module, 'reconcile_governed_worktrees',
+                return_value={'reaped': [], 'failures': []},
+            ) as reap:
+                module.governed_worktree_preflight(args)
+            reap.assert_called_once()
+            self.assertEqual(reap.call_args.kwargs['candidate_ids'], {'captured'})
+
+    def test_preflight_selects_nothing_when_no_cleanup_was_started(self):
+        module = self.load_syncwheel_module()
+        active = {'id': 'expired-active', 'target': None, 'state': 'active', 'code': 'expired'}
+        args = SimpleNamespace(
+            func=module.command_stack_set, repo=str(self.repo), manifest=None, personal=None,
+            stack='feature-a', json=False,
+        )
+        with mock.patch.object(module, 'emit_governed_worktree_warnings'), mock.patch.object(
+            module, 'governed_worktree_cleanup_candidates', return_value=[active],
+        ), mock.patch.object(
+            module, 'reconcile_governed_worktrees', return_value={'reaped': [], 'failures': []},
+        ) as reap:
+            module.governed_worktree_preflight(args)
+        reap.assert_called_once()
+        self.assertEqual(reap.call_args.kwargs['candidate_ids'], set())
+
+    def test_gc_lane_removes_only_the_named_expired_lane(self):
+        module, lanes, tips = self.open_expired_foreign_lanes(count=2)
+        keep, remove = lanes
+
+        preview = json.loads(self.run_cli(
+            'gc', '--no-fetch', '--json', '--lane', remove['id'],
+        ).stdout)
+        self.assertFalse(preview['applied'])
+        self.assertEqual(
+            [item['id'] for item in preview['governed_worktree_candidates']], [remove['id']],
+        )
+        self.assert_foreign_lanes_untouched(module, lanes, tips)
+
+        applied = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json', '--lane', remove['id'],
+        ).stdout)
+
+        self.assertEqual([item['id'] for item in applied['governed_worktree_reaped']], [remove['id']])
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual([lane['id'] for lane in registry['lanes']], [keep['id']])
+        self.assertTrue(Path(keep['path']).is_dir())
+        self.assertFalse(Path(remove['path']).exists())
+        event = next(
+            event for event in self.read_ledger_state()['recent_events']
+            if event['type'] == 'governed_worktree_reaped'
+        )
+        self.assertEqual(self.git('rev-parse', event['payload']['recovery_ref']), tips[remove['id']])
+
+    def test_gc_lane_refuses_a_lane_that_is_not_a_cleanup_candidate(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'still-leased', '--json').stdout)['lane']
+
+        result = self.run_cli(
+            'gc', '--apply', '--no-fetch', '--lane', 'still-leased', '--lane', 'missing-lane',
+            expected=2,
+        )
+
+        self.assertIn('still-leased [active]', result.stderr)
+        self.assertIn('missing-lane [unknown]', result.stderr)
+        self.assertTrue(Path(opened['path']).is_dir())
 
     def test_gc_preview_lists_an_eligible_governed_lane(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'gc-preview', '--json').stdout)
