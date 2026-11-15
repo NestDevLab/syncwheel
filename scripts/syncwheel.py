@@ -11046,7 +11046,10 @@ def governed_worktree_archive_remote(repo_root, manifest):
 
 
 def remote_ref_tip(repo_root, remote, ref):
-    result = git(repo_root, 'ls-remote', '--refs', remote, ref, check=False)
+    result = git(
+        repo_root, 'ls-remote', '--refs', remote, ref, check=False,
+        env={'GIT_TERMINAL_PROMPT': '0'},
+    )
     if result.returncode != 0:
         return False, result.stderr.strip() or result.stdout.strip() or f'could not read {remote}'
     for line in result.stdout.splitlines():
@@ -11077,27 +11080,35 @@ def archive_governed_worktree_tip(repo_root, manifest, lane, tip):
                 'kept. Add the publication remote, then retry the same command'
             ),
         }
+    if (
+        lane.get('archive_ref')
+        and lane.get('archive_remote') == remote
+        and lane.get('archive_confirmed_tip') == tip
+    ):
+        # Already confirmed on the remote by an earlier attempt: no network.
+        return None
     archive_ref = lane.get('archive_ref') or governed_worktree_archive_ref(lane)
     lane['archive_ref'] = archive_ref
     lane['archive_remote'] = remote
     lane.pop('archive_skipped', None)
 
-    def failure(detail):
+    def failure(detail, remedy='Fix access to the remote, then retry the same command'):
         return {
             'code': 'archive_push_failed',
-            'remedy': (
-                f'could not save {tip} to {remote} {archive_ref} ({detail}); the lane '
-                'was kept. Fix access to the remote, then retry the same command'
-            ),
+            'remedy': f'could not save {tip} to {remote} {archive_ref} ({detail}); the lane was kept. {remedy}',
         }
 
     readable, current = remote_ref_tip(repo_root, remote, archive_ref)
     if not readable:
         return failure(current)
     if current == tip:
+        lane['archive_confirmed_tip'] = tip
         return None
     if current is not None:
-        return failure(f'the remote ref already points at {current}')
+        return failure(
+            f'the remote ref already points at {current}',
+            'Inspect that remote ref; Syncwheel never overwrites it',
+        )
     try:
         result = run_authorized_push(
             repo_root,
@@ -11114,6 +11125,7 @@ def archive_governed_worktree_tip(repo_root, manifest, lane, tip):
     readable, current = remote_ref_tip(repo_root, remote, archive_ref)
     if not readable or current != tip:
         return failure('the remote did not confirm the pushed tip')
+    lane['archive_confirmed_tip'] = tip
     return None
 
 
@@ -11716,6 +11728,9 @@ def reap_governed_worktree_lane(
         lane.pop('recovery_ref', None)
         lane.pop('cleanup_idempotency_key', None)
         lane.pop('cleanup_operation_token', None)
+        # The new tip gets a new recovery ref, so it needs its own archive ref.
+        for key in ('archive_ref', 'archive_remote', 'archive_skipped', 'archive_confirmed_tip'):
+            lane.pop(key, None)
         if (
             event_type == 'governed_worktree_released'
             and superseded_event_type != event_type
@@ -22403,6 +22418,12 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest
                 persist=persist,
                 manifest_path=manifest_path,
             )
+            if not reaped and detail.get('code') == 'archive_push_failed':
+                print(
+                    f"WARNING: governed worktree {lane['id']} was captured but kept: "
+                    f"{detail.get('remedy')}",
+                    file=sys.stderr,
+                )
             captured.append({
                 'id': lane['id'], 'state': lane['state'], 'detail': detail['code'], 'reaped': reaped,
             })
@@ -36848,6 +36869,9 @@ def governed_worktree_preflight(args):
         blockers = [
             lane for lane in registry['lanes']
             if lane.get('target') in scoped_stacks and lane.get('state') != 'reaped'
+            # Intact lane whose tip is in a local recovery ref; only its remote
+            # save is pending, which never blocks the stack.
+            and lane.get('pending_reason') != 'archive_push_failed'
         ]
         if blockers:
             raise SyncwheelError(
