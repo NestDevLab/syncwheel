@@ -166,6 +166,23 @@ class PatchIdCacheTest(unittest.TestCase):
             self.assertEqual(expected, syncwheel.commit_patch_ids(self.repo, self.commits))
         syncwheel.patch_id_semantics_key.cache_clear()
 
+    def test_rows_cached_under_an_earlier_seed_are_never_read(self):
+        expected = {commit: self.legacy(commit) for commit in self.commits}
+        for seed in (b'stable:git-log-p:no-walk:no-merges:v1\0',
+                     b'stable:git-log-p:no-walk:no-merges:v2\0'):
+            with mock.patch.object(syncwheel, 'PATCH_ID_SEMANTICS_SEED', seed):
+                syncwheel.patch_id_semantics_key.cache_clear()
+                stale = syncwheel.patch_id_semantics_key(self.repo)
+            wrong = 'f' * 40
+            with syncwheel.patch_id_cache_connection(self.repo) as connection:
+                connection.executemany(
+                    'INSERT OR REPLACE INTO patch_ids VALUES (?, ?, ?, ?)',
+                    [(stale, commit, wrong, syncwheel.patch_id_row_digest(stale, commit, wrong))
+                     for commit in self.commits],
+                )
+        syncwheel.patch_id_semantics_key.cache_clear()
+        self.assertEqual(expected, syncwheel.commit_patch_ids(self.repo, self.commits))
+
     def test_attributes_change_invalidates_namespace(self):
         before = syncwheel.patch_id_semantics_key(self.repo)
         self.write('.gitattributes', '*.bin binary\n')

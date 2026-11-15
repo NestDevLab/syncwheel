@@ -2634,6 +2634,9 @@ PATCH_ID_IRRELEVANT_ENV = frozenset({
 })
 
 
+PATCH_ID_SEMANTICS_SEED = b'stable:git-log-p:no-textconv:no-ext-diff:no-walk:no-merges:v3\0'
+
+
 def patch_id_relevant_config(config):
     """Drop `git config --list --null` entries that cannot change a diff."""
     kept = []
@@ -2659,7 +2662,9 @@ def patch_id_relevant_environment_key(key):
 def patch_id_semantics_key(repo_root):
     """Snapshot Git diff semantics once per CLI process and repository."""
     config = patch_id_relevant_config(git(repo_root, 'config', '--list', '--null').stdout)
-    digest = hashlib.sha256(b'stable:git-log-p:no-walk:no-merges:v2\0')
+    # v3: computed with --no-textconv --no-ext-diff. Rows written under the
+    # earlier seeds may come from a textconv driver and are never read.
+    digest = hashlib.sha256(PATCH_ID_SEMANTICS_SEED)
     digest.update(config.encode('utf-8', 'surrogateescape'))
     digest.update(git(repo_root, '--version').stdout.encode())
     # Replace refs and grafts can change a commit's effective parents or diff
