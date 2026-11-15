@@ -377,13 +377,14 @@ destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
 the lane tip under `refs/syncwheel/recovery/lanes/...` and pushes the same tip
-to `refs/syncwheel/archive/lanes/...` on the publication remote before reaping
+to `refs/syncwheel/archive/lanes/...` on the publication remote (or the
+canonical remote when the publication one is not configured) before reaping
 the clean worktree and local lane branch. The archive ref is outside
 `refs/heads`, so forges do not list it as a branch, but anyone who can fetch the
-repository can fetch it. If that push fails, the lane is kept with
-`archive_push_failed` and other commands neither retry nor wait for it; retry
-the same `worktree release` or `gc --apply --lane`. A repository without the
-publication remote keeps only the local recovery ref. A dirty, unavailable, or current-directory lane
+repository can fetch it. If that push fails, or neither remote is
+configured, the lane is kept with `archive_push_failed` and other commands
+never stop on it; retry the same `worktree release` or `gc --apply --lane`.
+Only a repository with no remote at all keeps just the local recovery ref. A dirty, unavailable, or current-directory lane
 is retained and reported; it is never removed automatically. An expired lease
 or a dead owner PID never removes a lane either: other mutating commands only
 finish a capture or release that was already started, and report expired lanes.
