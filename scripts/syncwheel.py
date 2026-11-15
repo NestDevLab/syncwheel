@@ -22301,6 +22301,9 @@ def command_status(args):
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
     manifest, manifest_path = load_manifest(repo_root, manifest_path)
+    if manifest and manifest.get('repository_mode') == 'journal':
+        # Journal repositories have no delivery integration or stack plan.
+        return command_journal_status(args)
     snapshot = collect_repo_snapshot(repo_root, manifest)
     output = {'snapshot': snapshot, 'manifest_path': str(manifest_path), 'manifest_present': manifest is not None}
     if manifest:
@@ -36835,6 +36838,17 @@ def execute_parsed_command(args):
         )
         manifest, _ = load_manifest(repo_root, manifest_path)
         if manifest and manifest.get('repository_mode') == 'journal':
+            if args.command in {'check', 'ck'}:
+                personal = resolve_personal(repo_root, getattr(args, 'personal', None))
+                selector = (['--personal', personal] if personal
+                            else ['--manifest', str(manifest_path)])
+                target = ['--repo', str(repo_root), *selector]
+                raise SyncwheelError(
+                    f'{args.command} is forbidden for repository_mode="journal"; '
+                    'validate the manifest and inspect the journal instead:\n  '
+                    + quoted(['syncwheel', 'validate', *target]) + '\n  '
+                    + quoted(['syncwheel', 'journal', 'status', *target])
+                )
             raise SyncwheelError(
                 f'{args.command} is forbidden for repository_mode="journal"; use journal commands'
             )

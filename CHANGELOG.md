@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.46.31 - 2026-11-15
+
+- Make `status` use the journal report in journal repositories instead of building a delivery integration plan and crashing. Both text and JSON output match `journal status`.
+- Keep delivery `check` unavailable in journal repositories, but print executable `validate` and `journal status` remedies that preserve the selected repository and manifest.
+
 ## 0.46.28 - 2026-11-15
 
 - Stop removing governed lanes because their lease expired. A mutating command such as `stack set`, `stack sync`, `sync`, `publish`, `worktree lock` or `stack git --auto-worktree` used to remove every clean lane in the repository whose two-hour lease had passed, whoever owned it, even when the command itself was then refused. The preflight now only records moved lane paths and finishes cleanups that a capture or release already started. Expired lanes stay, are reported, and are removed only by `worktree release <lane>` or `gc --apply`.

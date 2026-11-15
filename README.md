@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.19`
+Current version: `0.46.31`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1366,6 +1366,12 @@ Set `repository_mode` to `journal` for a single-branch repository that records
 an allowlisted working tree without PR stacks or integration. The manifest's
 `journal` object declares `branch`, `remote`, `include`, `exclude`,
 `max_file_bytes`, and an optional `interval` (default `30m`).
+
+In journal mode, `syncwheel status` (including `--json`) reports the same state
+as `syncwheel journal status`. Delivery `check` remains unavailable and prints
+the exact `syncwheel validate` and `syncwheel journal status` commands for the
+selected repository and manifest. Use `validate` to check the manifest; the
+journal status report describes local admission and index state.
 
 ```bash
 syncwheel journal status
