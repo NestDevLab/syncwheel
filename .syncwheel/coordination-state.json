@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/main-integration": "cdeb796b409d472d590f2c78db2220f7b52eca95"
+    "refs/heads/pr/domain-modularization": "7736a1a5bca9d331f179ac1b9ea9e87a6cdb52b1"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -14,7 +14,7 @@
     "refs/heads/pr/desk-empty-step": "2ca9797e4f9b42c4623f0df166ae099ab2af3ff9",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
-    "refs/heads/pr/domain-modularization": "baf330ca11766557e1f21326015ae5110e15a949",
+    "refs/heads/pr/domain-modularization": "8cf86ea5fcb9de25572246350f9558d545aaa7c9",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/ephemeral-control-replay": "d7de8ccf7413c689c6d51c583e14b2861135cf91",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -118,7 +118,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-13T11:21:37+00:00",
+  "created_at": "2026-11-15T15:29:05+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -138,7 +138,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
-    "refs/heads/pr/domain-modularization": "602f07c1a785d6f06d1c720d182c411b3de8e080",
+    "refs/heads/pr/domain-modularization": "7736a1a5bca9d331f179ac1b9ea9e87a6cdb52b1",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
     "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480",
@@ -421,7 +421,23 @@
           "role": "canonical"
         },
         "branch": "pr/domain-modularization",
-        "commits": [],
+        "commits": [
+          "e2bc2a7d2e0c061062015b254836bd542034fd3e",
+          "6f0a0f43e5b692c0d02f96c657bdbb0181a22d6d",
+          "524f7a3ad02357065949a3d95922873efc7d4d3e",
+          "996d7e1c0d098b6a368d89e2486f210e43bc4baf",
+          "1b8bc220c79adf0ec6be68d8932bbd282d3486a7",
+          "ba84949e1daf03e0d09e5e7354625e855be4f075",
+          "e00f2fe18647829ea93cfdbdaf4e7e5245560660",
+          "ec989be9fb086406e176eb97bc41784c9aa5fd83",
+          "eaca99642a589f489d3d9e3d0b4b1650340ba58f",
+          "3ecdcaf2314fd2bf3eea5d0dac5406a66dc261aa",
+          "d7ebc027ba571cfd7af05f0b18c6124ceb2daeca",
+          "68daa5a997ea905153bbdd09c4f13d2d134f39ac",
+          "93f2f6775b14c81d304bdcb5896dca5b7ab8164a",
+          "c355edfccaf25162b7b6c1c1c8023207c7576788",
+          "2ebe3da86c49416392e6831889ad25613cfe1772"
+        ],
         "id": "domain-modularization",
         "integration_branch": "main-integration",
         "target_branch": "main"
@@ -454,13 +470,13 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "22bd4da8-b96b-496a-b166-a373c52da6fd",
-  "parent_state": "800e089b063e26cbeb0ff02f8d130cbb7c31b295",
+  "operation_token": "181616f5-1f3f-4ab6-952a-30183a0d1a65",
+  "parent_state": "b4733c164cab6f07c5933e0e325c0ea0c267cc50",
   "projection_status": "partial",
-  "publication_id": "a09af52c-de57-4904-a865-a202816645b6",
-  "publication_scope": "integration",
+  "publication_id": "3731cfcb-bdc2-45d0-be6d-d8a914f28a8c",
+  "publication_scope": "stack:domain-modularization",
   "schema_version": 2,
-  "syncwheel_version": "0.46.27",
+  "syncwheel_version": "0.46.33",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
