@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/domain-modularization": "7736a1a5bca9d331f179ac1b9ea9e87a6cdb52b1"
+    "refs/heads/pr/domain-modularization": "7d224c75c1f69eb3db0d68ad63b4f4c2b4fe7382"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -14,7 +14,7 @@
     "refs/heads/pr/desk-empty-step": "2ca9797e4f9b42c4623f0df166ae099ab2af3ff9",
     "refs/heads/pr/desk-merge-conflict-fix": "c6fc210fc144f4ba00fdba817e2ab16004b5d4fb",
     "refs/heads/pr/dogfood-resume-fix": "9ab61f455274df0c65771597e4a9a3befbb88038",
-    "refs/heads/pr/domain-modularization": "8cf86ea5fcb9de25572246350f9558d545aaa7c9",
+    "refs/heads/pr/domain-modularization": "7047b137443882fc9714f41dab4ca37a4243e533",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/ephemeral-control-replay": "d7de8ccf7413c689c6d51c583e14b2861135cf91",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
@@ -118,7 +118,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-15T15:29:05+00:00",
+  "created_at": "2026-11-15T15:32:43+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -138,7 +138,7 @@
     "refs/heads/pr/desk-merge-conflict-fix": "2d66b6365fdeb9b92865ee325863176613c3a482",
     "refs/heads/pr/direct-stack-land": "93d7c6f50571be7eef84a3c8982f026985c59efe",
     "refs/heads/pr/dogfood-resume-fix": "e93291b44d81391b2781721ea44c4278cc9d70b1",
-    "refs/heads/pr/domain-modularization": "7736a1a5bca9d331f179ac1b9ea9e87a6cdb52b1",
+    "refs/heads/pr/domain-modularization": "7d224c75c1f69eb3db0d68ad63b4f4c2b4fe7382",
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
     "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480",
@@ -470,10 +470,10 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "181616f5-1f3f-4ab6-952a-30183a0d1a65",
-  "parent_state": "b4733c164cab6f07c5933e0e325c0ea0c267cc50",
+  "operation_token": "c94d748d-f76b-42fd-9b03-65fc26dd7c54",
+  "parent_state": "24b9913e3528d614cd07b3f9f4e27efd193d1556",
   "projection_status": "partial",
-  "publication_id": "3731cfcb-bdc2-45d0-be6d-d8a914f28a8c",
+  "publication_id": "f8ee6848-07ad-4bac-b2ca-0204bb995d49",
   "publication_scope": "stack:domain-modularization",
   "schema_version": 2,
   "syncwheel_version": "0.46.33",
