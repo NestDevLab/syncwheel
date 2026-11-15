@@ -33,8 +33,8 @@ existed, it just was not prominent enough. Follow all four exactly.
    it owns the lanes you open and is recorded as `actor` on stack create, add, set,
    capture, promote, close-intent, and push ledger events, so a refusal blocked by your
    unpublished stack names you. Without it the actor is `<user>@<host>:<parent-pid>`.
-   A lane with a named owner is reaped only after its lease expires, never early
-   because the opening process died.
+   An expired lease never removes a lane, and neither does the death of the
+   opening process: only `worktree release <lane>` or `gc --apply` removes one.
 2. Never resolve a replay conflict with raw git. Take the retry the conflict names:
    `syncwheel stack rebuild <id> --replay-mode desk`, then resolve through the manifest with
    `syncwheel stack absorb <stack> [<path>...|--staged]` or `syncwheel stack
@@ -246,7 +246,8 @@ active-active channel must use the coordination remote.
 - keep local worktrees that need investigation with `worktree lock <stack>`;
   `gc --apply` reaps eligible expired governed lanes whether or not active-active
   coordination is enabled, removes only eligible local tombstoned artifacts, and
-  never deletes a remote branch
+  never deletes a remote branch; `gc --apply --lane <lane>` removes only the named
+  lanes. Other mutating commands never remove a lane because its lease expired
 - if manifest and Git disagree, fix the manifest or call out the conflict explicitly
 - do not claim a repo is aligned if integration and PR branches still disagree
 - stop on a stale channel plan, replay conflict, unknown required observation,

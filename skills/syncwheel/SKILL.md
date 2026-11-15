@@ -38,8 +38,8 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    ```
    Export `SYNCWHEEL_LANE_OWNER=<agent-name>` for the session. It owns your lanes and is
    the `actor` of your stack lifecycle ledger events, so refusals caused by your
-   unpublished stack name you as its owner. A lane with a named owner is reaped only
-   after its lease expires.
+   unpublished stack name you as its owner. An expired lease never removes a lane:
+   only `worktree release <lane>` or `gc --apply` does.
 
 2. **Never resolve a replay conflict with raw git.** A plumbing replay never descends
    silently into a conflict; it names the exact retry:
@@ -253,7 +253,8 @@ reaps only a clean lane. A missing lane with an expired lease or a known-dead
 local owner is eligible even if its retained registry path is outside the
 configured root; a dirty, unknown, or current-directory lane stays visible and
 requires explicit recovery. Check governed-worktree warnings before a mutating
-lifecycle command.
+lifecycle command. No command removes another lane because its lease expired:
+mutating commands only finish a capture or release that was already started.
 
 To retire a named dead or abandoned lane, first preview and then explicitly
 apply the release:
@@ -266,7 +267,13 @@ syncwheel worktree release <lane> --reason "<why>" --apply
 The preview does not write. Applying stores a recovery ref for an existing lane
 branch tip, removes the registry record, and appends a ledger event. It refuses
 an existing dirty worktree and names the recovery remedy. `gc --apply` reaps
-eligible expired lanes even when active-active coordination is disabled.
+eligible expired lanes even when active-active coordination is disabled; add
+`--lane <lane>` (repeatable) to remove only the named lanes:
+
+```bash
+syncwheel gc --lane <lane>
+syncwheel gc --apply --lane <lane>
+```
 
 ## Locate the CLI
 
