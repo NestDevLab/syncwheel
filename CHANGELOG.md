@@ -2,7 +2,7 @@
 
 ## 0.46.33 - 2026-11-15
 
-- Stop a lane held by someone else's Git worktree lock from blocking every mutation in the repository. Mutating commands first finish lane cleanups already in progress; when a pending lane carried a manual `git worktree lock` with another reason, the cleanup lock failed with `lane_in_use` and every unrelated `stack set`, `stack sync`, `worktree lock` or `stack git --auto-worktree` stopped with "cleanup failed closed". Such a lane is intact, since its cleanup stops before touching anything, so these commands now print a warning and leave it to `worktree release` or `gc --apply`. `stack add` for that lane's own stack, and the whole-repository publication commands (`sync`, `publish`, `int push`, `stack land`, unscoped `reconcile`/`resume`), still refuse.
+- Stop a lane held by someone else's Git worktree lock from blocking every mutation in the repository. Mutating commands first finish lane cleanups already in progress; when a pending lane carried a manual `git worktree lock` with another reason, the cleanup lock failed with `lane_in_use` and every unrelated `stack set`, `stack sync`, `worktree lock` or `stack git --auto-worktree` stopped with "cleanup failed closed". Such a lane is intact, since its cleanup stops before touching anything (the same happens when the lane branch is checked out elsewhere), so these commands now print a warning and leave it to `worktree release` or `gc --apply`. `stack add` for that lane's own stack, and `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume`, still refuse.
 
 ## 0.46.32 - 2026-11-15
 
