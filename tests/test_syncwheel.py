@@ -2584,6 +2584,14 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         registry, _ = module.load_governed_worktree_registry(self.repo)
         self.assertEqual(registry['lanes'][0]['pending_reason'], 'archive_push_failed')
 
+        # A release interrupted right after the local anchor is retried by the
+        # preflight; its failed remote save must not block the mutation either.
+        registry['lanes'][0]['pending_reason'] = 'reaping'
+        module.save_governed_worktree_registry(self.repo, registry)
+        self.run_cli('stack', 'set', 'feature-a', beta)
+        self.assertTrue(path.is_dir())
+        self.assertEqual(module.ref_tip(self.repo, opened['branch']), tip)
+
         self.git('init', '--bare', '-q', str(origin))
         released = json.loads(self.run_cli(
             'worktree', 'release', 'unsaved', '--reason', 'done', '--apply', '--json',
@@ -2600,8 +2608,22 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             'worktree', 'release', 'local-only', '--reason', 'done', '--apply',
         )
 
-        self.assertIn('not saved on a remote: remote_not_configured', released.stdout)
+        self.assertIn('not saved on a remote: no_remotes', released.stdout)
         self.assertFalse(Path(opened['path']).exists())
+
+    def test_release_keeps_the_lane_when_only_an_unrelated_remote_is_configured(self):
+        other = self.tmp / 'unrelated.git'
+        self.git('init', '--bare', '-q', str(other))
+        self.git('remote', 'add', 'unrelated', str(other))
+        opened = json.loads(self.run_cli('worktree', 'open', 'misrouted', '--json').stdout)['lane']
+
+        failed = self.run_cli(
+            'worktree', 'release', 'misrouted', '--reason', 'done', '--apply', expected=2,
+        )
+
+        self.assertIn('archive_push_failed', failed.stderr)
+        self.assertIn('Add the publication remote', failed.stderr)
+        self.assertTrue(Path(opened['path']).is_dir())
 
     def test_gc_lane_refuses_a_lane_that_is_not_a_cleanup_candidate(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'still-leased', '--json').stdout)['lane']
