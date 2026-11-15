@@ -1,11 +1,11 @@
 {
-  "changed_refs": [
-    "refs/heads/pr/domain-modularization"
-  ],
-  "claimed_at": "2026-11-15T15:32:43+00:00",
+  "changed_refs": [],
+  "claimed_at": "2026-11-15T15:51:24+00:00",
+  "closed": true,
   "coordination_id": "default",
-  "operation_token": "c94d748d-f76b-42fd-9b03-65fc26dd7c54",
-  "publication_scope": "stack:domain-modularization",
+  "operation_token": "936e8e8b-de39-45ae-a5d8-2872e8dffd73",
+  "publication_scope": "close:domain-modularization",
+  "reason": "merged",
   "source_ref": "refs/heads/pr/domain-modularization",
-  "syncwheel_version": "0.46.33"
+  "syncwheel_version": "0.47.0"
 }
