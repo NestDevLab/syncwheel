@@ -392,6 +392,9 @@ A lane that someone holds with their own `git worktree lock` is skipped by that
 finishing step with a warning, so it never stops unrelated commands; `stack add`
 for its own stack, `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume`
 still refuse until it is released.
+Those whole-repository commands stop only on lanes that need recovery and target a
+stack still declared in the manifest; lanes with no target or a closed stack are
+reported as warnings.
 Remove one with `worktree release <lane>`, or with `gc --apply`, which `--lane
 <lane>` (repeatable) limits to the named lanes; a missing lane whose lease
 expired, or whose local owner PID is known to be dead, is eligible for `gc`

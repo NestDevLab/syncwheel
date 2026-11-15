@@ -1987,6 +1987,38 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             warnings.assert_called_once()
             reap.assert_not_called()
 
+    def test_whole_repository_publication_blocks_only_on_lanes_of_declared_stacks(self):
+        module = self.load_syncwheel_module()
+        lanes = [
+            {'id': 'no-target', 'branch': 'syncwheel/lane/no-target', 'path': '/x/a',
+             'target': None, 'code': 'dirty'},
+            {'id': 'closed-stack', 'branch': 'syncwheel/lane/closed-stack', 'path': '/x/b',
+             'target': 'gone-stack', 'code': 'locked'},
+            {'id': 'healthy', 'branch': 'syncwheel/lane/healthy', 'path': '/x/c',
+             'target': 'feature-a', 'code': None},
+        ]
+        open_lane = {'id': 'open-stack', 'branch': 'syncwheel/lane/open-stack', 'path': '/x/d',
+                     'target': 'feature-b', 'code': 'dirty'}
+        args = SimpleNamespace(
+            func=module.command_sync, repo=str(self.repo), manifest=None, personal=None,
+            stack=None, apply=True, dry_run=False, json=False,
+        )
+        for extra, refused in (([], False), ([open_lane], True)):
+            with self.subTest(refused=refused), mock.patch.object(
+                module, 'governed_worktree_diagnostics', return_value={'lanes': lanes + extra},
+            ), mock.patch.object(
+                module, 'reconcile_governed_worktrees', return_value={'failures': []},
+            ), mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
+                if refused:
+                    with self.assertRaisesRegex(module.SyncwheelError, 'open-stack'):
+                        module.governed_worktree_preflight(args)
+                else:
+                    module.governed_worktree_preflight(args)
+            warnings = stderr.getvalue()
+            self.assertIn('no-target needs recovery (dirty) but does not block', warnings)
+            self.assertIn("its stack 'gone-stack' is not in the manifest", warnings)
+            self.assertNotIn('healthy', warnings)
+
     def test_stack_create_warns_and_preserves_unrelated_dirty_lane_non_interactively(self):
         opened = json.loads(self.run_cli(
             'worktree', 'open', 'unrelated-create-draft', '--json'

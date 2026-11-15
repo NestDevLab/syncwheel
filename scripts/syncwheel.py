@@ -18749,7 +18749,13 @@ def governed_worktree_preflight(args):
         )
     if args.func not in dangerous:
         return
-    blocked = [
+    # These commands rebuild stack branches, so a lane that needs recovery
+    # blocks them only when it works on a stack they can rebuild: one that is
+    # still declared in the manifest. A lane with no target, or whose stack was
+    # closed or never declared, cannot be affected; it is reported and left to
+    # its own release or gc.
+    open_stacks = {stack.get('id') for stack in manifest.get('stacks', [])}
+    needs_recovery = [
         lane for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
         if lane['code'] in {
             'dirty', 'outside_root', 'unregistered_worktree', 'unavailable',
@@ -18759,6 +18765,17 @@ def governed_worktree_preflight(args):
             'registration_mismatch', 'path_reappeared',
         }
     ]
+    blocked = [lane for lane in needs_recovery if lane.get('target') in open_stacks]
+    for lane in needs_recovery:
+        if lane.get('target') not in open_stacks:
+            label = lane['id'] or lane['branch'] or lane['path']
+            target = lane.get('target')
+            why = f'its stack {target!r} is not in the manifest' if target else 'it has no target stack'
+            print(
+                f"warning: governed worktree {label} needs recovery ({lane['code']}) but does not "
+                f'block this command: {why}',
+                file=sys.stderr,
+            )
     if blocked:
         labels = ', '.join(item['id'] or item['branch'] or item['path'] for item in blocked)
         raise SyncwheelError(
