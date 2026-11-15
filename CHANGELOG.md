@@ -1,9 +1,9 @@
 # Changelog
 
-## Unreleased
+## 0.47.0 - 2026-11-15
 
-- Vendored installations now require the complete `syncwheel*.py` sibling module set and `VERSION`, rather than a single copied CLI file. Direct script invocation and manual updates remain available.
-- Separate manifest schema, CLI grammar, coordination snapshots, journal workflows, replay execution, governed worktree lifecycle, ledger projection and Git index decoding into explicit domain modules. Preserve the supported CLI and import facade, patchable I/O operations and package entry points.
+- Split `scripts/syncwheel.py` into domain modules: manifest schema and storage, CLI grammar, coordination state, publication and its intents, journal workflows, replay, projection, provenance, integration history, stacks, governed worktrees, revision backend, ledger, Git index decoding and shared errors. `syncwheel.py` stays the CLI and composition root, so the commands, the `main` import, the revision-provider entry points and the existing patch points keep working. Domains never import the facade; they get explicit ports, and `pyproject.toml` lists every module.
+- Vendored installations now need the complete `scripts/syncwheel*.py` sibling set and `VERSION`, since a single copied `syncwheel.py` is no longer self-contained. The invocation is still `python3 path/to/bundle/syncwheel.py` and updates are still manual.
 
 ## 0.46.33 - 2026-11-15
 
