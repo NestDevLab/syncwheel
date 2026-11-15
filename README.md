@@ -378,10 +378,14 @@ destination is already known. Otherwise, after committing, use the existing
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
 the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
 worktree and local lane branch. A dirty, unavailable, or current-directory lane
-is retained and reported; it is never removed automatically. A missing lane
-whose lease expired, or whose local owner PID is known to be dead, is reaped on
-the next applicable mutation even when an old registry path is outside the
-current configured root. If Git reports that the branch's worktree moved,
+is retained and reported; it is never removed automatically. An expired lease
+or a dead owner PID never removes a lane either: other mutating commands only
+finish a capture or release that was already started, and report expired lanes.
+Remove one with `worktree release <lane>`, or with `gc --apply`, which `--lane
+<lane>` (repeatable) limits to the named lanes; a missing lane whose lease
+expired, or whose local owner PID is known to be dead, is eligible for `gc`
+even when an old registry path is outside the current configured root. If Git
+reports that the branch's worktree moved,
 Syncwheel resolves and checks the current path before deciding whether the lane
 is eligible, and retains moved dirty or externally locked worktrees.
 
