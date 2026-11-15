@@ -217,7 +217,8 @@ active-active channel must use the coordination remote.
 - treat a light lane as an operational boundary, not a sandbox: do not install
   dependencies there, and return to a clean checkout before stack ownership
   operations
-- review governed-worktree warnings on normal commands; a missing lane with an
+- review governed-worktree warnings on normal commands, which never remove a
+  lane; with `gc --apply` or `worktree release`, a missing lane with an
   expired lease or known dead local owner is recovered to a local recovery ref,
   and pushed to `refs/syncwheel/archive/lanes/...` on the publication remote,
   before reaping even if its registry path is outside the current root, while an
