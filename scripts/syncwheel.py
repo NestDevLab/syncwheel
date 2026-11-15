@@ -2613,11 +2613,53 @@ def git_object_id_length(repo_root):
     return 64 if algorithm == 'sha256' else 40
 
 
+# Config sections and environment variables that cannot change the output of
+# `git log -p` piped into `git patch-id --stable`. They are left out of the
+# patch-ID cache key so that a new tracking branch, a credential helper or a
+# tracing variable does not start a new, empty cache. Everything else stays in
+# the key, so an unknown input still invalidates the cache.
+PATCH_ID_IRRELEVANT_CONFIG_SECTIONS = frozenset({
+    'advice', 'alias', 'branch', 'commit', 'credential', 'fetch', 'gc', 'gpg',
+    'http', 'init', 'maintenance', 'pack', 'protocol', 'pull', 'push', 'receive',
+    'remote', 'rerere', 'safe', 'sendemail', 'tag', 'transfer', 'url', 'user',
+})
+PATCH_ID_IRRELEVANT_ENV_PREFIXES = (
+    'GIT_TRACE', 'GIT_AUTHOR_', 'GIT_COMMITTER_', 'GIT_HTTP_', 'GIT_PUSH_OPTION_',
+)
+PATCH_ID_IRRELEVANT_ENV = frozenset({
+    'GIT_ASKPASS', 'GIT_CURL_VERBOSE', 'GIT_EDITOR', 'GIT_FLUSH',
+    'GIT_INDEX_FILE', 'GIT_OPTIONAL_LOCKS', 'GIT_PAGER', 'GIT_PREFIX',
+    'GIT_PROGRESS_DELAY', 'GIT_REFLOG_ACTION', 'GIT_SEQUENCE_EDITOR', 'GIT_SSH',
+    'GIT_SSH_COMMAND', 'GIT_TERMINAL_PROMPT',
+})
+
+
+def patch_id_relevant_config(config):
+    """Drop `git config --list --null` entries that cannot change a diff."""
+    kept = []
+    for entry in config.split('\0'):
+        if not entry:
+            continue
+        key = entry.split('\n', 1)[0]
+        if key.split('.', 1)[0].lower() in PATCH_ID_IRRELEVANT_CONFIG_SECTIONS:
+            continue
+        kept.append(entry + '\0')
+    return ''.join(kept)
+
+
+def patch_id_relevant_environment_key(key):
+    if not key.startswith('GIT_'):
+        return False
+    if key in PATCH_ID_IRRELEVANT_ENV:
+        return False
+    return not key.startswith(PATCH_ID_IRRELEVANT_ENV_PREFIXES)
+
+
 @functools.lru_cache(maxsize=16)
 def patch_id_semantics_key(repo_root):
     """Snapshot Git diff semantics once per CLI process and repository."""
-    config = git(repo_root, 'config', '--list', '--null').stdout
-    digest = hashlib.sha256(b'stable:git-log-p:no-walk:no-merges:v1\0')
+    config = patch_id_relevant_config(git(repo_root, 'config', '--list', '--null').stdout)
+    digest = hashlib.sha256(b'stable:git-log-p:no-walk:no-merges:v2\0')
     digest.update(config.encode('utf-8', 'surrogateescape'))
     digest.update(git(repo_root, '--version').stdout.encode())
     # Replace refs and grafts can change a commit's effective parents or diff
@@ -2628,9 +2670,11 @@ def patch_id_semantics_key(repo_root):
     # object format from the target repository (notably SHA-1 versus SHA-256).
     digest.update(run(['git', 'rev-parse', '--show-object-format'], cwd=Path.cwd(),
                       check=False).stdout.encode())
-    digest.update(run(['git', 'config', '--list', '--null'], cwd=Path.cwd()).stdout.encode())
+    digest.update(patch_id_relevant_config(
+        run(['git', 'config', '--list', '--null'], cwd=Path.cwd()).stdout
+    ).encode('utf-8', 'surrogateescape'))
     for key, value in sorted(os.environ.items()):
-        if key.startswith('GIT_'):
+        if patch_id_relevant_environment_key(key):
             digest.update(key.encode() + b'=' + value.encode('utf-8', 'surrogateescape') + b'\0')
     common_dir = git_common_dir(repo_root)
     attributes = [('info/attributes', common_dir / 'info' / 'attributes'),

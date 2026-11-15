@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.30 - 2026-11-15
+
+- Keep the patch-ID cache warm across sessions. Its key used to hash the whole Git config and every `GIT_*` variable, so a different `user.email`, credential helper, remote, tracking branch or `GIT_TRACE2_EVENT` started an empty cache and the next `status` or `check` recomputed the patch ID of every commit. Sections and variables that cannot change `git log -p | git patch-id --stable` output are now left out of the key; all others, such as `diff.*` or `core.*`, still invalidate it. The cache namespace moves to `v2`, so each clone recomputes once.
+
 ## 0.46.29 - 2026-11-15
 
 - Push a governed lane's tip to `refs/syncwheel/archive/lanes/<lane>-<time>` on the publication remote before its folder and branch are removed, so the work survives the loss of the local clone. The local recovery ref is kept as before, and the ledger event names both refs. If the push fails the lane is kept with `archive_push_failed`; other mutating commands neither retry it nor stop on it, and the same `worktree release` or `gc --apply --lane` retries it. A repository without the publication remote keeps only the local recovery ref. Uncommitted files are still never saved: a dirty lane is still refused.

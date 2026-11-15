@@ -97,6 +97,52 @@ class PatchIdCacheTest(unittest.TestCase):
         self.assertEqual({commit: self.legacy(commit) for commit in self.commits},
                          syncwheel.commit_patch_ids(self.repo, self.commits))
 
+    def test_config_that_cannot_change_a_diff_keeps_the_namespace(self):
+        before = syncwheel.patch_id_semantics_key(self.repo)
+        self.git('config', 'branch.side.remote', 'origin')
+        self.git('config', 'branch.side.merge', 'refs/heads/side')
+        self.git('config', 'remote.origin.url', 'https://example.test/repo.git')
+        self.git('config', 'user.name', 'Another Agent')
+        self.git('config', 'credential.helper', 'store')
+        syncwheel.patch_id_semantics_key.cache_clear()  # Models a new CLI invocation.
+        self.assertEqual(before, syncwheel.patch_id_semantics_key(self.repo))
+        self.git('config', 'diff.algorithm', 'histogram')
+        syncwheel.patch_id_semantics_key.cache_clear()
+        self.assertNotEqual(before, syncwheel.patch_id_semantics_key(self.repo))
+
+    def test_environment_that_cannot_change_a_diff_keeps_the_namespace(self):
+        before = syncwheel.patch_id_semantics_key(self.repo)
+        quiet = {
+            'GIT_TRACE2_EVENT': str(Path(self.temp.name) / 'trace.json'),
+            'GIT_TRACE': '0',
+            'GIT_OPTIONAL_LOCKS': '0',
+            'GIT_TERMINAL_PROMPT': '0',
+            'GIT_AUTHOR_NAME': 'Another Agent',
+            'GIT_INDEX_FILE': str(Path(self.temp.name) / 'other-index'),
+        }
+        with mock.patch.dict(os.environ, quiet):
+            syncwheel.patch_id_semantics_key.cache_clear()  # Models a new CLI invocation.
+            self.assertEqual(before, syncwheel.patch_id_semantics_key(self.repo))
+        for key, value in (
+            ('GIT_DIFF_OPTS', '--unified=1'),
+            ('GIT_EXTERNAL_DIFF', 'true'),
+            ('GIT_CONFIG_PARAMETERS', "'diff.algorithm'='patience'"),
+        ):
+            with self.subTest(key=key), mock.patch.dict(os.environ, {key: value}):
+                syncwheel.patch_id_semantics_key.cache_clear()
+                self.assertNotEqual(before, syncwheel.patch_id_semantics_key(self.repo))
+        syncwheel.patch_id_semantics_key.cache_clear()
+
+    def test_cached_ids_survive_a_tracing_session(self):
+        expected = syncwheel.commit_patch_ids(self.repo, self.commits)
+        trace = {'GIT_TRACE2_EVENT': str(Path(self.temp.name) / 'trace.json')}
+        with mock.patch.dict(os.environ, trace), mock.patch.object(
+            syncwheel, 'batch_uncached_patch_ids', side_effect=AssertionError('cache miss'),
+        ):
+            syncwheel.patch_id_semantics_key.cache_clear()  # Models a new CLI invocation.
+            self.assertEqual(expected, syncwheel.commit_patch_ids(self.repo, self.commits))
+        syncwheel.patch_id_semantics_key.cache_clear()
+
     def test_attributes_change_invalidates_namespace(self):
         before = syncwheel.patch_id_semantics_key(self.repo)
         self.write('.gitattributes', '*.bin binary\n')

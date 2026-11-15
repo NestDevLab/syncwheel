@@ -1304,6 +1304,11 @@ raw Git equivalent of the Syncwheel lifecycle.
 - `VERSION`: current release version
 - `CHANGELOG.md`: release notes
 
+Syncwheel keeps a clone-local patch-ID cache in Git's common directory. Its key
+covers only the Git config and `GIT_*` environment that can change a diff, so a
+session with its own `user.*`, credential, remote or tracing settings reuses the
+same cache instead of recomputing every commit.
+
 ## Documentation map
 
 - `install.md`: AI-agent handoff for installing Syncwheel and the companion skill
