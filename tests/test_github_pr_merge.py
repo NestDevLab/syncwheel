@@ -205,6 +205,26 @@ class GithubPrMergeTest(unittest.TestCase):
             SYNCWHEEL.normalize_github_pr_merge_policy(policy)['checks'], 'none'
         )
 
+    def test_policy_accepts_release_branch_patterns_and_matches_them_narrowly(self):
+        policy = self.policy()
+        policy['base_branches'] = ['main', 'save/*']
+        normalized = SYNCWHEEL.normalize_github_pr_merge_policy(policy)
+        allowed = normalized['base_branches']
+        self.assertTrue(SYNCWHEEL.github_pr_merge_base_allowed('main', allowed))
+        self.assertTrue(SYNCWHEEL.github_pr_merge_base_allowed('save/kiosk-update-20261110', allowed))
+        for base in ('save/', 'save', 'saved/x', 'mainline', 'pr/save/x', '', None):
+            with self.subTest(base=base):
+                self.assertFalse(SYNCWHEEL.github_pr_merge_base_allowed(base, allowed))
+
+    def test_policy_rejects_broad_or_unsupported_base_patterns(self):
+        for pattern in ('*', '*/x', 'save*', 'save/*/x', 'save/?', 'save/[ab]', '/*'):
+            policy = self.policy()
+            policy['base_branches'] = [pattern]
+            with self.subTest(pattern=pattern), self.assertRaisesRegex(
+                SYNCWHEEL.SyncwheelError, 'PREFIX/\\* pattern',
+            ):
+                SYNCWHEEL.normalize_github_pr_merge_policy(policy)
+
     def test_policy_dry_run_preserves_existing_profile_and_does_not_write(self):
         before = (self.repo / '.syncwheel' / 'profile.local.json').read_bytes()
         output = io.StringIO()

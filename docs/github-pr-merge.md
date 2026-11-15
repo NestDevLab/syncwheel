@@ -32,6 +32,11 @@ syncwheel repo pr-merge-policy status --json
 syncwheel repo pr-merge-policy clear --apply
 ```
 
+`--base` is repeatable. Each value is an exact branch name, or a `PREFIX/*`
+pattern such as `save/*` or `release/*` that allows every branch under that
+prefix, so release branches do not have to be listed one by one. A bare `*` and
+other glob characters are rejected.
+
 At least one provenance filter (`--pr-author`, `--commit-author`, or
 `--head-repository`) is mandatory. Configured filters are combined with AND;
 empty lists, unknown keys, tokens, commands, and secrets are rejected.

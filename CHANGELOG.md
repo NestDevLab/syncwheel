@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.3 - 2026-11-15
+
+- Let the GitHub PR merge policy allow release branches by pattern. An entry in `base_branches` (`--base`) can now be `PREFIX/*`, such as `save/*` or `release/*`, which allows any branch under that prefix as a delivery base. Exact names keep matching exactly; bare `*`, other glob characters and patterns with `*` anywhere but the final segment are rejected.
+
 ## 0.47.2 - 2026-11-15
 
 - Let the clone-local GitHub PR merge policy declare integration validation advisory (`repo pr-merge-policy set --integration advisory`, key `integration`). With it, `stack merge-pr` records the stack's commits that are missing from the integration branch as one `integration_not_validated` warning instead of blocking, so an integration that other stacks keep from being rebuilt no longer stops an unrelated PR. The PR is then validated by its own checks, pinned head and live base only. The default stays `required`, which blocks as before and now says how to proceed; membership rules (`integration_membership: required`, a missing integration branch) still block in both modes.
