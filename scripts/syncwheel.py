@@ -18454,33 +18454,20 @@ def journal_recover_move(repo_root, branch, before, after):
 def journal_prefix_absorbed(repo_root, first, last, tip):
     """Whether the net change of the snapshots ``first``..``last`` is already on ``tip``.
 
-    Compares, path by path, the entry (mode and blob, or absence) that the
-    snapshots leave with the one on the tip. No merge runs, so merge drivers
-    and conflict styles cannot make missing work look absorbed.
+    Every path the snapshots change must hold the same entry (mode and object,
+    or absence) on ``tip`` as on ``last``. No merge runs, so merge drivers and
+    conflict styles cannot make missing work look absorbed, and no path is
+    passed as an argument, so pathspec magic and path encoding cannot either.
     """
-    # Plumbing with explicit flags: no diff.* or submodule ignore config may
-    # hide a changed path, and names are taken literally, never as pathspecs.
-    changed = [path for path in git_bytes(
-        repo_root, 'diff-tree', '-r', '-z', '--name-only', '--no-renames',
-        '--ignore-submodules=none', f'{first}^', last,
-    ).split(b'\0') if path]
-    if not changed:
-        return True
+    def changed_paths(old, new):
+        # Plumbing with explicit flags: no diff.* or submodule ignore config may
+        # hide a changed path.
+        return {path for path in git_bytes(
+            repo_root, 'diff-tree', '-r', '-z', '--name-only', '--no-renames',
+            '--ignore-submodules=none', old, new,
+        ).split(b'\0') if path}
 
-    def entries(commit):
-        listed = git_bytes(
-            repo_root, '--literal-pathspecs', 'ls-tree', '-z', '--full-tree', commit, '--', *changed,
-        )
-        result = {}
-        for record in listed.split(b'\0'):
-            if not record:
-                continue
-            meta, path = record.split(b'\t', 1)
-            mode, _kind, object_id = meta.split()
-            result[path] = (mode, object_id)
-        return result
-
-    return entries(last) == entries(tip)
+    return not changed_paths(f'{first}^', last) & changed_paths(last, tip)
 
 
 def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_path=None):
