@@ -1999,18 +1999,28 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         ]
         open_lane = {'id': 'open-stack', 'branch': 'syncwheel/lane/open-stack', 'path': '/x/d',
                      'target': 'feature-b', 'code': 'dirty'}
+        # A lane folder switched onto a stack branch can be removed by gc
+        # with its ignored files, so it still blocks even without a target.
+        switched_lane = {'id': 'switched', 'branch': 'syncwheel/lane/switched', 'path': '/x/e',
+                         'target': None, 'code': 'dirty'}
+        worktrees = [
+            {'path': '/x/a', 'branch': 'syncwheel/lane/no-target'},
+            {'path': '/x/e', 'branch': 'stack/closed-feature'},
+        ]
         args = SimpleNamespace(
             func=module.command_sync, repo=str(self.repo), manifest=None, personal=None,
             stack=None, apply=True, dry_run=False, json=False,
         )
-        for extra, refused in (([], False), ([open_lane], True)):
+        for extra, refused in (([], None), ([open_lane], 'open-stack'), ([switched_lane], 'switched')):
             with self.subTest(refused=refused), mock.patch.object(
                 module, 'governed_worktree_diagnostics', return_value={'lanes': lanes + extra},
+            ), mock.patch.object(
+                module, 'get_worktrees', return_value=worktrees,
             ), mock.patch.object(
                 module, 'reconcile_governed_worktrees', return_value={'failures': []},
             ), mock.patch('sys.stderr', new_callable=io.StringIO) as stderr:
                 if refused:
-                    with self.assertRaisesRegex(module.SyncwheelError, 'open-stack'):
+                    with self.assertRaisesRegex(module.SyncwheelError, refused):
                         module.governed_worktree_preflight(args)
                 else:
                     module.governed_worktree_preflight(args)

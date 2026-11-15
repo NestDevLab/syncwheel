@@ -18749,12 +18749,25 @@ def governed_worktree_preflight(args):
         )
     if args.func not in dangerous:
         return
-    # These commands rebuild stack branches, so a lane that needs recovery
-    # blocks them only when it works on a stack they can rebuild: one that is
-    # still declared in the manifest. A lane with no target, or whose stack was
-    # closed or never declared, cannot be affected; it is reported and left to
-    # its own release or gc.
+    # These commands rebuild stack branches, and sync/publish can gc the
+    # worktrees of closed stacks, so a lane that needs recovery blocks them
+    # when it works on a stack they can rebuild (one still declared in the
+    # manifest) or when its folder is checked out on a branch other than its
+    # own lane branch. Any other lane, with no target or a closed or undeclared
+    # stack, is reported and left to its own release or gc.
     open_stacks = {stack.get('id') for stack in manifest.get('stacks', [])}
+    checked_out = {
+        str(Path(item['path']).resolve(strict=False)): item.get('branch') or ''
+        for item in get_worktrees(repo_root) if item.get('path')
+    }
+
+    def lane_blocks(lane):
+        if lane.get('target') in open_stacks:
+            return True
+        path = lane.get('path')
+        branch = checked_out.get(str(Path(path).resolve(strict=False))) if path else None
+        return bool(branch) and not branch.startswith('syncwheel/lane/')
+
     needs_recovery = [
         lane for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
         if lane['code'] in {
@@ -18765,9 +18778,9 @@ def governed_worktree_preflight(args):
             'registration_mismatch', 'path_reappeared',
         }
     ]
-    blocked = [lane for lane in needs_recovery if lane.get('target') in open_stacks]
+    blocked = [lane for lane in needs_recovery if lane_blocks(lane)]
     for lane in needs_recovery:
-        if lane.get('target') not in open_stacks:
+        if not lane_blocks(lane):
             label = lane['id'] or lane['branch'] or lane['path']
             target = lane.get('target')
             why = f'its stack {target!r} is not in the manifest' if target else 'it has no target stack'
