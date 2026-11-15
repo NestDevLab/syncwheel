@@ -201,6 +201,42 @@ class JournalModeTest(unittest.TestCase):
             self.git('rev-parse', 'HEAD~1'), self.git('rev-parse', 'origin/journal'),
         )
 
+    def test_recover_drops_a_squash_merged_snapshot_whose_paths_changed_again_upstream(self):
+        head = self.local_commit('lock.json', 'v1\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/375')
+        later = self.local_commit('later.txt', 'local only\n')
+        self.publish_from_other_clone({'lock.json': 'v1\n'})
+        self.publish_from_other_clone({'lock.json': 'v2 from upstream\n'})
+
+        plan = json.loads(self.cli('journal', 'recover').stdout)
+        self.assertEqual(plan['absorbed'], [head])
+        self.assertEqual(plan['commits'], [later])
+        result = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+
+        self.assertEqual(result['absorbed'], [head])
+        self.assertEqual((self.repo / 'lock.json').read_text(), 'v2 from upstream\n')
+        self.assertEqual((self.repo / 'later.txt').read_text(), 'local only\n')
+        self.assertEqual(self.git('rev-parse', 'HEAD~1'), self.git('rev-parse', 'origin/journal'))
+
+    def test_recover_refuses_a_snapshot_that_reached_only_a_side_branch(self):
+        head = self.local_commit('lock.json', 'LOCAL WORK\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/8')
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        other = self.root / 'other'
+        run = lambda *args: subprocess.run(['git', *args], cwd=other, check=True, capture_output=True)
+        run('checkout', '-q', '-b', 'side')
+        (other / 'lock.json').write_text('LOCAL WORK\n')
+        run('add', 'lock.json')
+        run('commit', '-q', '-m', 'side copy')
+        run('checkout', '-q', 'journal')
+        run('merge', '-q', '-s', 'ours', '--no-edit', 'side')
+        run('push', '-q', 'origin', 'journal')
+
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
     def test_recover_plan_and_receipt_list_absorbed_snapshots(self):
         first = self.local_commit('m.txt', 'v1\n')
         second = self.local_commit('m.txt', 'v2\n')

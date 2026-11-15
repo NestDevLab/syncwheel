@@ -1536,7 +1536,7 @@ syncwheel journal publish --committed-only --apply
 
 Recovery is journal-only. It fetches remote refs, reports in-sync, ahead-only,
 behind-only or diverged, and delegates behind-only updates to journal pull.
-Diverged recovery drops a snapshot whose change is already on the journal tip (listed as `absorbed`, for example after a squash merge) and otherwise refuses snapshots reachable from any advertised remote ref,
+Diverged recovery drops a published snapshot whose change reached the journal mainline (listed as `absorbed`, for example after a squash merge, even if later commits changed the same files) and otherwise refuses snapshots reachable from any advertised remote ref,
 merge commits, and dirty or obstructing replay paths; it never stashes. It
 replays single-parent snapshots in an isolated worktree, retaining author,
 committer, dates and message; signatures are removed because the commit changes.

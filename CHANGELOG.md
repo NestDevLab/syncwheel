@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.46.32 - 2026-11-15
+
+- Let `journal recover` drop a squash-merged snapshot even after later mainline commits changed the same paths again. 0.46.31 compared the snapshot only with the current tip, so once upstream touched those files once more (a lock file updated by the next pull request, say) recovery refused with `already-published` again. The published prefix now counts as absorbed when any commit on the tip's first-parent history since the snapshots' base held exactly their result on every path they change. A copy that reached only a side branch, and was merged away, still does not count.
+
 ## 0.46.31 - 2026-11-15
 
 - Fix `syncwheel status` on a journal repository, which crashed with `KeyError: 'exists'` while building a plan. A journal repository has no stacks or integration branch to plan, so status now reports its validation and an empty plan.

@@ -18452,12 +18452,15 @@ def journal_recover_move(repo_root, branch, before, after):
 
 
 def journal_prefix_absorbed(repo_root, first, last, tip):
-    """Whether the net change of the snapshots ``first``..``last`` is already on ``tip``.
+    """Whether the net change of the snapshots ``first``..``last`` reached the journal mainline.
 
-    Every path the snapshots change must hold the same entry (mode and object,
-    or absence) on ``tip`` as on ``last``. No merge runs, so merge drivers and
-    conflict styles cannot make missing work look absorbed, and no path is
-    passed as an argument, so pathspec magic and path encoding cannot either.
+    The prefix is absorbed when some commit on the tip's first-parent history
+    since ``first^`` holds, for every path the snapshots change, the same entry
+    (mode and object, or absence) as ``last``: a squash merge landed it there.
+    Later mainline commits may change those paths again; that is upstream work
+    built on top, not a loss. No merge runs, so merge drivers and conflict
+    styles cannot make missing work look absorbed, and no path is passed as an
+    argument, so pathspec magic and path encoding cannot either.
     """
     def changed_paths(old, new):
         # Plumbing with explicit flags: no diff.* or submodule ignore config may
@@ -18467,7 +18470,11 @@ def journal_prefix_absorbed(repo_root, first, last, tip):
             '--ignore-submodules=none', old, new,
         ).split(b'\0') if path}
 
-    return not changed_paths(f'{first}^', last) & changed_paths(last, tip)
+    changed = changed_paths(f'{first}^', last)
+    if not changed:
+        return True
+    mainline = git(repo_root, 'rev-list', '--first-parent', f'{first}^..{tip}').stdout.split()
+    return any(not changed & changed_paths(last, candidate) for candidate in mainline)
 
 
 def journal_recover(repo_root, manifest, apply=False, rollback=None, manifest_path=None):
