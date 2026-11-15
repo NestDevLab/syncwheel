@@ -766,7 +766,9 @@ Practical meaning:
 For repositories that explicitly use `ai-managed` source delivery, the
 optional digest-bound GitHub PR merge path is documented in
 [`docs/github-pr-merge.md`](docs/github-pr-merge.md). Its private policy stays
-clone-local and its admin bypass is limited to required reviews. CI is required
+clone-local and its admin bypass is limited to required reviews. Its allowed
+bases are exact names or `PREFIX/*` patterns such as `save/*` for release
+branches. CI is required
 by default; repositories without CI can explicitly select clone-local
 `checks: "none"`, which remains visible as a merge-plan warning.
 
