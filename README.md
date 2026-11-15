@@ -376,8 +376,14 @@ directory, never in the shared manifest. Use `--into <existing-stack>` when the
 destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
 different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
-the lane tip under `refs/syncwheel/recovery/lanes/...` before reaping the clean
-worktree and local lane branch. A dirty, unavailable, or current-directory lane
+the lane tip under `refs/syncwheel/recovery/lanes/...` and pushes the same tip
+to `refs/syncwheel/archive/lanes/...` on the publication remote before reaping
+the clean worktree and local lane branch. The archive ref is outside
+`refs/heads`, so forges do not list it as a branch, but anyone who can fetch the
+repository can fetch it. If that push fails, the lane is kept with
+`archive_push_failed` and other commands neither retry nor wait for it; retry
+the same `worktree release` or `gc --apply --lane`. A repository without the
+publication remote keeps only the local recovery ref. A dirty, unavailable, or current-directory lane
 is retained and reported; it is never removed automatically. An expired lease
 or a dead owner PID never removes a lane either: other mutating commands only
 finish a capture or release that was already started, and report expired lanes.
@@ -434,8 +440,8 @@ syncwheel worktree release abandoned-lane --reason "superseded by pr/example" --
 ```
 
 `release` is dry-run by default. With `--apply`, it creates a recovery ref for
-an existing lane-branch tip, removes the registry record, and appends a ledger
-event. An explicitly abandoned record whose path is already missing can still
+an existing lane-branch tip, pushes it to the remote archive ref, removes the
+registry record, and appends a ledger event that names both refs. An explicitly abandoned record whose path is already missing can still
 be released; any remaining Git worktree registration is removed before the
 registry record. It refuses an existing dirty lane and names the recovery
 remedy instead of removing it. Pending cleanup, including a branch that advanced

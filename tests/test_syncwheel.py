@@ -2522,6 +2522,87 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertEqual(self.git('rev-parse', event['payload']['recovery_ref']), tips[remove['id']])
 
+    def add_archive_remote(self, name='archive-origin.git'):
+        origin = self.tmp / name
+        self.git('clone', '--bare', '-q', str(self.repo), str(origin))
+        self.git('remote', 'add', 'fork', str(origin))
+        return origin
+
+    def remote_ref(self, origin, ref):
+        result = subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', '--verify', '--quiet', ref],
+            capture_output=True, text=True,
+        )
+        return result.stdout.strip() or None
+
+    def test_gc_lane_saves_the_tip_on_the_remote_before_removing_the_folder(self):
+        origin = self.add_archive_remote()
+        module, lanes, tips = self.open_expired_foreign_lanes(count=1)
+        lane = lanes[0]
+
+        applied = json.loads(self.run_cli(
+            'gc', '--apply', '--no-fetch', '--json', '--lane', lane['id'],
+        ).stdout)
+
+        self.assertEqual([item['id'] for item in applied['governed_worktree_reaped']], [lane['id']])
+        self.assertFalse(Path(lane['path']).exists())
+        event = next(
+            event for event in self.read_ledger_state()['recent_events']
+            if event['type'] == 'governed_worktree_reaped'
+        )
+        archive_ref = event['payload']['archive_ref']
+        self.assertTrue(archive_ref.startswith('refs/syncwheel/archive/lanes/foreign-0-'))
+        self.assertEqual(event['payload']['archive_remote'], 'fork')
+        self.assertEqual(self.remote_ref(origin, archive_ref), tips[lane['id']])
+        self.assertNotIn('archive', self.git('--git-dir', str(origin), 'branch', '--list'))
+
+    def test_release_keeps_the_lane_when_the_remote_save_fails_and_retries(self):
+        origin = self.tmp / 'unreachable-origin.git'
+        self.git('remote', 'add', 'fork', str(origin))
+        opened = json.loads(self.run_cli('worktree', 'open', 'unsaved', '--json').stdout)['lane']
+        path = Path(opened['path'])
+        (path / 'work.txt').write_text('only on this machine\n')
+        subprocess.run(['git', 'add', 'work.txt'], cwd=path, check=True)
+        subprocess.run(['git', 'commit', '-qm', 'feat: unsaved work'], cwd=path, check=True)
+        module = self.load_syncwheel_module()
+        tip = module.ref_tip(self.repo, opened['branch'])
+
+        failed = self.run_cli(
+            'worktree', 'release', 'unsaved', '--reason', 'done', '--apply', expected=2,
+        )
+
+        self.assertIn('archive_push_failed', failed.stderr)
+        self.assertIn('the lane was kept', failed.stderr)
+        self.assertTrue(path.is_dir())
+        self.assertEqual(module.ref_tip(self.repo, opened['branch']), tip)
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'archive_push_failed')
+
+        beta = self.git('rev-parse', 'HEAD')
+        self.run_cli('stack', 'set', 'feature-a', beta)
+        self.assertTrue(path.is_dir())
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['pending_reason'], 'archive_push_failed')
+
+        self.git('init', '--bare', '-q', str(origin))
+        released = json.loads(self.run_cli(
+            'worktree', 'release', 'unsaved', '--reason', 'done', '--apply', '--json',
+        ).stdout)
+
+        self.assertFalse(path.exists())
+        self.assertEqual(self.remote_ref(origin, released['lane']['archive_ref']), tip)
+        self.assertEqual(self.git('rev-parse', released['lane']['recovery_ref']), tip)
+
+    def test_release_without_a_remote_keeps_only_the_local_recovery_ref(self):
+        opened = json.loads(self.run_cli('worktree', 'open', 'local-only', '--json').stdout)['lane']
+
+        released = self.run_cli(
+            'worktree', 'release', 'local-only', '--reason', 'done', '--apply',
+        )
+
+        self.assertIn('not saved on a remote: remote_not_configured', released.stdout)
+        self.assertFalse(Path(opened['path']).exists())
+
     def test_gc_lane_refuses_a_lane_that_is_not_a_cleanup_candidate(self):
         opened = json.loads(self.run_cli('worktree', 'open', 'still-leased', '--json').stdout)['lane']
 
