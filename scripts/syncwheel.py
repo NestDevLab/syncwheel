@@ -5264,6 +5264,12 @@ def github_rules_blockers(rules, blockers, *, repository_info=None, allowed_bypa
     return 'private_free_rules' if private_free_fallback else None
 
 
+def stack_merges_cleanly(repo_root, branch, revision):
+    """Return whether revision merges into branch without conflicts."""
+    result = git(repo_root, 'merge-tree', '--write-tree', branch, revision, check=False)
+    return result.returncode == 0 and re.search(r'^[0-9a-f]{40}$', result.stdout, re.MULTILINE) is not None
+
+
 def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
     source_revision = None
     declared = []
@@ -5309,8 +5315,26 @@ def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
     elif in_integration and (not integration_branch or not branch_exists(repo_root, integration_branch)):
         github_blocker(blockers, 'integration_missing', 'integration branch is missing')
     elif in_integration:
-        for commit in stack_integration_commits(stack):
-            if not branch_contains(repo_root, integration_branch, commit):
+        missing = [
+            commit for commit in stack_integration_commits(stack)
+            if not branch_contains(repo_root, integration_branch, commit)
+        ]
+        # The PR is judged on its own stack: an integration branch that could
+        # not be rebuilt because of other stacks must not block it. When the
+        # stack's commits are not in the integration yet, it still has to merge
+        # into the integration tip without conflicts; its own PR checks, the
+        # pinned head and the live base cover the rest.
+        if missing and source_revision and stack_merges_cleanly(repo_root, integration_branch, source_revision):
+            warnings.append({
+                'code': 'integration_not_validated',
+                'detail': (
+                    f'{len(missing)} stack commit(s) are absent from {integration_branch}; '
+                    'the stack merges into it without conflicts, so only its own PR checks validate it'
+                ),
+                'commits': missing,
+            })
+        else:
+            for commit in missing:
                 github_blocker(blockers, 'integration_not_validated', f'stack commit is absent from integration: {commit}')
     for dependency_id in stack.get('depends_on', []):
         try:

@@ -80,7 +80,11 @@ request an admin merge.
 
 The stack must be `published`, its remote branch must exactly match the
 declared commit projection, and all local, integration, identity, repository,
-review and rules checks must pass. CI must also pass unless the clone-local
+review and rules checks must pass. The integration check looks at this stack
+only: if its commits are not in the integration branch yet (for example because
+other stacks keep the integration from being rebuilt), the plan carries an
+`integration_not_validated` warning as long as the stack merges into the
+integration tip without conflicts, and a blocker otherwise. CI must also pass unless the clone-local
 policy explicitly declares `checks: "none"`:
 
 ```bash

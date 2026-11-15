@@ -136,6 +136,40 @@ class GithubPrMergeTest(unittest.TestCase):
             json=True,
         )
 
+    def preflight(self):
+        blockers, warnings = [], []
+        with mock.patch.object(SYNCWHEEL, 'governed_worktree_diagnostics', return_value={'lanes': []}):
+            SYNCWHEEL.github_stack_git_preflight(
+                self.repo, self.manifest, self.manifest['stacks'][0], blockers, warnings,
+            )
+        return blockers, warnings
+
+    def test_stack_absent_from_a_stale_integration_warns_when_it_merges_cleanly(self):
+        self.git('switch', '-q', 'main-integration')
+        self.git('reset', '-q', '--hard', 'main')
+        (self.repo / 'other.txt').write_text('another stack\n')
+        self.git('add', 'other.txt')
+        self.git('commit', '-qm', 'another stack')
+        blockers, warnings = self.preflight()
+        self.assertEqual([item['code'] for item in blockers], [])
+        self.assertEqual([item['code'] for item in warnings], ['integration_not_validated'])
+        self.assertEqual(warnings[0]['commits'], [self.integration])
+
+    def test_stack_absent_from_integration_still_blocks_when_it_conflicts(self):
+        self.git('switch', '-q', 'main-integration')
+        self.git('reset', '-q', '--hard', 'main')
+        (self.repo / 'feature.txt').write_text('a different feature\n')
+        self.git('add', 'feature.txt')
+        self.git('commit', '-qm', 'conflicting stack')
+        blockers, warnings = self.preflight()
+        self.assertEqual([item['code'] for item in blockers], ['integration_not_validated'])
+        self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
+
+    def test_stack_present_in_integration_has_no_integration_finding(self):
+        blockers, warnings = self.preflight()
+        self.assertEqual(blockers, [])
+        self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
+
     def test_policy_normalization_requires_a_provenance_filter(self):
         invalid = self.policy()
         invalid.pop('pr_authors')
