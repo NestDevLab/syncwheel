@@ -243,6 +243,45 @@ class JournalModeTest(unittest.TestCase):
         self.assertEqual((self.repo / 'notes.txt').read_text(), 'LOCAL WORK\n')
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
 
+    def test_recover_reads_changed_names_literally_never_as_pathspecs(self):
+        (self.repo / ':x').write_text('LOCAL WORK\n')
+        self.git('--literal-pathspecs', 'add', ':x')
+        self.git('commit', '-qm', 'colon path')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/9')
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual((self.repo / ':x').read_text(), 'LOCAL WORK\n')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_recover_sees_a_gitlink_bump_whatever_the_submodule_config(self):
+        sub = self.root / 'sub'
+        subprocess.run(['git', 'init', '-q', str(sub)], check=True)
+        commits = []
+        for number in (1, 2):
+            (sub / 'f').write_text(str(number))
+            subprocess.run(['git', '-C', str(sub), 'add', 'f'], check=True)
+            subprocess.run(['git', '-C', str(sub), '-c', 'user.name=t', '-c', 'user.email=t@example.invalid',
+                            'commit', '-qm', str(number)], check=True)
+            commits.append(subprocess.check_output(['git', '-C', str(sub), 'rev-parse', 'HEAD'], text=True).strip())
+        self.git('update-index', '--add', '--cacheinfo', f'160000,{commits[0]},mod')
+        self.git('commit', '-qm', 'add gitlink')
+        self.git('push', '-q', 'origin', 'journal')
+        self.git('update-index', '--cacheinfo', f'160000,{commits[1]},mod')
+        self.git('commit', '-qm', 'bump gitlink')
+        head = self.git('rev-parse', 'HEAD')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/7')
+        self.git('config', 'diff.ignoreSubmodules', 'all')
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+
+        result = self.cli('journal', 'recover', '--apply', expected=2)
+
+        self.assertIn('already-published', result.stderr)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
     def test_recover_refuses_commit_published_on_custom_remote_ref(self):
         self.publish_from_other_clone({'remote.txt': 'remote\n'})
         head = self.local_commit()

@@ -3,7 +3,7 @@
 ## 0.46.31 - 2026-11-15
 
 - Fix `syncwheel status` on a journal repository, which crashed with `KeyError: 'exists'` while building a plan. A journal repository has no stacks or integration branch to plan, so status now reports its validation and an empty plan.
-- Let `journal recover` drop a local snapshot that is published on another ref but whose change is already on the journal tip, for example a pull request merged with squash. Such a commit used to make recover refuse with `already-published` forever. The check compares, path by path, what the published snapshots leave with what the tip holds, over the whole published prefix, so a squash of several commits is recognised and no merge driver can make missing work look absorbed. A published snapshot whose change is not fully on the tip is still refused. The dropped commits are listed under `absorbed` in the output and in the recovery receipt.
+- Let `journal recover` drop a local snapshot that is published on another ref but whose change is already on the journal tip, for example a pull request merged with squash. Such a commit used to make recover refuse with `already-published` forever. The check compares, path by path, what the published snapshots leave with what the tip holds, over the whole published prefix, so a squash of several commits is recognised and no merge driver can make missing work look absorbed. Path names are read literally, never as pathspecs, and no diff or submodule ignore setting can hide a gitlink bump from the check. A published snapshot whose change is not fully on the tip is still refused. The dropped commits are listed under `absorbed` in the output and in the recovery receipt.
 
 ## 0.46.30 - 2026-11-15
 

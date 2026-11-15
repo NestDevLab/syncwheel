@@ -18458,14 +18458,19 @@ def journal_prefix_absorbed(repo_root, first, last, tip):
     snapshots leave with the one on the tip. No merge runs, so merge drivers
     and conflict styles cannot make missing work look absorbed.
     """
+    # Plumbing with explicit flags: no diff.* or submodule ignore config may
+    # hide a changed path, and names are taken literally, never as pathspecs.
     changed = [path for path in git_bytes(
-        repo_root, 'diff', '--name-only', '--no-renames', '-z', f'{first}^', last,
+        repo_root, 'diff-tree', '-r', '-z', '--name-only', '--no-renames',
+        '--ignore-submodules=none', f'{first}^', last,
     ).split(b'\0') if path]
     if not changed:
         return True
 
     def entries(commit):
-        listed = git_bytes(repo_root, 'ls-tree', '-z', '--full-tree', commit, '--', *changed)
+        listed = git_bytes(
+            repo_root, '--literal-pathspecs', 'ls-tree', '-z', '--full-tree', commit, '--', *changed,
+        )
         result = {}
         for record in listed.split(b'\0'):
             if not record:
