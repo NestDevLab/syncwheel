@@ -36834,7 +36834,7 @@ def governed_worktree_preflight(args):
         candidate_ids = {
             lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
             if lane.get('target') == args.stack
-            and lane.get('pending_reason') != 'archive_push_failed'
+            and lane.get('code') != 'archive_push_failed'
         }
         if not candidate_ids:
             return
@@ -36848,7 +36848,7 @@ def governed_worktree_preflight(args):
         # an unreachable remote never blocks unrelated mutations.
         candidate_ids = {
             lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
-            if lane.get('pending_reason') != 'archive_push_failed'
+            if lane.get('code') != 'archive_push_failed'
         }
         cleanup = reconcile_governed_worktrees(
             repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
