@@ -2,7 +2,7 @@
 
 ## 0.47.2 - 2026-11-15
 
-- Let `stack merge-pr` judge a PR on its own stack. When the stack's commits are missing from the integration branch, for example because other stacks keep it from being rebuilt, the plan now records an `integration_not_validated` warning instead of a blocker, provided the stack merges into the integration tip without conflicts (`git merge-tree`). A conflicting stack, a missing source branch or a stack outside a required integration still blocks, and every other merge gate (pinned head, live base, CI, reviews, rules) is unchanged.
+- Let the clone-local GitHub PR merge policy declare integration validation advisory (`repo pr-merge-policy set --integration advisory`, key `integration`). With it, `stack merge-pr` records the stack's commits that are missing from the integration branch as one `integration_not_validated` warning instead of blocking, so an integration that other stacks keep from being rebuilt no longer stops an unrelated PR. The PR is then validated by its own checks, pinned head and live base only. The default stays `required`, which blocks as before and now says how to proceed; membership rules (`integration_membership: required`, a missing integration branch) still block in both modes.
 
 ## 0.47.1 - 2026-11-15
 

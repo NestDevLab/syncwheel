@@ -338,6 +338,7 @@ from syncwheel_contracts import (
     COORDINATION_REPAIR_MISSING_REF_BACKEND,
     COORDINATION_REPAIR_TREE_EQUIVALENT_BACKEND,
     GITHUB_PR_MERGE_CHECKS,
+    GITHUB_PR_MERGE_INTEGRATION,
     GITHUB_PR_MERGE_METHODS,
     RECONCILE_MODES,
     UPDATE_MODES,
@@ -4888,7 +4889,7 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
     allowed = {
         'enabled', 'repository', 'base_branches', 'merge_method',
         'allowed_bypasses', 'merge_actors', 'pr_authors', 'commit_authors',
-        'head_repositories', 'checks',
+        'head_repositories', 'checks', 'integration',
     }
     unknown = sorted(set(value) - allowed)
     if unknown:
@@ -4931,6 +4932,10 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
     if checks not in GITHUB_PR_MERGE_CHECKS:
         accepted = ', '.join(sorted(GITHUB_PR_MERGE_CHECKS))
         raise SyncwheelError(f'{path}.checks accepts only: {accepted}')
+    integration = value.get('integration', 'required')
+    if integration not in GITHUB_PR_MERGE_INTEGRATION:
+        accepted = ', '.join(sorted(GITHUB_PR_MERGE_INTEGRATION))
+        raise SyncwheelError(f'{path}.integration accepts only: {accepted}')
     merge_actors = string_list('merge_actors', required=True)
     filters = {
         field: string_list(field)
@@ -4949,6 +4954,8 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
         'merge_actors': merge_actors,
         'checks': checks,
     }
+    if integration != 'required':
+        normalized['integration'] = integration
     for field, candidate in filters.items():
         if candidate is not None:
             normalized[field] = candidate
@@ -5067,6 +5074,8 @@ def command_repo_pr_merge_policy_set(args):
         'merge_actors': list(args.merge_actor),
         'checks': args.checks,
     }
+    if args.integration != 'required':
+        proposed['integration'] = args.integration
     for option, field in (
         (args.pr_author, 'pr_authors'),
         (args.commit_author, 'commit_authors'),
@@ -5264,13 +5273,7 @@ def github_rules_blockers(rules, blockers, *, repository_info=None, allowed_bypa
     return 'private_free_rules' if private_free_fallback else None
 
 
-def stack_merges_cleanly(repo_root, branch, revision):
-    """Return whether revision merges into branch without conflicts."""
-    result = git(repo_root, 'merge-tree', '--write-tree', branch, revision, check=False)
-    return result.returncode == 0 and re.search(r'^[0-9a-f]{40}$', result.stdout, re.MULTILINE) is not None
-
-
-def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
+def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings, integration_validation='required'):
     source_revision = None
     declared = []
     try:
@@ -5319,23 +5322,27 @@ def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings):
             commit for commit in stack_integration_commits(stack)
             if not branch_contains(repo_root, integration_branch, commit)
         ]
-        # The PR is judged on its own stack: an integration branch that could
-        # not be rebuilt because of other stacks must not block it. When the
-        # stack's commits are not in the integration yet, it still has to merge
-        # into the integration tip without conflicts; its own PR checks, the
-        # pinned head and the live base cover the rest.
-        if missing and source_revision and stack_merges_cleanly(repo_root, integration_branch, source_revision):
+        # The clone-local policy may declare integration validation advisory:
+        # the PR is then judged on its own checks, pinned head and live base,
+        # and an integration branch that is behind (for example because other
+        # stacks fail to rebuild) is reported instead of blocking. Membership
+        # rules above still apply.
+        if missing and integration_validation == 'advisory':
             warnings.append({
                 'code': 'integration_not_validated',
                 'detail': (
                     f'{len(missing)} stack commit(s) are absent from {integration_branch}; '
-                    'the stack merges into it without conflicts, so only its own PR checks validate it'
+                    'the merge policy declares integration validation advisory'
                 ),
                 'commits': missing,
             })
         else:
             for commit in missing:
-                github_blocker(blockers, 'integration_not_validated', f'stack commit is absent from integration: {commit}')
+                github_blocker(
+                    blockers, 'integration_not_validated',
+                    f'stack commit is absent from integration: {commit}; rebuild the integration, '
+                    'or declare integration validation advisory in the clone-local merge policy',
+                )
     for dependency_id in stack.get('depends_on', []):
         try:
             dependency = require_stack(manifest, dependency_id)
@@ -5379,7 +5386,10 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     validation = validate_manifest(repo_root, manifest)
     for error in validation.get('errors', []):
         github_blocker(blockers, 'manifest_invalid', error)
-    source_revision, declared = github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings)
+    source_revision, declared = github_stack_git_preflight(
+        repo_root, manifest, stack, blockers, warnings,
+        integration_validation=policy.get('integration', 'required'),
+    )
     base_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
     if base_branch not in policy['base_branches']:
         github_blocker(blockers, 'base_branch_not_allowed', f'base branch is not allowlisted: {base_branch}')

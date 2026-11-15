@@ -80,12 +80,14 @@ request an admin merge.
 
 The stack must be `published`, its remote branch must exactly match the
 declared commit projection, and all local, integration, identity, repository,
-review and rules checks must pass. The integration check looks at this stack
-only: if its commits are not in the integration branch yet (for example because
-other stacks keep the integration from being rebuilt), the plan carries an
-`integration_not_validated` warning as long as the stack merges into the
-integration tip without conflicts, and a blocker otherwise. CI must also pass unless the clone-local
-policy explicitly declares `checks: "none"`:
+review and rules checks must pass. By default every commit the stack owns in
+the integration projection must be on the integration branch
+(`integration_not_validated` otherwise). A clone whose integration is often
+behind can set `--integration advisory` on the policy: missing commits then
+become one warning listing them, and the PR is validated by its own checks,
+pinned head and live base only. Membership rules still block in both modes.
+CI must also pass unless the clone-local policy explicitly declares
+`checks: "none"`:
 
 ```bash
 syncwheel stack merge-pr STACK --json

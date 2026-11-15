@@ -768,7 +768,10 @@ optional digest-bound GitHub PR merge path is documented in
 [`docs/github-pr-merge.md`](docs/github-pr-merge.md). Its private policy stays
 clone-local and its admin bypass is limited to required reviews. CI is required
 by default; repositories without CI can explicitly select clone-local
-`checks: "none"`, which remains visible as a merge-plan warning.
+`checks: "none"`, which remains visible as a merge-plan warning. Integration
+validation is required by default too; a clone whose integration branch is often
+behind can select `integration: "advisory"`, which turns missing integration
+commits into a merge-plan warning.
 
 ## Install Methods
 

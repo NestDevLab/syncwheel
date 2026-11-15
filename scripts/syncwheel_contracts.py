@@ -26,6 +26,7 @@ RECONCILE_MODES = {'standard', 'resume'}
 GITHUB_PR_MERGE_METHODS = {'squash', 'merge', 'rebase'}
 
 GITHUB_PR_MERGE_CHECKS = {'all', 'none'}
+GITHUB_PR_MERGE_INTEGRATION = {'required', 'advisory'}
 
 
 PROFILE_FILENAME = 'profile.local.json'

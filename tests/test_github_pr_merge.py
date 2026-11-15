@@ -136,39 +136,59 @@ class GithubPrMergeTest(unittest.TestCase):
             json=True,
         )
 
-    def preflight(self):
+    def preflight(self, integration_validation='required'):
         blockers, warnings = [], []
         with mock.patch.object(SYNCWHEEL, 'governed_worktree_diagnostics', return_value={'lanes': []}):
             SYNCWHEEL.github_stack_git_preflight(
                 self.repo, self.manifest, self.manifest['stacks'][0], blockers, warnings,
+                integration_validation=integration_validation,
             )
         return blockers, warnings
 
-    def test_stack_absent_from_a_stale_integration_warns_when_it_merges_cleanly(self):
+    def stale_integration(self):
         self.git('switch', '-q', 'main-integration')
         self.git('reset', '-q', '--hard', 'main')
         (self.repo / 'other.txt').write_text('another stack\n')
         self.git('add', 'other.txt')
         self.git('commit', '-qm', 'another stack')
+
+    def test_stack_absent_from_integration_blocks_by_default(self):
+        self.stale_integration()
         blockers, warnings = self.preflight()
-        self.assertEqual([item['code'] for item in blockers], [])
+        self.assertEqual([item['code'] for item in blockers], ['integration_not_validated'])
+        self.assertIn('advisory', blockers[0]['detail'])
+        self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
+
+    def test_advisory_integration_policy_turns_absent_commits_into_one_warning(self):
+        self.stale_integration()
+        blockers, warnings = self.preflight('advisory')
+        self.assertEqual(blockers, [])
         self.assertEqual([item['code'] for item in warnings], ['integration_not_validated'])
         self.assertEqual(warnings[0]['commits'], [self.integration])
 
-    def test_stack_absent_from_integration_still_blocks_when_it_conflicts(self):
-        self.git('switch', '-q', 'main-integration')
-        self.git('reset', '-q', '--hard', 'main')
-        (self.repo / 'feature.txt').write_text('a different feature\n')
-        self.git('add', 'feature.txt')
-        self.git('commit', '-qm', 'conflicting stack')
-        blockers, warnings = self.preflight()
-        self.assertEqual([item['code'] for item in blockers], ['integration_not_validated'])
-        self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
+    def test_advisory_integration_policy_keeps_required_membership(self):
+        self.manifest['defaults']['integration_membership'] = 'required'
+        self.manifest['integration']['stacks'] = []
+        blockers, _warnings = self.preflight('advisory')
+        self.assertIn('integration_membership', [item['code'] for item in blockers])
 
     def test_stack_present_in_integration_has_no_integration_finding(self):
-        blockers, warnings = self.preflight()
-        self.assertEqual(blockers, [])
-        self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
+        for mode in ('required', 'advisory'):
+            with self.subTest(mode=mode):
+                blockers, warnings = self.preflight(mode)
+                self.assertEqual(blockers, [])
+                self.assertNotIn('integration_not_validated', [item['code'] for item in warnings])
+
+    def test_policy_integration_key_is_validated_and_omitted_when_required(self):
+        policy = self.policy()
+        self.assertNotIn('integration', SYNCWHEEL.normalize_github_pr_merge_policy(policy))
+        policy['integration'] = 'required'
+        self.assertNotIn('integration', SYNCWHEEL.normalize_github_pr_merge_policy(policy))
+        policy['integration'] = 'advisory'
+        self.assertEqual(SYNCWHEEL.normalize_github_pr_merge_policy(policy)['integration'], 'advisory')
+        policy['integration'] = 'off'
+        with self.assertRaisesRegex(SYNCWHEEL.SyncwheelError, 'integration accepts only'):
+            SYNCWHEEL.normalize_github_pr_merge_policy(policy)
 
     def test_policy_normalization_requires_a_provenance_filter(self):
         invalid = self.policy()
