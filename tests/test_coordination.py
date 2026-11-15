@@ -133,21 +133,21 @@ if checkpoint == 'authorized_push':
     module.run_authorized_push = killed
 elif checkpoint.startswith('ledger_event:'):
     wanted = checkpoint.split(':', 1)[1]
-    original = module.append_ledger_event
-    def killed(repo_root, event_type, payload, manifest_path=None, **kwargs):
-        result = original(repo_root, event_type, payload, manifest_path, **kwargs)
+    original = module.ManifestStore.append_ledger_event
+    def killed(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
+        result = original(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
         if event_type == wanted:
             os.kill(os.getpid(), signal.SIGKILL)
         return result
-    module.append_ledger_event = killed
+    module.ManifestStore.append_ledger_event = killed
 elif checkpoint == 'legacy_authorized_push':
-    original_event = module.append_ledger_event
-    def legacy(repo_root, event_type, payload, manifest_path=None, **kwargs):
+    original_event = module.ManifestStore.append_ledger_event
+    def legacy(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
         if event_type == 'stack_close_intent':
             payload = {key: value for key, value in payload.items() if key != 'actor'}
             payload['expected_coordination_state_tip'] = None
-        return original_event(repo_root, event_type, payload, manifest_path, **kwargs)
-    module.append_ledger_event = legacy
+        return original_event(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
+    module.ManifestStore.append_ledger_event = legacy
     original = module.run_authorized_push
     def killed(repo_root, command, remote, refs, check=True, **kwargs):
         result = original(repo_root, command, remote, refs, check=check, **kwargs)
@@ -156,29 +156,29 @@ elif checkpoint == 'legacy_authorized_push':
         return result
     module.run_authorized_push = killed
 elif checkpoint == 'legacy_close_intent':
-    original = module.append_ledger_event
-    def killed(repo_root, event_type, payload, manifest_path=None, **kwargs):
+    original = module.ManifestStore.append_ledger_event
+    def killed(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
         if event_type != 'stack_close_intent':
-            return original(repo_root, event_type, payload, manifest_path, **kwargs)
+            return original(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
         legacy = {key: value for key, value in payload.items() if key != 'actor'}
         legacy['expected_coordination_state_tip'] = None
-        original(repo_root, event_type, legacy, manifest_path, **kwargs)
+        original(store, repo_root, event_type, legacy, manifest_path, idempotency_key=idempotency_key, **kwargs)
         os.kill(os.getpid(), signal.SIGKILL)
-    module.append_ledger_event = killed
+    module.ManifestStore.append_ledger_event = killed
 elif checkpoint == 'save_manifest':
     original = module.save_manifest
     def killed(manifest_path, manifest):
         result = original(manifest_path, manifest)
         os.kill(os.getpid(), signal.SIGKILL)
         return result
-    module.save_manifest = killed
+    importlib.import_module('syncwheel_manifest_store').save_manifest = killed
 elif checkpoint == 'publish_intent':
-    original = module.begin_coordination_publication
+    original = module.PublicationIntents.begin_coordination_publication
     def killed(*call_args, **call_kwargs):
         result = original(*call_args, **call_kwargs)
         os.kill(os.getpid(), signal.SIGKILL)
         return result
-    module.begin_coordination_publication = killed
+    module.PublicationIntents.begin_coordination_publication = killed
 elif checkpoint == 'worktree_add':
     original = module.git
     def killed(repo_root, *git_args, **kwargs):
@@ -2797,7 +2797,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(repo, manifest_path):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.command_stack_push(args)
@@ -2861,7 +2861,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(repo, manifest_path):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -2920,7 +2920,7 @@ with module.coordination_publication_lock(Path(repo_path)):
 
         with module.manifest_write_transaction(repo, manifest_path):
             with mock.patch.object(
-                module, 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
+                importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=crash_after_ref,
             ):
                 with self.assertRaisesRegex(RuntimeError, 'after ref CAS'):
                     module.command_int_push(args)
@@ -3223,20 +3223,20 @@ with module.coordination_publication_lock(Path(repo_path)):
         foreign_tip = self.commit_on_branch(repo, 'scratch/foreign-after-preflight', 'foreign.txt')
         local_tip = self.commit_on_branch(repo, 'scratch/local-after-preflight', 'local.txt')
         module = self.load_module()
-        original_materialize = module.materialize_new_stack_branch
+        original_materialize = module.StackLifecycle.materialize_new_stack_branch
         source_ref = 'refs/heads/syncwheel/draft/collision'
 
         def materialize_then_publish_foreign(
-            repo_root, stack, planned_tip=None, operation_token=None
+            lifecycle, stack, planned_tip=None, operation_token=None
         ):
             original_materialize(
-                repo_root, stack, planned_tip=planned_tip,
+                lifecycle, stack, planned_tip=planned_tip,
                 operation_token=operation_token,
             )
             self.git(repo, 'push', '-q', 'origin', f'{foreign_tip}:{source_ref}')
 
         with mock.patch.object(
-            module, 'materialize_new_stack_branch', side_effect=materialize_then_publish_foreign
+            module.StackLifecycle, 'materialize_new_stack_branch', autospec=True, side_effect=materialize_then_publish_foreign
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'managed refs changed after the reviewed plan'):
                 module.command_stack_create(self.draft_create_args(repo, 'collision', local_tip))
@@ -3286,18 +3286,18 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.git(repo, 'branch', '-D', 'syncwheel/draft/reused')
         module = self.load_module()
         args = self.draft_create_args(repo, 'reused', first_commit)
-        real_append = module.append_ledger_event
+        real_append = module.ManifestStore.append_ledger_event
 
-        def fail_current_completion(repo_root, event_type, payload, manifest_path=None, **kwargs):
+        def fail_current_completion(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
             if (
                 event_type == 'manifest_saved'
                 and payload.get('reason') == 'stack_create'
                 and (payload.get('context') or {}).get('operation_token')
             ):
                 raise OSError('injected ledger completion failure')
-            return real_append(repo_root, event_type, payload, manifest_path, **kwargs)
+            return real_append(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
 
-        with mock.patch.object(module, 'append_ledger_event', side_effect=fail_current_completion):
+        with mock.patch.object(module.ManifestStore, 'append_ledger_event', autospec=True, side_effect=fail_current_completion):
             with self.assertRaisesRegex(OSError, 'injected ledger completion failure'):
                 module.command_stack_create(args)
 
@@ -4842,8 +4842,8 @@ with module.coordination_publication_lock(Path(repo_path)):
         module = self.load_module()
 
         with mock.patch.object(
-            module,
-            'atomic_push_capability_probe',
+            module.PublicationCoordinator,
+            'atomic_push_capability_probe', autospec=True,
             side_effect=module.SyncwheelError('injected atomic capability failure'),
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'injected atomic capability failure'):
@@ -4874,7 +4874,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.git(repo, 'update-ref', f'refs/heads/{branch}', foreign)
 
         with mock.patch.object(
-            module, 'draft_branch_creation_checkpoint', create=True,
+            importlib.import_module('syncwheel_stacks'), 'draft_branch_creation_checkpoint',
             side_effect=create_foreign_ref,
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'appeared concurrently'):
@@ -5128,7 +5128,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.run_cli(repo, 'stack', 'close', 'generation', '--force')
         self.git(repo, 'branch', '-D', stack['branch'])
 
-        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('stop after new intent')):
+        with mock.patch.object(module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('stop after new intent')):
             with self.assertRaisesRegex(module.SyncwheelError, 'stop after new intent'):
                 module.command_stack_create(self.draft_create_args(repo, 'generation', source))
 
@@ -5167,7 +5167,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                 module.command_stack_create(args)
 
         with mock.patch.object(
-            module, 'atomic_push_capability_probe',
+            module.PublicationCoordinator, 'atomic_push_capability_probe', autospec=True,
             side_effect=module.SyncwheelError('capability probe unavailable'),
         ) as probe:
             module.command_stack_create(args)
@@ -7741,7 +7741,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             self.prepare_compose_adoption_race('compose-adoption-postcheck-race')
         )
         module = fixture['module']
-        original_publish = module.coordinated_publish
+        original_publish = module.PublicationCoordinator.coordinated_publish
         second_tip = None
 
         def publish_peer_before_recovery(*args, **kwargs):
@@ -7756,7 +7756,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             return original_publish(*args, **kwargs)
 
         with mock.patch.object(
-            module, 'coordinated_publish', side_effect=publish_peer_before_recovery
+            module.PublicationCoordinator, 'coordinated_publish', autospec=True, side_effect=publish_peer_before_recovery
         ):
             self.assert_compose_adoption_refusal_is_local_noop(
                 fixture,
@@ -7807,7 +7807,7 @@ with module.coordination_publication_lock(Path(repo_path)):
     def test_compose_publisher_is_bound_to_reviewed_state_tip(self):
         fixture = self.prepare_additive_compose('compose-publisher-race')
         module = fixture['module']
-        original_publish = module.coordinated_publish
+        original_publish = module.PublicationCoordinator.coordinated_publish
 
         def publish_competitor_then_continue(*args, **kwargs):
             competitor_kwargs = dict(kwargs)
@@ -7818,8 +7818,8 @@ with module.coordination_publication_lock(Path(repo_path)):
             return original_publish(*args, **kwargs)
 
         with mock.patch.object(
-            module,
-            'coordinated_publish',
+            module.PublicationCoordinator,
+            'coordinated_publish', autospec=True,
             side_effect=publish_competitor_then_continue,
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'remote state changed'):
@@ -8019,7 +8019,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         first = self.stack_close_args(repo, 'close-reproof')
         first.reason = 'absorbed'
         with mock.patch.object(
-            module, 'coordinated_publish', side_effect=module.SyncwheelError('stop after intent')
+            module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('stop after intent')
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'stop after intent'):
                 module.command_stack_close(first)
@@ -8090,7 +8090,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         }, manifest_path)
 
         with mock.patch.object(
-            module, 'coordinated_publish', side_effect=module.SyncwheelError('close CAS lost')
+            module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('close CAS lost')
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'close CAS lost'):
                 module.command_stack_close(self.stack_close_args(repo, stack['id']))
@@ -8342,7 +8342,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             )
             return real_save(path, manifest)
 
-        with mock.patch.object(module, 'save_manifest', side_effect=save_after_remote):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=save_after_remote):
             module.command_stack_close(self.stack_close_args(repo, 'tombstone-first'))
 
         self.assertTrue(seen['claim'])
@@ -8391,7 +8391,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         source = self.commit_on_branch(repo, 'scratch/close-crash', 'close-crash.txt')
         self.add_legacy_unpublished_draft(repo, 'close-crash', source)
         module = self.load_module()
-        with mock.patch.object(module, 'save_manifest', side_effect=SystemExit('crash after push')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=SystemExit('crash after push')):
             with self.assertRaises(SystemExit):
                 module.command_stack_close(self.stack_close_args(repo, 'close-crash'))
 
@@ -8645,7 +8645,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         args = self.archive_args(repo, plan)
         manifest_path = repo / '.syncwheel' / 'manifest.json'
         before = manifest_path.read_bytes()
-        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('publication refused')):
+        with mock.patch.object(module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('publication refused')):
             with self.assertRaisesRegex(module.SyncwheelError, 'publication refused'):
                 module.command_stack_archive(args)
         self.assertEqual(before, manifest_path.read_bytes())
@@ -8658,7 +8658,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         _, repo, _, request = self.archive_fixture()
         module = self.load_module()
         plan = json.loads(self.run_cli(repo, *request).stdout)
-        with mock.patch.object(module, 'coordinated_publish', side_effect=module.SyncwheelError('offline')):
+        with mock.patch.object(module.PublicationCoordinator, 'coordinated_publish', side_effect=module.SyncwheelError('offline')):
             with self.assertRaises(module.SyncwheelError):
                 module.command_stack_archive(self.archive_args(repo, plan))
         self.run_cli(repo, 'stack', 'create', 'unrelated', '--draft')
@@ -8678,10 +8678,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         plan = json.loads(self.run_cli(repo, *request).stdout)
         module = self.load_module()
         args = self.archive_args(repo, plan)
-        with mock.patch.object(module, 'save_manifest', side_effect=OSError('save interrupted')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=OSError('save interrupted')):
             with self.assertRaisesRegex(OSError, 'save interrupted'):
                 module.command_stack_archive(args)
-        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(module, 'coordinated_publish') as publish:
+        with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(module.PublicationCoordinator, 'coordinated_publish') as publish:
             module.command_stack_archive(args)
             publish.assert_not_called()
         self.assertEqual(json.loads((repo / '.syncwheel' / 'manifest.json').read_text())['stacks'], [])
@@ -8849,7 +8849,7 @@ with module.coordination_publication_lock(Path(repo_path)):
         # Model an intent emitted before stack publication acquired its ref fence.
         # Its real state/claims still use the unchanged atomic publisher protocol.
         with module.manifest_write_transaction(repo, manifest_path):
-            with mock.patch.object(module, 'stack_publication_source_refs', return_value=None):
+            with mock.patch.object(importlib.import_module('syncwheel_publication_intents'), 'stack_publication_source_refs', return_value=None):
                 operation = module.begin_coordination_publication(
                     repo, manifest, manifest_path, broader, 'stack:selected', 'partial',
                     identity_changed_refs=selected,
@@ -9147,7 +9147,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             ['integration/shared', 'pr/race'],
         )
         module = self.load_module()
-        real_begin = module.begin_coordination_publication
+        real_begin = module.PublicationIntents.begin_coordination_publication
         begun = []
 
         def begin_then_lose_the_race(*call_args, **call_kwargs):
@@ -9172,7 +9172,7 @@ with module.coordination_publication_lock(Path(repo_path)):
             command='stack',
         )
         with mock.patch.object(
-            module, 'begin_coordination_publication',
+            module.PublicationIntents, 'begin_coordination_publication', autospec=True,
             side_effect=begin_then_lose_the_race,
         ):
             with self.assertRaisesRegex(
@@ -9373,15 +9373,15 @@ cli, peer, commands, encoded_args = sys.argv[1:]
 spec = importlib.util.spec_from_file_location('syncwheel_race_under_test', cli)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-original = module.append_ledger_event
-def racing(repo_root, event_type, payload, manifest_path=None, **kwargs):
-    result = original(repo_root, event_type, payload, manifest_path, **kwargs)
+original = module.ManifestStore.append_ledger_event
+def racing(store, repo_root, event_type, payload, manifest_path=None, idempotency_key=None, **kwargs):
+    result = original(store, repo_root, event_type, payload, manifest_path, idempotency_key=idempotency_key, **kwargs)
     if event_type == 'stack_close_intent':
         for command in json.loads(commands):
             subprocess.run(['python3', '-m', 'syncwheel', *command], cwd=peer, check=True,
                            capture_output=True)
     return result
-module.append_ledger_event = racing
+module.ManifestStore.append_ledger_event = racing
 sys.argv = [cli, *json.loads(encoded_args)]
 sys.exit(module.main())
 '''
@@ -10470,7 +10470,7 @@ sys.exit(module.main())
         def interrupt(stage):
             if stage == 'intent_saved':
                 raise module.SyncwheelError('test: interrupt after intent')
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
                 module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test recovery')
         pending = module.pending_control_manifest_intents(module.load_control_manifest_events(repo, path))
@@ -10493,7 +10493,7 @@ sys.exit(module.main())
         def interrupt(stage):
             if stage == 'intent_saved':
                 raise module.SyncwheelError('test: interrupt after intent')
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'test: interrupt'):
                 module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'old proposal')
         manifest['integration']['stacks'] = []
@@ -10522,7 +10522,7 @@ sys.exit(module.main())
         def interrupt(stage):
             if stage == 'ref_updated':
                 changed.write_text('later user proposal\n')
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'checkout changed'):
                 module.reconcile_integration_ancestry(repo, path, manifest, 'test', 'test drift')
         branch = manifest['integration']['branch']
@@ -11089,12 +11089,12 @@ sys.exit(module.main())
         self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
                      '--reason', 'prepare empty capture', expected=2)
         manifest, path = module.load_manifest(repo)
-        original_append = module.append_ledger_event
-        def interrupt_ledger(root, kind, payload, *args, **kwargs):
+        original_append = module.ManifestStore.append_ledger_event
+        def interrupt_ledger(store, root, kind, payload, *args, **kwargs):
             if kind == 'manifest_saved' and payload.get('reason') == 'stack_resolve_integration':
                 raise OSError('interrupted after source save')
-            return original_append(root, kind, payload, *args, **kwargs)
-        with mock.patch.object(module, 'append_ledger_event', side_effect=interrupt_ledger):
+            return original_append(store, root, kind, payload, *args, **kwargs)
+        with mock.patch.object(module.ManifestStore, 'append_ledger_event', autospec=True, side_effect=interrupt_ledger):
             with self.assertRaisesRegex(OSError, 'interrupted after source save'):
                 module.capture_integration_desk(repo, manifest, path, manifest['stacks'][0],
                                                SimpleNamespace(specs=[], empty=False, worktree=str(desk)))
@@ -11137,7 +11137,7 @@ sys.exit(module.main())
             proof = event.get('payload', {}).get('context', {}).get('empty_integration_only')
             if proof:
                 proof['tree'] = '0' * 40
-        with mock.patch.object(module, 'load_ledger_events', return_value=forged):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'load_ledger_events', return_value=forged):
             self.assertEqual(module.historically_empty_integration_only_commits(
                 repo, current, [fixture['duplicate'], second], path), set())
         self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk', '--worktree', str(desk),
@@ -11270,7 +11270,7 @@ sys.exit(module.main())
                        'integration_ref': 'refs/heads/integration/shared'}
         witness = {'changed_refs': {observation['integration_ref']: absorbed_tip},
                    'manifest': {'integration': {'derived_provenance': []}}}
-        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+        with mock.patch.object(module.IntegrationHistory, 'integration_reconciliation_publishing_states',
                                side_effect=lambda *_: iter([])):
             with self.assertRaisesRegex(module.SyncwheelError,
                                         'unexplained product paths: README.md'):
@@ -11278,7 +11278,7 @@ sys.exit(module.main())
                     repo, manifest, stack_tip, {}, observation=observation,
                     delivery_tip=delivery_tip,
                 )
-        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+        with mock.patch.object(module.IntegrationHistory, 'integration_reconciliation_publishing_states',
                                return_value=iter([witness])):
             module.integration_reconciliation_history(
                 repo, manifest, stack_tip, {}, observation=observation,
@@ -11287,7 +11287,7 @@ sys.exit(module.main())
         (repo / 'unmapped.txt').write_text('must remain blocked\n')
         self.git(repo, 'add', 'unmapped.txt')
         self.git(repo, 'commit', '-q', '-m', 'test: unowned product')
-        with mock.patch.object(module, 'integration_reconciliation_publishing_states',
+        with mock.patch.object(module.IntegrationHistory, 'integration_reconciliation_publishing_states',
                                side_effect=lambda *_: iter([witness])):
             with self.assertRaisesRegex(module.SyncwheelError,
                                         'unexplained product paths: unmapped.txt'):
@@ -12425,7 +12425,7 @@ sys.exit(module.main())
                 ref: module.ref_tip(repo, ref) for ref in extra_refs
             }}
             with module.manifest_write_transaction(repo, manifest_path):
-                with mock.patch.object(module, 'stack_publication_source_refs', return_value=None):
+                with mock.patch.object(importlib.import_module('syncwheel_publication_intents'), 'stack_publication_source_refs', return_value=None):
                     module.begin_coordination_publication(
                         repo, manifest, manifest_path, broader,
                         f'stack:{stack_id}', 'partial', identity_changed_refs=selected,
@@ -12460,7 +12460,7 @@ sys.exit(module.main())
         # Deliberately malformed historical claims must reach the proof
         # checker; the current publication fence would refuse their creation.
         with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
-            module, 'stack_publication_source_refs', return_value=None,
+            importlib.import_module('syncwheel_publication_intents'), 'stack_publication_source_refs', return_value=None,
         ):
             module.coordinated_publish(
                 other, manifest, manifest_path, changed, scope, 'partial',
@@ -13269,7 +13269,7 @@ sys.exit(module.main())
         with self.assertRaisesRegex(RuntimeError, 'after control intent'):
             with module.manifest_write_transaction(second, manifest_path):
                 with mock.patch.object(
-                    module, 'control_manifest_io_checkpoint',
+                    importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint',
                     side_effect=interrupt_after_intent,
                 ):
                     module.restore_control_manifest_after_integration_rebuild(
@@ -14111,8 +14111,10 @@ sys.exit(module.main())
                             ref, advanced, parent,
                         )
 
+                patched_owner = module
                 if stale == 'merge-stack':
-                    original = module.integration_projection_input_snapshot
+                    patched_owner = module.ProjectionService
+                    original = module.ProjectionService.integration_projection_input_snapshot
 
                     def race_replay_input_snapshot(*args, **kwargs):
                         result = original(*args, **kwargs)
@@ -14126,7 +14128,8 @@ sys.exit(module.main())
                         'integration replay inputs changed during published-tip proof'
                     )
                 else:
-                    original = module.apply_integration_reconciliation
+                    patched_owner = module.IntegrationHistory
+                    original = module.IntegrationHistory.apply_integration_reconciliation
 
                     def race_before_reconciliation_cas(*args, **kwargs):
                         if not raced:
@@ -14144,7 +14147,8 @@ sys.exit(module.main())
                 ])
                 args.dry_run = False
                 with mock.patch.object(
-                    module, patched_name, side_effect=patched_effect,
+                    patched_owner, patched_name, autospec=True,
+                    side_effect=patched_effect,
                 ):
                     with self.assertRaisesRegex(
                         module.SyncwheelError, expected_error,
@@ -14386,7 +14390,7 @@ sys.exit(module.main())
                 self.stage_owned_control_manifest_delta(follower)
             )
             remote_before = self.a14_remote_snapshot(fixture)
-            original = module.apply_integration_reconciliation
+            original = module.IntegrationHistory.apply_integration_reconciliation
             injected = []
 
             def inject_before_reconciliation_cas(*args, **kwargs):
@@ -14425,8 +14429,8 @@ sys.exit(module.main())
             stdout = io.StringIO()
             stderr = io.StringIO()
             with mock.patch.object(
-                module,
-                'apply_integration_reconciliation',
+                module.IntegrationHistory,
+                'apply_integration_reconciliation', autospec=True,
                 side_effect=inject_before_reconciliation_cas,
             ):
                 try:
@@ -14650,7 +14654,7 @@ sys.exit(module.main())
                 def interrupt(stage):
                     if stage == checkpoint:
                         raise module.SyncwheelError('test: interrupted independent reconciliation')
-                with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+                with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
                     with self.assertRaisesRegex(module.SyncwheelError, 'interrupted independent'):
                         module.reconcile_integration_ancestry(
                             repo, path, fixture['manifest'], 'test', 'recover exact independent ancestry',
@@ -14830,7 +14834,7 @@ sys.exit(module.main())
                             self.git(repo, 'update-ref', ref, tip, parent)
                         injected.append(tip)
 
-                with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interfere):
+                with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interfere):
                     with self.assertRaises(module.SyncwheelError):
                         module.reconcile_integration_ancestry(
                             repo, path, fixture['manifest'], 'test', 'reject stale divergence',
@@ -14852,7 +14856,7 @@ sys.exit(module.main())
             if stage == 'ref_updated':
                 raise module.SyncwheelError('test: interrupted divergence')
 
-        with mock.patch.object(module, 'control_manifest_io_checkpoint', side_effect=interrupt):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'control_manifest_io_checkpoint', side_effect=interrupt):
             with self.assertRaisesRegex(module.SyncwheelError, 'interrupted divergence'):
                 module.reconcile_integration_ancestry(
                     repo, path, fixture['manifest'], 'test', 'retry qualified divergence',
@@ -15268,7 +15272,8 @@ sys.exit(module.main())
             module, 'pending_coordination_publication_for_scope',
             side_effect=record_pending,
         ), mock.patch.object(
-            module, 'coordinated_publish', side_effect=block_publication
+            module.PublicationCoordinator, 'coordinated_publish',
+            autospec=True, side_effect=block_publication
         ):
             try:
                 returncode = args.func(args)

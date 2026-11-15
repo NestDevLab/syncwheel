@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.19`
+Current version: `0.46.26`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -910,11 +910,15 @@ source label with `SYNCWHEEL_UV_TOOL_SOURCE`.
    - Self-update status works for detached submodule-style checkouts; updating
      remains controlled by the parent repository's submodule policy.
 
-4. **Vendored checkout or script**
-   - Copy `scripts/syncwheel.py` into a project.
-   - Fastest for experiments, but updates are manual.
+4. **Vendored checkout or module bundle**
+   - Copy the complete `scripts/syncwheel*.py` sibling set and `VERSION` into
+     one directory in the project. This includes the CLI, revision provider,
+     GitHub adapter and domain modules declared in `pyproject.toml`.
+   - Invoke `python3 path/to/bundle/syncwheel.py ...`.
+   - Copying only `syncwheel.py` is no longer sufficient. Keep all sibling
+     modules from the same revision and replace the bundle together for manual updates.
    - `self status` reports `install_kind: script` when no git checkout or uv
-     tool environment is detected.
+     tool environment is detected. Vendored updates remain manual.
 
 ## Repo aliases
 

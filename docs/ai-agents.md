@@ -345,3 +345,9 @@ yet, use the checkout script directly:
 ```bash
 python3 /path/to/syncwheel/scripts/syncwheel.py self status
 ```
+
+## Source architecture
+
+See [Source module boundaries](module-architecture.md) before moving command or
+domain logic. Preserve the CLI facade, explicit I/O patch points and package
+module declarations when extending a domain.

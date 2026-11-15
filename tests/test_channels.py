@@ -5,15 +5,56 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
+sys.path.insert(0, str(Path(__file__).parent))
+
+from manifest_writer_graph import WriterGraph
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CLI = REPO_ROOT / 'scripts' / 'syncwheel.py'
+
+
+WRITER_GUARD_BACKEND_MODULE = 'syncwheel_revision_backend'
+WRITER_GUARD_SINKS = {
+    ('syncwheel_manifest_store', 'save_manifest'),
+    ('syncwheel_manifest_store', 'ManifestStore.append_ledger_event'),
+}
+
+
+def analyze_manifest_writer_guard(scripts_root, registered):
+    graph = WriterGraph(scripts_root, WRITER_GUARD_SINKS)
+    # These exact interface lookups use unannotated backend locals. Occurrences
+    # are zero-based within the named caller and remain stable when lines move.
+    # Every manual edge must still exist and must remain unresolved.
+    backend = WRITER_GUARD_BACKEND_MODULE
+    manual_edges = (
+        (('syncwheel', 'command_revision_provider_resolve_prepared'), 'backend.resolve_prepared', 0,
+         (backend, 'SyncwheelRevisionBackend.resolve_prepared')),
+        (('syncwheel_revision_provider', '_advance_journal_once'), 'backend.verify_recovery_gate', 0,
+         (backend, 'JournalRevisionBackend.verify_recovery_gate')),
+        (('syncwheel_revision_provider', '_advance_journal_once'), 'backend.verify_after_paths', 0,
+         (backend, 'JournalRevisionBackend.verify_after_paths')),
+        (('syncwheel_revision_provider', '_advance_journal_once'), 'backend.validate_prepared_commit', 0,
+         (backend, 'JournalRevisionBackend.validate_prepared_commit')),
+        (('syncwheel_revision_provider', '_advance_journal_once'), 'backend.publish_prepared_commit', 0,
+         (backend, 'JournalRevisionBackend.publish_prepared_commit')),
+        (('syncwheel_revision_provider', '_advance'), 'backend.verify_derived_final', 0,
+         (backend, 'SyncwheelRevisionBackend.verify_derived_final')),
+    )
+    return graph.inspect(registered, manual_edges)
+
+
+def assert_manifest_writer_guard(case, result):
+    for key in ('missing_roots', 'uncovered', 'unregistered_commands',
+                'registered_without_writer', 'unresolved_writer_calls'):
+        case.assertEqual(result[key], [], (key, result[key]))
 
 
 class DeploymentChannelTest(unittest.TestCase):
@@ -1023,7 +1064,7 @@ class DeploymentChannelTest(unittest.TestCase):
             apply=True, plan_digest=plan['planDigest'], operation_id=None,
         )
         with mock.patch.object(
-            module, 'channel_mutation_checkpoint', side_effect=KeyboardInterrupt()
+            importlib.import_module('syncwheel_manifest_store'), 'channel_mutation_checkpoint', side_effect=KeyboardInterrupt()
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'cancelled before'):
                 module.command_channel_apply(args)
@@ -1258,7 +1299,7 @@ class DeploymentChannelTest(unittest.TestCase):
             self.repo, manifest_path, 'cas-pure-writer'
         ):
             with mock.patch.object(
-                module, 'save_manifest', side_effect=bypass_lock_then_save
+                importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=bypass_lock_then_save
             ):
                 with self.assertRaisesRegex(
                     module.SyncwheelError, 'changed outside the active transaction'
@@ -1303,7 +1344,7 @@ class DeploymentChannelTest(unittest.TestCase):
             self.repo, manifest_path, 'cas-lifecycle'
         ):
             with mock.patch.object(
-                module, 'require_manifest_transaction_current',
+                importlib.import_module('syncwheel_manifest_store'), 'require_manifest_transaction_current',
                 side_effect=bypass_lock_then_check,
             ):
                 with self.assertRaisesRegex(
@@ -1340,171 +1381,102 @@ class DeploymentChannelTest(unittest.TestCase):
 
     def test_every_existing_delivery_manifest_writer_joins_global_lock(self):
         module = self.load_module()
-        saver_names = {'save_manifest', 'append_ledger_event'}
+        registered = {
+            (function.__module__, function.__qualname__)
+            for function, behavior in module.entrypoint_behavior_table().items()
+            if behavior['manifestMutates'] != 'never'
+        }
+        # The facade can be loaded under an isolated test module name. Only its
+        # actual defining file maps that name back to the source module.
+        registered = {
+            ('syncwheel' if owner == module.__name__ else owner, name)
+            for owner, name in registered
+        }
+        # Deliberate alarm when the registered manifest-mutating surface changes.
+        self.assertEqual(len(registered), 59)
+        normal = analyze_manifest_writer_guard(CLI.parent, registered)
+        assert_manifest_writer_guard(self, normal)
+        self.assertEqual(normal['manual_edges'], 6)
+        backend = WRITER_GUARD_BACKEND_MODULE
+        self.assertEqual(normal['multi_owner_factories'], {
+            backend + '.SyncwheelRevisionBackend.for_request': [
+                (backend, 'JournalRevisionBackend'),
+                (backend, 'SyncwheelRevisionBackend'),
+            ],
+        })
 
-        def analyze(scripts_root):
-            definitions = {}
-            by_simple_name = {}
-            imports = {}
-
-            class CallCollector(ast.NodeVisitor):
-                def __init__(self):
-                    self.calls = []
-
-                def visit_FunctionDef(self, node):
-                    return None
-
-                visit_AsyncFunctionDef = visit_FunctionDef
-
-                def visit_ClassDef(self, node):
-                    return None
-
-                def visit_Call(self, node):
-                    if isinstance(node.func, ast.Name):
-                        self.calls.append(('name', None, node.func.id))
-                    elif isinstance(node.func, ast.Attribute):
-                        value = node.func.value
-                        while isinstance(value, ast.Attribute):
-                            value = value.value
-                        root = value.id if isinstance(value, ast.Name) else None
-                        self.calls.append(('attribute', root, node.func.attr))
-                    self.generic_visit(node)
-
-            class DefinitionCollector(ast.NodeVisitor):
-                def __init__(self, module_name):
-                    self.module_name = module_name
-                    self.scope = []
-
-                def collect_function(self, node):
-                    self.scope.append(node.name)
-                    qualified_name = '.'.join(self.scope)
-                    calls = CallCollector()
-                    for statement in node.body:
-                        calls.visit(statement)
-                    key = (self.module_name, qualified_name)
-                    definitions[key] = calls.calls
-                    by_simple_name.setdefault(node.name, set()).add(key)
-                    for statement in node.body:
-                        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                            self.visit(statement)
-                    self.scope.pop()
-
-                def visit_FunctionDef(self, node):
-                    self.collect_function(node)
-
-                visit_AsyncFunctionDef = visit_FunctionDef
-
-                def visit_ClassDef(self, node):
-                    self.scope.append(node.name)
-                    for statement in node.body:
-                        self.visit(statement)
-                    self.scope.pop()
-
-            for path in sorted(Path(scripts_root).glob('*.py')):
-                module_name = path.stem
-                tree = ast.parse(path.read_text(), filename=str(path))
-                aliases = {}
-                for node in tree.body:
-                    if isinstance(node, ast.Import):
-                        for alias in node.names:
-                            aliases[alias.asname or alias.name.split('.')[0]] = alias.name.split('.')[-1]
-                    elif isinstance(node, ast.ImportFrom) and node.module:
-                        for alias in node.names:
-                            aliases[alias.asname or alias.name] = node.module.split('.')[-1]
-                imports[module_name] = aliases
-                DefinitionCollector(module_name).visit(tree)
-
-            def callees(key):
-                module_name, qualified_name = key
-                class_scope = qualified_name.rpartition('.')[0]
-                output = set()
-                for kind, root, leaf in definitions[key]:
-                    if kind == 'name':
-                        output.update(
-                            candidate for candidate in by_simple_name.get(leaf, set())
-                            if candidate[0] == module_name
-                        )
-                    elif root == 'self' and class_scope:
-                        candidate = (module_name, f'{class_scope}.{leaf}')
-                        if candidate in definitions:
-                            output.add(candidate)
-                    elif root in imports[module_name]:
-                        imported_module = imports[module_name][root]
-                        output.update(
-                            candidate for candidate in by_simple_name.get(leaf, set())
-                            if candidate[0] == imported_module
-                        )
-                    else:
-                        # Attribute calls on typed collaborators are resolved
-                        # conservatively by method name across script modules.
-                        output.update(by_simple_name.get(leaf, set()))
-                return output
-
-            direct_savers = {
-                key for key, calls in definitions.items()
-                if any(leaf in saver_names for _kind, _root, leaf in calls)
-            }
-
-            def reaches_saver(key, trail=()):
-                if key in trail:
-                    return False
-                if key in direct_savers:
-                    return True
-                return any(
-                    reaches_saver(callee, (*trail, key))
-                    for callee in callees(key)
+        controls = {
+            'unique': ('UnregisteredWriter', 'persist'),
+            'collision': ('UnregisteredWriter', 'complete_pending_promote_intents'),
+            'unrelated-class': ('StackLifecycle', 'command_stack_set'),
+        }
+        for label, (owner, method) in controls.items():
+            with self.subTest(control=label):
+                scripts = self.root / label
+                shutil.copytree(CLI.parent, scripts)
+                (scripts / 'syncwheel_guard_control.py').write_text(
+                    f'class {owner}:\n'
+                    f'    def {method}(self, backend, path, manifest):\n'
+                    '        backend.save_manifest(path, manifest)\n'
                 )
+                result = analyze_manifest_writer_guard(scripts, registered)
+                self.assertIn(('syncwheel_guard_control', f'{owner}.{method}'),
+                              [tuple(key) for key in result['uncovered']])
 
-            registered = {
-                ('syncwheel', entrypoint.__qualname__)
-                for entrypoint, behavior in module.entrypoint_behavior_table().items()
-                if behavior['manifestMutates'] != 'never'
-            }
-            covered = set()
-            frontier = list(registered)
-            while frontier:
-                key = frontier.pop()
-                if key in covered or key not in definitions:
-                    continue
-                covered.add(key)
-                frontier.extend(callees(key) - covered)
-            derived_commands = {
-                key for key in definitions
-                if key[1].startswith('command_') and reaches_saver(key)
-            }
-            registered_commands = {
-                key for key in registered if key[1].startswith('command_')
-            }
-            return direct_savers - covered, derived_commands, registered_commands
+        scripts = self.root / 'unresolved-collaborator'
+        shutil.copytree(CLI.parent, scripts)
+        path = scripts / 'syncwheel.py'
+        tree = ast.parse(path.read_text())
+        command = next(node for node in ast.walk(tree)
+                       if isinstance(node, ast.FunctionDef)
+                       and node.name == 'command_stack_create')
+        lines = path.read_text().splitlines(keepends=True)
+        # Replace a statement before the manual sites. Their caller-relative
+        # lookup occurrences remain valid when unrelated source lines move.
+        lines[command.body[0].lineno - 1] = '    external_collaborator.save_manifest(None, None)\n'
+        path.write_text(''.join(lines))
+        result = analyze_manifest_writer_guard(scripts, registered)
+        with self.subTest(control='unresolved-collaborator'):
+            self.assertTrue(any(lookup == 'external_collaborator.save_manifest'
+                                for caller, line, lookup in result['unresolved_writer_calls']))
 
-        uncovered, derived_commands, registered_commands = analyze(CLI.parent)
-        self.assertEqual(uncovered, set())
-        self.assertEqual(registered_commands, derived_commands)
-
-        mutant_root = self.root / 'mutant-scripts'
-        shutil.copytree(CLI.parent, mutant_root)
-        with (mutant_root / 'syncwheel_revision_provider.py').open('a') as handle:
-            handle.write(
-                '\nclass UndeclaredManifestSaver:\n'
-                '    def persist(self, backend, path, manifest):\n'
-                '        backend.save_manifest(path, manifest)\n'
-            )
-        mutant_uncovered, _derived, _registered = analyze(mutant_root)
-        self.assertIn(
-            ('syncwheel_revision_provider', 'UndeclaredManifestSaver.persist'),
-            mutant_uncovered,
+        scripts = self.root / 'imported-writer-alias'
+        shutil.copytree(CLI.parent, scripts)
+        writer_module = next(owner for owner, name in WRITER_GUARD_SINKS
+                             if name == 'save_manifest')
+        (scripts / 'syncwheel_guard_alias.py').write_text(
+            f'from {writer_module} import save_manifest as persist\n'
+            '\ndef unregistered_alias(path, manifest):\n'
+            '    persist(path, manifest)\n'
         )
-        for command in (
-            module.command_repo_authority_set,
-            module.command_coordination_compose,
-        ):
+        result = analyze_manifest_writer_guard(scripts, registered)
+        with self.subTest(control='imported-writer-alias'):
+            self.assertIn(('syncwheel_guard_alias', 'unregistered_alias'),
+                          [tuple(key) for key in result['uncovered']])
+
+        scripts = self.root / 'writer-value-reference'
+        shutil.copytree(CLI.parent, scripts)
+        (scripts / 'syncwheel_guard_reference.py').write_text(
+            f'from {writer_module} import save_manifest as persist\n'
+            f'import {writer_module} as storage\n'
+            '\ndef retained_name(path, manifest):\n'
+            '    writer = persist\n'
+            '    writer(path, manifest)\n'
+            '\ndef retained_attribute(path, manifest):\n'
+            '    writer = storage.save_manifest\n'
+            '    writer(path, manifest)\n'
+        )
+        result = analyze_manifest_writer_guard(scripts, registered)
+        with self.subTest(control='writer-value-reference'):
+            for name in ('retained_name', 'retained_attribute'):
+                self.assertIn(('syncwheel_guard_reference', name),
+                              [tuple(key) for key in result['uncovered']])
+
+        for command in (module.command_repo_authority_set,
+                        module.command_coordination_compose):
             with self.subTest(command=command.__name__):
-                self.assertTrue(module.manifest_mutation_requested(mock.Mock(
-                    func=command, apply=True,
-                )))
-                self.assertFalse(module.manifest_mutation_requested(mock.Mock(
-                    func=command, apply=False,
-                )))
+                self.assertTrue(module.manifest_mutation_requested(mock.Mock(func=command, apply=True)))
+                self.assertFalse(module.manifest_mutation_requested(mock.Mock(func=command, apply=False)))
 
     def test_old_git_uses_ephemeral_materialization_fallback(self):
         self.create(stacks=('a',))
@@ -1609,7 +1581,7 @@ class DeploymentChannelTest(unittest.TestCase):
             apply=True, plan_digest=plan['planDigest'], operation_id=None,
         )
         with mock.patch.object(
-            module, 'coordinated_publish',
+            module.PublicationCoordinator, 'coordinated_publish', autospec=True,
             side_effect=module.SyncwheelError('simulated atomic publication failure'),
         ):
             with self.assertRaisesRegex(module.SyncwheelError, 'simulated atomic'):
@@ -1676,7 +1648,7 @@ class DeploymentChannelTest(unittest.TestCase):
                     plan_digest=plan['planDigest'], operation_id=None,
                 )
                 with mock.patch.object(
-                    module, 'coordinated_publish', side_effect=failure
+                    module.PublicationCoordinator, 'coordinated_publish', autospec=True, side_effect=failure
                 ):
                     with self.assertRaises(module.SyncwheelError):
                         module.command_channel_publish(args)
@@ -1780,7 +1752,7 @@ class DeploymentChannelTest(unittest.TestCase):
             delete_local=True, reason='fault', apply=True,
             plan_digest=preview['planDigest'], operation_id=None,
         )
-        with mock.patch.object(module, 'save_manifest', side_effect=OSError('pre-replace')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=OSError('pre-replace')):
             with mock.patch.object(
                 module, 'record_channel_operation_receipt',
                 side_effect=OSError('terminal receipt unavailable'),
@@ -1825,7 +1797,7 @@ class DeploymentChannelTest(unittest.TestCase):
             delete_local=True, reason='pre-failure', apply=True,
             plan_digest=preview['planDigest'], operation_id=None,
         )
-        with mock.patch.object(module, 'save_manifest', side_effect=OSError('pre-replace')):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=OSError('pre-replace')):
             with self.assertRaisesRegex(module.SyncwheelError, 'outcome is partial'):
                 module.command_channel_close(args)
         terminal = module.channel_operation_events(
@@ -1858,7 +1830,7 @@ class DeploymentChannelTest(unittest.TestCase):
             real_save(path, manifest)
             raise module.ManifestDurabilityError('post-replace durability unknown')
 
-        with mock.patch.object(module, 'save_manifest', side_effect=replace_then_fail):
+        with mock.patch.object(importlib.import_module('syncwheel_manifest_store'), 'save_manifest', side_effect=replace_then_fail):
             with self.assertRaisesRegex(module.SyncwheelError, 'outcome is unknown'):
                 module.command_channel_close(args)
         terminal = module.channel_operation_events(

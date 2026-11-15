@@ -751,12 +751,7 @@ class RevisionProviderProtocolTest(unittest.TestCase):
         self.assertEqual(response['unmappedIntegrationCommits'], ['4' * 40])
 
     def test_provider_backend_has_no_worktree_materialization_path(self):
-        module_source = CLI.read_text()
-        class_start = module_source.index('class SyncwheelRevisionBackend:')
-        class_end = module_source.index('\ndef command_revision_provider', class_start)
-        source = module_source[
-            class_start:class_end
-        ]
+        source = (SCRIPTS / 'syncwheel_revision_backend.py').read_text()
         self.assertNotIn('materialize_new_stack_branch', source)
         self.assertNotIn('deterministic_stack_replay_worktree', source)
 
@@ -3144,7 +3139,7 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             fixture.repo, historical, replacement, observation
         ))
         with mock.patch.object(
-            SYNCWHEEL, 'integration_reconciliation_proof',
+            SYNCWHEEL.IntegrationHistory, 'integration_reconciliation_proof', autospec=True,
             side_effect=AssertionError('published derived history needs no replay'),
         ):
             self.assertEqual(
@@ -3169,10 +3164,10 @@ class RevisionProviderIntegrationTest(unittest.TestCase):
             for call in observed_git.call_args_list
         ))
         with mock.patch.object(
-            SYNCWHEEL, 'observe_published_integration_tip',
+            SYNCWHEEL.ProjectionService, 'observe_published_integration_tip', autospec=True,
             return_value={'status': 'stale'},
         ), mock.patch.object(
-            SYNCWHEEL, 'integration_reconciliation_historical_derived',
+            SYNCWHEEL.IntegrationHistory, 'integration_reconciliation_historical_derived', autospec=True,
             side_effect=AssertionError('stale observation cannot authenticate history'),
         ):
             self.assertEqual(
@@ -5952,12 +5947,12 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                 fixture = RevisionProviderRepository()
                 original = SYNCWHEEL.ledger_io_checkpoint
                 try:
-                    SYNCWHEEL.ledger_io_checkpoint = self._fault_once(stage)
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = self._fault_once(stage)
                     with self.assertRaisesRegex(RuntimeError, 'injected ledger fault'):
                         SYNCWHEEL.append_ledger_event(
                             fixture.repo, 'test_event', {'name': 'crashed'}
                         )
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     event = SYNCWHEEL.append_ledger_event(
                         fixture.repo, 'test_event', {'name': 'survivor'}
                     )
@@ -5974,7 +5969,7 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     )
                     self.assertTrue(segment.read_bytes().endswith(b'\n'))
                 finally:
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     fixture.close()
 
     def test_checkpoint_write_fault_never_hides_a_durable_event(self):
@@ -5988,12 +5983,12 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                 fixture = RevisionProviderRepository()
                 original = SYNCWHEEL.ledger_io_checkpoint
                 try:
-                    SYNCWHEEL.ledger_io_checkpoint = self._fault_once(stage)
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = self._fault_once(stage)
                     with self.assertRaisesRegex(RuntimeError, 'injected ledger fault'):
                         SYNCWHEEL.append_ledger_event(
                             fixture.repo, 'test_event', {'name': 'durable'}
                         )
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     state = SYNCWHEEL.load_ledger_state(fixture.repo)
                     self.assertEqual(state['last_seq'], 1)
                     self.assertEqual(state['event_count'], 1)
@@ -6011,7 +6006,7 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     )
                     self.assertEqual(checkpoint, SYNCWHEEL.reduce_ledger_state(events))
                 finally:
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     fixture.close()
 
     def test_provider_recovers_faults_inside_ownership_ledger_writes(self):
@@ -6035,12 +6030,12 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     )
                     (fixture.repo / 'feature.txt').write_text('feature\n')
                     protocol.handle_request(backend, request)
-                    SYNCWHEEL.ledger_io_checkpoint = self._fault_once(stage)
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = self._fault_once(stage)
                     with self.assertRaisesRegex(RuntimeError, 'injected ledger fault'):
                         protocol.handle_request(
                             backend, replace(request, action='finalize')
                         )
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     recovered = protocol.handle_request(
                         backend, replace(request, action='recover')
                     )
@@ -6053,7 +6048,7 @@ class RevisionProviderLedgerDurabilityTest(unittest.TestCase):
                     ]
                     self.assertEqual(len(ownership), 1)
                 finally:
-                    SYNCWHEEL.ledger_io_checkpoint = original
+                    importlib.import_module('syncwheel_manifest_store').ledger_io_checkpoint = original
                     fixture.close()
 
 
@@ -6090,7 +6085,24 @@ class RevisionProviderPackagingTest(unittest.TestCase):
                 names = set(archive.namelist())
             self.assertIn('syncwheel.py', names)
             self.assertIn('syncwheel_revision_provider.py', names)
-
+            for domain in (
+                'cli', 'contracts', 'coordination', 'errors', 'index', 'journal',
+                'journal_workflow', 'ledger', 'manifest', 'replay', 'worktrees', 'coordination_state', 'publication_intents', 'publication', 'revision_backend', 'files', 'provenance',
+            ):
+                self.assertIn(f'syncwheel_{domain}.py', names)
+            installed = root / 'installed'
+            with zipfile.ZipFile(wheel) as archive:
+                archive.extractall(installed)
+            smoke = subprocess.run(
+                [sys.executable, '-I', '-c',
+                 "import sys; sys.path.insert(0, sys.argv[1]); import syncwheel; "
+                 "sys.argv = ['syncwheel', '--version']; syncwheel.main()",
+                 str(installed)],
+                cwd=root, text=True, capture_output=True,
+            )
+            self.assertEqual(smoke.returncode, 0, smoke.stderr)
+            self.assertEqual(smoke.stdout.strip(),
+                             'syncwheel ' + (REPO_ROOT / 'VERSION').read_text().strip())
 
 class DirtyPathPhaseMarkerTest(unittest.TestCase):
     """Isolate each provider predicate after the preceding phase has passed."""
