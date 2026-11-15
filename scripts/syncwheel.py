@@ -257,6 +257,7 @@ GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
     'worktree_remove_failed',
     'branch_delete_failed',
     'recovery_ref_moved',
+    'archive_push_failed',
     'registration_mismatch',
     'ledger_pending',
 })
@@ -10957,6 +10958,129 @@ def governed_worktree_generation_token(lane):
     return hashlib.sha256(material).hexdigest()
 
 
+GOVERNED_WORKTREE_RECOVERY_PREFIX = 'refs/syncwheel/recovery/lanes/'
+GOVERNED_WORKTREE_ARCHIVE_PREFIX = 'refs/syncwheel/archive/lanes/'
+
+
+def governed_worktree_archive_ref(lane):
+    """The remote ref that keeps a removed lane's tip off this machine.
+
+    It mirrors the local recovery ref name, so one removal has one name in
+    both places. It lives outside refs/heads, so forges do not list it as a
+    branch, but anyone who can fetch the repository can fetch it.
+    """
+    recovery_ref = lane['recovery_ref']
+    suffix = (
+        recovery_ref[len(GOVERNED_WORKTREE_RECOVERY_PREFIX):]
+        if recovery_ref.startswith(GOVERNED_WORKTREE_RECOVERY_PREFIX)
+        else safe_ref_segment(recovery_ref)
+    )
+    return f'{GOVERNED_WORKTREE_ARCHIVE_PREFIX}{suffix}'
+
+
+def governed_worktree_archive_remote(repo_root, manifest):
+    """The first configured of the publication and canonical remotes.
+
+    Returns (remote, None), or (None, reason) when none of them is configured:
+    'no_remotes' when the repository has no remote at all, otherwise
+    'archive_remote_not_configured'.
+    """
+    defaults = (manifest or {}).get('defaults') or {}
+    names = [
+        name for name in (defaults.get('publication_remote'), defaults.get('canonical_remote'))
+        if name
+    ] or ['origin']
+    for name in names:
+        if remote_is_configured(repo_root, name):
+            return name, None
+    configured = git(repo_root, 'remote', check=False).stdout.split()
+    return None, ('archive_remote_not_configured' if configured else 'no_remotes')
+
+
+def remote_ref_tip(repo_root, remote, ref):
+    result = git(
+        repo_root, 'ls-remote', '--refs', remote, ref, check=False,
+        env={'GIT_TERMINAL_PROMPT': '0'},
+    )
+    if result.returncode != 0:
+        return False, result.stderr.strip() or result.stdout.strip() or f'could not read {remote}'
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == ref:
+            return True, parts[0]
+    return True, None
+
+
+def archive_governed_worktree_tip(repo_root, manifest, lane, tip):
+    """Push a lane's tip to a hidden ref on the remote before its folder goes.
+
+    Returns None when the tip is on the remote (or there is no remote to push
+    to), or a failure detail; on failure the caller keeps the lane.
+    """
+    remote, missing = governed_worktree_archive_remote(repo_root, manifest)
+    if missing == 'no_remotes':
+        # Nothing exists to push to: only the local recovery ref can keep the tip.
+        lane['archive_ref'] = None
+        lane['archive_skipped'] = 'no_remotes'
+        return None
+    if missing:
+        return {
+            'code': 'archive_push_failed',
+            'remedy': (
+                'neither the publication nor the canonical remote of the manifest is '
+                'configured in this clone, so the lane tip cannot be saved; the lane was '
+                'kept. Add the publication remote, then retry the same command'
+            ),
+        }
+    if (
+        lane.get('archive_ref')
+        and lane.get('archive_remote') == remote
+        and lane.get('archive_confirmed_tip') == tip
+    ):
+        # Already confirmed on the remote by an earlier attempt: no network.
+        return None
+    archive_ref = lane.get('archive_ref') or governed_worktree_archive_ref(lane)
+    lane['archive_ref'] = archive_ref
+    lane['archive_remote'] = remote
+    lane.pop('archive_skipped', None)
+
+    def failure(detail, remedy='Fix access to the remote, then retry the same command'):
+        return {
+            'code': 'archive_push_failed',
+            'remedy': f'could not save {tip} to {remote} {archive_ref} ({detail}); the lane was kept. {remedy}',
+        }
+
+    readable, current = remote_ref_tip(repo_root, remote, archive_ref)
+    if not readable:
+        return failure(current)
+    if current == tip:
+        lane['archive_confirmed_tip'] = tip
+        return None
+    if current is not None:
+        return failure(
+            f'the remote ref already points at {current}',
+            'Inspect that remote ref; Syncwheel never overwrites it',
+        )
+    try:
+        result = run_authorized_push(
+            repo_root,
+            ['git', 'push', '--porcelain', remote, f'{tip}:{archive_ref}'],
+            remote,
+            [archive_ref],
+            check=False,
+            manifest=manifest,
+        )
+    except SyncwheelError as exc:
+        return failure(str(exc))
+    if result.returncode != 0:
+        return failure(result.stderr.strip() or result.stdout.strip() or 'push failed')
+    readable, current = remote_ref_tip(repo_root, remote, archive_ref)
+    if not readable or current != tip:
+        return failure('the remote did not confirm the pushed tip')
+    lane['archive_confirmed_tip'] = tip
+    return None
+
+
 def governed_worktree_cleanup_tip(repo_root, lane):
     return (
         lane.get('cleanup_tip')
@@ -11556,6 +11680,9 @@ def reap_governed_worktree_lane(
         lane.pop('recovery_ref', None)
         lane.pop('cleanup_idempotency_key', None)
         lane.pop('cleanup_operation_token', None)
+        # The new tip gets a new recovery ref, so it needs its own archive ref.
+        for key in ('archive_ref', 'archive_remote', 'archive_skipped', 'archive_confirmed_tip'):
+            lane.pop(key, None)
         if (
             event_type == 'governed_worktree_released'
             and superseded_event_type != event_type
@@ -11604,6 +11731,15 @@ def reap_governed_worktree_lane(
                 persist()
             raise
         governed_worktree_cleanup_checkpoint('after_recovery_anchor')
+        archive_failure = archive_governed_worktree_tip(repo_root, manifest, lane, anchored_tip)
+        if archive_failure:
+            lane['pending_reason'] = 'archive_push_failed'
+            if persist:
+                persist()
+            return False, {**status, **archive_failure}
+        if persist:
+            persist()
+        governed_worktree_cleanup_checkpoint('after_remote_archive')
         current_tip = ref_tip(repo_root, lane['branch'])
         if current_tip is not None:
             if current_tip != anchored_tip:
@@ -11710,6 +11846,7 @@ def governed_worktree_reaped_payload(lane, reason='expired'):
     return {
         'lane': lane['id'], 'branch': lane['branch'], 'reason': reason,
         'recovery_ref': lane.get('recovery_ref'), 'target': lane.get('target'),
+        'archive_ref': lane.get('archive_ref'), 'archive_remote': lane.get('archive_remote'),
         'full': lane['full'],
         'generation_token': governed_worktree_generation_token(lane),
         'operation_token': lane.get('cleanup_operation_token'),
@@ -22030,6 +22167,7 @@ def command_worktree_release(args):
             'branch_advanced',
             'ledger_pending',
             'recovery_ref_moved',
+            'archive_push_failed',
         } and not missing_abandoned_path:
             raise SyncwheelError(
                 f"cannot release governed worktree lane {lane_id!r}: {status['code']}; {status['remedy']}"
@@ -22103,6 +22241,10 @@ def command_worktree_release(args):
             print(f'  completed the pending {terminal_type} ({terminal_reason})')
         if lane.get('recovery_ref'):
             print(f"  recovery ref: {lane['recovery_ref']}")
+        if lane.get('archive_ref'):
+            print(f"  saved on {lane.get('archive_remote')}: {lane['archive_ref']}")
+        elif lane.get('archive_skipped'):
+            print(f"  not saved on a remote: {lane['archive_skipped']}")
     return 0
 
 
@@ -22228,6 +22370,12 @@ def capture_governed_worktrees_for_stack(repo_root, manifest, stack_id, manifest
                 persist=persist,
                 manifest_path=manifest_path,
             )
+            if not reaped and detail.get('code') == 'archive_push_failed':
+                print(
+                    f"WARNING: governed worktree {lane['id']} was captured but kept: "
+                    f"{detail.get('remedy')}",
+                    file=sys.stderr,
+                )
             captured.append({
                 'id': lane['id'], 'state': lane['state'], 'detail': detail['code'], 'reaped': reaped,
             })
@@ -36673,6 +36821,9 @@ def governed_worktree_preflight(args):
         blockers = [
             lane for lane in registry['lanes']
             if lane.get('target') in scoped_stacks and lane.get('state') != 'reaped'
+            # Intact lane whose tip is in a local recovery ref; only its remote
+            # save is pending, which never blocks the stack.
+            and lane.get('pending_reason') != 'archive_push_failed'
         ]
         if blockers:
             raise SyncwheelError(
@@ -36687,6 +36838,7 @@ def governed_worktree_preflight(args):
         candidate_ids = {
             lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
             if lane.get('target') == args.stack
+            and lane.get('code') != 'archive_push_failed'
         }
         if not candidate_ids:
             return
@@ -36695,9 +36847,12 @@ def governed_worktree_preflight(args):
         )
     elif governed_worktree_mutation_requested(args):
         # Record moved lane paths and finish cleanups already started, but
-        # never select an active lane: removal needs release or gc.
+        # never select an active lane: removal needs release or gc. A lane
+        # whose remote save failed is intact and waits for its own retry, so
+        # an unreachable remote never blocks unrelated mutations.
         candidate_ids = {
             lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
+            if lane.get('code') != 'archive_push_failed'
         }
         cleanup = reconcile_governed_worktrees(
             repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
@@ -36705,9 +36860,14 @@ def governed_worktree_preflight(args):
         )
     else:
         return
-    if cleanup['failures']:
+    # A lane whose remote save failed is intact (branch and folder kept), so
+    # it never blocks an unrelated mutation; its own release or gc retries it.
+    failures = [
+        item for item in cleanup['failures'] if item.get('code') != 'archive_push_failed'
+    ]
+    if failures:
         details = ', '.join(
-            f"{item['id']} [{item['code']}]" for item in cleanup['failures']
+            f"{item['id']} [{item['code']}]" for item in failures
         )
         raise SyncwheelError(
             'governed worktree recovery is required before this mutation: '

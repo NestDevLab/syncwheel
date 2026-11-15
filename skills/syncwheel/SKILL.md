@@ -39,7 +39,9 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    Export `SYNCWHEEL_LANE_OWNER=<agent-name>` for the session. It owns your lanes and is
    the `actor` of your stack lifecycle ledger events, so refusals caused by your
    unpublished stack name you as its owner. An expired lease never removes a lane:
-   only `worktree release <lane>` or `gc --apply` does.
+   only `worktree release <lane>` or `gc --apply` does. Removal first pushes the
+   lane tip to `refs/syncwheel/archive/lanes/...` on the publication remote and keeps
+   the lane if that push fails; uncommitted files are never saved, so commit them first.
 
 2. **Never resolve a replay conflict with raw git.** A plumbing replay never descends
    silently into a conflict; it names the exact retry:

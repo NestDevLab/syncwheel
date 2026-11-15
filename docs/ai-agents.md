@@ -217,8 +217,10 @@ active-active channel must use the coordination remote.
 - treat a light lane as an operational boundary, not a sandbox: do not install
   dependencies there, and return to a clean checkout before stack ownership
   operations
-- review governed-worktree warnings on normal commands; a missing lane with an
-  expired lease or known dead local owner is recovered to a local recovery ref
+- review governed-worktree warnings on normal commands, which never remove a
+  lane; with `gc --apply` or `worktree release`, a missing lane with an
+  expired lease or known dead local owner is recovered to a local recovery ref,
+  and pushed to `refs/syncwheel/archive/lanes/...` on the publication remote,
   before reaping even if its registry path is outside the current root, while an
   existing dirty or unknown lane must remain visible until explicitly handled
 - preview `worktree release <lane> --reason <why>` before using `--apply` for a
@@ -227,7 +229,9 @@ active-active channel must use the coordination remote.
 - for `captured_pending_cleanup`, first leave the lane directory, then preview the
   named `worktree release <lane> --reason "complete captured lane cleanup"` with
   the same `--manifest` or `--personal` selector; add `--apply` only after review.
-  This works without active-active GC and preserves a recovery ref. Dirty bytes,
+  This works without active-active GC and preserves a recovery ref plus a remote
+  archive ref; if the archive push fails the lane stays (`archive_push_failed`).
+  Only commits are saved: commit uncommitted work first. Dirty bytes,
   live users and foreign locks still stop cleanup; never release another owner's
   lane merely because its warning is visible
 - use `--dry-run` when inspecting rebuild/push commands
