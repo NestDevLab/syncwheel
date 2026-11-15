@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.1 - 2026-11-15
+
+- Stop `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` from refusing because of lanes they do not work on. A governed lane that needs recovery (dirty, locked, outside the root, unregistered and so on) now blocks them when its target stack is still declared in the manifest, or when its folder is checked out on a branch other than its own lane branch, because gc may remove the worktree of a closed stack together with its ignored files. Any other lane, with no target or a closed or undeclared stack, is reported as a warning and left to `worktree release` or `gc --apply`. A captured lane whose cleanup fails, or that someone holds with their own `git worktree lock`, still stops these commands whatever its target. On one busy repository this cut the blocking lanes from 46 to 11.
+
 ## 0.47.0 - 2026-11-15
 
 - Split `scripts/syncwheel.py` into domain modules: manifest schema and storage, CLI grammar, coordination state, publication and its intents, journal workflows, replay, projection, provenance, integration history, stacks, governed worktrees, revision backend, ledger, Git index decoding and shared errors. `syncwheel.py` stays the CLI and composition root, so the commands, the `main` import, the revision-provider entry points and the existing patch points keep working. Domains never import the facade; they get explicit ports, and `pyproject.toml` lists every module.
