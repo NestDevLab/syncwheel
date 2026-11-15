@@ -100,6 +100,14 @@ class JournalModeTest(unittest.TestCase):
         self.git('commit', '-q', '-m', 'local snapshot')
         return self.git('rev-parse', 'HEAD')
 
+    def test_status_reports_a_journal_repository(self):
+        text = self.cli('status').stdout
+        self.assertIn('manifest validation:', text)
+        status = json.loads(self.cli('status', '--json').stdout)
+        self.assertEqual(status['plan'], [])
+        self.assertEqual(status['validation']['details']['journal']['branch'], 'journal')
+        self.assertIn('forbidden', self.cli('plan', expected=2).stderr)
+
     def test_recover_in_sync_and_ahead_only_never_publish(self):
         aligned = json.loads(self.cli('journal', 'recover', '--apply').stdout)
         self.assertEqual(aligned['relation'], 'in-sync')
@@ -176,6 +184,22 @@ class JournalModeTest(unittest.TestCase):
         result = self.cli('journal', 'recover', '--apply', expected=2)
         self.assertIn('already-published', result.stderr)
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+
+    def test_recover_drops_a_published_commit_whose_change_is_already_on_the_tip(self):
+        head = self.local_commit('merged.txt', 'merged by squash\n')
+        self.git('push', '-q', 'origin', 'HEAD:refs/heads/pr/375')
+        later = self.local_commit('later.txt', 'local only\n')
+        self.publish_from_other_clone({'merged.txt': 'merged by squash\n', 'remote.txt': 'remote\n'})
+
+        result = json.loads(self.cli('journal', 'recover', '--apply').stdout)
+
+        self.assertEqual(result['absorbed'], [head])
+        self.assertEqual(list(result['replayed']), [later])
+        self.assertEqual((self.repo / 'later.txt').read_text(), 'local only\n')
+        self.assertEqual((self.repo / 'remote.txt').read_text(), 'remote\n')
+        self.assertEqual(
+            self.git('rev-parse', 'HEAD~1'), self.git('rev-parse', 'origin/journal'),
+        )
 
     def test_recover_refuses_commit_published_on_custom_remote_ref(self):
         self.publish_from_other_clone({'remote.txt': 'remote\n'})
