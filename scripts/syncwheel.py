@@ -2,6 +2,7 @@
 import argparse
 import copy
 import contextlib
+from contextvars import ContextVar
 import datetime
 import errno
 import fnmatch
@@ -506,6 +507,7 @@ MANAGED_REPOSITORY_HOOKS = ('pre-push', 'pre-commit', 'post-checkout', 'referenc
 MANAGED_PUSH_AUTH_ENV = 'SYNCWHEEL_PUSH_AUTH_FILE'
 MANAGED_PUSH_SECRET_ENV = 'SYNCWHEEL_PUSH_AUTH_SECRET'
 MANAGED_PUSH_AUTH_TTL_SECONDS = 60
+_READONLY_DIAGNOSTICS = ContextVar('readonly_diagnostics', default=False)
 SYNCWHEEL_OWNS_REF_MOVES = False
 SYNCWHEEL_REF_AUTH_REPO = None
 SYNCWHEEL_REF_AUTH_TTL_SECONDS = 30
@@ -601,10 +603,14 @@ def managed_process_env(extra=None, authorize=True):
     process_env = os.environ.copy()
     for name in AMBIENT_GIT_LOCATION_ENV:
         process_env.pop(name, None)
-    if authorize and SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
+    diagnostics = _READONLY_DIAGNOSTICS.get()
+    if not diagnostics and authorize and SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
         process_env[MANAGED_REF_MOVE_AUTH_ENV] = authorize_ref_move(SYNCWHEEL_REF_AUTH_REPO)
     if extra:
         process_env.update(extra)
+    if diagnostics:
+        process_env.pop(MANAGED_REF_MOVE_AUTH_ENV, None)
+        process_env.update(GIT_NO_LAZY_FETCH='1', GIT_ALLOW_PROTOCOL='')
     return process_env
 
 
@@ -3278,6 +3284,9 @@ def commit_patch_ids(repo_root, commits):
     commits = list(dict.fromkeys(commits))
     if not commits:
         return {}
+    if _READONLY_DIAGNOSTICS.get():
+        # The shared SQLite cache API creates directories, schema and rows.
+        return batch_uncached_patch_ids(repo_root, commits)
     semantics = patch_id_semantics_key(repo_root)
     found = {}
     try:
@@ -3712,7 +3721,9 @@ def primary_checkout_state(repo_root, manifest):
     primary_path = Path(primary['path']) if primary.get('path') else None
     shared_manifest = primary_path / '.syncwheel' / 'manifest.json' if primary_path else None
     shared_expected = None
-    if shared_manifest and shared_manifest.exists():
+    if shared_manifest and _READONLY_DIAGNOSTICS.get():
+        shared_expected = primary_guard_branch(read_primary_authority_manifest(shared_manifest))
+    elif shared_manifest and shared_manifest.exists():
         try:
             shared_expected = primary_guard_branch(json.loads(shared_manifest.read_text()))
         except (OSError, ValueError):
@@ -10057,7 +10068,9 @@ def collect_repo_snapshot(repo_root, manifest):
     worktrees = get_worktrees(repo_root)
     stashes = git(repo_root, 'stash', 'list', check=False).stdout.splitlines()
     remotes = git(repo_root, 'remote', '-v', check=False).stdout.splitlines()
-    status_short = git(repo_root, 'status', '--short', '--branch', check=False).stdout.splitlines()
+    status_short = git(
+        repo_root, 'status', '--short', '--branch', check=False, env={'GIT_OPTIONAL_LOCKS': '0'},
+    ).stdout.splitlines()
     return {
         'repo_root': str(repo_root),
         'current_branch': current_branch,
@@ -11890,7 +11903,11 @@ def command_coordination_compose(args):
 def command_worktree_list(args):
     """List governed lanes and their health without changing anything."""
     repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    manifest, manifest_path = load_diagnostic_manifest(repo_root, args)
+    if manifest is None:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    if manifest.get('repository_mode') == 'journal':
+        raise SyncwheelError('worktree is forbidden for repository_mode="journal"; use journal commands')
     diagnostics = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
     lanes = [
         lane for lane in diagnostics['lanes']
@@ -12495,12 +12512,22 @@ def command_replay_mode(args):
     return 0
 
 
+def load_diagnostic_manifest(repo_root, args):
+    path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    if getattr(args, 'fetch', False):
+        return _manifest_storage.load_manifest(repo_root, path)
+    shared = primary_authority_manifest_path(repo_root)
+    shared_manifest = read_primary_authority_manifest(shared)
+    if Path(os.path.abspath(path)) == shared or path.resolve() == shared:
+        return shared_manifest, path
+    return _manifest_storage.load_manifest(repo_root, path)
+
+
 def command_status(args):
     repo_root = resolve_repo_root(args.repo)
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = load_diagnostic_manifest(repo_root, args)
     snapshot = collect_repo_snapshot(repo_root, manifest)
     output = {'snapshot': snapshot, 'manifest_path': str(manifest_path), 'manifest_present': manifest is not None}
     if manifest:
@@ -12635,8 +12662,7 @@ def command_check(args):
     repo_root = resolve_repo_root(args.repo)
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
-    manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
+    manifest, manifest_path = load_diagnostic_manifest(repo_root, args)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     snapshot = collect_repo_snapshot(repo_root, manifest)
@@ -20416,7 +20442,16 @@ def main():
         command_hooks_ref_guard,
     }
     global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
+    readonly_diagnostics = args.func == command_worktree_list or (
+        args.func in {command_status, command_check} and not args.fetch
+    )
     try:
+        if readonly_diagnostics:
+            diagnostic_scope = _READONLY_DIAGNOSTICS.set(True)
+            try:
+                return args.func(args)
+            finally:
+                _READONLY_DIAGNOSTICS.reset(diagnostic_scope)
         if args.func in {command_repo_tracking_set, command_repo_tracking_status}:
             args.repo = args.repo or os.environ.get(ENV_REPO)
             if args.func == command_repo_tracking_set:
@@ -20496,9 +20531,10 @@ def main():
         print(f'error: {exc}', file=sys.stderr)
         return 2
     finally:
-        if SYNCWHEEL_REF_AUTH_REPO:
-            clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
-        SYNCWHEEL_REF_AUTH_REPO = None
+        if not readonly_diagnostics:
+            if SYNCWHEEL_REF_AUTH_REPO:
+                clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
+            SYNCWHEEL_REF_AUTH_REPO = None
 
 
 class _JournalRepository:

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.20`
+Current version: `0.47.21`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -476,6 +476,12 @@ state, health, target stack, branch, path and remedy; `--problems` keeps only th
 lanes that need attention and `--json` adds a count per health code. It is
 read-only. When more than three lanes need attention, other commands print one
 summary line with those counts instead of one warning per lane.
+
+`status` without `--fetch`, `check --no-fetch`, and `worktree list` preserve
+control metadata, including authorization records, persistent caches and
+startup state. They do not start update maintenance or clean up stale authorization records. Delivery
+validation can still calculate projections using temporary Git objects and
+checkouts; explicit fetch remains a separate, requested operation.
 
 To retire a known dead or abandoned lane deliberately, preview the operation
 first and provide a durable reason:

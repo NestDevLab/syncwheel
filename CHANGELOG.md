@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.21 - 2026-11-16
+
+- Keep status without fetch, check with --no-fetch, and worktree list observational on control metadata. Skip implicit startup maintenance, authorization nonce creation or cleanup, and persistent patch-ID cache writes while preserving manifest selection checks and explicit fetch behavior.
+
 ## 0.47.20 - 2026-11-16
 
 - Validate the complete proposed integration before capturing commits into a stack. Keep capture preflight observational and require explicit recovery for pending control operations, so projection refusals do not leave manifest commits or ledger events. Capture no longer stages or commits tracked control metadata automatically.
