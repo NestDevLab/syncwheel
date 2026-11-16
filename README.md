@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.19`
+Current version: `0.47.20`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -541,6 +541,17 @@ syncwheel stack create --draft caching-experiment
 syncwheel stack capture-integration caching-experiment HEAD
 syncwheel stack promote caching-experiment --branch pr/caching
 ```
+
+`stack capture-integration` validates both the proposed stack and the complete
+integration composition before persisting ownership. A conflict in another
+stack must not leave a partial capture. Pending control recovery requires the
+explicit command printed for the selected manifest; capture does not repair it
+implicitly. Preserve the observed inputs and rerun the command if they change
+while the capture is being validated.
+Capture updates the stack ref, selected manifest and local ledger. It does not
+stage or commit the manifest, even when tracking is `git-tracked`: the primary
+HEAD and index stay unchanged. Publishing tracked control metadata remains a
+separate delivery step.
 
 A draft refuses `stack push` to the target remote and names its state as the reason. Under
 active-active coordination its source ref does publish to the coordination remote, so another clone

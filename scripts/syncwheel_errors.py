@@ -6,6 +6,10 @@ class SyncwheelError(Exception):
     pass
 
 
+class MetadataRollbackIncomplete(SyncwheelError):
+    """A failed metadata update retained one or more rollback images."""
+
+
 class ManifestDurabilityError(SyncwheelError):
     """The manifest was replaced, but durable directory sync could not be proven."""
 

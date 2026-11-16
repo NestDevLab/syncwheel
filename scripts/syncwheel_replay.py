@@ -9,7 +9,9 @@ from pathlib import Path
 import re
 import shlex
 import sys
+import contextlib
 import tempfile
+import shutil
 from typing import Protocol
 
 from syncwheel_errors import SyncwheelError
@@ -775,7 +777,8 @@ class ReplayEngine:
             'after_tip': before_tip,
             'conflict': None,
         }
-        cleanup_worktree = target['worktree'] if target.get('return_tree') else None
+        cleanup_worktree = (target['worktree'] if target.get('return_tree')
+                            and not plan.get('checked_projection_trial') else None)
         try:
             for index, step in enumerate(plan['steps']):
                 if step['kind'] == 'exec':
@@ -789,9 +792,15 @@ class ReplayEngine:
                         if self.repository.branch_contains(command_cwd, 'HEAD', argv[-1]):
                             continue
                     effective_argv = argv if env is not None else self.repository.with_git_identity(repo_root, argv)
+                    if plan.get('checked_projection_trial'):
+                        effective_argv = [effective_argv[0], '-c', 'core.hooksPath=/dev/null', *effective_argv[1:]]
                     try:
                         self.repository.run(effective_argv, cwd=repo_root, env=env)
                     except SyncwheelError as exc:
+                        if target.get('return_tree') and step.get('stack_id') and 'merge' in argv:
+                            raise SyncwheelError(
+                                f"integration projection: stack {step['stack_id']} failed to merge:\n{exc}"
+                            ) from exc
                         if not (
                             target.get('skip_contained')
                             and step.get('stack_id')
@@ -928,14 +937,44 @@ class ReplayEngine:
             )
             return self.execute_replay(plan, True)['tree']
 
+    @contextlib.contextmanager
+    def projection_trial(self, prefix):
+        repo_root = self.repository.root
+        directory = Path(tempfile.mkdtemp(prefix=prefix))
+        try:
+            yield directory
+        finally:
+            entries = self.repository.git(
+                repo_root, 'worktree', 'list', '--porcelain', '-z',
+            ).stdout.split('\0')
+            if f'worktree {directory}' in entries:
+                removed = self.repository.git(repo_root, 'worktree', 'remove', '--force',
+                                              str(directory), check=False)
+                if removed.returncode:
+                    raise SyncwheelError(
+                        f'projection trial cleanup failed; retained detached checkout at {directory}: '
+                        + removed.stderr.strip()
+                    )
+            if directory.exists():
+                shutil.rmtree(directory)
+
+    def materialize_capture_tip(self, stack):
+        for commit in stack['commits']:
+            self.replay_cherry_pick_args(commit, stack['base'], projection=False)
+        with self.projection_trial('syncwheel-stack-capture-') as tmp:
+            plan = self.replay_plan(
+                None, replay_target(stack=stack, worktree=Path(tmp), return_tree=True), 'desk',
+            )
+            plan['checked_projection_trial'] = True
+            return self.execute_replay(plan, True)['commit']
+
     def materialize_integration_replay(self, manifest, stack_ref_overrides=None):
         """Build the ordinary replay commit without moving refs or the source index.
 
         Keep the detached commit as well as its tree: ancestry reconciliation needs
         the actual replay graph before deciding whether to move integration.
         """
-        repo_root = self.repository.root
-        with tempfile.TemporaryDirectory(prefix='syncwheel-projection-') as tmp:
+        with self.projection_trial('syncwheel-projection-') as tmp:
             plan = self.replay_plan(
                 manifest,
                 replay_target(
@@ -947,6 +986,7 @@ class ReplayEngine:
                 ),
                 'desk',
             )
+            plan['checked_projection_trial'] = True
             return self.execute_replay(plan, True)['commit']
 
     def materialize_integration_projection(self, manifest, stack_ref_overrides=None):

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.20 - 2026-11-16
+
+- Validate the complete proposed integration before capturing commits into a stack. Keep capture preflight observational and require explicit recovery for pending control operations, so projection refusals do not leave manifest commits or ledger events. Capture no longer stages or commits tracked control metadata automatically.
+
 ## 0.47.19 - 2026-11-16
 
 - Preserve another owner's live lane during stack capture and automatic cleanup. Record the stack ownership without changing the protected lane's lease, checkout, index or refs, and report which owner is keeping it. Unproven foreign lease expiry also preserves the lane.

@@ -224,6 +224,11 @@ active-active channel must use the coordination remote.
   an empty stack; it must not amend the base commit
 - use `syncwheel stack capture-integration <stack> HEAD` only for already committed
   primary work named by a refusal; do not create a new primary commit to use it
+- capture validates the full proposed integration before persisting ownership.
+  Pending control recovery is explicit: follow the scoped command printed for
+  the selected manifest and retry capture after it completes
+- capture updates the selected manifest and ledger without staging or committing
+  control metadata; preserve tracked manifest changes for separate delivery
 - use `syncwheel hooks remove --disable --reason "..." --apply` only as a deliberate,
   visible clone-local recovery opt-out; re-enable the bundle afterwards
 - when a primary-checkout stop names a manifest-derived remedy, use the named

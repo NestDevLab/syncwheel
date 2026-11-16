@@ -2962,7 +2962,8 @@ def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, pe
 
 def resolve_command_manifest_selection(args):
     options = vars(args)
-    pinned = options.get('_stack_sync_selection') or options.get('_stack_absorb_selection')
+    pinned = (options.get('_stack_sync_selection') or options.get('_stack_absorb_selection')
+              or options.get('_stack_capture_selection'))
     if pinned is not None:
         return pinned
     tracking_selection = options.get('_tracking_selection')
@@ -15731,8 +15732,11 @@ def rebuild_stack_from_manifest(
 
 
 def command_stack_capture_integration(args):
-    repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    refuse_stack_sync_control_recovery(repo_root, manifest_path, 'stack capture-integration')
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+    if manifest is None:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
     return _stack_lifecycle(repo_root).command_stack_capture_integration(args, manifest, manifest_path)
 
 
@@ -19648,13 +19652,15 @@ def git_resume_requested(git_args, operation):
 
 
 def require_stack_sync_metadata_paths(repo_root, manifest_path):
-    require_private_tracking_path(repo_root, manifest_path)
+    # External manifests keep their ledger beside the selected file.
+    owner = repo_root if manifest_path.is_relative_to(repo_root) else Path(manifest_path.anchor)
+    require_private_tracking_path(owner, manifest_path)
     ledger = _manifest_storage.ledger_root(repo_root, manifest_path)
     events = _manifest_storage.ledger_events_dir(repo_root, manifest_path)
-    require_private_tracking_path(repo_root, events, directory=True)
+    require_private_tracking_path(owner, events, directory=True)
     for path in (*events.glob('*.jsonl'), ledger / 'ledger.lock',
                  _manifest_storage.ledger_checkpoint_path(repo_root, manifest_path)):
-        require_private_tracking_path(repo_root, path)
+        require_private_tracking_path(owner, path)
 
 
 def resolve_stack_sync_selection(args):
@@ -19671,7 +19677,7 @@ def resolve_stack_sync_selection(args):
     raise SyncwheelError('stack sync requires a manifest in the current or primary checkout')
 
 
-def refuse_stack_sync_control_recovery(repo_root, manifest_path):
+def refuse_stack_sync_control_recovery(repo_root, manifest_path, operation='stack sync'):
     shared_path = primary_authority_manifest_path(repo_root)
     for root, path in dict.fromkeys(((repo_root, manifest_path), (shared_path.parent.parent, shared_path))):
         require_stack_sync_metadata_paths(root, path)
@@ -19687,7 +19693,7 @@ def refuse_stack_sync_control_recovery(repo_root, manifest_path):
             selection = shlex.join(manifest_path_remedy_options(root, path))
             raise SyncwheelError(
                 'control manifest recovery is pending; from a clean primary checkout run '
-                f'syncwheel reconcile --apply {selection} before stack sync'
+                f'syncwheel reconcile --apply {selection} before {operation}'
             )
 
 
@@ -19770,8 +19776,11 @@ def primary_checkout_preflight(args):
     else:
         worktrees = get_worktrees(repo_root)
         primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-        manifest_path = resolve_manifest_path(
-            primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
+        manifest_path = (
+            selected_path if args.func == command_stack_capture_integration
+            else resolve_manifest_path(
+                primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
+            )
         )
     manifest, _ = _manifest_storage.load_manifest(primary_root, manifest_path)
     metadata_scope = False
@@ -20011,6 +20020,8 @@ def governed_worktree_preflight(args):
             repo_root, manifest, args.stack, active_only=True
         )
         return
+    if args.func == command_stack_capture_integration:
+        return
     if scoped_stacks:
         registry, _ = load_governed_worktree_registry(repo_root)
         blockers = [
@@ -20177,7 +20188,7 @@ def coordination_publication_lock_requested(args):
         return False
     always_mutating = {
         command_stack_create, command_stack_promote, command_stack_demote,
-        command_stack_close, command_stack_sync, command_stack_add,
+        command_stack_close, command_stack_sync, command_stack_add, command_stack_capture_integration,
     }
     dry_run_gated = {
         command_stack_push, command_int_push, command_stack_rebuild,
@@ -20204,10 +20215,14 @@ def coordination_publication_lock_for_command(args):
         return
     repo_root, manifest_path = resolve_command_manifest_selection(args)
     options = {}
-    if args.func == command_stack_sync:
-        refuse_stack_sync_control_recovery(repo_root, manifest_path)
+    if args.func in {command_stack_sync, command_stack_capture_integration}:
+        operation = 'stack sync' if args.func == command_stack_sync else 'stack capture-integration'
         selection = shlex.join(manifest_path_remedy_options(repo_root, manifest_path))
-        _stack_lifecycle(repo_root).refuse_pending_stack_sync_promotion(manifest_path, selection)
+        if args.func == command_stack_capture_integration:
+            _stack_lifecycle(repo_root).refuse_pending_stack_sync_promotion(manifest_path, selection)
+        refuse_stack_sync_control_recovery(repo_root, manifest_path, operation)
+        if args.func == command_stack_sync:
+            _stack_lifecycle(repo_root).refuse_pending_stack_sync_promotion(manifest_path, selection)
         options['stale_lock_remedy'] = (
             f'from a clean primary checkout run syncwheel reconcile --apply {selection}'
         )
@@ -20242,8 +20257,9 @@ def recover_control_manifest_before_command(args):
         # it replaces the source the interrupted operation was persisting.
         return None
     repo_root, manifest_path = resolve_command_manifest_selection(args)
-    if args.func == command_stack_sync:
-        refuse_stack_sync_control_recovery(repo_root, manifest_path)
+    if args.func in {command_stack_sync, command_stack_capture_integration}:
+        operation = 'stack sync' if args.func == command_stack_sync else 'stack capture-integration'
+        refuse_stack_sync_control_recovery(repo_root, manifest_path, operation)
         return None
     if getattr(args, '_tracking_selection', None) is not None:
         validate_selected_primary_authority_path(repo_root, manifest_path)
@@ -20410,6 +20426,11 @@ def main():
                 args.repo = str(args._tracking_selection[1])
         if args.func == command_stack_sync:
             args._stack_sync_selection = resolve_stack_sync_selection(args)
+        if args.func == command_stack_capture_integration:
+            capture_root, capture_path = resolve_command_manifest_selection(args)
+            capture_path = Path(os.path.abspath(capture_path))
+            args._stack_capture_selection = (capture_root, capture_path)
+            require_stack_sync_metadata_paths(capture_root, capture_path)
         if args.func == command_stack_absorb:
             args._stack_absorb_selection = resolve_command_manifest_selection(args)
             stack_absorb_preflight(args)
@@ -20435,20 +20456,22 @@ def main():
         # preflights: those inspect other worktrees and must not run there.
         if args.command != 'revision-provider' and not guard_callback:
             primary_checkout_preflight(args)
-            if args.func != command_stack_sync:
+            if args.func not in {command_stack_sync, command_stack_capture_integration}:
                 maybe_handle_startup_update_policy(args)
             governed_worktree_preflight(args)
-            converge_default_repository_hooks(args)
+            if args.func != command_stack_capture_integration:
+                converge_default_repository_hooks(args)
         with coordination_publication_lock_for_command(args) as publication_owner:
             if manifest_mutation_requested(args) and hasattr(args, 'repo'):
                 repo_root, manifest_path = resolve_command_manifest_selection(args)
-                if args.func != command_init and manifest_path.exists():
+                if args.func not in {command_init, command_stack_capture_integration} and manifest_path.exists():
                     existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
                         ensure_managed_repository_hooks(repo_root, existing_manifest, manifest_path)
                 with manifest_write_transaction(
                     repo_root, manifest_path, 'manifest-command',
-                    commit_tracked_changes=not getattr(args, '_metadata_preserve_primary', False),
+                    commit_tracked_changes=(args.func != command_stack_capture_integration
+                                            and not getattr(args, '_metadata_preserve_primary', False)),
                 ):
                     primary_root = getattr(args, '_metadata_primary_root', None)
                     if primary_root is not None:
@@ -21352,6 +21375,56 @@ class _StackRepository:
     def get_worktrees(self, *args, **kwargs):
         return get_worktrees(*args, **kwargs)
 
+    def capture_ref_transaction(self, operations):
+        commands = ['start']
+        for operation in operations:
+            commands.extend(('option no-deref', operation))
+        # Old-OID checks on some Git versions accept symbolic references to
+        # that same OID. Inspect ref kinds after Git has acquired its locks.
+        with tempfile.TemporaryFile(mode='w+t') as errors, subprocess.Popen(
+            ['git', 'update-ref', '--stdin'],
+            cwd=self.root, env=managed_process_env(),
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True,
+        ) as process:
+            def close_transaction():
+                process.stdin.close()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+
+            def require_response(expected):
+                if process.stdout.readline().strip() != expected:
+                    close_transaction()
+                    errors.seek(0)
+                    raise SyncwheelError(errors.read().strip() or f'missing Git response: {expected}')
+
+            try:
+                process.stdin.write('\n'.join([*commands, 'prepare', '']))
+                process.stdin.flush()
+                require_response('start: ok')
+                require_response('prepare: ok')
+                for operation in operations:
+                    action, ref, *_ = operation.split()
+                    if git(self.root, 'symbolic-ref', '--quiet', ref, check=False).returncode == 0:
+                        raise SyncwheelError(f'capture ref became symbolic before commit: {ref}')
+                    if action != 'verify' and find_worktree_for_branch(
+                        self.root, ref.removeprefix('refs/heads/'),
+                    ):
+                        raise SyncwheelError(f'capture ref is checked out before commit: {ref}')
+                process.stdin.write('commit\n')
+                process.stdin.flush()
+                require_response('commit: ok')
+            except BaseException:
+                # EOF aborts a prepared transaction without installing refs.
+                close_transaction()
+                raise
+
     def git(self, *args, **kwargs):
         return git(*args, **kwargs)
 
@@ -21416,6 +21489,9 @@ class _StackControl:
     def save_manifest(self, *args, **kwargs):
         return _manifest_storage.save_manifest(*args, **kwargs)
 
+    def prepare_capture_metadata(self, *args, **kwargs):
+        return _manifest_storage.prepare_capture_metadata(*args, **kwargs)
+
     def save_manifest_with_ledger(self, *args, **kwargs):
         return save_manifest_with_ledger(*args, **kwargs)
 
@@ -21427,6 +21503,9 @@ class _StackLedger:
         return _manifest_storage.load_ledger_events(*args, **kwargs)
 
 class _StackProjections:
+    def checkout_reset_destination_lease(self, *args, **kwargs):
+        return checkout_reset_destination_lease(*args, **kwargs)
+
     def capture_integration_desk(self, *args, **kwargs):
         return capture_integration_desk(*args, **kwargs)
 
