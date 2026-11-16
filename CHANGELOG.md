@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.47.8 - 2026-11-16
+
+- Resolve a paused rebase through its per-worktree branch record, so `int git -- rebase --continue` and `--abort` find the detached checkout. Ambiguous matches are refused.
+
+- Close the ways around the primary guard through `int git`, which authorizes integration ref moves for its own Git process. It now refuses `update-ref`, `symbolic-ref` writes, Git aliases (configured, or defined with `-c alias.*`), `-c`/`--config-env` overrides of `core.hooksPath`, `core.worktree`, `core.bare` and includes, and `-C`, `--git-dir`, `--work-tree`, `--namespace`, `--exec-path` and `--super-prefix`, before anything runs. `fetch --update-head-ok` and its long abbreviations are refused too. Fetch processes never receive integration-ref authorization, so short option bundles cannot move that branch either. A command that leaves the integration worktree on another branch exits non-zero and names the branch to switch back to.
+- Classify Git passthroughs by their real command: global options before it, such as `-c name=value`, are no longer mistaken for the command name. `worktree list`, `stash list` and `stash show`, `reflog show` (each only with the subcommand first), `symbolic-ref` reads, `merge-base`, `ls-tree`, `diff-tree`, `range-diff` and a few more read-only commands now count as reads, so `int git -- worktree list --porcelain` no longer stops on a dirty primary.
+
 ## 0.47.6 - 2026-11-16
 
 - Stop legacy (uncoordinated) forced stack pushes from discarding work another session pushed. `stack push --force-with-lease` (or `--force`), and the stack pushes of `publish` and `reconcile --push`, now read the live remote tip first. If that tip holds a commit the stack does not own (not declared, not reachable from the local stack branch, its base or any tip a `stack rebuild` in this clone produced for the stack, and with no matching patch ID), the push stops and names the commits. Otherwise the lease is pinned to that exact tip (`--force-with-lease=refs/heads/<branch>:<tip>`) instead of trusting the remote-tracking ref, which a fetch may already have moved onto someone else's commits. A lease the caller pins to an exact tip (`-- --force-with-lease=refs/heads/<branch>:<tip>`) is kept as written and replaces that tip, which is how to drop commits once you know they may go; `--force` and `--no-force-with-lease` never turn the push into an unleased one. Dry runs print the command unchanged. Integration pushes (`int push`, `reconcile --push` on the integration branch) keep the plain lease for now.

@@ -1273,6 +1273,15 @@ while the primary has tracked changes, naming the same remedies.
 lands completely. If such an operation pauses on the primary, finish it with
 `syncwheel int git -- <operation> --continue` (or `--abort`, `--skip`, `--quit`); any other
 mutation stays refused until the operation ends.
+Because of that authorization, `int git` refuses arguments that would act outside the
+checked-out integration branch: `update-ref`, `symbolic-ref` writes, Git aliases (configured
+or passed with `-c alias.*`), `-c` overrides of hook, worktree or include settings, and
+`-C`, `--git-dir`, `--work-tree` and the other options that point Git elsewhere, and
+`fetch --update-head-ok` and its long abbreviations. Fetch runs without integration-ref
+authorization. If a
+command leaves the integration worktree on another branch, it exits non-zero and names
+the branch to switch back to. Read-only commands, such as `symbolic-ref HEAD`,
+`worktree list` and `stash list`, run without the dirty-primary refusal.
 
 For `git-tracked` repositories the bundle is required by default. Every normal
 repo-aware Syncwheel command, including `repo tracking status`, `validate`, and

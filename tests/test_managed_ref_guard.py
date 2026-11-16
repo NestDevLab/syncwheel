@@ -2561,6 +2561,142 @@ class ManagedRefGuardTests(unittest.TestCase):
             self.assertEqual(self._rev('HEAD'), head)
         self.assertTrue((self.repo / '.git' / 'CHERRY_PICK_HEAD').exists())
 
+    def _current_branch(self):
+        return subprocess.run(
+            ['git', 'symbolic-ref', '--quiet', '--short', 'HEAD'], cwd=self.repo,
+            text=True, capture_output=True,
+        ).stdout.strip()
+
+    def test_int_git_refuses_direct_ref_and_head_writes(self):
+        one, two = self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'other', one], cwd=self.repo, check=True)
+        attempts = (
+            ['update-ref', 'refs/heads/main-integration', one],
+            ['symbolic-ref', 'HEAD', 'refs/heads/other'],
+            ['-c', 'alias.sw=switch', 'sw', 'other'],
+            ['-C', str(self.repo), 'update-ref', 'refs/heads/main-integration', one],
+            ['--git-dir', str(self.repo / '.git'), 'update-ref', 'refs/heads/main-integration', one],
+            ['fetch', '--update-head-ok', '.', f'+{one}:refs/heads/main-integration'],
+            ['fetch', '--update-head-o', '.', f'+{one}:refs/heads/main-integration'],
+        )
+        for arguments in attempts:
+            refused = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', *arguments)
+            self.assertEqual(refused.returncode, 2, (arguments, refused.stdout, refused.stderr))
+            self.assertIn('int git', refused.stderr)
+            self.assertEqual(self._rev('main-integration'), two, arguments)
+            self.assertEqual(self._current_branch(), 'main-integration', arguments)
+        self._assert_int_git_left_no_authorization()
+
+    def test_int_git_refuses_a_configured_alias(self):
+        one, two = self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'other', one], cwd=self.repo, check=True)
+        subprocess.run(['git', 'config', 'alias.sw', 'switch'], cwd=self.repo, check=True)
+
+        refused = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', 'sw', 'other')
+
+        self.assertEqual(refused.returncode, 2, refused.stderr)
+        self.assertIn('alias', refused.stderr)
+        self.assertEqual(self._current_branch(), 'main-integration')
+
+    def test_int_git_reads_head_and_lists_worktrees_without_authorization(self):
+        self._install_and_branch('main-integration')
+        (self.repo / 'one').write_text('dirty\n')
+
+        head = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', 'symbolic-ref', '--short', 'HEAD')
+        listed = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', 'worktree', 'list', '--porcelain')
+
+        self.assertEqual(head.returncode, 0, head.stderr)
+        self.assertEqual(head.stdout.strip(), 'main-integration')
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        self.assertIn(f'worktree {self.repo.resolve()}', listed.stdout)
+
+    def test_int_git_fetch_bundles_cannot_borrow_ref_authorization(self):
+        one, two = self._install_and_branch('main-integration')
+        before_index = (self.repo / '.git' / 'index').read_bytes()
+        before_files = {name: (self.repo / name).read_bytes() for name in ('one', 'two')}
+        for options in ('-qu', '-uq', '-fu'):
+            with self.subTest(options=options):
+                refused = self.run_syncwheel(
+                    'int', 'git', '--repo', str(self.repo), '--',
+                    'fetch', options, '.', f'+{one}:refs/heads/main-integration',
+                )
+                self.assertNotEqual(refused.returncode, 0, refused.stdout)
+                self.assertIn('refusing unauthorized primary integration ref move', refused.stderr)
+                self.assertEqual(self._rev('main-integration'), two)
+                self.assertEqual((self.repo / '.git' / 'index').read_bytes(), before_index)
+                self.assertEqual({name: (self.repo / name).read_bytes() for name in before_files}, before_files)
+        self._assert_int_git_left_no_authorization()
+
+    def test_int_git_fetch_still_imports_a_remote_tracking_ref(self):
+        one, two = self._install_and_branch('main-integration')
+        before_index = (self.repo / '.git' / 'index').read_bytes()
+        fetched = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--',
+            'fetch', '.', f'{one}:refs/remotes/probe/base',
+        )
+        self.assertEqual(fetched.returncode, 0, fetched.stderr)
+        self.assertEqual(self._rev('refs/remotes/probe/base'), one)
+        self.assertEqual(self._rev('main-integration'), two)
+        self.assertEqual((self.repo / '.git' / 'index').read_bytes(), before_index)
+        self._assert_int_git_left_no_authorization()
+
+    def test_a_stash_push_named_like_a_read_is_still_a_mutation(self):
+        self._install_and_branch('main-integration')
+        (self.repo / 'one').write_text('dirty\n')
+
+        for arguments in (['stash', '-m', 'list'], ['stash', '--', 'list'], ['stash', 'push', 'show']):
+            refused = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', *arguments)
+            self.assertEqual(refused.returncode, 2, (arguments, refused.stderr))
+            self.assertEqual((self.repo / 'one').read_text(), 'dirty\n', arguments)
+
+    def _pause_integration_rebase(self):
+        self._install_and_branch('main-integration')
+        self._side_commits(self._cherry_source(), ('one', 'other branch\n'))
+        self._commit_on_integration('one', 'integration branch\n')
+        before = self._rev('main-integration')
+        result = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'rebase', 'cherry-source'
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(syncwheel.interrupted_git_operation(self.repo), 'rebase')
+        self.assertEqual(self._run_git('symbolic-ref', '-q', 'HEAD').returncode, 1)
+        return before
+
+    def test_int_git_continues_a_paused_detached_rebase(self):
+        self._pause_integration_rebase()
+        (self.repo / 'one').write_text('resolved\n')
+        self.assertEqual(self._run_git('add', 'one').returncode, 0)
+        result = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'rebase', '--continue'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._run_git('symbolic-ref', '--short', 'HEAD').stdout.strip(),
+                         'main-integration')
+        self.assertEqual((self.repo / 'one').read_text(), 'resolved\n')
+        self.assertIsNone(syncwheel.interrupted_git_operation(self.repo))
+        self._assert_int_git_left_no_authorization()
+
+    def test_int_git_aborts_a_paused_detached_rebase(self):
+        before = self._pause_integration_rebase()
+        result = self.run_syncwheel(
+            'int', 'git', '--repo', str(self.repo), '--', 'rebase', '--abort'
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self._rev('HEAD'), before)
+        self.assertEqual(self._run_git('symbolic-ref', '--short', 'HEAD').stdout.strip(),
+                         'main-integration')
+        self.assertIsNone(syncwheel.interrupted_git_operation(self.repo))
+        self._assert_int_git_left_no_authorization()
+
+    def test_int_git_reports_a_switch_off_the_integration_branch(self):
+        one, two = self._install_and_branch('main-integration')
+        subprocess.run(['git', 'branch', 'other', one], cwd=self.repo, check=True)
+
+        switched = self.run_syncwheel('int', 'git', '--repo', str(self.repo), '--', 'switch', 'other')
+
+        self.assertNotEqual(switched.returncode, 0)
+        self.assertIn('main-integration', switched.stderr)
+
     def test_reusable_authorization_never_reaches_a_plain_git_command(self):
         self._install_and_branch('main-integration')
         commits = self._side_commits(self._cherry_source(), ('a', 'a\n'), ('b', 'b\n'))
