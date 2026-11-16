@@ -1650,6 +1650,224 @@ class ManagedRefGuardTests(unittest.TestCase):
             0,
         )
 
+    def write_active_lane_manifest(self, profile='lane', *, source_branch='pr/lane'):
+        branch = syncwheel.personal_integration_branch(profile)
+        path = syncwheel.personal_manifest_path(self.repo, profile)
+        manifest = self.write_selected_manifest(path, branch)
+        manifest['stacks'][0]['branch'] = source_branch
+        manifest['coordination'].update({
+            'mode': 'active-active', 'id': profile, 'state_branch': f'syncwheel/state/{profile}',
+        })
+        path.write_text(json.dumps(manifest, indent=2) + '\n')
+        return branch
+
+    def test_active_personal_manifest_can_use_ready_shared_guard_without_retargeting(self):
+        self._install_and_branch('main-integration')
+        branch = self.write_active_lane_manifest()
+        before = self.hook_bundle_bytes()
+        old, new = self.descendant_commit()
+        refs = subprocess.check_output(['git', 'for-each-ref'], cwd=self.repo)
+        status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertTrue(report['required'])
+        self.assertTrue(report['ready'], report['degradedCauses'])
+        self.assertFalse(report['targetMatchesManifest'])
+        self.assertEqual(report['guard']['integrationBranch'], 'main-integration')
+        self.assertNotEqual(report['guard']['integrationBranch'], branch)
+        moved = subprocess.run(
+            ['git', 'update-ref', 'refs/heads/main-integration', new, old],
+            cwd=self.repo, env=self._clean_env(), capture_output=True, text=True,
+        )
+        self.assertNotEqual(moved.returncode, 0)
+        self.assertIn('unauthorized primary integration ref move', moved.stderr)
+        self.assertEqual(subprocess.check_output(['git', 'for-each-ref'], cwd=self.repo), refs)
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
+    def test_active_personal_manifest_claiming_shared_ref_stays_degraded(self):
+        self._install_and_branch('main-integration')
+        self.write_active_lane_manifest(source_branch='main-integration')
+        before = self.hook_bundle_bytes()
+        status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertFalse(report['ready'])
+        self.assertTrue(report['degraded'])
+        self.assertIn('claims refs/heads/main-integration', ' '.join(report['degradedCauses']))
+        self.assertNotIn('hooks install', ' '.join(report['degradedCauses']))
+        validation = self.run_syncwheel('validate', '--personal', 'lane', '--json')
+        warnings = ' '.join(json.loads(validation.stdout)['warnings'])
+        self.assertIn('claims refs/heads/main-integration', warnings)
+        self.assertNotIn('hooks install', warnings)
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
+    def test_active_personal_manifest_can_consume_a_shared_stack_source(self):
+        self._install_and_branch('main-integration')
+        self.write_active_lane_manifest(source_branch='pr/feature')
+        status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertTrue(report['ready'], report['degradedCauses'])
+
+    def test_active_personal_manifest_claiming_primary_branch_or_state_stays_degraded(self):
+        primary = self.repo / '.syncwheel' / 'manifest.json'
+        self.manifest['coordination']['mode'] = 'active-active'
+        primary.write_text(json.dumps(self.manifest))
+        self._install_and_branch('main-integration')
+        mirror = self.temp_root / 'shared-manifest.json'
+        shutil.copyfile(primary, mirror)
+        shared = self.run_syncwheel('hooks', 'status', '--manifest', str(mirror))
+        self.assertEqual(shared.returncode, 0, shared.stderr)
+        self.assertTrue(json.loads(shared.stdout)['ready'])
+        self.write_active_lane_manifest()
+        personal = syncwheel.personal_manifest_path(self.repo, 'lane')
+        manifest = json.loads(personal.read_text())
+        for section, key, ref in (
+            ('integration', 'branch', 'main-integration'),
+            ('coordination', 'state_branch', 'syncwheel/state/default'),
+            ('both', None, 'main-integration'),
+        ):
+            with self.subTest(ref=ref):
+                data = json.loads(json.dumps(manifest))
+                if section != 'both':
+                    data[section][key] = ref
+                if section in {'integration', 'both'}:
+                    data['integration']['branch'] = ref
+                    data['stacks'][0]['integration_branch'] = ref
+                if section != 'integration':
+                    data['coordination'].update(id='default', state_branch='syncwheel/state/default')
+                personal.write_text(json.dumps(data))
+                status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+                self.assertEqual(status.returncode, 0, status.stderr)
+                report = json.loads(status.stdout)
+                self.assertFalse(report['ready'])
+                self.assertIn(f'refs/heads/{ref}', ' '.join(report['degradedCauses']))
+                if section == 'both':
+                    reconcile = self.run_syncwheel('reconcile', '--no-fetch', '--json', '--personal', 'lane')
+                    hooks = json.loads(reconcile.stdout)['validation']['details']['hooks']
+                    self.assertFalse(hooks['ready'])
+                    self.assertEqual(hooks['degradedCauses'], report['degradedCauses'])
+
+    def test_installed_pre_push_uses_linked_worktree_selection_and_preserves_shared_refs(self):
+        self.manifest['defaults'].update(canonical_remote='primary', publication_remote='primary')
+        self.manifest['coordination'].update(mode='active-active', remote='primary')
+        self.manifest['stacks'][0]['target_remote'] = 'primary'
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(json.dumps(self.manifest))
+        self._install_and_branch('main-integration')
+        branch = self.write_active_lane_manifest()
+        lane = self.temp_root / 'lane'
+        subprocess.run(['git', 'worktree', 'add', '-qb', branch, str(lane)], cwd=self.repo, check=True)
+        personal = syncwheel.personal_manifest_path(lane, 'lane')
+        personal.parent.mkdir(parents=True)
+        lane_manifest = json.loads(syncwheel.personal_manifest_path(self.repo, 'lane').read_text())
+        lane_manifest['defaults'].update(canonical_remote='origin', publication_remote='origin')
+        lane_manifest['coordination']['remote'] = 'origin'
+        lane_manifest['stacks'][0]['target_remote'] = 'origin'
+        personal.write_text(json.dumps(lane_manifest))
+        (lane / '.syncwheel' / 'profile.local.json').write_text('{"personal": "lane"}\n')
+        remote = self.temp_root / 'remote.git'
+        subprocess.run(['git', 'init', '--bare', '-q', str(remote)], check=True)
+        subprocess.run(['git', 'remote', 'add', 'origin', str(remote)], cwd=self.repo, check=True)
+        unavailable = self.temp_root / 'unavailable-primary.git'
+        subprocess.run(['git', 'remote', 'add', 'primary', str(unavailable)], cwd=self.repo, check=True)
+        before = self.hook_bundle_bytes()
+        trace = self.temp_root / 'pre-push.trace'
+        env = dict(self._clean_env(), GIT_TRACE=str(trace))
+        for ref in ('pr/lane', 'syncwheel/state/lane', 'pr/feature'):
+            with self.subTest(ref=ref):
+                pushed = subprocess.run(
+                    ['git', 'push', 'origin', f'HEAD:refs/heads/{ref}'],
+                    cwd=lane, env=env, capture_output=True, text=True,
+                )
+                self.assertNotEqual(pushed.returncode, 0, pushed.stderr)
+                self.assertIn('raw git push blocked', pushed.stderr)
+        self.assertEqual(subprocess.check_output(['git', 'for-each-ref'], cwd=remote), b'')
+        scratch = subprocess.run(
+            ['git', 'push', 'origin', 'HEAD:refs/heads/scratch'],
+            cwd=lane, env=env, capture_output=True, text=True,
+        )
+        self.assertEqual(scratch.returncode, 0, scratch.stderr)
+        self.assertNotIn(str(unavailable), trace.read_text())
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
+    def test_active_personal_manifest_passes_strict_check_with_shared_guard(self):
+        self._install_and_branch('main-integration')
+        branch = self.write_active_lane_manifest()
+        subprocess.run(
+            ['git', 'remote', 'add', 'origin', str(self.temp_root / 'remote.git')],
+            cwd=self.repo, check=True,
+        )
+        for ref in (
+            f'refs/heads/{branch}', 'refs/heads/pr/lane',
+            'refs/remotes/origin/main', 'refs/remotes/origin/pr/lane',
+        ):
+            subprocess.run(['git', 'update-ref', ref, 'HEAD'], cwd=self.repo, check=True)
+        before = self.hook_bundle_bytes()
+        refs = subprocess.check_output(['git', 'for-each-ref'], cwd=self.repo)
+        checked = self.run_syncwheel('check', '--no-fetch', '--strict', '--json', '--personal', 'lane')
+        self.assertEqual(checked.returncode, 0, checked.stdout + checked.stderr)
+        report = json.loads(checked.stdout)
+        self.assertEqual(report['validation']['warnings'], [])
+        self.assertEqual(report['readiness'], {'ready': True, 'blockers': []})
+        self.assertEqual(self.hook_bundle_bytes(), before)
+        self.assertEqual(subprocess.check_output(['git', 'for-each-ref'], cwd=self.repo), refs)
+
+    def test_active_personal_manifest_with_malformed_primary_ownership_stays_degraded(self):
+        self._install_and_branch('main-integration')
+        self.write_active_lane_manifest()
+        (self.repo / '.syncwheel' / 'manifest.json').write_text(
+            '{"integration": {"branch": "main-integration"}}\n'
+        )
+        before = self.hook_bundle_bytes()
+        status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertFalse(report['ready'])
+        self.assertTrue(report['degraded'])
+        causes = ' '.join(report['degradedCauses'])
+        self.assertIn('using the manifest that owns the primary checkout', causes)
+        self.assertNotIn('--personal', causes)
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
+    def test_active_personal_manifest_still_reports_missing_or_tampered_pre_push(self):
+        self._install_and_branch('main-integration')
+        self.write_active_lane_manifest()
+        pre_push = syncwheel.managed_hook_paths(self.repo, 'pre-push')[1]
+        pre_push.write_text(pre_push.read_text() + '\n# altered guard\n')
+        for cause in ('differs', 'missing'):
+            with self.subTest(cause=cause):
+                if cause == 'missing':
+                    pre_push.unlink()
+                before = self.hook_bundle_bytes()
+                status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+                self.assertEqual(status.returncode, 0, status.stderr)
+                report = json.loads(status.stdout)
+                self.assertFalse(report['ready'])
+                self.assertTrue(report['required'])
+                causes = ' '.join(report['degradedCauses'])
+                self.assertIn('pre-push:', causes)
+                self.assertIn(cause, causes)
+                self.assertIn('using the manifest that owns the primary checkout', causes)
+                self.assertNotIn('--personal', causes)
+                self.assertEqual(self.hook_bundle_bytes(), before)
+
+    def test_active_personal_manifest_retains_explicit_shared_guard_disable(self):
+        self._install_and_branch('main-integration')
+        self.write_active_lane_manifest()
+        disabled = self.run_syncwheel(
+            'hooks', 'remove', '--disable', '--reason', 'reviewed fixture opt-out', '--apply',
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        before = self.hook_bundle_bytes()
+        status = self.run_syncwheel('hooks', 'status', '--personal', 'lane')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertEqual(report['status'], 'disabled')
+        self.assertEqual(report['disabledReason'], 'reviewed fixture opt-out')
+        self.assertFalse(report['ready'])
+        self.assertFalse(report['degraded'])
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
     def test_personal_hook_lifecycle_uses_selected_branch_and_ledger(self):
         profile = 'alt'
         branch = syncwheel.personal_integration_branch(profile)

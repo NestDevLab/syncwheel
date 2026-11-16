@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.12 - 2026-11-16
+
+- Scope guard policy to the selected manifest's managed refs when it does not own the primary checkout. A different lane integration branch no longer degrades the shared primary guard, and lane diagnostics do not recommend retargeting that guard. Primary-owner mismatches and damaged hook bundles remain visible.
+
 ## 0.47.11 - 2026-11-16
 
 - Resolve a paused rebase through its per-worktree branch record, so `int git -- rebase --continue` and `--abort` find the detached checkout. Missing unrelated checkout directories do not prevent recovery; missing matching records still count when refusing ambiguous matches.

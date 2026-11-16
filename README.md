@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.11`
+Current version: `0.47.12`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1261,8 +1261,10 @@ The `pre-push` guard derives guarded refs from the manifest and published coordi
 including integration, stack and draft sources, channels, coordination state, an
 owned journal branch, and the delivery branches that only `stack land` may publish.
 It blocks direct, aliased, multi-ref, delete, force, and `HEAD:<managed>` pushes,
-then names the corresponding Syncwheel publisher. Existing
-hooks are chained and restored on removal; `core.hooksPath` is honored.
+then names the corresponding Syncwheel publisher. In a linked worktree, the
+pre-push hook also protects the refs declared locally by the primary manifest,
+without contacting the primary's publication remote. Existing hooks are chained
+and restored on removal; `core.hooksPath` is honored.
 
 The same bundle installs `post-checkout`, `pre-commit`, and `reference-transaction` guards
 for the primary checkout (0.42.4+). `post-checkout` compares the worktree with the declared
@@ -1292,16 +1294,16 @@ command leaves the integration worktree on another branch, it exits non-zero and
 the branch to switch back to. Read-only commands, such as `symbolic-ref HEAD`,
 `worktree list` and `stash list`, run without the dirty-primary refusal.
 
-For `git-tracked` repositories the bundle is required by default. Every normal
-repo-aware Syncwheel command, including `repo tracking status`, `validate`, and
-`status`, checks and converges the bundle before continuing. Initialization and a
-transition to `git-tracked` converge it in the same command. Explicit `hooks
-status|install|remove` lifecycle commands remain observational or plan-first so they
-can inspect and administer an absent bundle; the generated hook callbacks are also
-excluded to prevent recursion. Existing non-Syncwheel hooks are chained and restored
-on removal. `local-only` contribution clones remain opt-in. The only escape hatch is
-a persisted clone-local disable with a non-empty reason, which stays visible in
-validation.
+For `git-tracked` repositories the bundle is required by default. Status and
+validation report an absent, stale or damaged bundle; normal commands do not
+install it implicitly. A lane manifest that does not own the primary checkout is
+checked against its own managed refs. Its different integration branch is not a
+reason to retarget the shared primary guard. Repair that guard only through the
+manifest that owns the primary, after reviewing the hook installation plan.
+Explicit `hooks status|install|remove` commands remain observational or plan-first.
+Existing non-Syncwheel hooks are chained and restored on removal. `local-only`
+contribution clones remain opt-in. A persisted clone-local disable requires a
+non-empty reason and stays visible in validation.
 
 Syncwheel publishers use a short-lived, single-use authorization scoped to the
 remote and allowed destination refset.

@@ -1213,8 +1213,8 @@ def value_preserving_ref_updates(repo_root, updates):
 
 def primary_guard_repair_remedy(error):
     return (
-        f'{error}; run syncwheel hooks install --apply with the intended '
-        '--personal/--manifest selection'
+        f'{error}; run syncwheel hooks install --apply using the manifest that '
+        'owns the primary checkout'
     )
 
 
@@ -1248,8 +1248,12 @@ def atomic_write_private_json(path, payload, *, indent=None):
 
 
 def primary_guard_branch(manifest):
+    if not isinstance(manifest, dict):
+        return None
     section = 'journal' if manifest.get('repository_mode') == 'journal' else 'integration'
-    return (manifest.get(section) or {}).get('branch')
+    config = manifest.get(section)
+    branch = config.get('branch') if isinstance(config, dict) else None
+    return branch if isinstance(branch, str) and branch.strip() else None
 
 
 def primary_guard_payload(manifest, *, enabled=True, reason=None):
@@ -1801,14 +1805,40 @@ def managed_hook_bundle_status(repo_root):
     }
 
 
-def managed_push_guard_policy(repo_root, manifest):
+def primary_guard_manifest(repo_root):
+    worktrees = get_worktrees(repo_root)
+    if not worktrees or not worktrees[0].get('path'):
+        return None, None, False
+    root = Path(worktrees[0]['path'])
+    path = root / '.syncwheel' / 'manifest.json'
+    try:
+        manifest, _ = _manifest_storage.load_manifest(root, path)
+        return manifest, path, False
+    except (OSError, ValueError, SyncwheelError, AttributeError, TypeError):
+        return None, path, True
+
+
+def guard_coordination_ref(manifest):
+    if coordination_is_active(manifest):
+        return coordination_state_ref(coordination_config(manifest))
+    return None
+
+
+def guard_projection_refs(manifest):
+    refs = {f'refs/heads/{primary_guard_branch(manifest)}'}
+    state_ref = guard_coordination_ref(manifest)
+    if state_ref:
+        refs.add(state_ref)
+    return refs
+
+
+def managed_push_guard_policy(repo_root, manifest, manifest_path=None):
     guard, guard_error = inspect_primary_guard(repo_root)
     selected_branch = primary_guard_branch(manifest)
     branch_matches = bool(
         guard and guard['integrationBranch'] == selected_branch
     )
     disabled = bool(guard and not guard['enabled'])
-    enforced = bool(guard and branch_matches and guard['enabled'])
     reason = guard.get('reason') if guard else None
     tracking = manifest.get('syncwheel_tracking')
     required = tracking == SYNCWHEEL_TRACKING_GIT_TRACKED and bool(
@@ -1819,19 +1849,49 @@ def managed_push_guard_policy(repo_root, manifest):
     bundle = managed_hook_bundle_status(repo_root)
     hook = bundle['hooks']['pre-push']
     degraded_causes = []
+    shared_guard_matches = False
     if guard_error:
-        degraded_causes.append(
-            f'{guard_error}; run syncwheel hooks install --apply with the intended '
-            '--personal/--manifest selection'
+        degraded_causes.append(primary_guard_repair_remedy(guard_error))
+    elif guard:
+        primary_manifest, primary_path, invalid_primary = primary_guard_manifest(repo_root)
+        primary_branch = primary_guard_branch(primary_manifest)
+        guarded_branch = guard['integrationBranch']
+        alternate_path = (
+            manifest_path is not None and primary_path is not None
+            and Path(manifest_path).resolve() != primary_path.resolve()
         )
-    elif guard and not branch_matches:
-        degraded_causes.append(
-            f"primary guard targets {guard['integrationBranch']!r}, but the selected "
-            f"manifest declares {selected_branch!r}; run syncwheel hooks install "
-            '--apply with the same --personal/--manifest selection'
-        )
-    if guard and guard['enabled'] and branch_matches:
-        degraded_causes.extend(bundle['degradedCauses'])
+        if invalid_primary and alternate_path:
+            degraded_causes.append(primary_guard_repair_remedy(
+                'cannot verify ownership from the primary checkout manifest'
+            ))
+        elif primary_branch == guarded_branch and (
+            selected_branch != primary_branch
+            or guard_coordination_ref(manifest) != guard_coordination_ref(primary_manifest)
+            or (alternate_path and manifest != primary_manifest)
+        ):
+            # A lane may consume shared stack sources. The publication claim
+            # checks own stack ownership separately from this projection guard.
+            selected_refs = guard_projection_refs(manifest)
+            if manifest.get('repository_mode') != 'journal':
+                selected_refs.update(managed_ref_names(manifest))
+            overlap = selected_refs & guard_projection_refs(primary_manifest)
+            if overlap:
+                degraded_causes.append(
+                    'selected manifest claims ' + ', '.join(sorted(overlap))
+                    + ', which belongs to the primary checkout; choose distinct refs '
+                    'for the selected manifest'
+                )
+            else:
+                shared_guard_matches = True
+        elif not branch_matches:
+            expected = primary_branch or selected_branch
+            scope = 'primary projection' if primary_branch else 'selected manifest'
+            degraded_causes.append(primary_guard_repair_remedy(
+                f'primary guard targets {guarded_branch!r}, but the {scope} expects {expected!r}'
+            ))
+    enforced = bool(guard and guard['enabled'] and (branch_matches or shared_guard_matches))
+    if guard and guard['enabled']:
+        degraded_causes.extend(primary_guard_repair_remedy(cause) for cause in bundle['degradedCauses'])
     degraded = bool(degraded_causes)
     ready = enforced and bundle['ready'] and not degraded
     migration_pending = required and guard_error == 'primary guard configuration is missing'
@@ -1864,8 +1924,8 @@ def managed_push_guard_policy(repo_root, manifest):
     }
 
 
-def ensure_managed_repository_hooks(repo_root, manifest):
-    policy = managed_push_guard_policy(repo_root, manifest)
+def ensure_managed_repository_hooks(repo_root, manifest, manifest_path=None):
+    policy = managed_push_guard_policy(repo_root, manifest, manifest_path)
     if not policy['required'] or policy['disabled']:
         return policy
     # An absent bundle is visible in status but does not turn ordinary repository
@@ -1993,7 +2053,7 @@ def install_managed_push_hook(
     else:
         results = plans
     bundle = managed_hook_bundle_status(repo_root)
-    policy = managed_push_guard_policy(repo_root, selected_manifest)
+    policy = managed_push_guard_policy(repo_root, selected_manifest, manifest_path)
     pre_push = bundle['hooks']['pre-push']
     changed = [item['action'] for item in results.values() if item['action'] != 'none']
     return {
@@ -2078,13 +2138,22 @@ def remove_managed_push_hook(
     }
 
 
-def managed_push_refs(repo_root, manifest):
+def locally_configured_push_refs(manifest):
     refs = set(managed_ref_names(manifest))
     refs.update(coordination_claim_ref(ref) for ref in list(refs))
     refs.update(delivery_ref_names(manifest))
+    state_ref = guard_coordination_ref(manifest)
+    if state_ref:
+        refs.add(state_ref)
+    if manifest.get('repository_mode') == 'journal':
+        refs.add(f"refs/heads/{manifest['journal']['branch']}")
+    return refs
+
+
+def managed_push_refs(repo_root, manifest):
+    refs = locally_configured_push_refs(manifest)
     config = coordination_config(manifest)
     if config and config.get('mode') == 'active-active':
-        refs.add(coordination_state_ref(config))
         previous = read_remote_coordination_state(
             repo_root, config, fetch=True, local_manifest_version=manifest['version']
         )
@@ -2094,8 +2163,6 @@ def managed_push_refs(repo_root, manifest):
                 coordination_claim_ref(ref)
                 for ref in previous['state'].get('managed_refs') or {}
             )
-    if manifest.get('repository_mode') == 'journal':
-        refs.add(f"refs/heads/{manifest['journal']['branch']}")
     return refs
 
 
@@ -3631,17 +3698,10 @@ def primary_checkout_state(repo_root, manifest):
     shared_expected = None
     if shared_manifest and shared_manifest.exists():
         try:
-            shared_data = json.loads(shared_manifest.read_text())
-            if shared_data.get('repository_mode') == 'journal':
-                shared_expected = shared_data.get('journal', {}).get('branch')
-            else:
-                shared_expected = shared_data.get('integration', {}).get('branch')
-        except (OSError, json.JSONDecodeError):
+            shared_expected = primary_guard_branch(json.loads(shared_manifest.read_text()))
+        except (OSError, ValueError):
             pass
-    if manifest and manifest.get('repository_mode') == 'journal':
-        active_expected = manifest['journal']['branch']
-    else:
-        active_expected = manifest['integration']['branch'] if manifest else None
+    active_expected = primary_guard_branch(manifest)
     expected = shared_expected or active_expected
     allowed = list(dict.fromkeys(branch for branch in (expected, active_expected) if branch))
     actual = primary.get('branch', 'DETACHED')
@@ -5614,7 +5674,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     stack = require_stack(manifest, stack_id)
     blockers = []
     warnings = []
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     for error in validation.get('errors', []):
         github_blocker(blockers, 'manifest_invalid', error)
     source_revision, declared = github_stack_git_preflight(
@@ -9309,7 +9369,7 @@ def command_gc(args):
 def command_handoff(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     config = coordination_config(manifest)
     output = {
         'manifest_path': str(manifest_path),
@@ -9795,7 +9855,7 @@ def collect_repo_snapshot(repo_root, manifest):
     }
 
 
-def validate_manifest(repo_root, manifest):
+def validate_manifest(repo_root, manifest, manifest_path=None):
     warnings = []
     errors = []
     prime_commits(repo_root, [
@@ -9806,19 +9866,18 @@ def validate_manifest(repo_root, manifest):
         if isinstance(commit, str)
     ])
     details = {'stacks': [], 'channels': [], 'integration': {}, 'coordination': {}}
-    hooks = managed_push_guard_policy(repo_root, manifest)
+    hooks = managed_push_guard_policy(repo_root, manifest, manifest_path)
     details['hooks'] = hooks
     if hooks['disabled']:
         warnings.append(f"managed repository guards explicitly disabled: {hooks['disabledReason']}")
     if hooks['migrationPending']:
         warnings.append(
             'managed repository guards required; this clone is pending migration. '
-            'use `syncwheel hooks install --apply` to install them'
+            + '; '.join(hooks['degradedCauses'])
         )
     elif hooks['required'] and hooks['degraded']:
         warnings.append(
-            'managed repository guards are missing, stale, or tampered. '
-            'run `syncwheel hooks install --apply` to install or repair them. causes: '
+            'managed repository guards are degraded. causes: '
             + '; '.join(hooks['degradedCauses'])
         )
     if manifest.get('repository_mode') == 'journal':
@@ -12224,7 +12283,7 @@ def command_status(args):
     snapshot = collect_repo_snapshot(repo_root, manifest)
     output = {'snapshot': snapshot, 'manifest_path': str(manifest_path), 'manifest_present': manifest is not None}
     if manifest:
-        validation = validate_manifest(repo_root, manifest)
+        validation = validate_manifest(repo_root, manifest, manifest_path)
         output['validation'] = validation
         output['plan'] = build_plan(repo_root, manifest, validation)
         output['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
@@ -12317,7 +12376,7 @@ def command_validate(args):
     manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     if args.json:
         print(json.dumps(validation, indent=2))
     else:
@@ -12336,7 +12395,7 @@ def command_plan(args):
     manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     plan = build_plan(repo_root, manifest, validation)
     if args.json:
         print(json.dumps(plan, indent=2))
@@ -12357,7 +12416,7 @@ def command_check(args):
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     snapshot = collect_repo_snapshot(repo_root, manifest)
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     journal = manifest.get('repository_mode') == 'journal'
     plan = build_plan(repo_root, manifest, validation)
     diagnostics = [] if journal else integration_commit_diagnostics(repo_root, manifest, validation)
@@ -14823,7 +14882,7 @@ def build_stack_land_plan(repo_root, manifest, manifest_path, stack_id, args):
             'stack land STOP: direct landing is disabled; use --allow-direct for this explicit request '
             'or run syncwheel stack promote ' + stack_id
         )
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     if validation['errors']:
         raise SyncwheelError('stack land STOP: manifest validation failed: ' + '; '.join(validation['errors']))
     derived_source = [
@@ -16137,7 +16196,7 @@ def command_reconcile(args):
     resume_manifest_changed = False
     if args.mode == 'resume':
         original_manifest = json.loads(json.dumps(manifest))
-        initial_validation = validate_manifest(repo_root, manifest)
+        initial_validation = validate_manifest(repo_root, manifest, manifest_path)
         initial_diagnostics = integration_commit_diagnostics(repo_root, manifest, initial_validation, manifest_path)
         selected_stack_ids = args.stack or None
         resume_actions, effective_manifest = plan_resume_mutations(
@@ -16169,7 +16228,7 @@ def command_reconcile(args):
         for stack_id in args.stack:
             if stack_id not in known:
                 raise SyncwheelError(f'unknown stack: {stack_id}')
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     worktree_root = effective_worktree_root(manifest, args.worktree_root)
     stack_ids = set(args.stack or [stack['id'] for stack in manifest['stacks']])
     stack_reports = {
@@ -16761,7 +16820,7 @@ def command_int_sync_status(args):
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     report = integration_sync_report(repo_root, manifest, args.remote)
     output = {
         'manifest_path': str(manifest_path),
@@ -17183,7 +17242,7 @@ def command_int_rebuild(args):
             return 0
         return rebuild_integration_desk(repo_root, manifest, manifest_path, args)
     integration = manifest['integration']
-    validation = validate_manifest(repo_root, manifest)
+    validation = validate_manifest(repo_root, manifest, manifest_path)
     narrowed = validation['details']['integration'].get(
         'derived_paths_narrowed'
     ) or []
@@ -18402,7 +18461,7 @@ def command_repo_tracking_set(args):
             'repo_tracking_set',
             {'syncwheel_tracking': tracking, 'syncwheel_worktree_root': worktree_root},
         )
-        ensure_managed_repository_hooks(repo_root, manifest)
+        ensure_managed_repository_hooks(repo_root, manifest, manifest_path)
         git_add_paths(
             repo_root,
             [manifest_path, repo_root / '.gitignore', readme_path],
@@ -18663,8 +18722,8 @@ def command_self_install_hooks(args):
 
 def command_hooks_status(args):
     repo_root = resolve_repo_root(args.repo)
-    manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    print(json.dumps(managed_push_guard_policy(repo_root, manifest), indent=2, sort_keys=True))
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    print(json.dumps(managed_push_guard_policy(repo_root, manifest, manifest_path), indent=2, sort_keys=True))
     return 0
 
 
@@ -18709,7 +18768,13 @@ def command_hooks_guard(args):
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     updates = parse_pre_push_updates(sys.stdin)
     destinations = sorted({item['remoteRef'] for item in updates})
-    protected = sorted(set(destinations).intersection(managed_push_refs(repo_root, manifest)))
+    protected_refs = managed_push_refs(repo_root, manifest)
+    primary_manifest, _, _ = primary_guard_manifest(repo_root)
+    if primary_manifest and primary_manifest != manifest:
+        # The selected scope already checked its remote history. The primary
+        # may publish elsewhere, so add only its local declarations here.
+        protected_refs.update(locally_configured_push_refs(primary_manifest))
+    protected = sorted(set(destinations).intersection(protected_refs))
     if not protected:
         return 0
     if verify_managed_push_authorization(repo_root, args.remote_name, destinations):
@@ -19180,7 +19245,7 @@ def primary_checkout_preflight(args):
     if (
         syncwheel_mutation_requested(args)
         and not primary_guard_remedy_requested(args)
-        and not managed_push_guard_policy(primary_root, manifest)['disabled']
+        and not managed_push_guard_policy(primary_root, manifest, manifest_path)['disabled']
     ):
         # A resume owns its destination's index, which can be a linked checkout.
         # Resolve existing registrations only; this exception must not create a
@@ -19262,7 +19327,7 @@ def converge_default_repository_hooks(args):
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         return None
-    return ensure_managed_repository_hooks(repo_root, manifest)
+    return ensure_managed_repository_hooks(repo_root, manifest, manifest_path)
 
 
 def governed_worktree_mutation_requested(args):
@@ -19680,10 +19745,10 @@ def execute_parsed_command(args):
         )
         if mutating:
             repo_root = resolve_repo_root(args.repo)
-            manifest, _ = require_manifest(
+            manifest, manifest_path = require_manifest(
                 repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
             )
-            ensure_managed_repository_hooks(repo_root, manifest)
+            ensure_managed_repository_hooks(repo_root, manifest, manifest_path)
     return args.func(args)
 
 
@@ -19794,7 +19859,7 @@ def main():
                 if args.func != command_init and manifest_path.exists():
                     existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
-                        ensure_managed_repository_hooks(repo_root, existing_manifest)
+                        ensure_managed_repository_hooks(repo_root, existing_manifest, manifest_path)
                 with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
                     return execute_parsed_command(args)
             return execute_parsed_command(args)
