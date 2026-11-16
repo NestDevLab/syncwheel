@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.23 - 2026-11-16
+
+- Evaluate the latest verified check run per workflow and check name for PR merges. Report superseded runs as informational while preserving blocks for current failures, pending checks, distinct workflows and ambiguous history. Apply the same selection to required checks.
+
 ## 0.47.21 - 2026-11-16
 
 - Keep status without fetch, check with --no-fetch, and worktree list observational on control metadata. Skip implicit startup maintenance, authorization nonce creation or cleanup, and persistent patch-ID cache writes while preserving manifest selection checks and explicit fetch behavior.

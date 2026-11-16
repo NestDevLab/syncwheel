@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fixed GitHub adapter for Syncwheel's plan-first PR merge contract."""
 
+from collections import Counter
 import json
 import os
 import re
@@ -11,6 +12,8 @@ import sys
 SCHEMA_VERSION = 1
 DEFAULT_TIMEOUT_SECONDS = 30
 MAX_OUTPUT = 12000
+CHECK_OBSERVATION_PAGE_LIMIT = 10
+CHECK_ATTEMPT_REQUEST_LIMIT = 8
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 METHODS = {"squash", "merge", "rebase"}
 
@@ -21,12 +24,26 @@ PR_FIELDS = (
 )
 PR_LIST_FIELDS = "number,url,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid"
 
+CHECK_CONTEXT_FIELDS = (
+    "totalCount pageInfo{hasNextPage endCursor} nodes{__typename "
+    "... on CheckRun{id name status conclusion detailsUrl} "
+    "... on StatusContext{id context state}}"
+)
 THREAD_QUERY = (
     "query($owner:String!,$name:String!,$number:Int!){"
     "repository(owner:$owner,name:$name){"
     "pullRequest(number:$number){"
     "reviewThreads(first:100){nodes{isResolved isOutdated}pageInfo{hasNextPage}}"
-    "}}}"
+    "commits(last:1){nodes{commit{oid statusCheckRollup{"
+    "contexts(first:100){" + CHECK_CONTEXT_FIELDS + "}"
+    "}}}}}}}"
+)
+CHECK_PAGE_QUERY = (
+    "query($owner:String!,$name:String!,$head:GitObjectID!,$cursor:String!){"
+    "repository(owner:$owner,name:$name){"
+    "object(oid:$head){... on Commit{oid statusCheckRollup{"
+    "contexts(first:100,after:$cursor){" + CHECK_CONTEXT_FIELDS + "}"
+    "}}}}}"
 )
 
 
@@ -154,18 +171,296 @@ def _checks(pr):
     for item in pr.get("statusCheckRollup") or []:
         if not isinstance(item, dict):
             continue
-        name = item.get("name") or item.get("context") or item.get("app", {}).get("name")
+        legacy = item.get("__typename") == "StatusContext" or (
+            "context" in item and item.get("__typename") != "CheckRun"
+        )
+        app = item.get("app")
         status = item.get("status") or item.get("state")
         conclusion = item.get("conclusion")
-        if not status and conclusion:
-            status = conclusion
-        normalized.append({
-            "name": name,
-            "status": status,
+        check = {
+            "name": item.get("name") or item.get("context"),
+            "status": status or conclusion,
             "conclusion": conclusion,
             "required": False,
-        })
+            "kind": "status-context" if legacy else "check-run",
+        }
+        if isinstance(app, dict) and _positive_integer(app.get("id")):
+            check["appId"] = app["id"]
+        if isinstance(item.get("headSha"), str):
+            check["headSha"] = item["headSha"]
+        if isinstance(item.get("detailsUrl"), str) and item["detailsUrl"]:
+            check["detailsUrl"] = item["detailsUrl"]
+        normalized.append(check)
     return normalized
+
+
+def _positive_integer(value):
+    return type(value) is int and value > 0
+
+
+def _paged_objects(path, key, cwd, *, max_pages=CHECK_OBSERVATION_PAGE_LIMIT):
+    rows = []
+    total = None
+    delimiter = "&" if "?" in path else "?"
+    for page in range(1, max_pages + 1):
+        endpoint = f"{path}{delimiter}per_page=100&page={page}"
+        response = run_json(["api", endpoint], cwd)["value"]
+        if not isinstance(response, dict):
+            raise AdapterError(f"incomplete GitHub {key} observation")
+        batch = response.get(key)
+        count = response.get("total_count")
+        if (type(count) is not int or count < 0 or count > max_pages * 100
+                or (total is not None and count != total)
+                or not isinstance(batch, list)
+                or len(batch) != min(100, count - len(rows))
+                or any(not isinstance(item, dict) for item in batch)):
+            raise AdapterError(f"incomplete GitHub {key} observation")
+        total = count
+        rows.extend(batch)
+        if len(rows) == total:
+            return rows
+    raise AdapterError(f"GitHub {key} observation exceeded its page limit")
+
+
+def _check_attempts(repository, head, checks, runs, cwd):
+    duplicates = {}
+    for check in checks:
+        if "runId" not in check:
+            continue
+        key = (check["runId"], check["name"])
+        duplicates.setdefault(key, []).append(check)
+    unresolved_runs = sorted({key[0] for key, rows in duplicates.items() if len(rows) > 1})
+    remaining = CHECK_ATTEMPT_REQUEST_LIMIT
+    incomplete = False
+    base = f"repos/{repository}/actions/runs"
+    expected_url = re.compile(
+        rf"https://[^/]+/repos/{re.escape(repository)}/check-runs/([1-9][0-9]*)", re.IGNORECASE,
+    )
+    for run_id in unresolved_runs:
+        last = runs[run_id].get("run_attempt")
+        if not _positive_integer(last) or last > remaining:
+            incomplete = True
+            continue
+        observed = {}
+        remaining -= last
+        try:
+            for attempt in range(1, last + 1):
+                jobs = _paged_objects(f"{base}/{run_id}/attempts/{attempt}/jobs", "jobs", cwd, max_pages=1)
+                for job in jobs:
+                    url = job.get("check_run_url")
+                    match = expected_url.fullmatch(url) if isinstance(url, str) else None
+                    if (not match or job.get("run_id") != run_id or job.get("head_sha") != head
+                            or not isinstance(job.get("name"), str)):
+                        raise AdapterError("a workflow job did not match its observed attempt")
+                    check_id = int(match[1])
+                    if check_id in observed:
+                        raise AdapterError("a workflow job appeared in multiple attempts")
+                    observed[check_id] = (attempt, job["name"])
+        except AdapterError:
+            incomplete = True
+            continue
+        for key, rows in duplicates.items():
+            if key[0] != run_id:
+                continue
+            for row in rows:
+                attempt = observed.get(row["checkRunId"])
+                if attempt and attempt[1] == row["name"]:
+                    row["runAttempt"] = attempt[0]
+    return incomplete
+
+
+def _graph_repository(graph):
+    if not isinstance(graph, dict) or graph.get("errors"):
+        return {}
+    data = graph.get("data")
+    repository = data.get("repository") if isinstance(data, dict) else None
+    return repository if isinstance(repository, dict) else {}
+
+
+def _graph_check_nodes(graph, head, repository, cwd):
+    pr = _graph_repository(graph).get("pullRequest")
+    commits = pr.get("commits") if isinstance(pr, dict) else None
+    nodes = commits.get("nodes") if isinstance(commits, dict) else None
+    if not isinstance(nodes, list) or len(nodes) != 1 or not isinstance(nodes[0], dict):
+        return None
+    commit = nodes[0].get("commit")
+    owner, name = _split_repository(repository)
+    observed = []
+    cursors = set()
+    ids = set()
+    total = None
+    for page_number in range(CHECK_OBSERVATION_PAGE_LIMIT):
+        if not isinstance(commit, dict) or commit.get("oid") != head:
+            return None
+        rollup = commit.get("statusCheckRollup")
+        if rollup is None and "statusCheckRollup" in commit and page_number == 0:
+            return []
+        contexts = rollup.get("contexts") if isinstance(rollup, dict) else None
+        if not isinstance(contexts, dict):
+            return None
+        rows, page, count = (contexts.get(key) for key in ("nodes", "pageInfo", "totalCount"))
+        if (not isinstance(rows, list) or len(rows) > 100 or type(count) is not int
+                or not 0 <= count <= CHECK_OBSERVATION_PAGE_LIMIT * 100
+                or (total is not None and total != count) or len(observed) + len(rows) > count
+                or not isinstance(page, dict) or type(page.get("hasNextPage")) is not bool):
+            return None
+        total = count
+        for row in rows:
+            if not isinstance(row, dict) or row.get("__typename") not in {"CheckRun", "StatusContext"}:
+                return None
+            node_id = row.get("id")
+            if not isinstance(node_id, str) or not node_id or node_id in ids:
+                return None
+            ids.add(node_id)
+            observed.append(row)
+        if not page["hasNextPage"]:
+            return observed if len(observed) == total else None
+        cursor = page.get("endCursor")
+        if (not rows or len(observed) >= total or not isinstance(cursor, str) or not cursor
+                or cursor in cursors or page_number + 1 == CHECK_OBSERVATION_PAGE_LIMIT):
+            return None
+        cursors.add(cursor)
+        try:
+            result = run_json([
+                "api", "graphql", "-f", f"query={CHECK_PAGE_QUERY}",
+                "-f", f"owner={owner}", "-f", f"name={name}", "-f", f"head={head}", "-f", f"cursor={cursor}",
+            ], cwd)["value"]
+        except AdapterError:
+            return None
+        commit = _graph_repository(result).get("object")
+    return None
+
+
+def _observed_checks(pr, graph, repository, cwd):
+    rollup = _checks(pr)
+    check_runs = [item for item in rollup if item["kind"] == "check-run"]
+    head = pr.get("headRefOid")
+    if not isinstance(head, str) or not re.fullmatch(r"[0-9a-f]{40}", head):
+        return rollup, bool(check_runs)
+    graph_rows = _graph_check_nodes(graph, head, repository, cwd)
+    base = f"repos/{repository}"
+    try:
+        raw_checks = _paged_objects(f"{base}/commits/{head}/check-runs?filter=all", "check_runs", cwd)
+        ids = [item.get("id") for item in raw_checks]
+        if (not all(_positive_integer(check_id) for check_id in ids)
+                or len(set(ids)) != len(ids)
+                or any(item.get("head_sha") != head for item in raw_checks)):
+            raise AdapterError("check runs did not match the observed PR head")
+    except AdapterError:
+        return rollup, True
+
+    actions = [
+        item for item in raw_checks
+        if isinstance(item.get("app"), dict) and item["app"].get("slug") == "github-actions"
+    ]
+    by_suite = {}
+    actions_runs = {}
+    incomplete = graph_rows is None
+    if actions:
+        try:
+            runs = _paged_objects(f"{base}/actions/runs?head_sha={head}", "workflow_runs", cwd)
+            keys = ("id", "check_suite_id", "workflow_id", "run_number")
+            if (len(runs) >= 1000 or any(run.get("head_sha") != head
+                    or not all(_positive_integer(run.get(key)) for key in keys) for run in runs)):
+                raise AdapterError("workflow run history is incomplete or mismatches the PR head")
+            suite_counts = Counter(run["check_suite_id"] for run in runs)
+            run_counts = Counter(run["id"] for run in runs)
+            for run in runs:
+                suite = run["check_suite_id"]
+                if suite_counts[suite] == run_counts[run["id"]] == 1:
+                    by_suite[suite] = run
+                    actions_runs[run["id"]] = run
+                else:
+                    incomplete = True
+        except AdapterError:
+            incomplete = True
+
+    checks = []
+    for item in raw_checks:
+        app = item.get("app")
+        suite = item.get("check_suite")
+        status = item.get("status")
+        conclusion = item.get("conclusion")
+        check = {
+            "kind": "check-run", "name": item.get("name"), "required": False,
+            "status": status.upper() if isinstance(status, str) else None,
+            "conclusion": conclusion.upper() if isinstance(conclusion, str) else None,
+            "headSha": head, "checkRunId": item["id"],
+        }
+        if isinstance(item.get("details_url"), str) and item["details_url"]:
+            check["detailsUrl"] = item["details_url"]
+        if isinstance(item.get("node_id"), str) and item["node_id"]:
+            check["checkNodeId"] = item["node_id"]
+        if isinstance(app, dict) and _positive_integer(app.get("id")):
+            check["appId"] = app["id"]
+            if app.get("slug") == "github-actions" and isinstance(suite, dict):
+                run = by_suite.get(suite.get("id")) if _positive_integer(suite.get("id")) else None
+                if run and run["id"] in actions_runs:
+                    check.update(
+                        workflowId=run["workflow_id"], runId=run["id"],
+                        runNumber=run["run_number"], runCreatedAt=run.get("created_at"),
+                    )
+        checks.append(check)
+
+    attempts_incomplete = _check_attempts(repository, head, checks, actions_runs, cwd)
+    # A disagreement between surfaces must remain visible. Only an exact
+    # identity and outcome match can replace the original rollup row.
+    def identity(check):
+        name, url = check.get("name"), check.get("detailsUrl")
+        if (not isinstance(name, str) or not name or not isinstance(url, str) or not url
+                or check.get("headSha", head) != head):
+            return None
+        return name, url
+
+    def outcome(check):
+        return tuple(str(check.get(key) or "").upper() for key in ("status", "conclusion"))
+
+    graph_by_identity = {}
+    for row in graph_rows or ():
+        if row.get("__typename") != "CheckRun" or not isinstance(row.get("id"), str) or not row["id"]:
+            continue
+        key = identity(row)
+        if key is not None:
+            graph_by_identity.setdefault(key, []).append(row)
+    rollup_counts = Counter(identity(check) for check in check_runs)
+    rest_by_node = {}
+    for check in checks:
+        if "checkNodeId" in check:
+            rest_by_node.setdefault(check["checkNodeId"], []).append(check)
+    unmatched = []
+    for check in check_runs:
+        key = identity(check)
+        graph_matches = graph_by_identity.get(key, [])
+        rest_matches = rest_by_node.get(graph_matches[0]["id"], []) if len(graph_matches) == 1 else []
+        if (key is None or rollup_counts[key] != 1 or len(rest_matches) != 1
+                or identity(rest_matches[0]) != key or outcome(graph_matches[0]) != outcome(check)
+                or outcome(rest_matches[0]) != outcome(check)
+                or ("appId" in check and check["appId"] != rest_matches[0].get("appId"))):
+            unmatched.append(check)
+    seen_graph = set()
+    for row in graph_rows or ():
+        if row.get("__typename") != "CheckRun":
+            continue
+        node = row.get("id")
+        if not isinstance(node, str) or not node or node in seen_graph:
+            incomplete = True
+            continue
+        seen_graph.add(node)
+        matching = rest_by_node.get(node, [])
+        if len(matching) != 1 or identity(matching[0]) != identity(row) or outcome(matching[0]) != outcome(row):
+            unmatched.extend(_checks({"statusCheckRollup": [{**row, "headSha": head}]}))
+    contexts = [item for item in rollup if item["kind"] == "status-context"]
+    for row in graph_rows or ():
+        if row["__typename"] != "StatusContext":
+            continue
+        if not isinstance(row.get("context"), str) or not row["context"] or not isinstance(row.get("state"), str):
+            incomplete = True
+            continue
+        observed_context, = _checks({"statusCheckRollup": [{**row, "headSha": head}]})
+        if not any(item["name"] == observed_context["name"] and item.get("headSha", head) == head
+                   and outcome(item) == outcome(observed_context) for item in contexts):
+            contexts.append(observed_context)
+    return [*contexts, *checks, *unmatched], incomplete or attempts_incomplete
 
 
 def _review_summary(pr, threads):
@@ -370,6 +665,7 @@ def observe(request, cwd):
 
     protection = _optional_api(repo=repository, path=f"repos/{repository}/branches/{base_branch}/protection", cwd=cwd)
     rulesets = _optional_api(repo=repository, path=f"repos/{repository}/rules/branches/{base_branch}", cwd=cwd)
+    checks, checks_incomplete = _observed_checks(pr, graph, repository, cwd)
     allow = {
         "squash": bool(repo_info.get("allow_squash_merge")),
         "merge": bool(repo_info.get("allow_merge_commit")),
@@ -406,7 +702,8 @@ def observe(request, cwd):
             "mergeStateStatus": pr.get("mergeStateStatus"),
             "mergedAt": pr.get("mergedAt"),
             "mergedBy": (pr.get("mergedBy") or {}).get("login") if isinstance(pr.get("mergedBy"), dict) else None,
-            "checks": _checks(pr),
+            "checks": checks,
+            "checksIncomplete": checks_incomplete,
             "mergeCommit": (pr.get("mergeCommit") or {}).get("oid") if isinstance(pr.get("mergeCommit"), dict) else None,
             "threadsTruncated": threads_truncated,
         },

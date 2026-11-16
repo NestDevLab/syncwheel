@@ -5571,45 +5571,129 @@ def github_blocker(blockers, code, detail, **evidence):
     blockers.append(item)
 
 
-def github_ci_check_result(check):
+def github_ci_check_result(check, head):
     if not isinstance(check, dict):
+        return None
+    if 'headSha' in check and (not head or check['headSha'] != head):
+        return None
+    if check.get('kind') == 'check-run' and (
+        not isinstance(check.get('name'), str) or not check['name']
+        or str(check.get('status') or '').upper() != 'COMPLETED'
+    ):
         return None
     status = str(check.get('conclusion') or check.get('status') or '').upper()
     return status if status in {'SUCCESS', 'SKIPPED'} else None
 
 
-def github_required_check_names(rules):
-    """Extract required check names from supported GitHub rule response shapes."""
-    names = []
+def github_check_positive_integer(value):
+    return type(value) is int and value > 0
+
+
+def github_workflow_run_creation(check):
+    value = check.get('runCreatedAt')
+    if not isinstance(value, str):
+        return None
+    try:
+        created = datetime.datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return created if created.tzinfo is not None else None
+
+
+def github_effective_checks(checks, head):
+    groups = {}
+    for index, check in enumerate(checks):
+        if (isinstance(check, dict) and check.get('kind') == 'check-run'
+                and head and check.get('headSha') == head
+                and isinstance(check.get('name'), str) and check['name']
+                and all(github_check_positive_integer(check.get(key))
+                        for key in ('appId', 'workflowId', 'checkRunId'))):
+            key = (check['appId'], check['workflowId'], check['name'])
+            groups.setdefault(key, []).append((index, check))
+
+    superseded_indexes = set()
+    for group in groups.values():
+        by_run = {}
+        run_order = {}
+        for index, check in group:
+            run_id = check.get('runId')
+            number = check.get('runNumber')
+            created = github_workflow_run_creation(check)
+            if (not github_check_positive_integer(run_id)
+                    or not github_check_positive_integer(number) or created is None):
+                break
+            if run_order.setdefault(run_id, (number, created)) != (number, created):
+                break
+            by_run.setdefault(run_id, []).append((index, check))
+        else:
+            numbers = {number for number, _ in run_order.values()}
+            ordered = sorted(run_order, key=run_order.get)
+            dates = [run_order[run_id][1] for run_id in ordered]
+            if len(numbers) != len(run_order) or dates != sorted(dates):
+                continue
+            attempts_by_run = {
+                run_id: [check.get('runAttempt') for _, check in rows]
+                for run_id, rows in by_run.items() if len(rows) > 1
+            }
+            if any(
+                not all(github_check_positive_integer(attempt) for attempt in attempts)
+                or len(set(attempts)) != len(attempts)
+                for attempts in attempts_by_run.values()
+            ):
+                continue
+            for run_id in ordered[:-1]:
+                superseded_indexes.update(index for index, _ in by_run[run_id])
+            if ordered[-1] in attempts_by_run:
+                newest_attempt = max(attempts_by_run[ordered[-1]])
+                superseded_indexes.update(
+                    index for index, check in by_run[ordered[-1]] if check['runAttempt'] < newest_attempt
+                )
+
+
+    effective, superseded = [], []
+    for index, check in enumerate(checks):
+        (superseded if index in superseded_indexes else effective).append(check)
+    return (
+        sorted(effective, key=lambda check: json.dumps(check, sort_keys=True)),
+        sorted(superseded, key=lambda check: json.dumps(check, sort_keys=True)),
+    )
+
+
+def github_required_checks(rules):
+    """Extract the name and optional provider of each observed required check."""
+    def requirement(item, provider_key):
+        if isinstance(item, str):
+            return (item, None) if item else None
+        if not isinstance(item, dict):
+            return None
+        name = item.get('context') or item.get('name')
+        if not isinstance(name, str) or not name:
+            return None
+        provider = item.get(provider_key)
+        if provider is None or (provider_key == 'app_id' and type(provider) is int and provider == -1):
+            return name, None
+        return name, provider if github_check_positive_integer(provider) else 'unproven'
+
+    required_checks = []
     protection = rules.get('branchProtection') if isinstance(rules, dict) else None
     required = protection.get('required_status_checks') if isinstance(protection, dict) else None
     if isinstance(required, dict):
-        candidates = [*(required.get('contexts') or []), *(required.get('checks') or [])]
-        for item in candidates:
-            if isinstance(item, str) and item:
-                names.append(item)
-            elif isinstance(item, dict):
-                name = item.get('context') or item.get('name')
-                if isinstance(name, str) and name:
-                    names.append(name)
+        explicit = [item for candidate in required.get('checks') or []
+                    if (item := requirement(candidate, 'app_id')) is not None]
+        explicit_names = {name for name, _ in explicit}
+        required_checks.extend(explicit)
+        required_checks.extend(item for candidate in required.get('contexts') or []
+                               if (item := requirement(candidate, 'app_id')) and item[0] not in explicit_names)
     rulesets = rules.get('rulesets') if isinstance(rules, dict) else None
     if isinstance(rulesets, dict):
         rulesets = rulesets.get('rules') or rulesets.get('nodes') or []
     for rule in rulesets or []:
-        if not isinstance(rule, dict):
-            continue
-        rule_type = str(rule.get('type') or rule.get('rule_type') or '').lower()
-        if rule_type != 'required_status_checks':
+        if not isinstance(rule, dict) or str(rule.get('type') or rule.get('rule_type') or '').lower() != 'required_status_checks':
             continue
         parameters = rule.get('parameters') or {}
-        for item in parameters.get('required_status_checks') or []:
-            if isinstance(item, str) and item:
-                names.append(item)
-            elif isinstance(item, dict):
-                name = item.get('context') or item.get('name')
-                if isinstance(name, str) and name:
-                    names.append(name)
-    return list(dict.fromkeys(names))
+        required_checks.extend(item for candidate in parameters.get('required_status_checks') or []
+                               if (item := requirement(candidate, 'integration_id')) is not None)
+    return list(dict.fromkeys(required_checks))
 
 
 def github_rule_review_required(rules):
@@ -5796,6 +5880,7 @@ def github_pr_merge_plan_digest(plan):
     unsigned = copy.deepcopy(plan)
     unsigned.pop('planDigest', None)
     unsigned.pop('operationId', None)
+    unsigned.pop('supersededChecks', None)
     return canonical_json_digest(unsigned)
 
 
@@ -5936,6 +6021,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
     permissions = repository_info.get('permissions') if isinstance(repository_info, dict) else {}
     if not isinstance(permissions, dict) or permissions.get('admin') is not True:
         github_blocker(blockers, 'merge_actor_not_admin', 'effective gh actor has no repository admin permission')
+    checks, superseded_checks = [], []
     if isinstance(pr, dict):
         if pr_number is not None and pr.get('number') != int(pr_number):
             github_blocker(blockers, 'pull_request_number_mismatch', 'observed PR number differs from the stack declaration')
@@ -5984,31 +6070,39 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
             github_blocker(blockers, 'not_mergeable', f"mergeable={pr.get('mergeable')}")
         if pr.get('mergeStateStatus') in {'BEHIND', 'DIRTY', 'UNKNOWN', 'UNSTABLE'}:
             github_blocker(blockers, 'base_obsolete_or_dirty', f"mergeStateStatus={pr.get('mergeStateStatus')}")
-        checks = pr.get('checks') or []
+        head = pr.get('headRefOid')
+        checks, superseded_checks = github_effective_checks(pr.get('checks') or [], head)
+        required_checks = github_required_checks(rules)
+        if pr.get('checksIncomplete') is True and (policy['checks'] == 'all' or required_checks):
+            github_blocker(blockers, 'checks_observation_incomplete', 'exact-head check history could not be observed')
         if policy['checks'] == 'all':
             if not checks:
                 github_blocker(blockers, 'checks_missing', 'at least one successful check is required')
             else:
                 for check in checks:
-                    if github_ci_check_result(check) is None:
+                    if github_ci_check_result(check, head) is None:
                         github_blocker(blockers, 'check_failed_or_pending', f'check did not conclude SUCCESS/SKIPPED: {check}')
         else:
             warnings.append({
                 'code': 'checks_not_required',
                 'detail': 'the clone-local merge policy does not require CI checks',
             })
-        required_names = github_required_check_names(rules)
-        if required_names:
-            observed_by_name = {
-                item.get('name'): item
-                for item in checks
-                if isinstance(item, dict) and isinstance(item.get('name'), str)
-            }
-            for name in required_names:
-                required_check = observed_by_name.get(name)
-                if required_check is None:
-                    github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
-                elif github_ci_check_result(required_check) is None:
+        for name, provider in required_checks:
+            named = [
+                check for check in checks if isinstance(check, dict) and check.get('name') == name
+            ]
+            if provider is not None:
+                matches = [check for check in named if github_check_positive_integer(check.get('appId'))
+                           and check['appId'] == provider]
+                unverified = [check for check in named if not github_check_positive_integer(check.get('appId'))]
+                if not matches or provider == 'unproven':
+                    github_blocker(blockers, 'required_check_missing', f'required check from its GitHub app is absent: {name}')
+                    continue
+                named = [*matches, *unverified]
+            if not named:
+                github_blocker(blockers, 'required_check_missing', f'required check is absent: {name}')
+            for required_check in named:
+                if github_ci_check_result(required_check, head) is None:
                     github_blocker(
                         blockers,
                         'required_check_failed_or_pending',
@@ -6086,7 +6180,8 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'commitAuthors': pr.get('commitAuthors') or [],
         'headRepository': pr.get('headRepository'),
         'mergeActor': actor,
-        'checks': pr.get('checks') or [],
+        'checks': checks,
+        'supersededChecks': superseded_checks,
         'review': pr.get('review') or {},
         'threads': (pr.get('review') or {}).get('threads') or [],
         'rules': rules,
