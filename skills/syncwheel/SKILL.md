@@ -235,7 +235,10 @@ lane. `governed_worktree_capacity` can set another `limit`; only explicit
 `enforcement: "error"` enforces a hard cap. After its commits are
 owned through the existing `stack create`, `stack add`, or
 `stack capture-integration` flow, Syncwheel stores a local recovery ref and
-reaps only a clean lane. A missing lane with an expired lease or a known-dead
+reaps only an eligible clean lane. Another owner's lane with a live or unproven
+lease stays active and unchanged even after its commits are captured. The
+command names the owner in its kept-lane diagnostic; coordinate an explicit
+release with that owner. A missing lane with an expired lease or a known-dead
 local owner is eligible even if its retained registry path is outside the
 configured root; a dirty, unknown, or current-directory lane stays visible and
 requires explicit recovery. Check governed-worktree warnings before a mutating

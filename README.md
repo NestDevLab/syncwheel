@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.18`
+Current version: `0.47.19`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -401,7 +401,12 @@ lease, base, branch, target stack, mode, and any recovery ref in Git's common
 directory, never in the shared manifest. Use `--into <existing-stack>` when the
 destination is already known. Otherwise, after committing, use the existing
 `stack create`, `stack add`, or `stack capture-integration` workflow from a
-different clean checkout. Once a stack owns every lane commit, Syncwheel anchors
+different clean checkout. Capturing commits from another owner's lane with a live
+lease records stack ownership and reports `captured, kept: owner <owner> live`.
+The lane stays active with its lease, checkout, index and refs unchanged; an
+unproven foreign lease expiry is also retained. Coordinate explicit release with
+its owner instead of treating capture as permission to remove their checkout.
+For an eligible lane, once a stack owns every lane commit, Syncwheel anchors
 the lane tip under `refs/syncwheel/recovery/lanes/...` and pushes the same tip
 to `refs/syncwheel/archive/lanes/...` on the publication remote (or the
 canonical remote when the publication one is not configured) before reaping
