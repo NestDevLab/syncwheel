@@ -8611,14 +8611,27 @@ def coordination_remote_is_reachable(repo_root, remote):
     )
 
 
-def require_new_managed_refs_absent(config, state, changed_refs, observed_refs):
+def require_new_managed_refs_absent(
+    config, state, changed_refs, observed_refs, repo_root=None, adopt_remote_tips=None,
+):
     """Refuse to take over a remote branch the published state never managed.
 
     The publication lease is the observed tip, so without this check a branch
     pushed outside coordination would be silently replaced by a new stack.
+    Before any state exists (the first coordinated publication) every remote
+    branch is unmanaged: it may only be moved forward, unless the caller named
+    its exact tip as the one to replace.
     """
     if not state:
+        require_first_publication_keeps_remote_work(
+            config, changed_refs, observed_refs, repo_root, adopt_remote_tips or {},
+        )
         return
+    if adopt_remote_tips:
+        raise SyncwheelError(
+            '--adopt-remote only applies to the first coordinated publication; '
+            'coordination state is already published'
+        )
     managed = state.get('managed_refs') or {}
     closed_tips = {
         coordination_tombstone_ref(item): item.get('remote_tip')
@@ -8636,6 +8649,29 @@ def require_new_managed_refs_absent(config, state, changed_refs, observed_refs):
             'managed by the published coordination state; refusing to replace it. '
             'Pick another branch for the new stack, or delete the remote branch '
             'after confirming nobody owns it'
+        )
+
+
+def require_first_publication_keeps_remote_work(
+    config, changed_refs, observed_refs, repo_root, adopt_remote_tips,
+):
+    for ref in sorted(changed_refs):
+        observed = observed_refs.get(ref)
+        new_tip = changed_refs[ref]
+        if not observed or observed == new_tip or adopt_remote_tips.get(ref) == observed:
+            continue
+        if repo_root is not None and commit_exists(repo_root, observed):
+            if branch_contains(repo_root, new_tip, observed):
+                continue
+            detail = 'is not an ancestor of the local tip'
+        else:
+            detail = 'has not been fetched by this clone'
+        raise SyncwheelError(
+            f'first coordinated publish STOP: {ref} already exists on {config["remote"]} '
+            f'at {observed}, which {detail}; publishing {new_tip} would discard its '
+            'commits. Fetch it and fold any work you need into stacks first. Once '
+            'nothing on it may be lost, replace exactly that tip with '
+            f'`syncwheel int push --adopt-remote {observed}`'
         )
 
 
@@ -17099,6 +17135,8 @@ def command_int_push(args):
     complete_pending_promote_intents(
         repo_root, manifest, manifest_path, apply=not args.dry_run
     )
+    if getattr(args, 'adopt_remote', None) and not coordination_is_active(manifest):
+        raise SyncwheelError('--adopt-remote only applies to a coordinated (active-active) manifest')
     if coordination_is_active(manifest):
         if not args.dry_run:
             manifest = recover_incomplete_control_manifest_persistence(
@@ -17118,11 +17156,11 @@ def command_int_push(args):
         integration = manifest['integration']
         config = coordination_config(manifest)
         coordinated_push_remote(args, config)
-        changed_refs = {
-            f"refs/heads/{integration['branch']}": ref_tip(
-                repo_root, integration['branch']
-            )
-        }
+        integration_ref = f"refs/heads/{integration['branch']}"
+        changed_refs = {integration_ref: ref_tip(repo_root, integration['branch'])}
+        adopt_remote = getattr(args, 'adopt_remote', None)
+        if adopt_remote and not re.fullmatch(r'[0-9a-fA-F]{40}|[0-9a-fA-F]{64}', adopt_remote):
+            raise SyncwheelError('--adopt-remote needs the full commit id of the remote tip')
         try:
             publication_operation = (
                 None if args.dry_run else begin_coordination_publication(
@@ -17149,6 +17187,9 @@ def command_int_push(args):
                 operation_token=(
                     publication_operation['operation_token']
                     if publication_operation else None
+                ),
+                adopt_remote_tips=(
+                    {integration_ref: adopt_remote.lower()} if adopt_remote else None
                 ),
             )
         except SyncwheelError as exc:

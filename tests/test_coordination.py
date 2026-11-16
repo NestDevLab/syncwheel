@@ -1435,6 +1435,59 @@ with module.coordination_publication_lock(Path(repo_path)):
         )
         self.assertNotEqual(state.returncode, 0)
 
+    def first_publication_over_foreign_integration(self):
+        origin = self.create_remote()
+        other = self.clone(origin, 'other')
+        self.git(other, 'switch', '-q', '-c', 'integration/shared')
+        (other / 'other.txt').write_text('other clone work\n')
+        self.git(other, 'add', 'other.txt')
+        self.git(other, 'commit', '-q', '-m', 'feat: other clone work')
+        self.git(other, 'push', '-q', 'origin', 'integration/shared')
+        foreign = self.git(other, 'rev-parse', 'HEAD').stdout.strip()
+        first = self.clone(origin, 'first')
+        self.init_coordinated(first)
+        self.anchor_generated_metadata_in_replay_base(first)
+        return origin, first, foreign
+
+    def remote_integration_tip(self, origin):
+        return subprocess.run(
+            ['git', '--git-dir', str(origin), 'rev-parse', 'refs/heads/integration/shared'],
+            text=True, capture_output=True, check=True,
+        ).stdout.strip()
+
+    def test_first_coordinated_publish_refuses_to_discard_a_foreign_integration(self):
+        origin, first, foreign = self.first_publication_over_foreign_integration()
+
+        refused = self.run_cli(first, 'int', 'push', expected=2)
+
+        self.assertIn('first coordinated publish STOP', refused.stderr)
+        self.assertIn(foreign, refused.stderr)
+        self.assertIn(f'--adopt-remote {foreign}', refused.stderr)
+        self.assertEqual(self.remote_integration_tip(origin), foreign)
+        state = subprocess.run(
+            ['git', '--git-dir', str(origin), 'show-ref', '--verify', '--quiet',
+             'refs/heads/syncwheel/state/default'],
+            text=True, capture_output=True,
+        )
+        self.assertNotEqual(state.returncode, 0)
+
+    def test_first_coordinated_publish_replaces_only_the_adopted_tip(self):
+        origin, first, foreign = self.first_publication_over_foreign_integration()
+        local_tip = self.git(first, 'rev-parse', 'integration/shared').stdout.strip()
+
+        wrong = self.run_cli(first, 'int', 'push', '--adopt-remote', local_tip, expected=2)
+        self.assertIn('first coordinated publish STOP', wrong.stderr)
+        self.assertEqual(self.remote_integration_tip(origin), foreign)
+
+        self.run_cli(first, 'int', 'push', '--adopt-remote', foreign)
+        self.assertEqual(
+            self.remote_integration_tip(origin),
+            self.git(first, 'rev-parse', 'integration/shared').stdout.strip(),
+        )
+
+        again = self.run_cli(first, 'int', 'push', '--adopt-remote', foreign, expected=2)
+        self.assertIn('only applies to the first coordinated publication', again.stderr)
+
     def test_state_is_append_only_and_safe_for_public_transport(self):
         origin = self.create_remote()
         first = self.clone(origin, 'first')
