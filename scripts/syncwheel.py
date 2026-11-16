@@ -1864,11 +1864,7 @@ def managed_push_guard_policy(repo_root, manifest, manifest_path=None):
             degraded_causes.append(primary_guard_repair_remedy(
                 'cannot verify ownership from the primary checkout manifest'
             ))
-        elif primary_branch == guarded_branch and (
-            selected_branch != primary_branch
-            or guard_coordination_ref(manifest) != guard_coordination_ref(primary_manifest)
-            or (alternate_path and manifest != primary_manifest)
-        ):
+        elif alternate_path and primary_branch == guarded_branch and manifest != primary_manifest:
             # A lane may consume shared stack sources. The publication claim
             # checks own stack ownership separately from this projection guard.
             selected_refs = guard_projection_refs(manifest)
@@ -1884,8 +1880,10 @@ def managed_push_guard_policy(repo_root, manifest, manifest_path=None):
             else:
                 shared_guard_matches = True
         elif not branch_matches:
-            expected = primary_branch or selected_branch
-            scope = 'primary projection' if primary_branch else 'selected manifest'
+            # A caller without selection provenance may be validating a
+            # proposed change to the primary manifest before writing it.
+            expected = (primary_branch if alternate_path else None) or selected_branch
+            scope = 'primary projection' if alternate_path and primary_branch else 'selected manifest'
             degraded_causes.append(primary_guard_repair_remedy(
                 f'primary guard targets {guarded_branch!r}, but the {scope} expects {expected!r}'
             ))

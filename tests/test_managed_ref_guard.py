@@ -625,6 +625,24 @@ class ManagedRefGuardTests(unittest.TestCase):
         self.assertFalse(policy['enforced'])
         self.assertIn('other-journal', '; '.join(policy['degradedCauses']))
 
+    def test_journal_guard_cli_reports_a_renamed_owner_branch_without_retargeting(self):
+        self._make_journal_manifest()
+        self.assertTrue(syncwheel.install_managed_push_hook(self.repo, apply=True)['ready'])
+        before = self.hook_bundle_bytes()
+        manifest_path = self.repo / '.syncwheel' / 'manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['journal']['branch'] = 'other-journal'
+        manifest_path.write_text(json.dumps(manifest))
+
+        status = self.run_syncwheel('hooks', 'status')
+        self.assertEqual(status.returncode, 0, status.stderr)
+        report = json.loads(status.stdout)
+        self.assertFalse(report['ready'])
+        self.assertFalse(report['enforced'])
+        self.assertEqual(report['guard']['integrationBranch'], 'journal')
+        self.assertIn('other-journal', ' '.join(report['degradedCauses']))
+        self.assertEqual(self.hook_bundle_bytes(), before)
+
     def test_degraded_guard_protects_a_journal_repository_integration_ref(self):
         # A journal manifest declares no integration branch at all, so nothing
         # in the tree can name the ref guard.json was protecting.
