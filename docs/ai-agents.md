@@ -300,7 +300,7 @@ a human gate:
 syncwheel repo authority status
 ```
 
-- `human-gated` (or no block at all): ask before commit, push, PR, and merge, as
+- `human-gated` (or no block in the primary shared manifest): ask before commit, push, PR, and merge, as
   the repository's own instructions require.
 - Neither mode reserves refreshing the local shared integration branch: it is staging, not storage. See "The shared integration branch is staging, not storage" in the Syncwheel skill.
 - `ai-managed`: the repository's configured Syncwheel pipeline runs unattended.
@@ -314,6 +314,12 @@ syncwheel repo authority status
   own; otherwise rollout remains gated.
 - `destructive_rewrite` is never allowed, whatever the block says: force
   pushes, history rewrites, and deleting work always need a human.
+
+A lane or personal manifest without a declaration inherits the primary checkout's
+shared manifest policy. An explicit declaration can retain or narrow its grants;
+it cannot add capabilities denied or not granted by the primary policy. Inspect
+the effective policy and its source with `repo authority status`. Inherited
+authority is not written into the lane manifest.
 
 Only a maintainer sets this policy (`syncwheel repo authority set ... --apply`).
 Never set it, widen it, or infer it for yourself.

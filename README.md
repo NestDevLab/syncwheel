@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.13`
+Current version: `0.47.14`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -146,7 +146,9 @@ stack, pull-request or delivery branch. New managed worktrees default to repo-re
 with `mode=ai-managed` and `source_change` allowed lets an agent edit, test,
 commit, push, open and merge the PR without asking at each step; `runtime_change`
 must be granted separately; `destructive_rewrite` can never be granted. An
-absent block means `human-gated`. Inspect and set it with
+absent block in the primary shared manifest means `human-gated`. A lane or
+personal manifest without its own block inherits that primary policy. An explicit
+lane declaration may retain or restrict its grants, never widen them. Inspect and set it with
 `syncwheel repo authority status` and `syncwheel repo authority set`.
 
 ## Active-active coordination

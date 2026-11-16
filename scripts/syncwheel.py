@@ -5695,6 +5695,77 @@ def github_pr_merge_plan_digest(plan):
     return canonical_json_digest(unsigned)
 
 
+def read_primary_authority_manifest(shared_path):
+    """Read the canonical manifest without following control-path redirects."""
+    try:
+        directory = os.open(shared_path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            descriptor = os.open(
+                shared_path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=directory,
+            )
+            with os.fdopen(descriptor, encoding='utf-8') as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise SyncwheelError('canonical manifest must be a regular file')
+                return normalize_manifest_data(json.load(stream), shared_path)
+        finally:
+            os.close(directory)
+    except FileNotFoundError:
+        return None
+    except (AttributeError, OSError, TypeError, ValueError, SyncwheelError) as exc:
+        raise SyncwheelError(f'cannot read canonical primary authority from {shared_path}: {exc}') from exc
+
+
+def primary_authority_manifest_path(repo_root):
+    worktrees = get_worktrees(repo_root)
+    if not worktrees or not worktrees[0].get('path'):
+        raise SyncwheelError('cannot identify the primary worktree for repository authority')
+    return Path(worktrees[0]['path']).resolve() / '.syncwheel' / 'manifest.json'
+
+
+def validate_selected_primary_authority_path(repo_root, manifest_path):
+    shared_path = primary_authority_manifest_path(repo_root)
+    selected_path = Path(manifest_path)
+    if Path(os.path.abspath(selected_path)) == shared_path or selected_path.resolve() == shared_path:
+        read_primary_authority_manifest(shared_path)
+
+
+def resolve_repository_authority(repo_root, manifest, manifest_path):
+    shared_path = primary_authority_manifest_path(repo_root)
+    shared = read_primary_authority_manifest(shared_path)
+    shared_policy = manifest_authority(shared)
+    selected_path = Path(manifest_path).resolve()
+    selected_declared = 'authority' in manifest
+    shared_declared = shared is not None and 'authority' in shared
+    if selected_path == shared_path:
+        policy = shared_policy
+        source = 'shared' if shared_declared else 'default'
+    elif not selected_declared:
+        policy = shared_policy
+        source = 'inherited' if shared_declared else 'default'
+    else:
+        selected = manifest_authority(manifest)
+        excess = sorted(set(selected['allow']) - set(shared_policy['allow']))
+        if excess:
+            raise SyncwheelError(
+                f'selected authority exceeds canonical primary authority at {shared_path}: '
+                + ', '.join(excess)
+            )
+        policy = normalize_authority_policy({
+            **selected,
+            'deny': sorted(set(selected['deny']) | set(shared_policy['deny'])),
+        })
+        source = 'selected'
+    return policy, {
+        'source': source,
+        'selected_manifest_path': str(selected_path),
+        'shared_manifest_path': str(shared_path),
+        'shared_manifest_present': shared is not None,
+        'shared_authority_present': shared_declared,
+        'shared_policy': shared_policy,
+    }
+
+
 def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, args):
     require_delivery_manifest(manifest)
     policy = github_pr_merge_policy_from_profile(load_repo_profile(repo_root))
@@ -5702,7 +5773,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         raise SyncwheelError('GitHub PR merge policy is missing or invalid; configure profile.local.json first')
     if not policy['enabled']:
         raise SyncwheelError('GitHub PR merge policy is disabled')
-    authority = manifest_authority(manifest)
+    authority, authority_provenance = resolve_repository_authority(repo_root, manifest, manifest_path)
     if authority['mode'] != AUTHORITY_MODE_AI_MANAGED or AUTHORITY_CLASS_SOURCE_CHANGE not in authority['allow']:
         raise SyncwheelError('GitHub PR merge requires authority.mode=ai-managed with source_change allowed')
     stack = require_stack(manifest, stack_id)
@@ -5922,6 +5993,7 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
         'adapterRequest': request,
         'policy': policy,
         'authority': authority,
+        'authorityProvenance': authority_provenance,
         'source': {'branch': stack.get('branch'), 'revision': source_revision, 'base': stack.get('base'), 'commits': declared},
         'integration': {'branch': (manifest.get('integration') or {}).get('branch'), 'revision': ref_tip(repo_root, (manifest.get('integration') or {}).get('branch'))},
         'warnings': warnings,
@@ -6058,16 +6130,24 @@ def command_stack_merge_pr(args):
         raise SyncwheelError('GitHub PR merge plan is stale; generate a new preview and use its exact planDigest')
     if plan['status'] != 'ready':
         raise SyncwheelError('GitHub PR merge STOP: plan is blocked; resolve blockers and preview again')
-    record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
-    record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
-    merge_result = github_adapter_request(repo_root, {
-        'operation': 'merge',
-        'repository': plan['repository'],
-        'pullRequestNumber': plan['pullRequest']['number'],
-        'method': plan['mergeMethod'],
-        'admin': plan['path'] == 'admin-review-bypass',
-        'headSha': plan['headSha'],
-    })
+    shared_path = Path(plan['authorityProvenance']['shared_manifest_path'])
+    with channel_mutation_lock(shared_path.parent.parent, shared_path, 'github-pr-merge-authority'):
+        current_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+        if current_manifest is None:
+            raise SyncwheelError('GitHub PR merge selected manifest disappeared; preview again')
+        current_authority = resolve_repository_authority(repo_root, current_manifest, manifest_path)
+        if current_authority != (plan['authority'], plan['authorityProvenance']):
+            raise SyncwheelError('GitHub PR merge authority changed during observation; preview again')
+        record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_started', plan, status='started')
+        record_github_pr_merge_event(repo_root, manifest_path, 'github_pr_merge_prepared', plan, status='prepared')
+        merge_result = github_adapter_request(repo_root, {
+            'operation': 'merge',
+            'repository': plan['repository'],
+            'pullRequestNumber': plan['pullRequest']['number'],
+            'method': plan['mergeMethod'],
+            'admin': plan['path'] == 'admin-review-bypass',
+            'headSha': plan['headSha'],
+        })
     observed = github_adapter_request(repo_root, {
         **plan['adapterRequest'],
         'pullRequestNumber': plan['pullRequest']['number'],
@@ -12328,7 +12408,9 @@ def command_status(args):
         output['validation'] = validation
         output['plan'] = build_plan(repo_root, manifest, validation)
         output['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
-        output['authority'] = manifest_authority(manifest)
+        output['authority'], output['authority_provenance'] = resolve_repository_authority(
+            repo_root, manifest, manifest_path,
+        )
     if args.json:
         print(json.dumps(output, indent=2))
         primary = output['validation']['details'].get('primary_checkout') if manifest else None
@@ -12339,6 +12421,7 @@ def command_status(args):
     print(f"manifest: {manifest_path if manifest else 'missing'}")
     if manifest:
         print(f"authority: {format_authority_policy(output['authority'])}")
+        print(f"authority_source: {output['authority_provenance']['source']}")
     print('\nremotes:')
     for line in snapshot['remotes']:
         print(f'  - {line}')
@@ -17242,17 +17325,20 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
     return result
 
 
+def require_int_rebuild_reason(args, repo_root, manifest, manifest_path):
+    authority, provenance = resolve_repository_authority(repo_root, manifest or {}, manifest_path)
+    if (
+        not args.dry_run
+        and not args.reason
+        and AUTHORITY_MODE_AI_MANAGED in (authority['mode'], provenance['shared_policy']['mode'])
+    ):
+        raise SyncwheelError('int rebuild requires --reason for an ai-managed repository')
+
+
 def command_int_rebuild(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    if (
-        not args.dry_run
-        and manifest_authority(manifest)['mode'] == AUTHORITY_MODE_AI_MANAGED
-        and not args.reason
-    ):
-        raise SyncwheelError(
-            'int rebuild requires --reason for an ai-managed repository'
-        )
+    require_int_rebuild_reason(args, repo_root, manifest, manifest_path)
     if not args.dry_run:
         complete_pending_promote_intents(repo_root, manifest, manifest_path, apply=True)
         if not getattr(args, '_skip_implicit_control_recovery', False):
@@ -18009,6 +18095,7 @@ def managed_block_exists(path, marker):
 
 
 def syncwheel_tracking_report(repo_root, manifest_path):
+    validate_selected_primary_authority_path(repo_root, manifest_path)
     manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     manifest_present = manifest is not None
     tracking = manifest.get('syncwheel_tracking') if manifest else None
@@ -18044,6 +18131,9 @@ def syncwheel_tracking_report(repo_root, manifest_path):
         if managed_block_exists(gitignore, SYNCWHEEL_GITIGNORE_MARKER):
             actions.append('remove Syncwheel managed .gitignore block')
 
+    policy, provenance = (
+        resolve_repository_authority(repo_root, manifest, manifest_path) if manifest_present else (None, None)
+    )
     return {
         'repo_root': str(repo_root),
         'manifest_path': str(manifest_path),
@@ -18052,7 +18142,8 @@ def syncwheel_tracking_report(repo_root, manifest_path):
         'manifest_tracked': manifest_tracked,
         'syncwheel_tracking': tracking,
         'syncwheel_tracking_present': tracking is not None,
-        'authority': manifest_authority(manifest) if manifest_present else None,
+        'authority': policy,
+        'authority_provenance': provenance,
         'authority_present': bool(manifest_present and 'authority' in manifest),
         'syncwheel_worktree_root': worktree_root,
         'effective_worktree_root': str(effective_root),
@@ -18070,6 +18161,8 @@ def print_syncwheel_tracking_report(report):
     print(f"manifest: {report['manifest_path'] if report['manifest_present'] else 'missing'}")
     print(f"syncwheel_tracking: {report['syncwheel_tracking'] or 'missing'}")
     print(f"authority: {format_authority_policy(report['authority'])}")
+    if report['authority_provenance']:
+        print(f"authority_source: {report['authority_provenance']['source']}")
     print(f"syncwheel_worktree_root: {report['syncwheel_worktree_root']}")
     print(f"effective_worktree_root: {report['effective_worktree_root']}")
     print(f"manifest_tracked: {'yes' if report['manifest_tracked'] else 'no'}")
@@ -18094,11 +18187,14 @@ def format_authority_policy(policy):
 
 
 def authority_report(repo_root, manifest_path):
+    validate_selected_primary_authority_path(repo_root, manifest_path)
     manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     present = bool(manifest and 'authority' in manifest)
-    policy = manifest_authority(manifest) if manifest else None
+    policy, provenance = (
+        resolve_repository_authority(repo_root, manifest, manifest_path) if manifest else (None, None)
+    )
     warnings = []
-    if manifest and not present:
+    if provenance and provenance['source'] == 'default':
         warnings.append(
             'authority is not declared; agents must treat this repository as '
             f'{AUTHORITY_MODE_HUMAN_GATED} until a maintainer sets it'
@@ -18108,6 +18204,7 @@ def authority_report(repo_root, manifest_path):
         'manifest_path': str(manifest_path),
         'manifest_present': manifest is not None,
         'authority': policy,
+        'authority_provenance': provenance,
         'authority_present': present,
         'warnings': warnings,
     }
@@ -18117,6 +18214,8 @@ def print_authority_report(report):
     print(f"repo: {report['repo_root']}")
     print(f"manifest: {report['manifest_path'] if report['manifest_present'] else 'missing'}")
     print(f"authority: {format_authority_policy(report['authority'])}")
+    if report['authority_provenance']:
+        print(f"authority_source: {report['authority_provenance']['source']}")
     print(f"authority_declared: {'yes' if report['authority_present'] else 'no'}")
     for warning in report['warnings']:
         print(f'warning: {warning}')
@@ -18140,20 +18239,32 @@ def command_repo_authority_set(args):
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     ensure_manifest_in_repo(repo_root, manifest_path)
-    current = manifest_authority(manifest)
+    inherited, provenance = resolve_repository_authority(repo_root, {}, manifest_path)
     proposed = normalize_authority_policy(
         {'mode': args.mode, 'allow': list(args.allow or []), 'deny': []}, 'requested'
     )
-    if not args.apply:
-        print(f"current_authority: {format_authority_policy(current)}")
-        print(f"proposed_authority: {format_authority_policy(proposed)}")
-        print('dry_run: pass --apply to write this policy')
-        return 0
-    manifest['authority'] = proposed
-    save_manifest_with_ledger(
-        repo_root, manifest_path, manifest, 'repo_authority_set', {'authority': proposed}
+    shared_path = Path(provenance['shared_manifest_path'])
+    selected_is_shared = provenance['selected_manifest_path'] == str(shared_path)
+    lock = (
+        channel_mutation_lock(shared_path.parent.parent, shared_path, 'repo-authority')
+        if args.apply and not selected_is_shared else contextlib.nullcontext()
     )
-    report = authority_report(repo_root, manifest_path)
+    with lock:
+        if not selected_is_shared:
+            resolve_repository_authority(repo_root, {**manifest, 'authority': proposed}, manifest_path)
+        if not args.apply:
+            if not selected_is_shared and 'authority' in manifest:
+                print(f"current_declared_authority: {format_authority_policy(manifest_authority(manifest))}")
+            else:
+                print(f"current_authority: {format_authority_policy(inherited)}")
+            print(f"proposed_authority: {format_authority_policy(proposed)}")
+            print('dry_run: pass --apply to write this policy')
+            return 0
+        manifest['authority'] = proposed
+        save_manifest_with_ledger(
+            repo_root, manifest_path, manifest, 'repo_authority_set', {'authority': proposed}
+        )
+        report = authority_report(repo_root, manifest_path)
     if args.json:
         print(json.dumps(report, indent=2))
     else:
@@ -19813,6 +19924,8 @@ def recover_control_manifest_before_command(args):
         getattr(args, 'personal', None),
     )
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+    if args.func == command_int_rebuild:
+        require_int_rebuild_reason(args, repo_root, manifest, manifest_path)
     explicit_rebuild = args.func == command_int_rebuild and bool(getattr(args, 'reason', None))
     if not explicit_rebuild and skip_implicit_control_recovery_on_dirty_primary(repo_root, manifest_path):
         # An explicit rebuild can resume its own frozen integration lease,
@@ -19972,6 +20085,14 @@ def main():
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
+        if args.func in {
+            command_status, command_repo_tracking_status,
+            command_repo_authority_status, command_repo_authority_set,
+            command_stack_merge_pr, command_int_rebuild,
+        }:
+            repo_root = SYNCWHEEL_REF_AUTH_REPO
+            manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+            validate_selected_primary_authority_path(repo_root, manifest_path)
         stack_adoption_preflight(args)
         route_stack_add_from_governed_lane(args)
         lane_push_refusal = lane_stack_push_manifest_refusal(args)

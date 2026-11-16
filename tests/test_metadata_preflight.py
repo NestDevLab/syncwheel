@@ -76,6 +76,13 @@ class MetadataPreflightTest(unittest.TestCase):
         return path
 
     def test_personal_authority_preserves_primary_state_for_either_tracking_policy(self):
+        shared_manifest = json.loads(self.manifest_path.read_text())
+        shared_manifest['authority'] = {
+            'mode': 'ai-managed', 'allow': ['source_change'], 'deny': ['destructive_rewrite'],
+        }
+        self.manifest_path.write_text(json.dumps(shared_manifest))
+        self.git('add', '.syncwheel/manifest.json')
+        self.git('commit', '-qm', 'Declare shared source authority')
         self.dirty_product()
         for tracking in ('git-tracked', 'local-only'):
             with self.subTest(tracking=tracking):

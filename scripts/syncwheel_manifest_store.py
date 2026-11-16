@@ -116,10 +116,14 @@ class ManifestLifecycle(Protocol):
 
 def load_manifest(repo_root, manifest_path=None):
     path = Path(manifest_path) if manifest_path else repo_root / '.syncwheel' / 'manifest.json'
-    if not path.exists():
-        return None, path
     try:
-        data = json.loads(path.read_text())
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        with os.fdopen(descriptor, encoding='utf-8') as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise SyncwheelError(f'manifest path is not a regular file: {path}')
+            data = json.load(stream)
+    except FileNotFoundError:
+        return None, path
     except json.JSONDecodeError as exc:
         raise SyncwheelError(f'invalid manifest JSON: {exc}') from exc
     return normalize_manifest_data(data, path), path

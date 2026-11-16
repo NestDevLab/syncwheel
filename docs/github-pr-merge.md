@@ -1,8 +1,11 @@
 # GitHub PR merge policy
 
 Syncwheel can plan and apply a GitHub pull-request merge through a narrow,
-clone-local policy. The shared manifest still owns the stack and must declare
-`authority.mode: "ai-managed"` with `source_change` allowed. The policy itself
+clone-local policy. The selected manifest owns the stack and its effective
+authority must be `ai-managed` with `source_change` allowed. Lane and personal
+manifests inherit the primary shared authority when they have no declaration;
+an explicit declaration may restrict but cannot widen it. Merge plans bind that
+authority and recheck it before merging. The policy itself
 is stored in `.syncwheel/profile.local.json`, which must remain ignored and
 untracked.
 

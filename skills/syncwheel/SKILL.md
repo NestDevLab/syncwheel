@@ -648,7 +648,11 @@ human at each stage. `source_change` covers source delivery up to and including
 merge or `journal publish`; `runtime_change` covers the rollout that pipeline
 leads to (deployment channels, install, restart) and must be listed on its own.
 `destructive_rewrite`, external sends, money, and work outside the named scope
-stay gated whatever the block says. Missing block means `human-gated`. Never
+stay gated whatever the block says. A missing block in the primary shared
+manifest means `human-gated`. A lane or personal manifest without a declaration
+inherits that primary policy; its explicit declaration may retain or restrict
+the grants but must never widen them. Read the effective policy and its source
+with `repo authority status`; do not copy inherited grants into a lane. Never
 set or widen this policy yourself.
 Refreshing the local shared integration branch is not covered by these gates; see "The shared integration branch is staging, not storage".
 
