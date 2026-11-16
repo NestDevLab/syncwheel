@@ -6,13 +6,22 @@ from pathlib import Path
 from unittest import mock
 
 import test_coordination as module
+import test_a14_reset_destination_lease as destination_cases
 
 
 MARKER = "A14_RESET_DESTINATION_TRACKED_EDIT"
 
 
-def _checkout_snapshot(case, fixture):
+def _source_snapshot(case, fixture):
     snapshot = case.a14_source_snapshot(fixture)
+    snapshot["git_info_exclude"] = destination_cases._git_info_exclude_bytes(
+        case, fixture["follower"],
+    )
+    return snapshot
+
+
+def _checkout_snapshot(case, fixture):
+    snapshot = _source_snapshot(case, fixture)
     snapshot.pop("integration")
     return snapshot
 
@@ -21,9 +30,7 @@ def test_a14_reset_destination():
     case = module.ActiveActiveCoordinationTest(methodName="runTest")
     case.setUp()
     try:
-        fixture = case.a14_published_tip_reuse_fixture(
-            "a14-reset-destination", integration_strategy="cherry-pick"
-        )
+        fixture = destination_cases._published_replay_fixture(case, "a14-reset-destination")
         caller = fixture["follower"]
         syncwheel = fixture["module"]
         integration_branch = fixture["manifest"]["integration"]["branch"]
@@ -77,7 +84,7 @@ def test_a14_reset_destination():
                 (target / "README.md").write_text(
                     "concurrent tracked edit in actual reset destination\n"
                 )
-                injected.append(case.a14_source_snapshot(target_fixture))
+                injected.append(_source_snapshot(case, target_fixture))
             return result
 
         error = None
@@ -108,7 +115,7 @@ def test_a14_reset_destination():
                 except syncwheel.SyncwheelError as exc:
                     error = str(exc)
 
-        target_after = case.a14_source_snapshot(target_fixture)
+        target_after = _source_snapshot(case, target_fixture)
         observed = {
             "caller_on_other_branch": bool(caller_branch)
             and caller_branch != integration_branch,
