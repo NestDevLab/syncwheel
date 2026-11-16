@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.15`
+Current version: `0.47.16`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -146,6 +146,9 @@ With a personal manifest selected, `repo tracking set` changes only that manifes
 policy and private ledger. Both tracking values leave shared ignore files, hooks,
 the manifest README and Git indexes unchanged. Personal metadata must already be
 ignored and untracked; changing its policy does not migrate the shared repository.
+The command prepares the manifest and ledger update before publication and restores
+its own writes if publication raises a handled error. This rollback does not
+provide automatic recovery from process termination or power loss.
 
 `authority` declares how far agents may take a change on their own. A repo
 with `mode=ai-managed` and `source_change` allowed lets an agent edit, test,
