@@ -224,6 +224,7 @@ from syncwheel_worktrees import (
     GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS,
     GOVERNED_WORKTREE_REGISTRY_VERSION,
     GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES,
+    GOVERNED_WORKTREE_WARNING_DETAIL_LIMIT,
     RESET,
     YELLOW,
     _REGISTRY_EXPECTED_DIGEST_UNSET,
@@ -11296,6 +11297,45 @@ def command_coordination_compose(args):
     return 0
 
 
+def command_worktree_list(args):
+    """List governed lanes and their health without changing anything."""
+    repo_root = resolve_repo_root(args.repo)
+    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    diagnostics = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
+    lanes = [
+        lane for lane in diagnostics['lanes']
+        if not args.problems or lane.get('code')
+    ]
+    if args.json:
+        print(json.dumps({
+            'registryPath': diagnostics['registry_path'],
+            'lanes': lanes,
+            'counts': governed_worktree_problem_counts(diagnostics['lanes']),
+        }, indent=2, sort_keys=True))
+        return 0
+    if not lanes:
+        print('no governed worktree lanes' + (' need attention' if args.problems else ''))
+        return 0
+    for lane in lanes:
+        label = lane.get('id') or lane.get('branch') or lane.get('path')
+        print(
+            f"{label}  state={lane.get('state')}  health={lane.get('code') or 'ok'}  "
+            f"target={lane.get('target') or '-'}  branch={lane.get('branch') or '-'}"
+        )
+        print(f"    path: {lane.get('path')}")
+        if lane.get('code') and lane.get('remedy'):
+            print(f"    remedy: {lane['remedy']}")
+    return 0
+
+
+def governed_worktree_problem_counts(lanes):
+    counts = {}
+    for lane in lanes:
+        if lane.get('code'):
+            counts[lane['code']] = counts.get(lane['code'], 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def command_worktree_lock(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -18670,9 +18710,10 @@ def governed_worktree_preflight(args):
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         return
-    if args.func == command_worktree_open:
-        # Open checks its own target and registry under the lock. Recovery of
-        # unrelated lanes belongs to explicit release and gc commands.
+    if args.func in {command_worktree_open, command_worktree_list}:
+        # Open checks its own target and registry under the lock, and list is
+        # the detailed view of the same diagnostics. Recovery of unrelated
+        # lanes belongs to explicit release and gc commands.
         return
     emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)), manifest_path=manifest_path)
     if args.func == command_stack_create:
@@ -18733,9 +18774,23 @@ def governed_worktree_preflight(args):
             and lane.get('pending_reason') != 'archive_push_failed'
         ]
         if blockers:
+            # Name each lane's health and remedy: the warnings above may have
+            # been collapsed into a summary line on a busy repository.
+            health = {
+                lane['id']: lane
+                for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
+                if lane.get('id')
+            }
+
+            def describe(lane):
+                found = health.get(lane['id']) or {}
+                code = found.get('code') or lane.get('pending_reason') or lane.get('state')
+                remedy = found.get('remedy')
+                return f"{lane['id']} [{code}]" + (f': {remedy}' if remedy else '')
+
             raise SyncwheelError(
                 f'governed worktree recovery is required before updating {scoped_stack_label}: '
-                + ', '.join(lane['id'] for lane in blockers)
+                + '; '.join(describe(lane) for lane in blockers)
             )
         return
     # A lane whose remote save failed is intact (branch and folder kept), so
@@ -18797,7 +18852,8 @@ def governed_worktree_preflight(args):
         raise SyncwheelError(
             'governed worktree recovery is required before this mutation: '
             + details
-            + '; cleanup failed closed, retry the named remedy'
+            + '; cleanup failed closed, retry the named remedy '
+            '(`syncwheel worktree list --problems` shows each lane and its remedy)'
         )
     if args.func not in dangerous:
         return
@@ -18833,20 +18889,33 @@ def governed_worktree_preflight(args):
         }
     ]
     blocked = [lane for lane in needs_recovery if lane_blocks(lane)]
-    for lane in needs_recovery:
-        if not lane_blocks(lane):
-            label = lane['id'] or lane['branch'] or lane['path']
-            target = lane.get('target')
-            why = f'its stack {target!r} is not in the manifest' if target else 'it has no target stack'
-            print(
-                f"warning: governed worktree {label} needs recovery ({lane['code']}) but does not "
-                f'block this command: {why}',
-                file=sys.stderr,
-            )
+    passed = [lane for lane in needs_recovery if not lane_blocks(lane)]
+    if len(passed) > GOVERNED_WORKTREE_WARNING_DETAIL_LIMIT:
+        print(
+            f'warning: {len(passed)} governed worktree lanes need recovery but do not block this '
+            'command: they have no target stack, or their stack is not in the manifest; '
+            '`syncwheel worktree list --problems` shows them',
+            file=sys.stderr,
+        )
+        passed = []
+    for lane in passed:
+        label = lane['id'] or lane['branch'] or lane['path']
+        target = lane.get('target')
+        why = f'its stack {target!r} is not in the manifest' if target else 'it has no target stack'
+        print(
+            f"warning: governed worktree {label} needs recovery ({lane['code']}) but does not "
+            f'block this command: {why}',
+            file=sys.stderr,
+        )
     if blocked:
-        labels = ', '.join(item['id'] or item['branch'] or item['path'] for item in blocked)
+        # Name the reason and remedy here: the warnings above may have been
+        # collapsed into a summary line on a busy repository.
+        details = '; '.join(
+            f"{item['id'] or item['branch'] or item['path']} [{item['code']}]: {item.get('remedy') or 'see worktree list'}"
+            for item in blocked
+        )
         raise SyncwheelError(
-            'governed worktree recovery is required before this mutation: ' + labels
+            'governed worktree recovery is required before this mutation: ' + details
         )
 
 
@@ -19238,6 +19307,7 @@ def command_handlers():
         'command_sync': command_sync,
         'command_use': command_use,
         'command_validate': command_validate,
+        'command_worktree_list': command_worktree_list,
         'command_worktree_lock': command_worktree_lock,
         'command_worktree_open': command_worktree_open,
         'command_worktree_release': command_worktree_release,

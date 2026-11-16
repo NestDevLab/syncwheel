@@ -258,6 +258,10 @@ requires explicit recovery. Check governed-worktree warnings before a mutating
 lifecycle command. No command removes another lane because its lease expired:
 mutating commands only finish a capture or release that was already started.
 
+To see the lanes, run `syncwheel worktree list --problems` (read-only). When more
+than three lanes need attention, other commands print one summary line that
+points there instead of one warning per lane.
+
 To retire a named dead or abandoned lane, first preview and then explicitly
 apply the release:
 
