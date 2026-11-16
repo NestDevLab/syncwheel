@@ -19,9 +19,7 @@ The AI agent owns:
 
 ## Ratified working rules (read this first)
 
-Ratified operating rules (MGT-0206). Rule 2 is the one a real incident violated by
-resolving a rebuild conflict with raw git instead of the documented path — the mechanism
-existed, it just was not prominent enough. Follow all four exactly.
+Follow these four operating rules before changing a managed repository.
 
 1. Never author or commit in the primary checkout; it stays on
    `manifest.integration.branch`. Open a governed lane: `syncwheel worktree open <lane>
@@ -51,16 +49,18 @@ existed, it just was not prominent enough. Follow all four exactly.
    close a normally merged stack with `--reason merged`, or a squash/rebase delivery
    with `--reason absorbed`, then validate and rebuild. `absorbed` verifies final
    delivered content and does not require `--force`.
-4. Every mutating command carries `--reason`; it is mandatory in `ai-managed` repositories
-   and already enforced on several commands individually (`int rebuild` when ai-managed,
-   `hooks remove --disable`, `worktree release`, `coordination provenance reset`). Pass it
-   always. It lands in the ledger with the actor and the exact command:
+4. Record a reason for each mutation. Use `--reason` when the subcommand's
+   `--help` lists it (some commands require it, including `int rebuild` in
+   ai-managed repositories). Otherwise, record the reason and command in the
+   work receipt, as for `stack add`. Inspect Syncwheel's events with
    `syncwheel ledger show`.
 
-**When something looks wrong:** do not force a push, do not hand-edit the manifest or the
-coordination state, do not fall back to raw git. Re-observe and use the exact remedy the
-failing command names. For a managed ref that disagrees with the coordination state, the
-named repair classes are all `syncwheel coordination repair` (plan-first, then `--apply
+**After a refusal on managed state:** stop and report the command, error, and
+next documented remedy. Do not bypass it with raw `git push`, a manual managed
+manifest or coordination state edit, or an internal mutation helper. Re-observe
+and follow the named remedy when its preconditions are met. For a managed ref
+that disagrees with the coordination state, use `syncwheel coordination repair`
+(plan-first, then `--apply
 --plan-file <plan>`): default for a wrong recorded tip on an otherwise-correct ref (ref
 repair), `--freeze-backend tree-equivalent-state-cas` for same-tree/different-shape,
 `--freeze-backend fast-forward-state-cas` for an exact reviewed fast-forward,

@@ -10,15 +10,12 @@ metadata:
 
 Syncwheel makes Git maintenance **deterministic and safe when many agents touch the
 same repositories**. Branch ownership, PR stacks, and the integration branch are
-described in a manifest; Syncwheel reconciles Git to match it. Plain manual
-`git`/worktree surgery is the exception path, used only when Syncwheel is
-unavailable, blocked, or cannot express the needed recovery.
+described in a manifest; Syncwheel reconciles Git to match it. Follow the
+documented recovery procedure for managed state.
 
 ## Ratified working rules (read this first)
 
-These four are ratified operating rules (MGT-0206), not suggestions. A real incident
-happened because an operator resolved a rebuild conflict with raw git instead of rule 2 —
-the mechanism already existed; only the visibility was missing. Read rule 2 twice.
+Follow these four operating rules before changing a managed repository.
 
 1. **Never author in the primary checkout.** It stays on `manifest.integration.branch` as
    the shared test projection. Open a governed lane instead:
@@ -78,14 +75,12 @@ the mechanism already existed; only the visibility was missing. Read rule 2 twic
    syncwheel int rebuild --reason "<why>"
    ```
 
-4. **Every mutating command carries `--reason`; it is mandatory in `ai-managed`
-   repositories.** Pass it always, not only on the commands that already refuse to run
-   without one (`int rebuild` in an ai-managed repo, `hooks remove --disable`,
-   `worktree release`, `coordination provenance reset`, among others). The reason lands in
-   the append-only ledger together with the actor and the exact command:
-   ```bash
-   syncwheel ledger show
-   ```
+4. **Record a reason for each mutation.** Pass `--reason` where the exact
+   subcommand's `--help` lists it, including where required (`int rebuild` in an
+   ai-managed repo, `hooks remove --disable`, `worktree release`, and
+   `coordination provenance reset`). If the subcommand lacks the flag (for example
+   `stack add`), record the reason and command in the work receipt. Inspect
+   Syncwheel's recorded events with `syncwheel ledger show`.
 
 ### The shared integration branch is staging, not storage
 
@@ -109,10 +104,9 @@ syncwheel int align-remote --dry-run
 syncwheel int align-remote
 ```
 
-If it refuses because of the checkout or a dirty tree, fix that and rerun. If it refuses because the
-remote does not match the manifest projection or a stack cannot replay onto the remote, which is
-normal after a long divergence, that is not a blocker and another lane's replay conflict is not
-yours to resolve. Check that the branch holds nothing of its own. This must print nothing:
+If it refuses because of the checkout or a dirty tree, resolve that precondition and
+rerun the dry run. If the remote does not match the manifest projection or a stack
+cannot replay, check whether integration holds work of its own. This must print nothing:
 
 ```bash
 BRANCH=<manifest.integration.branch>; PUB=<manifest.defaults.publication_remote>; REMOTE=$PUB/$BRANCH
@@ -128,31 +122,17 @@ files after a capture, so that confirmation is what lets you continue. If they c
 leave the branch as it is and ask. `int rebuild` is not a substitute, because it drops every commit
 not mapped to a stack. If the primary checkout is dirty, recover it losslessly before starting.
 
-Once the check is empty or the capture is confirmed, realign:
-
-```bash
-set -e
-BRANCH=<manifest.integration.branch>; PUB=<manifest.defaults.publication_remote>; REMOTE=$PUB/$BRANCH
-git branch "backup/$BRANCH-before-realign-$(date -u +%Y%m%dT%H%M%SZ)" "$BRANCH"
-saved=$(mktemp); cp .syncwheel/manifest.json "$saved"
-syncwheel int git -- reset --keep "$REMOTE"
-
-# git-tracked repositories only; a local-only manifest is untouched by the reset.
-cp "$saved" .syncwheel/manifest.json
-syncwheel int git -- add .syncwheel/manifest.json
-git diff --cached --quiet || syncwheel int git -- commit -m "chore(syncwheel): reapply manifest after realignment"
-syncwheel validate
-```
-
-The branch ends level with the remote, or one commit ahead when the manifest differs. Lanes open
-normally from there.
+After the precondition changes, rerun `syncwheel int align-remote --dry-run`.
+If it still refuses, report the branch and stack evidence with the refusal.
 
 
 ### When something looks wrong
 
-Do not force a push, do not hand-edit `.syncwheel/manifest.json` or the coordination
-state, and do not fall back to raw git. Re-observe, then use the exact remedy the failing
-command names.
+After a refusal on managed state, stop and report the command, its error, and
+the next documented remedy. Do not bypass it with a raw `git push` (including
+force or `--no-verify`), a manual managed manifest or coordination state edit,
+or a direct call to an internal mutation helper. Re-observe with read-only
+commands and use the named remedy only when its preconditions are met.
 
 For a managed ref that disagrees with the coordination state, `syncwheel coordination
 repair` is the family of named remedies, always plan-first then `--apply --plan-file
@@ -196,9 +176,12 @@ local.
 
 ## The contract
 
-When the manifest declares `repository_mode: "journal"`, use only
-`syncwheel journal status`, plan-first `journal snapshot` / `journal publish` /
-`journal pull`, and `journal schedule`. Add `--apply` only with mutation authority. Journal mode
+When the manifest declares `repository_mode: "journal"`, use
+`syncwheel check --no-fetch` for local validation and `syncwheel journal status`
+to inspect publication state. Journal `check` does not validate an integration
+projection; `--strict` fails on warnings or a dirty worktree. Use plan-first
+`journal snapshot` / `journal publish` / `journal pull`, and `journal schedule`.
+Add `--apply` only with mutation authority. Journal mode
 forbids stack, integration, reconcile, sync, and delivery publish commands; its
 publisher pulls first, stops on divergence, and never rewrites history.
 `journal pull --apply` is the only governed catch-up: it fast-forwards a strictly

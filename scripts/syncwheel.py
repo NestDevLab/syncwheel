@@ -177,6 +177,7 @@ from syncwheel_publication import (
     report_advisory_unclaimed_owned_refs,
 )
 from syncwheel_manifest import (
+    validate_stack_adoption,
     manifest_digest,
     canonical_manifest_json,
     channel_composition_digest,
@@ -539,7 +540,7 @@ GOVERNED_WORKTREE_REAP_PENDING_REASONS = frozenset({
 JOURNAL_FORBIDDEN_COMMANDS = {
     'stack', 's', 'spoke', 'int', 'i', 'publish', 'sync', 'reconcile', 'rec',
     'resume', 'coordination', 'coord', 'handoff', 'gc', 'worktree', 'wt',
-    'plan', 'pl', 'check', 'ck', 'manifest', 'm', 'channel', 'ch',
+    'plan', 'pl', 'manifest', 'm', 'channel', 'ch',
 }
 
 
@@ -4518,6 +4519,8 @@ def require_channel(manifest, channel_id):
 
 def pin_stack_for_channel(repo_root, manifest, stack_id):
     stack = require_stack(manifest, stack_id)
+    if stack.get('adopted_history'):
+        raise SyncwheelError('channel pins do not yet support adopted stack histories')
     if not branch_exists(repo_root, stack['branch']):
         raise SyncwheelError(
             f"cannot pin stack {stack_id}: local branch {stack['branch']!r} is missing"
@@ -9923,6 +9926,11 @@ def validate_manifest(repo_root, manifest):
             patch_id = commit_patch_id(repo_root, commit)
             if patch_id:
                 stack_declared_patch_ids.add(patch_id)
+        if stack.get('adopted_history'):
+            try:
+                stack_declared_shas.update(declared_stack_history(repo_root, stack))
+            except SyncwheelError as exc:
+                errors.append(f"stack {stack['id']}: {exc}")
         if item['branch_exists'] and item['base_exists']:
             item['branch_commits'] = [
                 commit_full_sha(repo_root, commit)
@@ -9991,6 +9999,8 @@ def validate_manifest(repo_root, manifest):
                 f"published stack {stack['id']} branch is not aligned with {remote_ref}: "
                 f"{item['remote_relation']}"
             )
+        if stack.get('adopted_history') and not stack.get('integration_resolution'):
+            declared_commit_shas.update(stack_declared_shas)
         for commit in item['integration_commits']:
             if not commit_exists(repo_root, commit):
                 item['missing_commits'].append(commit)
@@ -10545,6 +10555,13 @@ def plan_resume_mutations(repo_root, manifest, diagnostics, selected_stack_ids=N
             continue
 
         stack = stacks[stack_id]
+        if stack.get('adopted_history'):
+            actions.append({
+                'type': 'resume_manual_review', 'stack': stack_id,
+                'commit': item['commit'], 'short': item['short'], 'subject': item['subject'],
+                'reason': 'adopted_history_requires_explicit_adoption',
+            })
+            continue
         if item['commit'] not in stack['commits']:
             stack['commits'].append(item['commit'])
             actions.append({
@@ -11650,6 +11667,7 @@ def command_worktree_open(args):
     path = root / branch.replace('/', '-').replace('\\', '-')
     if not path_is_relative_to(path, root):
         raise SyncwheelError('configured worktree path escapes syncwheel_worktree_root')
+    stack_materialization = None
     with governed_worktree_registry_lock(repo_root):
         registry, registry_path = load_governed_worktree_registry(repo_root)
         recovered = copy.deepcopy(registry)
@@ -11694,13 +11712,23 @@ def command_worktree_open(args):
         if not base:
             raise SyncwheelError('cannot open a governed worktree: base commit is missing')
         if base_ref:
-            stack_tip = ref_tip(repo_root, stack['branch'])
-            projected_tip = deterministic_stack_replay_tip(
-                repo_root, stack['base'], stack.get('commits') or []
+            stack_branch_ref = f"refs/heads/{stack['branch']}"
+            stack_tip = ref_tip(repo_root, stack_branch_ref)
+            commits = stack.get('commits') or []
+            can_materialize = (
+                stack_tip is None
+                and not commits
+                and stack.get('state', 'published') == 'published'
+                and git(repo_root, 'symbolic-ref', '--quiet', stack_branch_ref, check=False).returncode == 1
             )
-            if projected_tip:
-                projected_tip = commit_full_sha(repo_root, projected_tip)
-            if not stack_tip or base != stack_tip or base != projected_tip:
+            projected_tip = None
+            if stack_tip is not None or can_materialize:
+                adopted = validate_stack_adoption(stack)
+                projected_tip = (adopted['tip'] if adopted else
+                                 deterministic_stack_replay_tip(repo_root, stack['base'], commits))
+                if projected_tip:
+                    projected_tip = commit_full_sha(repo_root, projected_tip)
+            if base != projected_tip or (base != stack_tip and not can_materialize):
                 raise SyncwheelError(
                     f'worktree open --base must resolve to the current exact projection '
                     f'of stack {args.into!r}; rebuild or align that stack before opening a lane'
@@ -11723,13 +11751,52 @@ def command_worktree_open(args):
         }
         run(['git', 'worktree', 'add', '-b', branch, str(path), base], cwd=repo_root)
         try:
+            if base_ref and can_materialize:
+                created = git(
+                    repo_root, 'update-ref', '--no-deref', stack_branch_ref, base,
+                    '0' * len(base), check=False,
+                )
+                if created.returncode != 0:
+                    raise SyncwheelError(
+                        f"cannot materialize missing stack branch {stack_branch_ref}: "
+                        f"{created.stderr.strip()}"
+                    )
+                stack_materialization = {'branch': stack['branch'], 'tip': base}
             registry['lanes'].append(lane)
             persist()
-        except BaseException:
-            run(['git', 'worktree', 'remove', '--force', str(path)], cwd=repo_root, check=False)
-            git(repo_root, 'branch', '-D', branch, check=False)
+        except BaseException as error:
+            # A durability failure can occur after the registry replacement.
+            current_registry, _ = load_governed_worktree_registry(repo_root)
+            if lane in current_registry['lanes']:
+                raise SyncwheelError(
+                    f'governed worktree lane is visible after a registry write failure: '
+                    f'{lane_id}; inspect it before retrying'
+                ) from error
+            removed = git(repo_root, 'worktree', 'remove', str(path), check=False)
+            if removed.returncode == 0:
+                removed = git(
+                    repo_root, 'update-ref', '--no-deref', '-d', f'refs/heads/{branch}',
+                    base, check=False,
+                )
+            if stack_materialization:
+                rolled_back = git(
+                    repo_root, 'update-ref', '--no-deref', '-d', stack_branch_ref, base,
+                    check=False,
+                )
+                if rolled_back.returncode != 0:
+                    raise SyncwheelError(
+                        f'{error}; could not roll back {stack_branch_ref}: '
+                        f'{rolled_back.stderr.strip()}'
+                    ) from error
+            if removed.returncode != 0:
+                raise SyncwheelError(
+                    f'{error}; could not fully roll back lane {lane_id}: '
+                    f'{removed.stderr.strip()}'
+                ) from error
             raise
     output = {'lane': lane, 'registry_path': str(registry_path), 'warnings': warnings}
+    if stack_materialization:
+        output['stack_materialization'] = stack_materialization
     if args.json:
         print(json.dumps(output, indent=2, sort_keys=True))
     else:
@@ -11739,6 +11806,8 @@ def command_worktree_open(args):
         print(f"  lease: {lane['lease_expires_at']}")
         if lane['target']:
             print(f"  target stack: {lane['target']}")
+        if stack_materialization:
+            print(f"  materialized stack branch: {stack_materialization['branch']} at {base}")
         for warning in warnings:
             print(f'  warning: {warning}')
     return 0
@@ -11955,11 +12024,11 @@ def governed_worktree_commit_set(repo_root, lane):
     )
 
 
-def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, capture=False):
+def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, capture=False, active_only=False):
     """Prove that retained copies cannot contribute unpublished working-tree state."""
     stack = require_stack(manifest, stack_id)
     registry, _ = load_governed_worktree_registry(repo_root)
-    owned = {commit_full_sha(repo_root, commit) for commit in stack['commits']}
+    owned = set(declared_stack_history(repo_root, stack))
     target_tip = ref_tip(repo_root, stack['branch'])
     root = governed_worktree_root(repo_root, manifest).resolve(strict=False)
     snapshots = []
@@ -11970,9 +12039,12 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
         def refuse(reason):
             raise SyncwheelError(f"cannot retain captured worktree {lane['id']!r}: {reason}")
 
-        if lane['state'] != 'captured_pending_cleanup' or not lane.get('generation_token'):
-            refuse('a completed native capture is required')
-        if parse_coordination_timestamp(lane.get('captured_at', '')) is None:
+        active = lane['state'] == 'active'
+        if not lane.get('generation_token') or (not active and (
+            active_only or lane['state'] != 'captured_pending_cleanup'
+        )):
+            refuse('an active lane or completed native capture is required')
+        if not active and parse_coordination_timestamp(lane.get('captured_at', '')) is None:
             refuse('native capture evidence is missing')
         if lane.get('pending_reason') or any(key.startswith('cleanup_') for key in lane):
             refuse('an interrupted cleanup must be recovered first')
@@ -11985,7 +12057,7 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
         if not worktree or Path(worktree['path']).resolve(strict=False) != path:
             refuse('the Git worktree registration does not match')
         lock = worktree.get('locked')
-        if not lock or lock == governed_worktree_cleanup_lock_reason(lane):
+        if not active and (not lock or lock == governed_worktree_cleanup_lock_reason(lane)):
             refuse('an explicit Git worktree retention lock is required')
         status = git(path, 'status', '--porcelain=v1', '--untracked-files=all',
                      '--ignore-submodules=none', check=False)
@@ -11995,7 +12067,9 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
         if not target_tip or not tip or ref_tip(path, 'HEAD') != tip or (not capture and tip != target_tip):
             refuse('the captured HEAD and stack publication HEAD must match exactly')
         commits = governed_worktree_commit_set(repo_root, lane)
-        if not commits or not commits.issubset(owned) or tip not in owned:
+        unowned = [commit for commit in commits if commit not in owned
+                   and not branch_contains(repo_root, stack['base'], commit)]
+        if (unowned or (tip not in owned and tip != commit_full_sha(repo_root, stack['base']))):
             refuse('the captured commits are not fully owned by the selected stack')
         if capture:
             base = commit_full_sha(repo_root, stack['base'])
@@ -12030,12 +12104,16 @@ def retained_capture_manifest(repo_root, manifest, args):
 
 
 def verify_retained_captured_worktrees(repo_root, manifest, args, *, after_capture=False):
-    if getattr(args, 'retain_captured_worktrees', None) is None:
+    active_only = getattr(args, 'retain_captured_worktrees', None) is None
+    if active_only and not hasattr(args, '_active_publication_snapshot'):
         return []
-    expected = getattr(args, '_retained_captured_worktree_snapshot', None)
+    expected = getattr(args, '_active_publication_snapshot' if active_only
+                       else '_retained_captured_worktree_snapshot', None)
     capture = args.func == command_stack_capture_integration and not after_capture
     proposed = retained_capture_manifest(repo_root, manifest, args) if capture else manifest
-    observed = retained_captured_worktree_snapshot(repo_root, proposed, args.stack, capture=capture)
+    observed = retained_captured_worktree_snapshot(
+        repo_root, proposed, args.stack, capture=capture, active_only=active_only
+    )
     if after_capture and expected is not None:
         expected = [{**item, 'target_tip': item['tip']} for item in expected]
     if expected is None or observed != expected:
@@ -12251,14 +12329,17 @@ def command_check(args):
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     snapshot = collect_repo_snapshot(repo_root, manifest)
     validation = validate_manifest(repo_root, manifest)
+    journal = manifest.get('repository_mode') == 'journal'
     plan = build_plan(repo_root, manifest, validation)
-    diagnostics = integration_commit_diagnostics(repo_root, manifest, validation)
+    diagnostics = [] if journal else integration_commit_diagnostics(repo_root, manifest, validation)
     governed = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
     readiness_blockers = []
     if validation['errors']:
         readiness_blockers.append('validation_errors')
     if validation['warnings']:
         readiness_blockers.append('validation_warnings')
+    if journal and snapshot['working_tree_dirty']:
+        readiness_blockers.append('dirty_worktree')
     if plan:
         readiness_blockers.append('planned_actions')
     if any(item['code'] for item in governed['lanes']):
@@ -12279,33 +12360,37 @@ def command_check(args):
         },
     }
     if args.json:
+        if journal:
+            output['repository_mode'] = 'journal'
         print(json.dumps(output, indent=2))
         return 1 if validation['errors'] or (args.strict and not readiness['ready']) else 0
     print(f"repo: {snapshot['repo_root']}")
     print(f"branch: {snapshot['current_branch']}")
     print(f"manifest: {manifest_path}")
-    if validation['errors']:
-        print('\nvalidation:')
+    label = 'journal validation' if journal else 'validation'
+    if validation['errors'] or validation['warnings']:
+        print(f'\n{label}:')
         for line in validation['errors']:
             print(f'  - ERROR: {line}')
-    if validation['warnings']:
-        if not validation['errors']:
-            print('\nvalidation:')
         for line in validation['warnings']:
             print(f'  - WARN: {line}')
-    if not validation['errors'] and not validation['warnings']:
-        print('\nvalidation: OK')
-    print_integration_commit_diagnostics(diagnostics)
-    print('\nplan:')
-    if not plan:
-        print('  - no actions needed')
-    for action in plan:
-        line = action['type']
-        if 'stack' in action:
-            line += f" stack={action['stack']}"
-        if 'branch' in action:
-            line += f" branch={action['branch']}"
-        print(f'  - {line}')
+    else:
+        print(f'\n{label}: OK')
+    if journal:
+        if snapshot['working_tree_dirty']:
+            print('\njournal worktree has uncommitted changes')
+    else:
+        print_integration_commit_diagnostics(diagnostics)
+        print('\nplan:')
+        if not plan:
+            print('  - no actions needed')
+        for action in plan:
+            line = action['type']
+            if 'stack' in action:
+                line += f" stack={action['stack']}"
+            if 'branch' in action:
+                line += f" branch={action['branch']}"
+            print(f'  - {line}')
     if args.strict:
         print(f"\nreadiness: {'READY' if readiness['ready'] else 'BLOCKED'}")
     return 1 if validation['errors'] or (args.strict and not readiness['ready']) else 0
@@ -14582,6 +14667,8 @@ def landing_require_clean_worktrees(repo_root):
 
 
 def landing_stack_projection_is_exact(repo_root, stack):
+    if stack.get('adopted_history'):
+        raise SyncwheelError('stack land does not yet support adopted stack histories')
     if not branch_exists(repo_root, stack['branch']):
         raise SyncwheelError(f"stack land STOP: source branch is missing: {stack['branch']}")
     if not ref_exists(repo_root, stack['base']):
@@ -15494,6 +15581,16 @@ def stack_remote_ref(manifest, stack, remote=None):
     return f"{remote}/{stack['branch']}"
 
 
+def declared_stack_history(repo_root, stack):
+    """Expand only explicitly adopted history; ordinary merge recipes own no ancestors."""
+    adopted = validate_stack_adoption(stack)
+    if adopted:
+        if not branch_contains(repo_root, adopted['tip'], adopted['base']):
+            raise SyncwheelError('adopted history base is not an ancestor of its tip')
+        return rev_list(repo_root, f"{adopted['base']}..{adopted['tip']}")
+    return [commit_full_sha(repo_root, item) for item in stack['commits']]
+
+
 def stack_reconcile_report(repo_root, manifest, stack, remote=None):
     branch = stack['branch']
     remote_ref = stack_remote_ref(manifest, stack, remote)
@@ -15583,6 +15680,8 @@ def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_
     for action in actions:
         if action['type'] in stack_actions:
             stack = require_stack(manifest, action['stack'])
+            if stack.get('adopted_history'):
+                raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
             worktree = reconcile_worktree_path(repo_root, stack['branch'], worktree_root)
             path = Path(worktree).resolve()
             key = (stack['branch'], path)
@@ -16188,12 +16287,16 @@ def command_reconcile(args):
             )
         elif action['type'] == 'push_stack':
             stack = require_stack(manifest, action['stack'])
+            adopted = validate_stack_adoption(stack)
+            publication_tip = ref_tip(repo_root, stack['branch'])
+            if adopted and publication_tip != adopted['tip']:
+                raise SyncwheelError('adopted stack source changed; inspect and adopt the exact intended tip')
             refusal = draft_push_refusal(manifest, stack, stack_push_remote(manifest, stack, args.remote))
             if refusal:
                 raise SyncwheelError(refusal)
             if coordinated_push:
                 ref = f"refs/heads/{stack['branch']}"
-                coordinated_refs[ref] = ref_tip(repo_root, stack['branch'])
+                coordinated_refs[ref] = publication_tip
                 coordinated_events.append({
                     'type': 'stack_pushed',
                     'stack': stack['id'],
@@ -16208,11 +16311,12 @@ def command_reconcile(args):
                 # Same rule as `stack push`: never discard a commit another
                 # session pushed to this stack branch; pin the exact lease.
                 leases = legacy_stack_push_lease(
-                    repo_root, stack, remote, ref_tip(repo_root, stack['branch']),
+                    repo_root, stack, remote, publication_tip,
                     stack_push_args, manifest_path,
                 )
                 stack_push_args = [*leases, *without_force_push_args(stack_push_args)]
-            command = ['git', 'push', *stack_push_args, remote, stack['branch']]
+            refspec = f"{publication_tip}:refs/heads/{stack['branch']}"
+            command = ['git', 'push', *stack_push_args, remote, refspec]
             run_authorized_push(
                 repo_root, command, remote, [f"refs/heads/{stack['branch']}"],
                 manifest=manifest,
@@ -16225,7 +16329,7 @@ def command_reconcile(args):
                     'stack': stack['id'],
                     'branch': stack['branch'],
                     'remote': remote,
-                    'tip': ref_tip(repo_root, stack['branch']),
+                    'tip': publication_tip,
                     'actor': governed_worktree_owner(),
                 },
                 manifest_path,
@@ -18747,6 +18851,10 @@ def mutation_rule_requested(rule, args):
         return False
     if rule == 'always':
         return True
+    if rule == 'stack-set':
+        return bool(getattr(args, 'apply', False)) if (
+            getattr(args, 'base', None) or getattr(args, 'adopt_tip', None)
+        ) else True
     if rule == 'apply':
         return bool(getattr(args, 'apply', False))
     if rule == 'execute':
@@ -18992,6 +19100,12 @@ def governed_worktree_preflight(args):
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         return
+    if args.func in {command_stack_sync, command_stack_absorb}:
+        if require_stack(manifest, args.stack).get('adopted_history'):
+            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
+    if args.func == command_stack_set and (getattr(args, 'base', None) or getattr(args, 'adopt_tip', None)):
+        # Adoption has an exact plan and never cleans up lanes.
+        return
     if args.func in {command_worktree_open, command_worktree_list}:
         # Open checks its own target and registry under the lock, and list is
         # the detailed view of the same diagnostics. Recovery of unrelated
@@ -19044,6 +19158,13 @@ def governed_worktree_preflight(args):
         proposed = retained_capture_manifest(repo_root, manifest, args)
         args._retained_captured_worktree_snapshot = retained_captured_worktree_snapshot(
             repo_root, proposed, args.stack, capture=args.func == command_stack_capture_integration
+        )
+        return
+    if args.func == command_stack_push:
+        # Publication only reads lanes. A clean lane at the already declared
+        # exact source tip does not need capture or cleanup, even on handoff.
+        args._active_publication_snapshot = retained_captured_worktree_snapshot(
+            repo_root, manifest, args.stack, active_only=True
         )
         return
     if scoped_stacks:
@@ -19290,6 +19411,26 @@ def recover_control_manifest_before_command(args):
     return recovered
 
 
+def stack_adoption_preflight(args):
+    if not hasattr(args, 'repo') or not syncwheel_mutation_requested(args):
+        return
+    from syncwheel_stack_adoption import pending_adoptions
+    root = resolve_repo_root(args.repo)
+    path = resolve_manifest_path(root, args.repo, getattr(args, 'manifest', None),
+                                 getattr(args, 'personal', None))
+    pending = pending_adoptions(load_ledger_events(root, path))
+    if not pending:
+        return
+    if (args.func == command_stack_set and getattr(args, 'adopt_tip', None)
+            and getattr(args, 'plan_digest', None) in {p['planDigest'] for p in pending}):
+        return
+    plan = pending[0]
+    raise SyncwheelError(
+        f"interrupted stack adoption: resume stack set {plan['stack']} --base {plan['base']} "
+        f"--adopt-tip {plan['tip']} --plan-digest {plan['planDigest']} --apply"
+    )
+
+
 def execute_parsed_command(args):
     recover_control_manifest_before_command(args)
     if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
@@ -19409,6 +19550,7 @@ def main():
         if hasattr(args, 'repo'):
             SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
     try:
+        stack_adoption_preflight(args)
         route_stack_add_from_governed_lane(args)
         lane_push_refusal = lane_stack_push_manifest_refusal(args)
         if lane_push_refusal:

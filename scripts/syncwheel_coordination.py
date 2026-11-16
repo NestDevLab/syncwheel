@@ -11,6 +11,7 @@ import re
 from syncwheel_manifest import canonical_json_digest
 from syncwheel_errors import SyncwheelError
 from syncwheel_manifest import (
+    validate_stack_adoption,
     CHANNEL_LIFECYCLES,
     MANIFEST_VERSION_CHANNELS,
     channel_pin_digest,
@@ -27,6 +28,8 @@ COORDINATION_STATE_SCHEMA_VERSION = 2
 COORDINATION_STATE_SCHEMA_VERSION_CHANNELS = 3
 
 COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS = 4
+
+COORDINATION_STATE_SCHEMA_VERSION_ADOPTIONS = 5
 
 COORDINATION_REMOTE_ROLE_CANONICAL = 'canonical'
 
@@ -171,6 +174,7 @@ def validate_coordination_snapshot_refs(snapshot, *, branch_is_valid):
         coordination_public_remote_ref_parts(
             stack['base'], f'coordination state stacks[{index}].base'
         , branch_is_valid=branch_is_valid)
+        validate_stack_adoption(stack)
         dependencies = stack.get('depends_on', [])
         if (
             not isinstance(dependencies, list)
@@ -226,6 +230,10 @@ def validate_coordination_snapshot_refs(snapshot, *, branch_is_valid):
 
 
 def coordination_snapshot_schema(snapshot):
+    # Older serializers silently omit adoption bindings; do not let them republish.
+    if any(isinstance(stack, dict) and stack.get('adopted_history')
+           for stack in snapshot.get('stacks', [])):
+        return COORDINATION_STATE_SCHEMA_VERSION_ADOPTIONS
     # Older peers must reject bound resolutions rather than silently erase them.
     integration = snapshot.get('integration')
     if isinstance(integration, dict) and integration.get('resolutions'):
@@ -242,6 +250,7 @@ def validate_coordination_state(state, expected_id=None, claims_mode='advisory',
         COORDINATION_STATE_SCHEMA_VERSION,
         COORDINATION_STATE_SCHEMA_VERSION_CHANNELS,
         COORDINATION_STATE_SCHEMA_VERSION_RESOLUTIONS,
+        COORDINATION_STATE_SCHEMA_VERSION_ADOPTIONS,
     }:
         raise SyncwheelError(
             f"unsupported coordination state schema: {state.get('schema_version')!r}"
