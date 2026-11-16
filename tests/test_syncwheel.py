@@ -2547,6 +2547,24 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn('syncwheel worktree list --problems', result.stderr)
         self.assertNotIn('governed worktree foreign-0: expired', result.stderr)
 
+    def test_blocking_lane_error_names_code_and_remedy(self):
+        module = self.load_syncwheel_module()
+        lanes = [{'id': 'own', 'branch': 'syncwheel/lane/own', 'path': '/x/own',
+                  'target': 'feature-a', 'code': 'dirty', 'remedy': 'commit the lane changes'}]
+        args = SimpleNamespace(
+            func=module.command_sync, repo=str(self.repo), manifest=None, personal=None,
+            stack=None, apply=True, dry_run=False, json=False,
+        )
+        with mock.patch.object(
+            module, 'governed_worktree_diagnostics', return_value={'lanes': lanes},
+        ), mock.patch.object(
+            module, 'reconcile_governed_worktrees', return_value={'failures': []},
+        ), mock.patch('sys.stderr', new_callable=io.StringIO):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, r'own \[dirty\]: commit the lane changes',
+            ):
+                module.governed_worktree_preflight(args)
+
     def test_worktree_list_shows_lanes_and_problems_without_changing_anything(self):
         module, lanes, tips = self.open_expired_foreign_lanes(count=2)
         healthy = json.loads(self.run_cli('worktree', 'open', 'healthy-lane', '--json').stdout)['lane']

@@ -18838,7 +18838,8 @@ def governed_worktree_preflight(args):
         raise SyncwheelError(
             'governed worktree recovery is required before this mutation: '
             + details
-            + '; cleanup failed closed, retry the named remedy'
+            + '; cleanup failed closed, retry the named remedy '
+            '(`syncwheel worktree list --problems` shows each lane and its remedy)'
         )
     if args.func not in dangerous:
         return
@@ -18893,9 +18894,14 @@ def governed_worktree_preflight(args):
             file=sys.stderr,
         )
     if blocked:
-        labels = ', '.join(item['id'] or item['branch'] or item['path'] for item in blocked)
+        # Name the reason and remedy here: the warnings above may have been
+        # collapsed into a summary line on a busy repository.
+        details = '; '.join(
+            f"{item['id'] or item['branch'] or item['path']} [{item['code']}]: {item.get('remedy') or 'see worktree list'}"
+            for item in blocked
+        )
         raise SyncwheelError(
-            'governed worktree recovery is required before this mutation: ' + labels
+            'governed worktree recovery is required before this mutation: ' + details
         )
 
 

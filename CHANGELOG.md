@@ -3,7 +3,7 @@
 ## 0.47.4 - 2026-11-16
 
 - Add `worktree list` (alias `ls`), a read-only view of every governed lane with its state, health code, target stack, branch, path and remedy. `--problems` keeps only lanes that need attention, and `--json` also returns a count per health code.
-- When more than three lanes need attention, commands print one warning line with the count per health code and a pointer to `worktree list --problems`, instead of one line per lane. `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` likewise print one line for the lanes that need recovery but do not block them.
+- When more than three lanes need attention, the warnings printed before a command runs become one line with the count per health code and a pointer to `worktree list --problems`, instead of one line per lane. `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` likewise print one line for the lanes that need recovery but do not block them. When lanes do block a command, its error now names each lane with its health code and remedy. `worktree open` still lists every lane warning in its own output.
 
 ## 0.47.3 - 2026-11-15
 
