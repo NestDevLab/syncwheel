@@ -5524,7 +5524,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
                               '--force-with-lease', expected=2)
 
-        self.assertIn('never had on the stack', result.stderr)
+        self.assertIn('stack does not own', result.stderr)
         self.assertIn(foreign[:12], result.stderr)
         self.assertIn(f'--force-with-lease=refs/heads/pr/feature-a:{foreign}', result.stderr)
         self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), foreign)
@@ -5548,7 +5548,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn(f'--force-with-lease=refs/heads/pr/feature-a:{tip}', result.stdout)
         self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), rewritten)
 
-    def test_forced_legacy_stack_push_replaces_an_earlier_rewrite_this_clone_pushed(self):
+    def test_forced_legacy_stack_push_replaces_an_earlier_rebuild_of_this_clone(self):
         origin, tip, rewritten = self.legacy_pushed_stack_with_remote()
         # A rebuild whose diff differs from the next one: same parents, another
         # tree, so neither ancestry nor patch-id links it to the later rewrite.
@@ -5566,6 +5566,16 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', '--force-with-lease')
         self.git('fetch', '-q', 'origin')
         self.git('update-ref', 'refs/heads/pr/feature-a', rewritten, earlier)
+        # Only a rebuild result makes the earlier tip this clone's own.
+        refused = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
+                               '--force-with-lease', expected=2)
+        self.assertIn('stack does not own', refused.stderr)
+        module = self.load_syncwheel_module()
+        module.append_ledger_event(
+            self.repo, 'stack_rebuilt',
+            {'stack': 'feature-a', 'branch': 'pr/feature-a', 'before_tip': tip, 'after_tip': earlier},
+            self.repo / '.syncwheel' / 'manifest.json',
+        )
 
         result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', '--force-with-lease')
 

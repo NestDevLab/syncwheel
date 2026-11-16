@@ -2266,16 +2266,18 @@ def explicit_push_leases(push_args):
 
 
 def stack_tips_from_ledger(repo_root, stack_id, manifest_path=None):
-    """Every tip this clone itself rebuilt or pushed for one stack."""
-    tips = []
-    for event in load_ledger_events(repo_root, manifest_path):
-        payload = event.get('payload') or {}
-        if payload.get('stack') != stack_id:
-            continue
-        if event.get('type') == 'stack_rebuilt':
-            tips.extend([payload.get('before_tip'), payload.get('after_tip')])
-        elif event.get('type') == 'stack_pushed':
-            tips.append(payload.get('tip'))
+    """Every tip a rebuild in this clone produced for one stack.
+
+    Only rebuild results count: they are replays of declared commits. A
+    rebuild's before tip and a pushed tip record whatever the branch held,
+    which may be a commit another session made in a worktree of this clone.
+    """
+    tips = [
+        (event.get('payload') or {}).get('after_tip')
+        for event in load_ledger_events(repo_root, manifest_path)
+        if event.get('type') == 'stack_rebuilt'
+        and (event.get('payload') or {}).get('stack') == stack_id
+    ]
     return [tip for tip in dict.fromkeys(tips) if isinstance(tip, str) and tip]
 
 
@@ -2285,7 +2287,7 @@ def legacy_stack_push_lease(repo_root, stack, remote, local_tip, push_args=(), m
     A bare --force-with-lease trusts the remote-tracking ref, which the last
     fetch already moved onto commits another session pushed; the push would
     then silently drop them. Observe the live remote tip instead, refuse if
-    it holds a commit this clone never had on the stack, and pin the lease to
+    it holds a commit the stack does not own, and pin the lease to
     that tip. A lease the caller pinned to an exact tip is kept as written:
     naming the tip is the explicit acknowledgement of what it replaces.
     """
@@ -2308,8 +2310,8 @@ def legacy_stack_push_lease(repo_root, stack, remote, local_tip, push_args=(), m
             f'has not fetched; fetch it and run `syncwheel check` before a forced push'
         )
     # Owned history: the local tip, the stack's declared commits and base, and
-    # every tip this clone rebuilt or pushed for the stack, so an earlier
-    # rewrite of the same stack is recognised even when its patch-id changed.
+    # every tip a rebuild in this clone produced for the stack, so an earlier
+    # rebuild of the same stack is recognised even when its patch-id changed.
     owned_tips = [local_tip, stack.get('base'), *stack.get('commits', []),
                   *stack_tips_from_ledger(repo_root, stack['id'], manifest_path)]
     owned_tips = [
@@ -2337,8 +2339,8 @@ def legacy_stack_push_lease(repo_root, stack, remote, local_tip, push_args=(), m
         ]
     if foreign:
         raise SyncwheelError(
-            f"stack push {stack['id']} STOP: {remote} {ref} holds {len(foreign)} commit(s) this "
-            f"clone never had on the stack ({', '.join(commit[:12] for commit in foreign[:5])}"
+            f"stack push {stack['id']} STOP: {remote} {ref} holds {len(foreign)} commit(s) the "
+            f"stack does not own ({', '.join(commit[:12] for commit in foreign[:5])}"
             f"{', ...' if len(foreign) > 5 else ''}); another session pushed there. A forced push "
             'would discard them: add them to the stack, or, once you know they may go, pass '
             f'`--force-with-lease={ref}:{remote_tip}` to replace exactly that tip'

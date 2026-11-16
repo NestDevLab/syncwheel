@@ -77,7 +77,7 @@ Default behavior is conservative:
 - legacy manifests use `--force-with-lease` by default, because managed
   branches are often rewritten by deterministic rebuilds; for stack branches
   the lease is pinned to the live remote tip, and the push stops when that tip
-  holds a commit this clone never had on the stack, so another session's
+  holds a commit the stack does not own, so another session's
   pushed work is not discarded (integration pushes keep the plain lease)
 - active-active version 2 or 3 manifests publish managed refs and state together
   with atomic, exact leases; unsupported remotes fail closed
