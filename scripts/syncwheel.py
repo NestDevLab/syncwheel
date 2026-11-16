@@ -6892,9 +6892,11 @@ def append_governed_worktree_cleanup_event(repo_root, lane, manifest_path=None):
 
 def reconcile_governed_worktrees(
     repo_root, manifest, manifest_path=None, candidate_ids=None, repair_all_paths=False,
+    *, protect_foreign_lanes=False,
 ):
     return _governed_worktrees(repo_root).reconcile_governed_worktrees(
         manifest, manifest_path, candidate_ids, repair_all_paths,
+        protect_foreign_lanes=protect_foreign_lanes,
     )
 
 
@@ -20058,6 +20060,7 @@ def governed_worktree_preflight(args):
             return
         cleanup = reconcile_governed_worktrees(
             repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
+            protect_foreign_lanes=True,
         )
     elif governed_worktree_mutation_requested(args):
         # Record moved lane paths and finish cleanups already started, but
@@ -20068,9 +20071,13 @@ def governed_worktree_preflight(args):
             lane['id'] for lane in governed_worktree_pending_cleanup_candidates(repo_root, manifest)
             if lane.get('code') != 'archive_push_failed'
         }
+        protect_foreign = args.func in {
+            command_stack_capture_integration, command_stack_classify_integration,
+        }
+        options = {'protect_foreign_lanes': True} if protect_foreign else {}
         cleanup = reconcile_governed_worktrees(
             repo_root, manifest, manifest_path, candidate_ids=candidate_ids,
-            repair_all_paths=True,
+            repair_all_paths=True, **options,
         )
         # A lane whose cleanup could not take its Git worktree lock (someone
         # holds it with their own lock) is intact: the cleanup stopped before
@@ -20743,6 +20750,9 @@ class _GovernedWorktreeRepository:
 
     def rev_list(self, *args, **kwargs):
         return rev_list(*args, **kwargs)
+
+    def governed_worktree_owner(self):
+        return governed_worktree_owner()
 
     def append_ledger_event(self, *args, **kwargs):
         return append_ledger_event(*args, **kwargs)

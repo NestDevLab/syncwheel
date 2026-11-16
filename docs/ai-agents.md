@@ -240,6 +240,10 @@ active-active channel must use the coordination remote.
   and pushed to `refs/syncwheel/archive/lanes/...` on the publication remote,
   before reaping even if its registry path is outside the current root, while an
   existing dirty or unknown lane must remain visible until explicitly handled
+- capturing commits does not authorize removing another owner's live lane.
+  Keep its active state and lease, and coordinate an explicit release with its
+  owner when the command reports `captured, kept`. Unproven lease expiry also
+  retains a foreign lane
 - preview `worktree release <lane> --reason <why>` before using `--apply` for a
   dead or abandoned lane; apply records the reason in the ledger and refuses an
   existing dirty worktree with its recovery remedy
@@ -252,8 +256,9 @@ active-active channel must use the coordination remote.
   live users and foreign locks still stop cleanup; never release another owner's
   lane merely because its warning is visible
 - use `--dry-run` when inspecting rebuild/push commands
-- prefer `reconcile` for the normal multi-device lifecycle; use raw Git only as
-  inspection or fallback
+- prefer `reconcile` for the normal multi-device lifecycle. Raw Git is for
+  inspection; there is no raw-push fallback. Stop and report a Syncwheel refusal
+  instead of bypassing it
 - for an active-active manifest, use `handoff` before taking over from another
   device or agent; never bypass the coordinated publisher with `git push`
 - when a publication or revision-provider check is blocked by another stack's

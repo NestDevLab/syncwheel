@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.19 - 2026-11-16
+
+- Preserve another owner's live lane during stack capture and automatic cleanup. Record the stack ownership without changing the protected lane's lease, checkout, index or refs, and report which owner is keeping it. Unproven foreign lease expiry also preserves the lane.
+
 ## 0.47.18 - 2026-11-16
 
 - Name path-scoped stack absorb with a new commit for uncommitted primary changes, reserving capture-integration for existing unowned commits. Refuse default amend on an empty stack before changing its base, metadata or worktrees. An empty recipe whose branch has moved from the base also refuses a new-commit absorb, preserving its undeclared history.

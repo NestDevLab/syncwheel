@@ -108,6 +108,23 @@ def governed_worktree_lane_lease_expired(lane, now):
     return bool(expires and expires <= now)
 
 
+def automatic_lane_cleanup_hold(lane, actor, now):
+    """Require a known owner and lease before automatic capture cleanup."""
+    owner = lane.get('owner')
+    expires = parse_coordination_timestamp(lane.get('lease_expires_at'))
+    if not isinstance(owner, str) or not owner.strip() or expires is None:
+        return 'lane owner or lease is unverified'
+    if owner.startswith('unknown@') and owner.endswith(':0'):
+        return 'lane owner is unverified'
+    if not isinstance(actor, str) or not actor.strip() or (
+        actor.startswith('unknown@') and actor.endswith(':0')
+    ):
+        return 'current lane owner is unverified'
+    if owner != actor and expires > now:
+        return f'owner {owner} live'
+    return None
+
+
 def governed_worktree_pending_remedy(manifest, lane, manifest_path=None):
     reason = shlex.quote(
         lane.get('cleanup_event_reason')
@@ -252,6 +269,7 @@ class WorktreeRepository(Protocol):
     def branch_exists(self, repo_root, branch): ...
     def commit_full_sha(self, repo_root, ref): ...
     def rev_list(self, repo_root, rev_range): ...
+    def governed_worktree_owner(self): ...
 
 
 class WorktreeLedger(Protocol):
@@ -660,6 +678,8 @@ class GovernedWorktrees:
         registry,
         persist,
         manifest_path=None,
+        *,
+        protect_lane=None,
     ):
         repo_root = self.repository.root
         ledger = self.governed_worktree_cleanup_ledger(manifest_path)
@@ -673,6 +693,7 @@ class GovernedWorktrees:
             lane = by_id.get(lane_id)
             if (
                 lane is not None
+                and not (protect_lane and protect_lane(lane))
                 and generation
                 and governed_worktree_generation_token(lane) == generation
             ):
@@ -696,6 +717,8 @@ class GovernedWorktrees:
             if not isinstance(recorded, dict) or not generation:
                 continue
             lane = by_id.get(lane_id)
+            if protect_lane and (protect_lane(recorded) or (lane is not None and protect_lane(lane))):
+                continue
             if lane is None:
                 restored = copy.deepcopy(recorded)
                 registry['lanes'].append(restored)
@@ -1289,19 +1312,24 @@ class GovernedWorktrees:
 
     def reconcile_governed_worktrees(
         self, manifest, manifest_path=None, candidate_ids=None, repair_all_paths=False,
+        *, protect_foreign_lanes=False,
     ):
         repo_root = self.repository.root
         with self.governed_worktree_registry_lock():
             self.prune_governed_worktree_stale_locks(manifest_path)
             registry, _ = self.load_governed_worktree_registry()
             persist = self.governed_worktree_registry_cas_persister(registry)
+            protect_lane = self.automatic_cleanup_hold() if protect_foreign_lanes else None
             self.recover_governed_worktree_registry_from_ledger(
                 registry,
                 persist,
                 manifest_path,
+                protect_lane=protect_lane,
             )
             paths_updated = False
             for lane in registry['lanes']:
+                if protect_lane and protect_lane(lane):
+                    continue
                 status = self.governed_worktree_lane_status(manifest, lane)
                 if (
                     status.get('path_moved')
@@ -1319,7 +1347,7 @@ class GovernedWorktrees:
             reaped = []
             failures = []
             for lane in list(registry['lanes']):
-                if lane['id'] not in selected:
+                if lane['id'] not in selected or (protect_lane and protect_lane(lane)):
                     continue
                 completed, detail = self.reap_governed_worktree_lane(
                     manifest,
@@ -1354,6 +1382,11 @@ class GovernedWorktrees:
             return set()
         return set(self.repository.rev_list(repo_root, f"{lane['base']}..{lane['branch']}"))
 
+    def automatic_cleanup_hold(self):
+        actor = self.repository.governed_worktree_owner()
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return lambda lane: automatic_lane_cleanup_hold(lane, actor, now)
+
     def capture_governed_worktrees_for_stack(self, manifest, stack_id, manifest_path=None):
         repo_root = self.repository.root
         stack = require_stack(manifest, stack_id)
@@ -1361,10 +1394,12 @@ class GovernedWorktrees:
         with self.governed_worktree_registry_lock():
             registry, _ = self.load_governed_worktree_registry()
             persist = self.governed_worktree_registry_cas_persister(registry)
+            hold = self.automatic_cleanup_hold()
             self.recover_governed_worktree_registry_from_ledger(
                 registry,
                 persist,
                 manifest_path,
+                protect_lane=hold,
             )
             captured = []
             for lane in registry['lanes']:
@@ -1372,6 +1407,13 @@ class GovernedWorktrees:
                     continue
                 commits = self.governed_worktree_commit_set(lane)
                 if not commits or not commits.issubset(owned):
+                    continue
+                reason = hold(lane)
+                if reason:
+                    print(
+                        f"WARNING: governed worktree {lane['id']} captured, kept: {reason}",
+                        file=sys.stderr,
+                    )
                     continue
                 lane['state'] = 'captured_pending_cleanup'
                 lane['captured_at'] = iso_utc_now()
