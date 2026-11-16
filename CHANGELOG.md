@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.7 - 2026-11-16
+
+- Stop the first coordinated publication from overwriting an existing remote branch. Before any coordination state exists, `int push` (and `publish`) used the tip it had just observed as the lease, so a `main-integration` another clone had pushed was silently replaced. Now each pushed branch may only move forward from the observed remote tip; if that tip is not an ancestor of the local one, or has not been fetched, the push stops before anything is written and names the tip. `int push --adopt-remote <full commit id>` replaces the remote integration branch only when it is at exactly that tip, and is refused once coordination state is published or on a legacy manifest.
+
 ## 0.47.5 - 2026-11-16
 
 - Speed up whole-repository commands by remembering, for the length of one command, the Git answers that cannot change while it runs: which full commit ids exist, ancestry between two fixed commits, a commit's parents and changed files, and the Git common directory. `validate`, `status` and `check` also learn all declared commits with one `git cat-file --batch-check` instead of one `rev-parse` each. Refs are never remembered. On a 20-stack fixture `int rebuild` drops from 971 to 438 Git processes (3.6 s to 1.7 s) and `int rebuild --dry-run` from 792 to 339; on a busy production repository the patch-ID cache alone had issued 1,771 `rev-parse --git-common-dir` calls per `status`.

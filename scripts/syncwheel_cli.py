@@ -1078,6 +1078,12 @@ def build_parser(commands, version):
 
     int_push_p = int_sub.add_parser('push', parents=[common])
     add_push_args(int_push_p)
+    int_push_p.add_argument(
+        '--adopt-remote',
+        metavar='TIP',
+        help='first coordinated publish only: replace the existing remote integration '
+             'branch, which must be at exactly this full commit id',
+    )
     int_push_p.set_defaults(func=commands['command_int_push'])
 
     int_git_p = int_sub.add_parser('git', aliases=['g'], parents=[common])
