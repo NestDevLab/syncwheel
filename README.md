@@ -75,7 +75,10 @@ Default behavior is conservative:
 - lower-level `reconcile --apply` and `reconcile --apply --push` remain
   available for explicit scripting
 - legacy manifests use `--force-with-lease` by default, because managed
-  branches are often rewritten by deterministic rebuilds
+  branches are often rewritten by deterministic rebuilds; for stack branches
+  the lease is pinned to the live remote tip, and the push stops when that tip
+  holds a commit the stack does not own, so another session's
+  pushed work is not discarded (integration pushes keep the plain lease)
 - active-active version 2 or 3 manifests publish managed refs and state together
   with atomic, exact leases; unsupported remotes fail closed
 - once coordination state is published, a new managed branch (stack, channel

@@ -1488,6 +1488,42 @@ with module.coordination_publication_lock(Path(repo_path)):
         again = self.run_cli(first, 'int', 'push', '--adopt-remote', foreign, expected=2)
         self.assertIn('only applies to the first coordinated publication', again.stderr)
 
+    def test_first_publication_always_checks_the_adopted_tip(self):
+        module = self.load_module()
+        ref = 'refs/heads/integration/shared'
+        for observed, local in ((None, 'b' * 40), ('b' * 40, 'b' * 40),
+                                ('a' * 40, 'b' * 40)):
+            with self.subTest(observed=observed, local=local):
+                with mock.patch.object(module, 'commit_exists', return_value=True), \
+                     mock.patch.object(module, 'branch_contains', return_value=True):
+                    with self.assertRaisesRegex(module.SyncwheelError, '--adopt-remote expected'):
+                        module.require_new_managed_refs_absent(
+                            {'remote': 'origin'}, None, {ref: local}, {ref: observed},
+                            self.tmp, {ref: 'c' * 40}, integration_ref=ref,
+                        )
+
+    def test_first_publication_allows_a_fast_forward_without_adoption(self):
+        module = self.load_module()
+        ref = 'refs/heads/integration/shared'
+        with mock.patch.object(module, 'commit_exists', return_value=True), \
+             mock.patch.object(module, 'branch_contains', return_value=True) as contains:
+            module.require_new_managed_refs_absent(
+                {'remote': 'origin'}, None, {ref: 'b' * 40}, {ref: 'a' * 40},
+                self.tmp, integration_ref=ref,
+            )
+        contains.assert_called_once_with(self.tmp, 'b' * 40, 'a' * 40)
+
+    def test_first_publication_stack_collision_names_a_stack_remedy(self):
+        module = self.load_module()
+        ref = 'refs/heads/pr/change'
+        with self.assertRaises(module.SyncwheelError) as caught:
+            module.require_new_managed_refs_absent(
+                {'remote': 'origin'}, None, {ref: 'b' * 40}, {ref: 'a' * 40},
+                integration_ref='refs/heads/integration/shared',
+            )
+        self.assertIn('Reconcile the stack', str(caught.exception))
+        self.assertNotIn('int push', str(caught.exception))
+
     def test_state_is_append_only_and_safe_for_public_transport(self):
         origin = self.create_remote()
         first = self.clone(origin, 'first')
