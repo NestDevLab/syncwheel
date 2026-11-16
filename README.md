@@ -1331,7 +1331,10 @@ raw Git equivalent of the Syncwheel lifecycle.
 Syncwheel keeps a clone-local patch-ID cache in Git's common directory. Its key
 covers only the Git config and `GIT_*` environment that can change a diff, so a
 session with its own `user.*`, credential, remote or tracing settings reuses the
-same cache instead of recomputing every commit.
+same cache instead of recomputing every commit. Within one command, Syncwheel
+also remembers Git answers that cannot change while it runs (existence of full
+commit ids, ancestry between fixed commits, parents, changed files, the common
+directory); refs are always read fresh.
 
 ## Documentation map
 

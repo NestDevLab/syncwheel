@@ -1083,9 +1083,14 @@ def install_syncwheel_hooks(root=None, dry_run=False):
 
 
 def git_common_dir(repo_root):
+    key = ('common_dir', str(repo_root))
+    if key in _RUN_MEMO:
+        return _RUN_MEMO[key]
     result = git(repo_root, 'rev-parse', '--git-common-dir')
     path = Path(result.stdout.strip())
-    return (repo_root / path).resolve() if not path.is_absolute() else path.resolve()
+    common = (Path(repo_root) / path).resolve() if not path.is_absolute() else path.resolve()
+    _RUN_MEMO[key] = common
+    return common
 
 
 def primary_guard_path(repo_root):
@@ -1272,14 +1277,18 @@ def save_primary_guard(repo_root, manifest, *, enabled=True, reason=None):
 def ref_auth_dir(repo_root):
     # authorize=False breaks the cycle: issuing an authorization needs this
     # directory, and managed_process_env() issues one for every other command.
-    result = run(
-        ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root, check=False,
-        authorize=False,
-    )
-    if result.returncode != 0:
-        raise SyncwheelError('cannot resolve git common directory for ref authorization')
-    path = Path(result.stdout.strip())
-    common = (Path(repo_root) / path).resolve() if not path.is_absolute() else path.resolve()
+    key = ('common_dir', str(repo_root))
+    common = _RUN_MEMO.get(key)
+    if common is None:
+        result = run(
+            ['git', 'rev-parse', '--git-common-dir'], cwd=repo_root, check=False,
+            authorize=False,
+        )
+        if result.returncode != 0:
+            raise SyncwheelError('cannot resolve git common directory for ref authorization')
+        path = Path(result.stdout.strip())
+        common = (Path(repo_root) / path).resolve() if not path.is_absolute() else path.resolve()
+        _RUN_MEMO[key] = common
     return common / 'syncwheel' / 'ref-auth'
 
 
@@ -2784,30 +2793,114 @@ def ref_exists(repo_root, ref):
     return git(repo_root, 'rev-parse', '--verify', '--quiet', ref, check=False).returncode == 0
 
 
+# Answers about full commit ids never change while one command runs: a
+# commit that exists stays, and ancestry between two fixed commits is fixed.
+# Remembering them removes thousands of git processes from whole-repository
+# commands. Refs are never remembered, since they move. main() clears both.
+_KNOWN_COMMITS = {}
+_KNOWN_ANCESTRY = {}
+_RUN_MEMO = {}
+
+
+def clear_commit_memo():
+    _KNOWN_COMMITS.clear()
+    _KNOWN_ANCESTRY.clear()
+    _RUN_MEMO.clear()
+
+
+def _is_full_object_id(repo_root, value):
+    return (
+        isinstance(value, str)
+        and len(value) in (40, 64)
+        and re.fullmatch(r'[0-9a-f]+', value) is not None
+        and len(value) == git_object_id_length(repo_root)
+    )
+
+
+def remember_commits(repo_root, commits):
+    known = _KNOWN_COMMITS.setdefault(str(repo_root), set())
+    for commit in commits:
+        if _is_full_object_id(repo_root, commit):
+            known.add(commit)
+
+
+def prime_commits(repo_root, refs):
+    """Learn in one git process which full commit ids exist as commits."""
+    candidates = sorted({ref for ref in refs if _is_full_object_id(repo_root, ref)}
+                        - _KNOWN_COMMITS.get(str(repo_root), set()))
+    if not candidates:
+        return
+    result = git(
+        repo_root, 'cat-file', '--batch-check=%(objectname) %(objecttype)',
+        input_text=''.join(f'{ref}\n' for ref in candidates), check=False,
+    )
+    if result.returncode != 0:
+        return
+    found = []
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == 'commit':
+            found.append(parts[0])
+    remember_commits(repo_root, found)
+
+
+def _commit_is_known(repo_root, value):
+    return value in _KNOWN_COMMITS.get(str(repo_root), ()) and _is_full_object_id(repo_root, value)
+
+
 def commit_exists(repo_root, ref):
-    return git(repo_root, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}', check=False).returncode == 0
+    if _commit_is_known(repo_root, ref):
+        return True
+    result = git(repo_root, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}', check=False)
+    if result.returncode != 0:
+        return False
+    # Remember the peeled commit, never the input: an annotated tag id is
+    # full-length hex too, and must keep resolving to the commit it names.
+    remember_commits(repo_root, [result.stdout.strip()])
+    return True
 
 
 def branch_contains(repo_root, branch, commit):
-    return git(repo_root, 'merge-base', '--is-ancestor', commit, branch, check=False).returncode == 0
+    fixed = _is_full_object_id(repo_root, branch) and _is_full_object_id(repo_root, commit)
+    key = (str(repo_root), commit, branch)
+    if fixed and key in _KNOWN_ANCESTRY:
+        return _KNOWN_ANCESTRY[key]
+    result = git(repo_root, 'merge-base', '--is-ancestor', commit, branch, check=False).returncode
+    contained = result == 0
+    # Exit 1 means "not an ancestor"; anything else is an error and is not remembered.
+    if fixed and result in (0, 1):
+        _KNOWN_ANCESTRY[key] = contained
+    return contained
 
 
 def commit_full_sha(repo_root, ref):
-    return git(repo_root, 'rev-parse', f'{ref}^{{commit}}').stdout.strip()
+    if _commit_is_known(repo_root, ref):
+        return ref
+    full = git(repo_root, 'rev-parse', f'{ref}^{{commit}}').stdout.strip()
+    remember_commits(repo_root, [full])
+    return full
+
+
+def commit_parents(repo_root, commit):
+    """Return the parents of a commit; fixed for a full commit id, so remembered."""
+    fixed = _is_full_object_id(repo_root, commit)
+    key = ('parents', str(repo_root), commit)
+    if fixed and key in _RUN_MEMO:
+        return list(_RUN_MEMO[key])
+    result = git(repo_root, 'rev-list', '--parents', '-n', '1', commit)
+    parents = result.stdout.strip().split()[1:]
+    if fixed:
+        _RUN_MEMO[key] = tuple(parents)
+    return parents
 
 
 def commit_parent_count(repo_root, commit):
-    result = git(repo_root, 'rev-list', '--parents', '-n', '1', commit)
-    parts = result.stdout.strip().split()
-    return max(0, len(parts) - 1)
+    return len(commit_parents(repo_root, commit))
 
 
 def commit_first_parent(repo_root, commit):
-    result = git(repo_root, 'rev-list', '--parents', '-n', '1', commit)
-    parts = result.stdout.strip().split()
-    if len(parts) < 2:
-        return None
-    return parts[1]
+    parents = commit_parents(repo_root, commit)
+    return parents[0] if parents else None
 
 
 def commit_patch_id(repo_root, commit):
@@ -3154,6 +3247,11 @@ def commit_subject(repo_root, commit):
 
 
 def commit_changed_files(repo_root, commit, limit=None):
+    fixed = _is_full_object_id(repo_root, commit)
+    key = ('changed_files', str(repo_root), commit)
+    if fixed and key in _RUN_MEMO:
+        files = list(_RUN_MEMO[key])
+        return files[:limit] if limit else files
     result = git(
         repo_root,
         'show',
@@ -3167,6 +3265,8 @@ def commit_changed_files(repo_root, commit, limit=None):
     if result.returncode != 0:
         return []
     files = [path for path in result.stdout.split('\0') if path]
+    if fixed:
+        _RUN_MEMO[key] = tuple(files)
     return files[:limit] if limit else files
 
 
@@ -3177,7 +3277,7 @@ def is_manifest_only_commit(repo_root, commit):
         return True
     # Initialization also writes the managed ignore block. Preserve the strict
     # control-transition proof so unrelated ignore changes stay unowned.
-    parents = git(repo_root, 'rev-list', '--parents', '-n', '1', commit).stdout.split()[1:]
+    parents = commit_parents(repo_root, commit)
     return len(parents) == 1 and integration_control_only_transition(repo_root, commit, parents[0])
 
 
@@ -4755,7 +4855,9 @@ def channel_receipt(channel, plan, status, tip=None, published_revision=None, co
 
 def rev_list(repo_root, rev_range):
     result = git(repo_root, 'rev-list', '--reverse', rev_range)
-    return [line for line in result.stdout.splitlines() if line.strip()]
+    commits = [line for line in result.stdout.splitlines() if line.strip()]
+    remember_commits(repo_root, commits)
+    return commits
 
 
 def commit_list_for_spec(repo_root, spec):
@@ -9509,6 +9611,13 @@ def collect_repo_snapshot(repo_root, manifest):
 def validate_manifest(repo_root, manifest):
     warnings = []
     errors = []
+    prime_commits(repo_root, [
+        commit
+        for stack in manifest.get('stacks', [])
+        for key in ('commits', 'integration_commits', 'integration_only_commits')
+        for commit in (stack.get(key) or [])
+        if isinstance(commit, str)
+    ])
     details = {'stacks': [], 'channels': [], 'integration': {}, 'coordination': {}}
     hooks = managed_push_guard_policy(repo_root, manifest)
     details['hooks'] = hooks
@@ -19097,6 +19206,7 @@ def route_stack_add_from_governed_lane(args):
 
 
 def main():
+    clear_commit_memo()
     parser = build_parser()
     raw_args = sys.argv[1:]
     passthrough = []
