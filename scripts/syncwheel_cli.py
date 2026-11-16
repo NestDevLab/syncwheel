@@ -517,6 +517,14 @@ def build_parser(commands, version):
     worktree_open_p.add_argument('-j', '--json', action='store_true')
     worktree_open_p.set_defaults(func=commands['command_worktree_open'])
 
+    worktree_list_p = worktree_sub.add_parser(
+        'list', aliases=['ls'], parents=[common],
+        help='list governed lanes with their state, health and remedy; read-only',
+    )
+    worktree_list_p.add_argument('-P', '--problems', action='store_true', help='show only lanes that need attention')
+    worktree_list_p.add_argument('-j', '--json', action='store_true')
+    worktree_list_p.set_defaults(func=commands['command_worktree_list'])
+
     worktree_release_p = worktree_sub.add_parser('release', parents=[common])
     worktree_release_p.add_argument('lane')
     worktree_release_p.add_argument('--reason', required=True, help='why this dead or abandoned lane is being released')
@@ -1111,6 +1119,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         commands['command_hooks_ref_guard'],
         commands['command_handoff'],
         commands['command_status'],
+        commands['command_worktree_list'],
         commands['command_validate'],
         commands['command_plan'],
         commands['command_check'],

@@ -4,6 +4,11 @@
 
 - Speed up whole-repository commands by remembering, for the length of one command, the Git answers that cannot change while it runs: which full commit ids exist, ancestry between two fixed commits, a commit's parents and changed files, and the Git common directory. `validate`, `status` and `check` also learn all declared commits with one `git cat-file --batch-check` instead of one `rev-parse` each. Refs are never remembered. On a 20-stack fixture `int rebuild` drops from 971 to 438 Git processes (3.6 s to 1.7 s) and `int rebuild --dry-run` from 792 to 339; on a busy production repository the patch-ID cache alone had issued 1,771 `rev-parse --git-common-dir` calls per `status`.
 
+## 0.47.4 - 2026-11-16
+
+- Add `worktree list` (alias `ls`), a read-only view of every governed lane with its state, health code, target stack, branch, path and remedy. `--problems` keeps only lanes that need attention, and `--json` also returns a count per health code.
+- When more than three lanes need attention, the warnings printed before a command runs become one line with the count per health code and a pointer to `worktree list --problems`, instead of one line per lane. `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` likewise print one line for the lanes that need recovery but do not block them. When lanes do block a command, its error now names each lane with its health code and remedy. `worktree open` still lists every lane warning in its own output.
+
 ## 0.47.3 - 2026-11-15
 
 - Let the GitHub PR merge policy allow release branches by pattern. An entry in `base_branches` (`--base`) can now be `PREFIX/*`, such as `save/*` or `release/*`, which allows any branch under that prefix as a delivery base. Exact names keep matching exactly; bare `*`, other glob characters and patterns with `*` anywhere but the final segment are rejected.

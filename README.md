@@ -440,6 +440,12 @@ Syncwheel-owned refs, double-force worktree operations, and direct non-owner
 writes into a lane during cleanup are outside the supported concurrency model
 and fail closed when their effects are detectable.
 
+`syncwheel worktree list` (alias `ls`) shows every governed lane with its
+state, health, target stack, branch, path and remedy; `--problems` keeps only the
+lanes that need attention and `--json` adds a count per health code. It is
+read-only. When more than three lanes need attention, other commands print one
+summary line with those counts instead of one warning per lane.
+
 To retire a known dead or abandoned lane deliberately, preview the operation
 first and provide a durable reason:
 
