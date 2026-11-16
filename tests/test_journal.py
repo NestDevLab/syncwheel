@@ -108,6 +108,39 @@ class JournalModeTest(unittest.TestCase):
         self.assertEqual(status['validation']['details']['journal']['branch'], 'journal')
         self.assertIn('forbidden', self.cli('plan', expected=2).stderr)
 
+    def test_check_no_fetch_validates_journal_without_changing_repository_state(self):
+        self.arm_ref_guard()
+        manifest = self.repo / '.syncwheel' / 'manifest.json'
+        before = manifest.read_bytes()
+        head = self.git('rev-parse', 'HEAD')
+        self.publish_from_other_clone({'remote.txt': 'remote\n'})
+        check = json.loads(self.cli('check', '--no-fetch', '--strict', '--json').stdout)
+        self.assertEqual(check['repository_mode'], 'journal')
+        self.assertEqual(check['validation']['details']['journal']['branch'], 'journal')
+        self.assertEqual(check['readiness'], {'ready': True, 'blockers': []})
+        self.assertEqual(check['plan'], [])
+        self.assertEqual(manifest.read_bytes(), before)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('rev-parse', 'origin/journal'), head)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+
+    def test_strict_check_blocks_dirty_journal_but_normal_check_reports_it(self):
+        self.arm_ref_guard()
+        (self.repo / 'notes.txt').write_text('unfinished\n')
+        check = json.loads(self.cli('ck', '--no-fetch', '--json').stdout)
+        self.assertEqual(check['readiness'], {'ready': False, 'blockers': ['dirty_worktree']})
+        result = self.cli('ck', '--no-fetch', '--strict', expected=1)
+        self.assertIn('journal validation: OK', result.stdout)
+        self.assertIn('readiness: BLOCKED', result.stdout)
+        self.assertIn('journal worktree has uncommitted changes', result.stdout)
+        self.assertEqual(self.git('status', '--porcelain'), 'M notes.txt')
+
+    def test_strict_check_blocks_journal_validation_warnings(self):
+        self.git('switch', '-c', 'other')
+        check = json.loads(self.cli('check', '--no-fetch', '--strict', '--json', expected=1).stdout)
+        self.assertEqual(check['readiness'], {'ready': False, 'blockers': ['validation_warnings']})
+        self.assertIn("journal branch is not checked out: expected 'journal'", check['validation']['warnings'])
+
     def test_recover_in_sync_and_ahead_only_never_publish(self):
         aligned = json.loads(self.cli('journal', 'recover', '--apply').stdout)
         self.assertEqual(aligned['relation'], 'in-sync')

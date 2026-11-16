@@ -1018,6 +1018,7 @@ def normalize_manifest_data(data, path):
         else:
             stack.pop('depends_on', None)
         stack.setdefault('meta', {})
+        validate_stack_adoption(stack)
         normalized.append(stack)
     data['stacks'] = normalized
     validate_stack_dependency_graph(
@@ -1106,6 +1107,21 @@ def stack_integration_only_commits(stack):
     return list(stack.get('integration_only_commits') or [])
 
 
+def validate_stack_adoption(stack):
+    """Bind an explicit history interval to its pinned replay recipe."""
+    adopted = stack.get('adopted_history')
+    if adopted is None:
+        return None
+    if (not isinstance(adopted, dict) or set(adopted) != {'base', 'tip'}
+            or any(not isinstance(value, str) or not re.fullmatch(r'[0-9a-f]{40,64}', value)
+                   for value in adopted.values())):
+        raise SyncwheelError('adopted_history requires full base and tip object IDs')
+    expected = [] if adopted['tip'] == adopted['base'] else [adopted['tip']]
+    if stack['base'] != adopted['base'] or stack['commits'] != expected:
+        raise SyncwheelError('adopted history is stale; use stack set --base BASE --adopt-tip TIP')
+    return adopted
+
+
 def stack_integration_commits(stack):
     """Return every commit owned by a stack in the integration projection."""
     return list(dict.fromkeys([
@@ -1127,6 +1143,7 @@ def stack_delivery_identity(stack):
         'commits': list(stack.get('commits') or []),
         'integration_commits': stack_integration_base_commits(stack),
         'integration_only_commits': stack_integration_only_commits(stack),
+        **({'adopted_history': stack['adopted_history']} if stack.get('adopted_history') else {}),
     }
 
 

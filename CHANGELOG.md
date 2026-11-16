@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.47.10 - 2026-11-16
+
+- Allow stack publication from clean, registered active lanes at the exact declared source tip without changing their owner, capture state, files or retention locks. Explicit retention also accepts active lanes; pending cleanup and changed source state still stop publication.
+- Add digest-bound `stack set --base BASE --adopt-tip TIP` to adopt an existing merge tip and its explicitly listed history without rewriting commits. The base must be its unique direct projection parent. Prepared ref/manifest updates are recoverable through the same CLI operation; stale recovery states are preserved and refused. Channel pins and direct landing explicitly refuse adopted histories until those operations support them.
+- Let `worktree open --into STACK --base BASE` materialize a missing empty stack branch at its exact base, using compare-and-swap and preserving concurrent work.
+- Make `check` and `ck` validate journal repositories without changing their mode or evaluating an integration projection. Strict checks also report uncommitted journal changes.
+- Align the skill and guides with supported `--reason` flags and require refusal reporting instead of raw-push, internal-helper or manual-state fallbacks.
+
 ## 0.47.7 - 2026-11-16
 
 - Stop the first coordinated publication from overwriting an existing remote branch. Before any coordination state exists, `int push` (and `publish`) used the tip it had just observed as the lease, so a `main-integration` another clone had pushed was silently replaced. Now each pushed branch may only move forward from the observed remote tip; if that tip is not an ancestor of the local one, or has not been fetched, the push stops before anything is written and names the tip. `int push --adopt-remote <full commit id>` replaces the remote integration branch only when it is at exactly that tip, and is refused once coordination state is published or on a legacy manifest.

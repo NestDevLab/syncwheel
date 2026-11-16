@@ -905,6 +905,10 @@ def build_parser(commands, version):
     stack_set_p.add_argument('stack')
     stack_set_p.add_argument('specs', nargs='*')
     stack_set_p.add_argument('--target-branch', help='update delivery target metadata without rebuilding refs')
+    stack_set_p.add_argument('--base', help='pin the base for exact history adoption')
+    stack_set_p.add_argument('--adopt-tip', help='adopt this existing tip without rewriting its history')
+    stack_set_p.add_argument('--plan-digest', help='digest of the exact adoption preview')
+    stack_set_p.add_argument('--apply', action='store_true', help='apply the reviewed adoption plan')
     stack_set_p.add_argument(
         '--published',
         action='store_true',
@@ -1157,6 +1161,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         commands['command_worktree_unlock'],
     ), mutates='always')
     register((commands['command_worktree_open'],), mutates='always', remedy=True)
+    register((commands['command_stack_set'],), mutates='stack-set', manifest_mutates='stack-set')
     register((
         commands['command_stack_close'],
         commands['command_stack_create'],
@@ -1164,7 +1169,6 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         commands['command_stack_demote'],
         commands['command_stack_sync'],
         commands['command_stack_absorb'],
-        commands['command_stack_set'],
         commands['command_stack_resolve_integration'],
         commands['command_stack_add'],
         commands['command_coordination_provenance_reset'],
