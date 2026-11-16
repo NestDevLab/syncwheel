@@ -1004,6 +1004,18 @@ def build_parser(commands, version):
     stack_merge_pr_p.add_argument('-j', '--json', action='store_true')
     stack_merge_pr_p.set_defaults(func=commands['command_stack_merge_pr'])
 
+    stack_release_desk_p = stack_sub.add_parser(
+        'release-desk', parents=[common], help='preserve and release a stack replay desk',
+    )
+    stack_release_desk_p.add_argument('stack')
+    stack_release_desk_p.add_argument('--legacy-worktree')
+    stack_release_desk_p.add_argument('--reason', required=True)
+    stack_release_desk_p.add_argument('--confirm-writers-stopped', action='store_true')
+    stack_release_desk_p.add_argument('--plan-digest')
+    stack_release_desk_p.add_argument('-a', '--apply', action='store_true')
+    stack_release_desk_p.add_argument('-j', '--json', action='store_true')
+    stack_release_desk_p.set_defaults(func=commands['command_stack_release_desk'])
+
     stack_archive_p = stack_sub.add_parser(
         'archive', parents=[common], help='retain source history and defer a stack without delivery claims',
     )
@@ -1162,6 +1174,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         commands['command_worktree_unlock'],
     ), mutates='always')
     register((commands['command_worktree_open'],), mutates='always', remedy=True)
+    register((commands['command_stack_release_desk'],), mutates='apply')
     register((commands['command_stack_set'],), mutates='stack-set', manifest_mutates='stack-set')
     register((commands['command_stack_close'], commands['command_stack_sync']), mutates='always',
              manifest_mutates='always', primary_scope='metadata')

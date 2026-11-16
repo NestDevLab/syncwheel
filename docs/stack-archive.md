@@ -47,3 +47,41 @@ completed request is idempotent and cannot archive a newly recreated stack.
 Inspect `syncwheel ledger show` for the receipt. To resume, inspect the retained
 commits and create a new native stack with the reviewed endpoints; archival does
 not automatically restore or apply deferred content.
+
+## Release a replay desk
+
+A source branch checked out in a persistent replay desk must be released before
+archiving its stack. Desks created by `stack rebuild --replay-mode desk` are
+registered separately from writer lanes and appear in `worktree list --json`
+under `desks`. A pre-existing checkout reused during replay is not automatically
+registered as a Syncwheel desk.
+
+Stop the desk's editors, builds and other writers, then preview and apply the
+same request with the returned digest:
+
+```bash
+syncwheel stack release-desk feature --reason "Release completed review checkout"
+syncwheel stack release-desk feature --reason "Release completed review checkout" \
+  --plan-digest DIGEST --confirm-writers-stopped --apply
+```
+
+For a desk created before registration was available, verify its ownership and
+add `--legacy-worktree PATH` to both commands. This explicitly selects one
+checkout; a matching pathname alone does not establish ownership. The primary,
+governed writer lanes and ambiguous checkouts are not eligible for this path.
+Keep the same `--personal` or `--manifest` selection that identified the stack.
+
+The preview binds the selected stack, checkout identity, source tip, index and
+files. Apply rechecks those inputs, saves the tip and separate index, staged and
+working state in local recovery refs, and verifies recovery before removing the
+checkout and Git registration. The source branch remains available. Retain the
+returned `recoveryRefs`; these are local recovery evidence, not a remote backup.
+
+`--confirm-writers-stopped` is an operator attestation. A Git worktree lock does
+not stop a process that already has a file open. Detected changes preserve the
+desk or its reported quarantine instead of completing removal. Unsupported
+states or data must be resolved without discarding them before release. If a
+removal is interrupted, follow the printed recovery instruction for that exact
+plan; a replacement checkout at the same path is not the original desk.
+
+After a successful release, retry the original `stack archive` preview.

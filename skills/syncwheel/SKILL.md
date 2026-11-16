@@ -486,6 +486,16 @@ syncwheel replay-mode                             # show the repo-local default
 syncwheel replay-mode set desk                    # persist it for this clone
 ```
 
+Stack replay desks created by Syncwheel appear in `worktree list --json` under
+`desks`. Before archiving their stack, preview `stack release-desk <id> --reason
+"..."`, stop the desk's writers, then apply the same request with `--plan-digest
+<digest> --confirm-writers-stopped --apply`. Release verifies local recovery
+refs for the tip, index and working changes before removing the checkout. For
+an older unregistered desk, verify ownership and pass `--legacy-worktree <path>`
+in both commands; never use this path to release a governed writer lane. Keep
+the selected manifest and the recovery refs. Follow any printed refusal or
+partial-recovery instruction without raw Git cleanup.
+
 Selection is four-tier, most specific first: the `--replay-mode` flag, `replay_mode` in the repo-local
 `.syncwheel/profile.local.json`, `defaults.replay_mode` in the manifest, then `auto`. An unavailable
 mode falls back rather than failing.

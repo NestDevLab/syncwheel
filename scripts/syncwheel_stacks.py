@@ -151,6 +151,8 @@ class StackLedger(Protocol):
 class StackProjections(Protocol):
     def capture_integration_desk(self, *args, **kwargs): ...
     def checkout_reset_destination_lease(self, *args, **kwargs): ...
+    def register_created_desk(self, *args, **kwargs): ...
+    def archive_desk_remedy(self, *args, **kwargs): ...
     def ensure_in_place_target(self, *args, **kwargs): ...
     def ensure_non_in_place_target_clean(self, *args, **kwargs): ...
     def reconcile_worktree_path(self, *args, **kwargs): ...
@@ -503,7 +505,7 @@ class StackLifecycle:
         return True
 
 
-    def stack_archive_writer_guard(self, manifest, stack):
+    def stack_archive_writer_guard(self, manifest, stack, manifest_path=None):
         """An authoring lane or checked-out source must be released before archival."""
         repo_root = self.repository.root
         registry, _ = self.worktrees.load_governed_worktree_registry()
@@ -512,17 +514,18 @@ class StackLifecycle:
         ) for lane in registry['lanes']):
             raise SyncwheelError('stack archive refuses an active writer lane; capture and release it first')
         worktree = self.repository.find_worktree_for_branch(repo_root, stack['branch'])
-        if worktree:
-            raise SyncwheelError('stack archive refuses a checked-out source branch; release its writer first')
+        remedy = self.projections.archive_desk_remedy(repo_root, manifest_path, stack, worktree)
+        if remedy:
+            raise SyncwheelError(f'stack archive refuses a checked-out source branch or pending desk release; {remedy}')
         _, coordination = self.publication.coordination_profile()
         if stack['id'] in (coordination.get('locks') or {}) or local_lease_is_active(coordination):
             raise SyncwheelError('stack archive refuses an active worktree lock or coordination lease')
 
 
-    def build_stack_archive_plan(self, manifest, stack_id, reason, resume_intent):
+    def build_stack_archive_plan(self, manifest, stack_id, reason, resume_intent, manifest_path=None):
         repo_root = self.repository.root
         stack = require_stack(manifest, stack_id)
-        self.stack_archive_writer_guard(manifest, stack)
+        self.stack_archive_writer_guard(manifest, stack, manifest_path)
         if not reason or not reason.strip() or not resume_intent or not resume_intent.strip():
             raise SyncwheelError('stack archive requires a nonempty --reason and --resume-intent')
         if channel_ids_referencing_stack(manifest, stack_id) or any(
@@ -643,10 +646,10 @@ class StackLifecycle:
                 return 0
             stack = stack_map(manifest).get(args.stack)
             if stack is not None:
-                self.stack_archive_writer_guard(manifest, stack)
+                self.stack_archive_writer_guard(manifest, stack, manifest_path)
             self.verify_stack_archive_proof(plan, stack)
         else:
-            plan = self.build_stack_archive_plan(manifest, args.stack, args.reason, args.resume_intent)
+            plan = self.build_stack_archive_plan(manifest, args.stack, args.reason, args.resume_intent, manifest_path)
             if not args.apply:
                 print(json.dumps(plan, indent=2))
                 return 0
@@ -2883,10 +2886,12 @@ class StackLifecycle:
             )
         if not dry_run and mode == 'desk':
             self.projections.ensure_non_in_place_target_clean(repo_root, stack['branch'], worktree)
-        result = self.replay.execute_replay(
-            self.replay.replay_plan(manifest, replay_target(stack=stack, worktree=worktree), mode),
-            not dry_run,
-        )
+        plan = self.replay.replay_plan(manifest, replay_target(stack=stack, worktree=worktree), mode)
+        if not dry_run and mode == 'desk':
+            plan['register_created_desk'] = lambda path: self.projections.register_created_desk(
+                repo_root, manifest_path, stack, path,
+            )
+        result = self.replay.execute_replay(plan, not dry_run)
         require_replay_success(result)
         if not dry_run:
             self.ledger.append_ledger_event(
