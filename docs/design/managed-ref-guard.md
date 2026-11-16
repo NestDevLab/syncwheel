@@ -38,9 +38,15 @@ The clone has one effective guard target, not one hook bundle per profile.
 branch; changing an already recorded target requires `--reason` and appends a
 `primary_guard_retargeted` intent with actor, previous target, new target, and reason
 to that manifest's ledger before the guard changes. Disable intent is appended to
-the same selected ledger. Status against another profile, or after an
-integration-branch rename, is `degraded` and directs the operator to rerun
-`hooks install --apply` with the same profile selector and a reason.
+the same selected ledger. A selected manifest that does not own the primary is
+checked against its own managed refs; its different integration branch does not
+make the shared primary guard degraded. Diagnostics for that selection never
+recommend installing hooks with the lane selector to retarget the shared guard.
+A genuine mismatch for the primary-owning manifest remains degraded and requires
+an explicitly reviewed repair through that owning manifest. Missing or damaged
+hook bundles remain visible for the refs they protect. The installed pre-push
+hook also protects the refs declared locally by the shared primary manifest,
+without making the lane depend on the primary's publication remote.
 
 Generated hooks invoke a stable installed `syncwheel` CLI resolved at installation,
 never a path inside the repository, Git common directory, `var/`, the configured or
