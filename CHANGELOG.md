@@ -4,6 +4,15 @@
 
 - Stop legacy (uncoordinated) forced stack pushes from discarding work another session pushed. `stack push --force-with-lease` (or `--force`), and the stack pushes of `publish` and `reconcile --push`, now read the live remote tip first. If that tip holds a commit the stack does not own (not declared, not reachable from the local stack branch, its base or any tip a `stack rebuild` in this clone produced for the stack, and with no matching patch ID), the push stops and names the commits. Otherwise the lease is pinned to that exact tip (`--force-with-lease=refs/heads/<branch>:<tip>`) instead of trusting the remote-tracking ref, which a fetch may already have moved onto someone else's commits. A lease the caller pins to an exact tip (`-- --force-with-lease=refs/heads/<branch>:<tip>`) is kept as written and replaces that tip, which is how to drop commits once you know they may go; `--force` and `--no-force-with-lease` never turn the push into an unleased one. Dry runs print the command unchanged. Integration pushes (`int push`, `reconcile --push` on the integration branch) keep the plain lease for now.
 
+## 0.47.5 - 2026-11-16
+
+- Speed up whole-repository commands by remembering, for the length of one command, the Git answers that cannot change while it runs: which full commit ids exist, ancestry between two fixed commits, a commit's parents and changed files, and the Git common directory. `validate`, `status` and `check` also learn all declared commits with one `git cat-file --batch-check` instead of one `rev-parse` each. Refs are never remembered. On a 20-stack fixture `int rebuild` drops from 971 to 438 Git processes (3.6 s to 1.7 s) and `int rebuild --dry-run` from 792 to 339; on a busy production repository the patch-ID cache alone had issued 1,771 `rev-parse --git-common-dir` calls per `status`.
+
+## 0.47.4 - 2026-11-16
+
+- Add `worktree list` (alias `ls`), a read-only view of every governed lane with its state, health code, target stack, branch, path and remedy. `--problems` keeps only lanes that need attention, and `--json` also returns a count per health code.
+- When more than three lanes need attention, the warnings printed before a command runs become one line with the count per health code and a pointer to `worktree list --problems`, instead of one line per lane. `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` likewise print one line for the lanes that need recovery but do not block them. When lanes do block a command, its error now names each lane with its health code and remedy. `worktree open` still lists every lane warning in its own output.
+
 ## 0.47.3 - 2026-11-15
 
 - Let the GitHub PR merge policy allow release branches by pattern. An entry in `base_branches` (`--base`) can now be `PREFIX/*`, such as `save/*` or `release/*`, which allows any branch under that prefix as a delivery base. Exact names keep matching exactly; bare `*`, other glob characters and patterns with `*` anywhere but the final segment are rejected.

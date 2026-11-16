@@ -40,6 +40,9 @@ GOVERNED_WORKTREE_LOCK_TIMEOUT_SECONDS = 5
 
 GOVERNED_WORKTREE_LOCK_STALE_SECONDS = 300
 
+# Above this many lanes needing attention, warnings become one summary line.
+GOVERNED_WORKTREE_WARNING_DETAIL_LIMIT = 3
+
 GOVERNED_WORKTREE_TERMINAL_EVENT_TYPES = (
     'governed_worktree_released',
     'governed_worktree_reaped',
@@ -556,10 +559,11 @@ class GovernedWorktrees:
                 })
         return {'registry_path': str(path), 'lanes': diagnostics}
 
-    def governed_worktree_warning_lines(self, manifest, manifest_path=None):
-        repo_root = self.repository.root
+    def governed_worktree_warning_lines(self, manifest, manifest_path=None, lanes=None):
+        if lanes is None:
+            lanes = self.governed_worktree_diagnostics(manifest, manifest_path)['lanes']
         lines = []
-        for lane in self.governed_worktree_diagnostics(manifest, manifest_path)['lanes']:
+        for lane in lanes:
             if not lane['code']:
                 continue
             label = lane['id'] or lane['branch'] or lane['path']
@@ -569,12 +573,26 @@ class GovernedWorktrees:
         return lines
 
     def emit_governed_worktree_warnings(self, manifest, json_mode=False, manifest_path=None):
-        repo_root = self.repository.root
-        lines = self.governed_worktree_warning_lines(manifest, manifest_path)
+        lanes = self.governed_worktree_diagnostics(manifest, manifest_path)['lanes']
+        lines = self.governed_worktree_warning_lines(manifest, manifest_path, lanes=lanes)
         if not lines:
             return lines
         color = '' if os.environ.get('NO_COLOR') or not sys.stderr.isatty() else YELLOW
         reset = '' if not color else RESET
+        if len(lines) > GOVERNED_WORKTREE_WARNING_DETAIL_LIMIT:
+            # One line per lane buries the command's own output on busy
+            # repositories; summarize by health code and point at the list.
+            counts = {}
+            for lane in lanes:
+                if lane['code']:
+                    counts[lane['code']] = counts.get(lane['code'], 0) + 1
+            summary = ', '.join(f'{code} {count}' for code, count in sorted(counts.items()))
+            print(
+                f'{color}WARNING: {len(lines)} governed worktree lanes need attention ({summary}); '
+                f'`syncwheel worktree list --problems` shows each lane and its remedy{reset}',
+                file=sys.stderr,
+            )
+            return lines
         for line in lines:
             print(f'{color}WARNING: {line}{reset}', file=sys.stderr)
         return lines
