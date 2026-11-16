@@ -9345,7 +9345,13 @@ def resolve_git_worktree(repo_root, branch, manifest, worktree=None, auto_worktr
         if not record.get('detached'):
             continue
         path = Path(record['path'])
-        git_dir = Path(git(path, 'rev-parse', '--absolute-git-dir').stdout.strip())
+        # A prunable worktree still has authoritative rebase state in its
+        # common-Git registration. Do not run a subprocess in a missing cwd.
+        git_dir = governed_worktree_admin_dir_for_path(repo_root, path)
+        if git_dir is None:
+            if not path.is_dir():
+                continue
+            git_dir = Path(git(path, 'rev-parse', '--absolute-git-dir').stdout.strip())
         for directory in ('rebase-merge', 'rebase-apply'):
             head_name = git_dir / directory / 'head-name'
             if head_name.is_file() and not head_name.is_symlink():
@@ -9355,6 +9361,8 @@ def resolve_git_worktree(repo_root, branch, manifest, worktree=None, auto_worktr
     if len(paused) > 1:
         raise SyncwheelError(f'multiple paused rebase worktrees name branch: {branch}')
     if paused:
+        if not paused[0].is_dir():
+            raise SyncwheelError(f'paused rebase worktree is missing: {paused[0]}; restore it before resuming')
         return paused[0]
     if worktree:
         path = Path(worktree).expanduser().resolve()
@@ -17341,23 +17349,20 @@ def command_int_git(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, _ = require_manifest(repo_root, args.repo, args.manifest, args.personal)
     branch = manifest['integration']['branch']
-    worktree = resolve_git_worktree(repo_root, branch, manifest, args.worktree, args.auto_worktree)
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('int git requires git arguments after --')
+    # Reject unsafe commands before an optional checkout can be created.
+    refusal = int_git_passthrough_refusal(repo_root, git_args, branch)
+    if refusal:
+        raise SyncwheelError(refusal)
+    worktree = resolve_git_worktree(repo_root, branch, manifest, args.worktree, args.auto_worktree)
     refusal = int_git_passthrough_refusal(worktree, git_args, branch)
     if refusal:
         raise SyncwheelError(refusal)
     started_on_branch = get_current_branch(worktree) == branch
     _, command, _ = split_git_passthrough(git_args)
-    if command == 'fetch':
-        # Fetch can import objects and remote-tracking refs. Its option parser
-        # must never turn it into an authorized move of the checked-out branch.
-        result = run(
-            ['git', *git_args], cwd=worktree, check=False, authorize=False,
-            env={MANAGED_REF_MOVE_AUTH_ENV: ''},
-        )
-    elif git_passthrough_mutation_requested(git_args):
+    if command in GIT_INTEGRATION_REF_COMMANDS:
         # One passthrough can land many commits (cherry-pick, rebase, am), so the
         # authorization lasts for this process. Output is captured: no editor can open.
         with ref_move_authorization(repo_root, reusable=True) as authorization:
@@ -17366,7 +17371,11 @@ def command_int_git(args):
                 env={MANAGED_REF_MOVE_AUTH_ENV: authorization, 'GIT_EDITOR': 'true'},
             )
     else:
-        result = run(['git', *git_args], cwd=worktree, check=False)
+        # Other Git commands cannot borrow a generated or inherited ref token.
+        result = run(
+            ['git', *git_args], cwd=worktree, check=False, authorize=False,
+            env={MANAGED_REF_MOVE_AUTH_ENV: ''},
+        )
     if result.stdout:
         print(result.stdout, end='')
     if result.stderr:
@@ -18795,6 +18804,9 @@ GIT_READ_ONLY_SUBCOMMANDS = {
     'stash': frozenset({'list', 'show'}),
     'reflog': frozenset({'show'}),
 }
+GIT_INTEGRATION_REF_COMMANDS = frozenset({
+    'commit', 'reset', 'merge', 'rebase', 'cherry-pick', 'revert', 'am',
+})
 
 
 def split_git_passthrough(git_args):
@@ -18806,7 +18818,9 @@ def split_git_passthrough(git_args):
         if not part.startswith('-'):
             break
         name, has_value, value = part.partition('=')
-        if name in GIT_GLOBAL_OPTIONS_WITH_VALUE and not has_value:
+        if part.startswith(('-c', '-C')) and len(part) > 2:
+            name, value = part[:2], part[2:]
+        elif name in GIT_GLOBAL_OPTIONS_WITH_VALUE and not has_value:
             value = git_args[index + 1] if index + 1 < len(git_args) else ''
             index += 1
         options.append((name, value))
@@ -18825,6 +18839,49 @@ def symbolic_ref_reads_only(rest):
     return len(git_positionals(rest)) <= 1
 
 
+def git_branch_reads_only(rest):
+    return not rest or rest == ['--show-current'] or (
+        rest[0] in {'--list', '-l'} and all(not part.startswith('-') for part in rest[1:])
+    )
+
+
+def git_config_reads_only(rest):
+    arities = {'--get': (1, 2), '--get-all': (1, 2), '--get-regexp': (1, 2),
+               '--get-urlmatch': (2, 2), '--list': (0, 0), '-l': (0, 0)}
+    if not rest or rest[0] not in arities:
+        return False
+    low, high = arities[rest[0]]
+    return low <= len(rest) - 1 <= high and all(not part.startswith('-') for part in rest[1:])
+
+
+def git_fetch_updates_head(rest):
+    # Git accepts combined short options and unique long abbreviations. Values
+    # of other options and arguments after -- are not options themselves.
+    value_options = ('--upload-pack', '--jobs', '--depth', '--shallow-since',
+                     '--shallow-exclude', '--deepen', '--refmap', '--server-option',
+                     '--negotiation-tip', '--filter')
+    consume_value = False
+    for part in rest:
+        if consume_value:
+            consume_value = False
+            continue
+        if part == '--':
+            break
+        if part.startswith('--'):
+            name, equals, _ = part.partition('=')
+            if len(name) > 2 and '--update-head-ok'.startswith(name):
+                return True
+            consume_value = not equals and any(option.startswith(name) for option in value_options)
+        elif part.startswith('-'):
+            for index, option in enumerate(part[1:], 1):
+                if option == 'u':
+                    return True
+                if option in {'o', 'j'}:
+                    consume_value = index == len(part) - 1
+                    break
+    return False
+
+
 def git_passthrough_mutation_requested(git_args):
     """Fail closed for Git passthroughs except its unambiguous read-only verbs."""
     options, command, rest = split_git_passthrough(git_args)
@@ -18835,6 +18892,10 @@ def git_passthrough_mutation_requested(git_args):
         return False
     if command == 'symbolic-ref':
         return not symbolic_ref_reads_only(rest)
+    if command == 'branch':
+        return not git_branch_reads_only(rest)
+    if command == 'config':
+        return not git_config_reads_only(rest)
     if command in GIT_READ_ONLY_SUBCOMMANDS:
         # The subcommand must come first: `stash -m list` is a stash push.
         return not rest or rest[0] not in GIT_READ_ONLY_SUBCOMMANDS[command]
@@ -18867,13 +18928,11 @@ def int_git_passthrough_refusal(worktree, git_args, branch):
             'with `syncwheel int rebuild`, or move it with a Git command such as reset '
             'or cherry-pick'
         )
-    if command == 'fetch' and any(
-        part == '-u' or (
-            part.startswith('--') and len(part.split('=', 1)[0]) > 2
-            and '--update-head-ok'.startswith(part.split('=', 1)[0])
-        )
-        for part in rest
-    ):
+    if command == 'branch' and not git_branch_reads_only(rest):
+        return f'{prefix}; branch writes can rename or remove protected refs; only branch listing is supported'
+    if command == 'config' and not git_config_reads_only(rest):
+        return f'{prefix}; config writes can disable the guard; only explicit config reads are supported'
+    if command == 'fetch' and git_fetch_updates_head(rest):
         return (
             f'{prefix}; fetch --update-head-ok writes the checked-out branch without '
             'updating its index. Fetch into a remote-tracking ref and merge or reset from it'
@@ -18954,11 +19013,16 @@ def primary_checkout_preflight(args):
         and not primary_guard_remedy_requested(args)
         and not managed_push_guard_policy(primary_root, manifest)['disabled']
     ):
-        # A paused operation owns the dirty index, so finishing it is never unrelated work.
-        if args.func == command_int_git and git_resume_requested(
-            args.git_args, interrupted_git_operation(primary_root)
+        # A resume owns its destination's index, which can be a linked checkout.
+        # Resolve existing registrations only; this exception must not create a
+        # checkout or let an unrelated mutation bypass the dirty-primary guard.
+        if args.func == command_int_git and any(
+            git_resume_requested(args.git_args, operation)
+            for operation in ('rebase', 'am', 'cherry-pick', 'revert', 'merge')
         ):
-            return
+            target = resolve_git_worktree(primary_root, manifest['integration']['branch'], manifest)
+            if git_resume_requested(args.git_args, interrupted_git_operation(target)):
+                return
         # These commands own manifest/ref metadata or an explicit absorb patch;
         # they do not rewrite unrelated primary product paths. Commands that
         # rebuild or align the integration checkout retain the global guard.
