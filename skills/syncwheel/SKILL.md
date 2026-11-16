@@ -432,7 +432,14 @@ wheel metaphor helps, but the manifest field remains `stacks`.
 For uncommitted tracked primary changes, identify their owning stack and use
 `syncwheel stack absorb <stack> <paths> -N -m "message"`. An empty stack refuses
 default amend to preserve its base. `capture-integration` assigns existing
-unowned commits and cannot capture uncommitted working-tree changes.
+unowned commits and cannot capture uncommitted working-tree changes. Capture
+must validate the complete proposed integration before persisting ownership.
+If it reports pending control recovery, follow the printed command with the
+same selected manifest, then retry capture. Do not substitute another manifest
+or repair the shared primary manually to get past a projection refusal.
+Capture updates the stack ref, selected manifest and ledger without staging or
+committing tracked control metadata. Preserve that manifest change for its
+separate delivery step; capture leaves the primary HEAD and index unchanged.
 
 Product-changing mutations refuse while the shared primary checkout is dirty. Bounded
 metadata operations may preserve unrelated unstaged changes: authority on an untracked

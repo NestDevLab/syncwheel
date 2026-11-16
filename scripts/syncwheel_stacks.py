@@ -9,6 +9,7 @@ import contextlib
 import copy
 import hashlib
 import json
+import re
 from pathlib import Path
 import sys
 import tempfile
@@ -27,6 +28,7 @@ from syncwheel_coordination import (
     stack_snapshot_map,
 )
 from syncwheel_errors import (
+    MetadataRollbackIncomplete,
     SyncwheelError,
 )
 from syncwheel_ledger import (
@@ -63,6 +65,7 @@ from syncwheel_publication_intents import (
 )
 from syncwheel_replay import (
     ReplayEngine,
+    backup_branch_name,
     quoted,
     replay_target,
     require_nonempty_desk_stack_rebuild,
@@ -109,6 +112,7 @@ class StackRepository(Protocol):
     def get_current_branch(self, *args, **kwargs): ...
     def get_worktrees(self, *args, **kwargs): ...
     def git(self, *args, **kwargs): ...
+    def capture_ref_transaction(self, operations): ...
     def governed_worktree_owner(self, *args, **kwargs): ...
     def is_valid_coordination_branch_ref(self, *args, **kwargs): ...
     def ref_tip(self, *args, **kwargs): ...
@@ -134,6 +138,7 @@ class StackControl(Protocol):
     def require_manifest(self, *args, **kwargs): ...
     def require_manifest_transaction_current(self, *args, **kwargs): ...
     def restore_control_manifest_after_integration_rebuild(self, *args, **kwargs): ...
+    def prepare_capture_metadata(self, *args, **kwargs): ...
     def save_manifest(self, *args, **kwargs): ...
     def save_manifest_with_ledger(self, *args, **kwargs): ...
 
@@ -145,6 +150,7 @@ class StackLedger(Protocol):
 
 class StackProjections(Protocol):
     def capture_integration_desk(self, *args, **kwargs): ...
+    def checkout_reset_destination_lease(self, *args, **kwargs): ...
     def ensure_in_place_target(self, *args, **kwargs): ...
     def ensure_non_in_place_target_clean(self, *args, **kwargs): ...
     def reconcile_worktree_path(self, *args, **kwargs): ...
@@ -2900,76 +2906,175 @@ class StackLifecycle:
         return result
 
 
+    def observe_capture_inputs(self, manifest, stack, specs):
+        repo_root = self.repository.root
+        integration = manifest['integration']
+        siblings = [require_stack(manifest, stack_id) for stack_id in integration['stacks']]
+        revisions = {integration['base'], stack['base']}
+        refs = {f"refs/heads/{integration['branch']}", f"refs/heads/{stack['branch']}"}
+        for item in siblings:
+            for key in ('commits', 'integration_commits', 'integration_only_commits'):
+                revisions.update(item.get(key) or ())
+            if integration.get('strategy') == 'merge-stacks':
+                refs.add(f"refs/heads/{item['branch']}")
+        revisions.update(stack['commits'])
+        resolved = {value: self.repository.commit_full_sha(repo_root, value)
+                    for value in sorted(revisions)}
+        spec_endpoints = {endpoint for spec in specs for endpoint in re.split(r'\.\.\.?', spec)}
+        # Include endpoints and peeled/ancestry expressions in the ref lease.
+        ref_names = {re.split(r'[~^]', value, maxsplit=1)[0]
+                     for value in revisions | spec_endpoints if value}
+        refs.update(
+            ref for value in ref_names
+            if (ref := self.repository.git(
+                repo_root, 'rev-parse', '--symbolic-full-name', '--verify', '--end-of-options', value, check=False,
+            ).stdout.strip()).startswith('refs/')
+        )
+        direct = {}
+        for ref in sorted(refs):
+            self.repository.git(repo_root, 'check-ref-format', ref)
+            if self.repository.git(repo_root, 'symbolic-ref', '--quiet', ref, check=False).returncode == 0:
+                raise SyncwheelError(f'stack capture-integration requires a direct ref: {ref}')
+            direct[ref] = self.repository.git(repo_root, 'show-ref', '--verify', '--hash', ref,
+                                              check=False).stdout.strip() or None
+        requested = [
+            self.repository.commit_full_sha(repo_root, commit)
+            for spec in specs
+            for commit in self.repository.commit_list_for_spec(repo_root, spec)
+        ]
+        return resolved, direct, requested
+
+    def publish_capture_tip(self, branch, before, tip, direct):
+        ref = f'refs/heads/{branch}'
+        zero = '0' * len(tip)
+        operations = []
+        for dependency, oid in sorted(direct.items()):
+            if dependency != ref:
+                operations.append(f'verify {dependency} {oid or zero}')
+        if before == tip:
+            operations.append(f'verify {ref} {tip}')
+            backup = None
+        else:
+            backup = f'refs/heads/{backup_branch_name(branch, syncwheel_timestamp())}' if before else None
+            if backup:
+                operations.append(f'create {backup} {before}')
+            operations.append(f'update {ref} {tip} {before or zero}')
+        self.repository.capture_ref_transaction(operations)
+        return backup
+
+    def rollback_capture_tip(self, branch, before, tip, backup):
+        ref = f'refs/heads/{branch}'
+        operations = []
+        operations.append(f'update {ref} {before} {tip}' if before else f'delete {ref} {tip}')
+        if backup:
+            operations.append(f'delete {backup} {before}')
+        self.repository.capture_ref_transaction(operations)
+
     def command_stack_capture_integration(self, args, manifest, manifest_path):
         repo_root = self.repository.root
         self.projections.verify_retained_captured_worktrees(repo_root, manifest, args)
         stack = require_stack(manifest, args.stack)
 
-        # Expand every requested spec before changing stack ownership or refs.
-        captured_commits = []
-        for spec in args.specs:
-            captured_commits.extend(self.repository.commit_list_for_spec(repo_root, spec))
+        if validate_stack_adoption(stack):
+            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
+        original = copy.deepcopy(manifest)
+        inputs = self.observe_capture_inputs(original, stack, args.specs)
+        resolved, direct, captured_commits = inputs
+        branch = stack['branch']
+        before = direct[f'refs/heads/{branch}']
+        if branch == manifest['integration']['branch']:
+            raise SyncwheelError('capture requires a stack branch distinct from integration')
+        destination = self.projections.checkout_reset_destination_lease(repo_root, branch)
 
-        previous_commits = list(stack['commits'])
-        previous_full_shas = {
-            self.repository.commit_full_sha(repo_root, commit)
-            for commit in previous_commits
-            if self.repository.commit_exists(repo_root, commit)
-        }
-        added_commits = []
-        for commit in captured_commits:
-            full_sha = self.repository.commit_full_sha(repo_root, commit)
-            if full_sha not in previous_full_shas:
-                added_commits.append(full_sha)
-                previous_full_shas.add(full_sha)
-
-        # This guard must remain before stack mutation: integration-first commits
-        # can only be captured from the current manifest projection.
+        before_commits = [resolved[value] for value in stack['commits']]
+        declared = list(dict.fromkeys([*before_commits, *captured_commits]))
+        added_commits = [commit for commit in declared if commit not in before_commits]
         self.validate_integration_first_base(manifest, added_commits)
+        stack['commits'] = declared
+        proposed = copy.deepcopy(manifest)
+        proposed['integration']['base'] = resolved[manifest['integration']['base']]
+        projected_stack = require_stack(proposed, args.stack)
+        projected_stack['base'] = resolved[stack['base']]
+        try:
+            tip = self.replay.materialize_capture_tip(projected_stack)
+        except SyncwheelError as exc:
+            raise SyncwheelError(f"stack {args.stack} projection failed after adding commits:\n{exc}") from exc
+        overrides = {args.stack: tip}
+        for stack_id in proposed['integration']['stacks']:
+            item = require_stack(proposed, stack_id)
+            for key in ('integration_commits', 'integration_only_commits'):
+                if item.get(key):
+                    item[key] = [resolved[value] for value in item[key]]
+            if item is not projected_stack:
+                item['commits'] = [resolved[value] for value in item['commits']]
+                if proposed['integration'].get('strategy') == 'merge-stacks':
+                    observed = direct[f"refs/heads/{item['branch']}"]
+                    if not observed:
+                        raise SyncwheelError(f'integration projection: stack {stack_id} source ref is missing')
+                    overrides[stack_id] = observed
+        try:
+            self.replay.materialize_integration_projection(proposed, overrides)
+        except SyncwheelError as exc:
+            raise SyncwheelError(f'proposed integration projection failed before capture:\n{exc}') from exc
 
-        commits = []
-        seen_commits = set()
-        for commit in [*previous_commits, *captured_commits]:
-            full_sha = self.repository.commit_full_sha(repo_root, commit)
-            if full_sha not in seen_commits:
-                seen_commits.add(full_sha)
-                commits.append(full_sha)
-        stack['commits'] = commits
-        self.validate_stack_update(manifest, stack, previous_commits)
-
-        # Capture owns an integration SHA, so it must materialize the same SHA on
-        # the stack ref before the manifest can record that ownership. The shared
-        # executor creates the usual backup ref and ledger event; R4's ephemeral
-        # mode removes its detached worktree before returning.
-        self.control.require_manifest_transaction_current(manifest_path)
-        self.rebuild_stack_from_manifest(
-            manifest,
-            manifest_path,
-            stack,
-            dry_run=False,
-            mode='ephemeral',
-            worktree=None,
-        )
-        self.control.save_manifest_with_ledger(
-            repo_root,
-            manifest_path,
-            manifest,
-            'stack_capture_integration',
-            {
-                'stack': args.stack,
-                'branch': stack['branch'],
-                'added_commits': added_commits,
-                'actor': self.repository.governed_worktree_owner(),
-            },
-        )
-        if getattr(args, 'retain_captured_worktrees', None) is not None:
-            self.projections.verify_retained_captured_worktrees(repo_root, manifest, args, after_capture=True)
-        else:
-            self.worktrees.capture_governed_worktrees_for_stack(
-                manifest,
-                args.stack,
-                manifest_path=manifest_path,
+        rebuild = {
+            'stack': args.stack, 'branch': branch, 'base': stack['base'],
+            'integration_branch': stack.get('integration_branch'),
+            'before_tip': before, 'after_tip': tip, 'replay_mode': 'ephemeral',
+        }
+        context = {
+            'stack': args.stack, 'branch': branch, 'added_commits': added_commits,
+            'actor': self.repository.governed_worktree_owner(),
+        }
+        path = destination['worktree_path']
+        if path and before != tip:
+            raise SyncwheelError(
+                f'capture would move stack branch {branch!r} checked out at {path}; '
+                'inspect and preserve that checkout before retrying with the stack branch unchecked out'
             )
+
+        def require_current_capture_inputs():
+            if inputs != self.observe_capture_inputs(original, require_stack(original, args.stack), args.specs):
+                raise SyncwheelError('capture projection inputs changed; inspect the refs and retry')
+            if destination != self.projections.checkout_reset_destination_lease(repo_root, branch):
+                raise SyncwheelError('capture checkout changed after projection; inspect it and retry')
+            retained = self.projections.verify_retained_captured_worktrees(repo_root, manifest, args)
+            if any(item['tip'] != tip for item in retained):
+                raise SyncwheelError('proposed capture tip differs from a retained lane; inspect the lane before retrying')
+
+        require_current_capture_inputs()
+        backup = None
+        installed = False
+        try:
+            with self.control.prepare_capture_metadata(repo_root, manifest_path, manifest, rebuild, context):
+                require_current_capture_inputs()
+                backup = self.publish_capture_tip(branch, before, tip, direct)
+                installed = before != tip
+        except (OSError, SyncwheelError) as failure:
+            if installed:
+                # Preserve the new source and backup if metadata rollback itself
+                # encountered a foreign write and the surviving recipe is unknown.
+                if isinstance(failure, MetadataRollbackIncomplete):
+                    raise SyncwheelError(
+                        f'{failure}; capture source and backup kept for inspection: {branch}, {backup}'
+                    ) from failure
+                try:
+                    self.rollback_capture_tip(branch, before, tip, backup)
+                except SyncwheelError as error:
+                    raise SyncwheelError(
+                        f'{failure}; capture ref rollback refused ({error}); inspect {branch} and {backup}'
+                    ) from failure
+            if isinstance(failure, OSError):
+                raise SyncwheelError(f'stack capture-integration write failed: {failure}') from failure
+            raise
+        if getattr(args, 'retain_captured_worktrees', None) is None:
+            try:
+                self.worktrees.capture_governed_worktrees_for_stack(
+                    manifest, args.stack, manifest_path=manifest_path,
+                )
+            except (SyncwheelError, OSError) as exc:
+                print(f'warning: stack capture-integration applied; lane cleanup failed: {exc}',
+                      file=sys.stderr)
         print(f"{args.stack}: captured {len(added_commits)} integration commit(s)")
         return 0
 

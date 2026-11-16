@@ -32,6 +32,7 @@ from syncwheel_errors import (
     ControlManifestAlignmentDrift,
     IntegrationReconciliationLeaseDrift,
     ManifestDurabilityError,
+    MetadataRollbackIncomplete,
     SyncwheelError,
 )
 from syncwheel_files import (
@@ -484,28 +485,28 @@ def private_tracking_file_image(path):
         os.close(descriptor)
 
 
-def remove_private_tracking_temporaries(temporary_paths, *, applied):
+def remove_private_tracking_temporaries(temporary_paths, *, applied, operation):
     for path in reversed(temporary_paths):
         try:
             path.unlink(missing_ok=True)
         except OSError as error:
             outcome = 'applied' if applied else 'interrupted'
             print(
-                f'warning: personal tracking {outcome}; could not remove temporary file {path}: {error}',
+                f'warning: {operation} {outcome}; could not remove temporary file {path}: {error}',
                 file=sys.stderr,
             )
 
 
 @contextlib.contextmanager
-def private_tracking_temporaries():
+def private_tracking_temporaries(operation='personal tracking'):
     temporary_paths = []
     try:
         yield temporary_paths
     except BaseException:
-        remove_private_tracking_temporaries(temporary_paths, applied=False)
+        remove_private_tracking_temporaries(temporary_paths, applied=False, operation=operation)
         raise
     else:
-        remove_private_tracking_temporaries(temporary_paths, applied=True)
+        remove_private_tracking_temporaries(temporary_paths, applied=True, operation=operation)
 
 
 def stage_private_tracking_file(temporary_paths, path, mode, payload, *, append_at=None):
@@ -527,13 +528,13 @@ def stage_private_tracking_file(temporary_paths, path, mode, payload, *, append_
     return temporary, private_tracking_file_image(temporary)
 
 
-def publish_private_tracking_files(writes, temporary_paths):
+def publish_private_tracking_files(writes, temporary_paths, operation='personal tracking'):
     """Publish staged bytes and undo only the files this transaction still owns."""
     installed = []
     try:
         for path, before, staged, after, rollback, phase in writes:
             if private_tracking_file_image(path) != before:
-                raise SyncwheelError(f'private tracking metadata changed before write: {path}')
+                raise SyncwheelError(f'{operation} metadata changed before write: {path}')
             os.replace(staged, path)
             installed.append((path, after, rollback))
             if phase != 'event_fsynced':
@@ -561,11 +562,71 @@ def publish_private_tracking_files(writes, temporary_paths):
                     detail += f'; original image retained at {rollback}'
                 rollback_errors.append(detail)
         if rollback_errors:
-            raise SyncwheelError(
-                f'personal tracking write failed ({failure}); rollback incomplete: '
+            raise MetadataRollbackIncomplete(
+                f'{operation} write failed ({failure}); rollback incomplete: '
                 + ', '.join(rollback_errors)
             ) from failure
         raise
+
+
+
+@contextlib.contextmanager
+def prepare_capture_metadata(repo_root, manifest_path, manifest, rebuild, context):
+    operation = 'stack capture-integration'
+    transaction = active_manifest_write_transaction(manifest_path)
+    if transaction is None:
+        raise SyncwheelError('stack capture-integration requires a manifest transaction')
+    with ledger_write_lock(repo_root, manifest_path), private_tracking_temporaries(operation) as temporary_paths:
+        require_manifest_transaction_current(manifest_path)
+        events = load_ledger_events(repo_root, manifest_path)
+        if pending_control_manifest_intents(events):
+            raise SyncwheelError('control manifest recovery became pending before capture; run capture again for the selected recovery command')
+        state = reduce_ledger_state(events)
+        payload = manifest_event_payload(manifest_path, manifest, 'stack_capture_integration', context)
+        segment = next_ledger_segment_path(repo_root, manifest_path, create_directory=False)
+        segments = {}
+        for kind, data in (('stack_rebuilt', rebuild), ('manifest_saved', payload)):
+            if segment not in segments:
+                before = private_tracking_file_image(segment)
+                segments[segment] = (before, before[3] if before else b'')
+            before, records = segments[segment]
+            event = {
+                'schema_version': LEDGER_SCHEMA_VERSION,
+                'seq': state['last_seq'] + 1,
+                'ts': iso_utc_now(),
+                'type': kind,
+                'payload': data,
+            }
+            events.append(event)
+            state = reduce_ledger_state(events)
+            records += (json.dumps(event, sort_keys=True) + '\n').encode('utf-8')
+            segments[segment] = (before, records)
+            if records.count(b'\n') >= LEDGER_SEGMENT_MAX_EVENTS:
+                segment = segment.with_name(f'{int(segment.stem) + 1:06d}.jsonl')
+        before_manifest = private_tracking_file_image(manifest_path)
+        if before_manifest is None:
+            raise SyncwheelError('capture manifest disappeared before apply')
+        checkpoint = ledger_checkpoint_path(repo_root, manifest_path)
+        plan = [
+            (manifest_path, before_manifest, (json.dumps(manifest, indent=2) + '\n').encode(),
+             'capture_manifest_replaced'),
+            *((path, before, records, 'event_fsynced')
+              for path, (before, records) in segments.items()),
+            (checkpoint, private_tracking_file_image(checkpoint),
+             (json.dumps(state, indent=2, sort_keys=True) + '\n').encode(), 'checkpoint_replaced'),
+        ]
+        writes = []
+        for path, before, contents, phase in plan:
+            mode = before[2] if before else 0o600
+            staged, after = stage_private_tracking_file(temporary_paths, path, mode, contents)
+            rollback = stage_private_tracking_file(temporary_paths, path, mode, before[3])[0] if before else None
+            writes.append((path, before, staged, after, rollback, phase))
+        require_manifest_transaction_current(manifest_path)
+        after_digest = manifest_digest(normalize_manifest_data(manifest, manifest_path))
+        yield
+        publish_private_tracking_files(writes, temporary_paths, operation)
+        transaction['expectedDigest'] = after_digest
+        transaction['manifestWritten'] = True
 
 
 def write_ledger_checkpoint(repo_root, state, manifest_path=None):
