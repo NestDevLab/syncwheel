@@ -75,6 +75,16 @@ from syncwheel_worktrees import GovernedWorktrees
 from syncwheel_stack_adoption import StackAdoption
 
 
+def require_stack_absorb_amendable(stack, args):
+    if stack.get('adopted_history'):
+        raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
+    if args.amend and not stack['commits']:
+        raise SyncwheelError(
+            f"stack {stack['id']!r} has no commits to amend; "
+            'use -N/--no-amend with -m MESSAGE to create its first commit'
+        )
+
+
 def ordinary_empty_draft_close(manifest, stack, args, reason):
     return bool(
         stack and stack.get('state') == 'draft' and not coordination_is_active(manifest)
@@ -2368,11 +2378,27 @@ class StackLifecycle:
         return 0
 
 
+    def require_empty_stack_absorb_base(self, stack):
+        if stack['commits']:
+            return None
+        repo_root = self.repository.root
+        branch_ref = f"refs/heads/{stack['branch']}"
+        base = self.repository.commit_full_sha(repo_root, stack['base'])
+        tip = self.repository.ref_tip(repo_root, branch_ref)
+        symbolic = self.repository.git(repo_root, 'symbolic-ref', '--quiet', branch_ref, check=False)
+        if symbolic.returncode == 0 or tip not in (None, base):
+            raise SyncwheelError(
+                f"empty stack {stack['id']!r} branch does not match its base as a direct ref "
+                f"({stack['branch']!r}); use a new draft for this patch and classify the existing history explicitly"
+            )
+        return base, tip
+
+
     def command_stack_absorb(self, args, manifest, manifest_path):
         repo_root = self.repository.root
         stack = require_stack(manifest, args.stack)
-        if stack.get('adopted_history'):
-            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
+        require_stack_absorb_amendable(stack, args)
+        empty_start = self.require_empty_stack_absorb_base(stack)
         integration_branch = stack.get('integration_branch') or manifest['integration']['branch']
         current_branch = self.repository.get_current_branch(repo_root)
         if current_branch != integration_branch and not args.force:
@@ -2399,6 +2425,8 @@ class StackLifecycle:
 
         self.control.require_manifest_transaction_current(manifest_path)
         stack_worktree = self.resolve_stack_absorb_location(manifest_path, manifest, stack, args)
+        if empty_start is not None and self.repository.ref_tip(stack_worktree, 'HEAD') != empty_start[0]:
+            raise SyncwheelError('empty stack worktree no longer matches its base; preserve it and review the branch')
         # The patch and commit touch only selected paths. Unrelated unstaged work
         # in the stack worktree remains outside this operation, but the real index
         # and patch paths must be clean before `git apply --index`.
@@ -2450,6 +2478,14 @@ class StackLifecycle:
     def resolve_stack_absorb_location(self, manifest_path, manifest, stack, args):
         repo_root = self.repository.root
         branch = stack['branch']
+        empty_start = self.require_empty_stack_absorb_base(stack)
+
+        def add_worktree(path):
+            options = [str(path), branch]
+            if empty_start is not None and empty_start[1] is None:
+                options = ['-b', branch, str(path), empty_start[0]]
+            self.repository.run(['git', 'worktree', 'add', *options], cwd=repo_root)
+
         existing = self.repository.find_worktree_for_branch(repo_root, branch)
         if args.worktree:
             path = Path(args.worktree).expanduser().resolve()
@@ -2459,7 +2495,7 @@ class StackLifecycle:
                     'reuse that worktree or pass its path with --worktree'
                 )
             if not existing:
-                self.repository.run(['git', 'worktree', 'add', str(path), branch], cwd=repo_root)
+                add_worktree(path)
             return path
         if existing:
             return existing
@@ -2469,7 +2505,7 @@ class StackLifecycle:
             self.control.ensure_syncwheel_worktree_root_excluded(repo_root, worktree_root)
         else:
             self.control.ensure_syncwheel_metadata_excluded(repo_root, manifest.get('syncwheel_tracking'), worktree_root)
-        self.repository.run(['git', 'worktree', 'add', str(path), branch], cwd=repo_root)
+        add_worktree(path)
         return path
 
 
@@ -2830,7 +2866,9 @@ class StackLifecycle:
             return {'status': 'ok', 'before_tip': current, 'after_tip': current, 'mode': mode}
         require_nonempty_desk_stack_rebuild(stack, mode)
         if not dry_run and mode == 'in-place':
-            self.projections.ensure_in_place_target(repo_root, stack['branch'], manifest, stack['id'])
+            self.projections.ensure_in_place_target(
+                repo_root, stack['branch'], manifest, stack['id'], manifest_path=manifest_path,
+            )
         if not dry_run and mode in ('ephemeral', 'plumbing'):
             self.projections.ensure_non_in_place_target_clean(
                 repo_root,

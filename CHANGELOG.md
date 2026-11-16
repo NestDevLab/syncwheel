@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.18 - 2026-11-16
+
+- Name path-scoped stack absorb with a new commit for uncommitted primary changes, reserving capture-integration for existing unowned commits. Refuse default amend on an empty stack before changing its base, metadata or worktrees. An empty recipe whose branch has moved from the base also refuses a new-commit absorb, preserving its undeclared history.
+
 ## 0.47.17 - 2026-11-16
 
 - Let stack sync update selected manifest metadata while unrelated primary product files are unstaged. Preserve product bytes, indexes, ignore files and unrelated refs; require explicit recovery for pending operations instead of starting promotion recovery or worktree cleanup.

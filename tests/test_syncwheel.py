@@ -5372,13 +5372,14 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn('requires current branch', result.stderr)
         self.assertIn('syncwheel worktree open <lane> --into feature-a', result.stderr)
 
-    def test_int_rebuild_in_place_names_manifest_capture_remedy(self):
+    def test_int_rebuild_in_place_names_worktree_remedy_on_wrong_branch(self):
         self.git('switch', '-qc', 'feature/wrong-primary')
 
         result = self.run_cli('int', 'rebuild', '--in-place', expected=2)
 
         self.assertIn('requires current branch', result.stderr)
-        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
+        self.assertIn('syncwheel worktree open <lane>', result.stderr)
+        self.assertNotIn('capture-integration', result.stderr)
 
     def test_stack_sync_updates_manifest_from_branch(self):
         with (self.repo / '.git' / 'info' / 'exclude').open('a') as exclude:
@@ -6753,7 +6754,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('reconcile', '--no-fetch', '--apply', expected=2)
 
         self.assertIn('primary checkout is dirty', result.stderr)
-        self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
+        self.assertIn('syncwheel stack absorb <stack-id> alpha.txt -N -m', result.stderr)
+        self.assertNotIn('capture-integration', result.stderr)
         self.assertEqual(self.git('rev-parse', 'pr/feature-b'), before_stack)
         self.assertEqual(manifest.read_text(), before_manifest)
         self.assertFalse(ledger.exists())
