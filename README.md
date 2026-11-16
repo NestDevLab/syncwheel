@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.16`
+Current version: `0.47.17`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -237,8 +237,8 @@ never reached the remote and is recorded as
 `superseded` when the reviewed state tip was overtaken; the local rename of an
 abandoned promotion is undone only when the remote carries neither the promoted
 ref nor a claim bearing its token. A promotion whose push landed before its
-manifest save owes only that save: the next coordinated command, `stack
-rebuild`, `stack sync` and `stack add` included, completes it from the published
+manifest save owes only that save: rerunning `stack promote`, `stack rebuild`
+or `stack add` completes it from the published
 state and rebuilds the promoted branch, so an intervening `sync` cannot strand
 it, and a draft branch that came back with commits of its own is anchored under
 `refs/syncwheel/recovery/drafts/` before it is dropped. A clone that lost a
@@ -328,6 +328,10 @@ publication succeeds but local manifest adoption fails, replan produces an
 adopt-only operation and never repeats the push.
 
 ## Common Short Flags
+
+An explicit `--manifest PATH` overrides a personal selection inherited from the
+environment or repository profile. Passing both `--manifest` and `--personal`
+explicitly remains an error. The command does not change the stored profile.
 
 Long options remain stable; short flags are available for daily workflows:
 
@@ -1085,6 +1089,13 @@ python3 scripts/syncwheel.py stack add feature-a HEAD
 Use `stack sync` when the branch already represents the intended PR stack. Use
 `stack set` or `stack add` when you want to declare an explicit revision range
 or append a new commit.
+
+`stack sync` updates the selected manifest and its ledger. Unrelated unstaged
+product changes in the primary are preserved, along with its index and ignore
+files. Pending promotion or control recovery must be completed through the
+printed explicit remedy before retrying; syncing does not recover promotions or
+clean up worktrees. Conflicts, staged changes and dirty shared control metadata
+remain blocking.
 
 After a parent PR lands, use `stack set <id> --target-branch main` to update
 only the stack's delivery target. Source commits, base, branch refs and integration

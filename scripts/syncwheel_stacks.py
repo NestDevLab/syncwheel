@@ -2337,13 +2337,25 @@ class StackLifecycle:
         return 0
 
 
-    def command_stack_sync(self, args, manifest, manifest_path):
+    def refuse_pending_stack_sync_promotion(self, manifest_path, remedy_selection):
+        for intent in self.intents.pending_coordination_publications(manifest_path):
+            scope = str(intent.get('scope') or '')
+            if scope.startswith('promote:'):
+                pending_stack = scope[len('promote:'):]
+                raise SyncwheelError(
+                    'pending stack promotion; complete it with '
+                    f'syncwheel stack promote {quoted([pending_stack])} {remedy_selection}'
+                )
+
+    def command_stack_sync(self, args, manifest, manifest_path, remedy_selection):
         repo_root = self.repository.root
-        if require_stack(manifest, args.stack).get('adopted_history'):
-            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
-        self.complete_pending_promote_intents(manifest, manifest_path)
         stack = require_stack(manifest, args.stack)
-        commits = self.repository.rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
+        if stack.get('adopted_history'):
+            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
+        self.refuse_pending_stack_sync_promotion(manifest_path, remedy_selection)
+        commits = self.repository.rev_list(
+            repo_root, f"{stack['base']}..{stack['branch']}", offline=True,
+        )
         stack['commits'] = commits
         self.control.save_manifest_with_ledger(
             repo_root,

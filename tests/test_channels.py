@@ -10,6 +10,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -1203,6 +1204,8 @@ class DeploymentChannelTest(unittest.TestCase):
 
     def test_manifest_global_lock_preserves_channel_against_stack_writer(self):
         self.create('migration', stacks=())
+        with (self.repo / '.git' / 'info' / 'exclude').open('a') as exclude:
+            exclude.write('\n.syncwheel/ledger/\n')
         module = self.load_module()
         manifest, manifest_path = module.load_manifest(self.repo)
         channel = {
@@ -1229,6 +1232,8 @@ class DeploymentChannelTest(unittest.TestCase):
             fresh, _ = module.load_manifest(self.repo, manifest_path)
             fresh.setdefault('channels', []).append(channel)
             module.save_manifest(manifest_path, fresh)
+            self.git('add', '.syncwheel/manifest.json')
+            self.git('commit', '-qm', 'Persist competing channel update')
         stdout, stderr = process.communicate(timeout=10)
         self.assertEqual(process.returncode, 0, (stdout, stderr))
         final, _ = module.load_manifest(self.repo, manifest_path)
@@ -1292,9 +1297,7 @@ class DeploymentChannelTest(unittest.TestCase):
                 manifest_path.write_text(json.dumps(raw, indent=2) + '\n')
             return real_save(path, proposed)
 
-        args = mock.Mock(
-            repo=str(self.repo), manifest=None, personal=None, stack='a'
-        )
+        args = SimpleNamespace(repo=str(self.repo), manifest=None, personal=None, stack='a')
         with module.manifest_write_transaction(
             self.repo, manifest_path, 'cas-pure-writer'
         ):

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.17 - 2026-11-16
+
+- Let stack sync update selected manifest metadata while unrelated primary product files are unstaged. Preserve product bytes, indexes, ignore files and unrelated refs; require explicit recovery for pending operations instead of starting promotion recovery or worktree cleanup.
+
 ## 0.47.16 - 2026-11-16
 
 - Prepare personal tracking updates before writing and restore their manifest and private ledger when a handled write fails. Keep the selected profile, shared ignore files, Git index and refs unchanged.
