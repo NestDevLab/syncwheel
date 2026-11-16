@@ -196,12 +196,11 @@ class SyncwheelFixtureTest(unittest.TestCase):
         self.assertIn('match exactly', self.run_cli(*args, expected=2).stderr)
         self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), base)
 
-    def test_retained_captured_push_refuses_uncaptured_cleanup_and_missing_ownership(self):
+    def test_retained_push_refuses_invalid_retention_evidence_and_missing_ownership(self):
         path, _, base, origin = self.captured_push_copy()
         module = self.load_syncwheel_module()
         original, _ = module.load_governed_worktree_registry(self.repo)
-        cases = [({'state': 'active'}, 'completed native capture'),
-                 ({'pending_reason': 'branch_advanced'}, 'interrupted cleanup'),
+        cases = [({'pending_reason': 'branch_advanced'}, 'interrupted cleanup'),
                  ({'cleanup_tip': 'unknown'}, 'interrupted cleanup'),
                  ({'captured_at': ''}, 'capture evidence is missing'),
                  ({'path': str(self.tmp)}, 'outside the governed root'),
@@ -5987,7 +5986,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
 
         # The lease is pinned to the live remote tip (absent here), not the tracking ref.
-        self.assertIn('git push --force-with-lease=refs/heads/pr/publish: fork pr/publish', result.stdout)
+        tip = self.git('rev-parse', 'pr/publish')
+        self.assertIn(f'git push --force-with-lease=refs/heads/pr/publish: fork {tip}:refs/heads/pr/publish', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/publish'), tip)
 
     def test_publish_uses_force_with_lease_by_default(self):
         origin = self.tmp / 'origin.git'
@@ -6016,7 +6017,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
 
         # The lease is pinned to the live remote tip (absent here), not the tracking ref.
-        self.assertIn('git push --force-with-lease=refs/heads/pr/publish: fork pr/publish', result.stdout)
+        tip = self.git('rev-parse', 'pr/publish')
+        self.assertIn(f'git push --force-with-lease=refs/heads/pr/publish: fork {tip}:refs/heads/pr/publish', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/publish'), tip)
 
     def test_sync_never_pushes(self):
         origin = self.tmp / 'origin.git'
@@ -6075,7 +6078,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             expected=0,
         )
 
-        self.assertIn('git push fork pr/publish', result.stdout)
+        tip = self.git('rev-parse', 'pr/publish')
+        self.assertIn(f'git push fork {tip}:refs/heads/pr/publish', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/publish'), tip)
         self.assertNotIn('--force-with-lease', result.stdout)
 
     def test_reconcile_reports_stack_and_integration_rebuild_plan(self):

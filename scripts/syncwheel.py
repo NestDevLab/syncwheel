@@ -12035,6 +12035,10 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
     for lane in registry['lanes']:
         if lane.get('target') != stack_id or lane['state'] == 'reaped':
             continue
+        if active_only and lane.get('pending_reason') == 'archive_push_failed':
+            # The native recovery ref preserves this lane. A failed remote
+            # archive has never blocked its independent stack publication.
+            continue
 
         def refuse(reason):
             raise SyncwheelError(f"cannot retain captured worktree {lane['id']!r}: {reason}")
