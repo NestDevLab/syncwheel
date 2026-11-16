@@ -401,6 +401,22 @@ class GovernedWorktrees:
                     raise SyncwheelError(f'governed worktree lane {lane_id!r} is missing {key!r}: {path}')
             if not isinstance(lane.get('full'), bool):
                 raise SyncwheelError(f'governed worktree lane {lane_id!r} has invalid full mode: {path}')
+        desks = data.get('desks', [])
+        if not isinstance(desks, list):
+            raise SyncwheelError(f'governed worktree registry desks must be a list: {path}')
+        seen_desks = set()
+        for desk in desks:
+            if (not isinstance(desk, dict) or desk.get('kind') != 'replay-desk'
+                    or any(not isinstance(desk.get(key), str) or not desk[key]
+                           for key in ('stack', 'branch', 'path', 'manifest', 'admin'))
+                    or any(not Path(desk[key]).is_absolute() for key in ('path', 'manifest', 'admin'))
+                    or any(not isinstance(desk.get(key), list) or len(desk[key]) != 2
+                           or any(type(value) is not int or value < 0 for value in desk[key])
+                           for key in ('identity', 'checkoutIdentity'))):
+                raise SyncwheelError(f'governed worktree registry contains an invalid desk: {path}')
+            if desk['admin'] in seen_desks:
+                raise SyncwheelError(f'governed worktree registry contains a duplicate desk: {path}')
+            seen_desks.add(desk['admin'])
         return data, path
 
     def save_governed_worktree_registry(

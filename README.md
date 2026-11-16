@@ -477,6 +477,14 @@ lanes that need attention and `--json` adds a count per health code. It is
 read-only. When more than three lanes need attention, other commands print one
 summary line with those counts instead of one warning per lane.
 
+Persistent stack replay desks created by Syncwheel also appear in `worktree
+list`; JSON output lists them under `desks`. Use `stack release-desk STACK`
+to preview their recovery and removal before archiving a stack. The apply
+requires the reviewed plan digest and confirmation that writers have stopped.
+It retains the tip, index and working changes in local recovery refs before
+removing the checkout. See [desk release](docs/stack-archive.md#release-a-replay-desk)
+for the command sequence and the explicit path selection for older desks.
+
 `status` without `--fetch`, `check --no-fetch`, and `worktree list` preserve
 control metadata, including authorization records, persistent caches and
 startup state. They do not start update maintenance or clean up stale authorization records. Delivery

@@ -50,6 +50,7 @@ from syncwheel_projection import (
 )
 
 import syncwheel_manifest_store as _manifest_storage
+from syncwheel_desks import DeskLifecycle
 from syncwheel_manifest_store import (
     ManifestStore,
     CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION,
@@ -508,6 +509,7 @@ MANAGED_PUSH_AUTH_ENV = 'SYNCWHEEL_PUSH_AUTH_FILE'
 MANAGED_PUSH_SECRET_ENV = 'SYNCWHEEL_PUSH_AUTH_SECRET'
 MANAGED_PUSH_AUTH_TTL_SECONDS = 60
 _READONLY_DIAGNOSTICS = ContextVar('readonly_diagnostics', default=False)
+_EXPLICIT_REF_AUTHORIZATION = ContextVar('explicit_ref_authorization', default=False)
 SYNCWHEEL_OWNS_REF_MOVES = False
 SYNCWHEEL_REF_AUTH_REPO = None
 SYNCWHEEL_REF_AUTH_TTL_SECONDS = 30
@@ -604,7 +606,11 @@ def managed_process_env(extra=None, authorize=True):
     for name in AMBIENT_GIT_LOCATION_ENV:
         process_env.pop(name, None)
     diagnostics = _READONLY_DIAGNOSTICS.get()
-    if not diagnostics and authorize and SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO:
+    explicit_authorization = _EXPLICIT_REF_AUTHORIZATION.get()
+    if explicit_authorization:
+        process_env.pop(MANAGED_REF_MOVE_AUTH_ENV, None)
+    if (not diagnostics and not explicit_authorization and authorize
+            and SYNCWHEEL_OWNS_REF_MOVES and SYNCWHEEL_REF_AUTH_REPO):
         process_env[MANAGED_REF_MOVE_AUTH_ENV] = authorize_ref_move(SYNCWHEEL_REF_AUTH_REPO)
     if extra:
         process_env.update(extra)
@@ -12008,16 +12014,20 @@ def command_worktree_list(args):
         lane for lane in diagnostics['lanes']
         if not args.problems or lane.get('code')
     ]
+    desks = _desk_lifecycle(repo_root).desks()
     if args.json:
         print(json.dumps({
             'registryPath': diagnostics['registry_path'],
             'lanes': lanes,
+            'desks': desks if not args.problems else [],
             'counts': governed_worktree_problem_counts(diagnostics['lanes']),
         }, indent=2, sort_keys=True))
         return 0
-    if not lanes:
+    for desk in desks if not args.problems else ():
+        print(f"{desk['stack']}  kind=replay-desk  branch={desk['branch']}")
+        print(f"    path: {desk['path']}")
+    if not lanes and (not desks or args.problems):
         print('no governed worktree lanes' + (' need attention' if args.problems else ''))
-        return 0
     for lane in lanes:
         label = lane.get('id') or lane.get('branch') or lane.get('path')
         print(
@@ -12168,6 +12178,10 @@ def command_worktree_open(args):
         }
         run(['git', 'worktree', 'add', '-b', branch, str(path), base], cwd=repo_root)
         try:
+            admin = governed_worktree_admin_dir_for_path(repo_root, path)
+            if not admin:
+                raise SyncwheelError('cannot prove the new governed worktree Git administration')
+            lane['admin_dir'] = str(admin)
             if base_ref and can_materialize:
                 created = git(
                     repo_root, 'update-ref', '--no-deref', stack_branch_ref, base,
@@ -15576,6 +15590,35 @@ def verify_stack_archive_proof(repo_root, proof, stack=None):
     return _stack_lifecycle(repo_root).verify_stack_archive_proof(
         proof, stack,
     )
+
+
+def command_stack_release_desk(args):
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    manifest_path = Path(os.path.abspath(manifest_path))
+    require_stack_sync_metadata_paths(repo_root, manifest_path)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+    if not manifest:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    require_delivery_manifest(manifest)
+    stack = require_stack(manifest, args.stack)
+
+    def require_no_writer():
+        current, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+        if not current or manifest_digest(current) != manifest_digest(manifest):
+            raise SyncwheelError('selected manifest changed during desk release')
+        roots = {repo_root, primary_authority_manifest_path(repo_root).parent.parent}
+        for root in roots:
+            _, coordination = coordination_profile(root)
+            if stack['id'] in (coordination.get('locks') or {}) or local_lease_is_active(coordination):
+                raise SyncwheelError('desk release refuses an active worktree lock or coordination lease')
+
+    require_no_writer()
+    try:
+        result = _desk_lifecycle(repo_root).release(args, manifest, manifest_path, stack, require_no_writer)
+    except OSError as error:
+        raise SyncwheelError(f'desk release could not complete: {error}') from error
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
 
 
 def command_stack_archive(args):
@@ -20543,15 +20586,22 @@ def main():
         command_hooks_ref_guard,
     }
     global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
-    readonly_diagnostics = args.func == command_worktree_list or (
-        args.func in {command_status, command_check} and not args.fetch
+    desk_release = args.func == command_stack_release_desk
+    readonly_diagnostics = (
+        args.func == command_worktree_list
+        or (args.func in {command_status, command_check} and not args.fetch)
+        or (desk_release and not args.apply)
     )
     try:
-        if readonly_diagnostics:
-            diagnostic_scope = _READONLY_DIAGNOSTICS.set(True)
+        if desk_release:
+            args.repo = args.repo or os.environ.get(ENV_REPO)
+        if readonly_diagnostics or desk_release:
+            diagnostic_scope = _READONLY_DIAGNOSTICS.set(readonly_diagnostics)
+            authorization_scope = _EXPLICIT_REF_AUTHORIZATION.set(desk_release and args.apply)
             try:
                 return args.func(args)
             finally:
+                _EXPLICIT_REF_AUTHORIZATION.reset(authorization_scope)
                 _READONLY_DIAGNOSTICS.reset(diagnostic_scope)
         if args.func in {command_repo_tracking_set, command_repo_tracking_status}:
             args.repo = args.repo or os.environ.get(ENV_REPO)
@@ -20632,7 +20682,7 @@ def main():
         print(f'error: {exc}', file=sys.stderr)
         return 2
     finally:
-        if not readonly_diagnostics:
+        if not readonly_diagnostics and not desk_release:
             if SYNCWHEEL_REF_AUTH_REPO:
                 clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
             SYNCWHEEL_REF_AUTH_REPO = None
@@ -20765,6 +20815,7 @@ def command_handlers():
         'command_stack_absorb': command_stack_absorb,
         'command_stack_add': command_stack_add,
         'command_stack_archive': command_stack_archive,
+        'command_stack_release_desk': command_stack_release_desk,
         'command_stack_capture_integration': command_stack_capture_integration,
         'command_stack_classify_integration': command_stack_classify_integration,
         'command_stack_close': command_stack_close,
@@ -21512,7 +21563,35 @@ class _StackRepository:
     def get_worktrees(self, *args, **kwargs):
         return get_worktrees(*args, **kwargs)
 
-    def capture_ref_transaction(self, operations):
+    def binary_git(self, path, *args, input_data=None, index=None, recovery_identity=False):
+        env = {'GIT_OPTIONAL_LOCKS': '0'}
+        if index is not None:
+            env['GIT_INDEX_FILE'] = str(index)
+        if recovery_identity:
+            for role in ('AUTHOR', 'COMMITTER'):
+                env.update({f'GIT_{role}_NAME': 'Syncwheel',
+                            f'GIT_{role}_EMAIL': 'syncwheel@example.invalid',
+                            f'GIT_{role}_DATE': '2000-01-01T00:00:00+00:00'})
+        result = subprocess.run(
+            ['git', '-c', 'commit.gpgsign=false', *args], cwd=path, input=input_data,
+            env=managed_process_env(env, authorize=False), capture_output=True,
+        )
+        if result.returncode:
+            raise SyncwheelError(result.stderr.decode(errors='replace').strip() or 'desk snapshot Git command failed')
+        return result.stdout
+
+    def write_desk_intent(self, path, payload):
+        common = git_common_dir(self.root)
+        require_private_tracking_path(common, path)
+        atomic_write_private_json(path, payload, indent=2)
+        fsync_directory_path(path.parent)
+        fsync_directory_path(path.parent.parent)
+
+    def publish_desk_recovery_refs(self, operations):
+        with ref_move_authorization(self.root) as nonce:
+            self.capture_ref_transaction(operations, {MANAGED_REF_MOVE_AUTH_ENV: nonce})
+
+    def capture_ref_transaction(self, operations, authorization=None):
         commands = ['start']
         for operation in operations:
             commands.extend(('option no-deref', operation))
@@ -21520,7 +21599,7 @@ class _StackRepository:
         # that same OID. Inspect ref kinds after Git has acquired its locks.
         with tempfile.TemporaryFile(mode='w+t') as errors, subprocess.Popen(
             ['git', 'update-ref', '--stdin'],
-            cwd=self.root, env=managed_process_env(),
+            cwd=self.root, env=managed_process_env(authorization),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True,
         ) as process:
             def close_transaction():
@@ -21640,6 +21719,36 @@ class _StackLedger:
         return _manifest_storage.load_ledger_events(*args, **kwargs)
 
 class _StackProjections:
+    def register_created_desk(self, repo_root, manifest_path, stack, path):
+        return _desk_lifecycle(repo_root).register_created(manifest_path, stack, path)
+
+    def archive_desk_remedy(self, repo_root, manifest_path, stack, worktree):
+        primary = primary_authority_manifest_path(repo_root).parent.parent
+        selected = manifest_path or primary / '.syncwheel/manifest.json'
+        desks = _desk_lifecycle(repo_root)
+        pending = desks.pending_release(selected, stack)
+        args = ['syncwheel', 'stack', 'release-desk', stack['id']]
+        if pending:
+            args.extend(('--reason', pending['reason']))
+            if pending['legacy']:
+                args.extend(('--legacy-worktree', pending['path']))
+            args.extend(('--confirm-writers-stopped', '--plan-digest', pending['planDigest'], '--apply'))
+        elif worktree:
+            worktree = Path(worktree).resolve()
+            if worktree == primary:
+                return 'preserve the primary checkout and move the stack authoring work to a separate desk'
+            registry, _ = _governed_worktrees(repo_root).load_governed_worktree_registry()
+            desks.require_no_lane(registry, stack, worktree, governed_worktree_admin_dir_for_path(repo_root, worktree))
+            args.extend(('--reason', 'Release the stack desk'))
+            if not any(item['path'] == str(Path(worktree).resolve()) and item['stack'] == stack['id']
+                       and item['manifest'] == str(selected.resolve()) for item in desks.desks()):
+                args.extend(('--legacy-worktree', str(worktree)))
+        else:
+            return None
+        args.extend(manifest_path_remedy_options(repo_root, selected))
+        action = 'confirm that writers are stopped and resume' if pending else 'inspect ownership and preview'
+        return f'{action} with {shlex.join(args)}'
+
     def checkout_reset_destination_lease(self, *args, **kwargs):
         return checkout_reset_destination_lease(*args, **kwargs)
 
@@ -21670,6 +21779,10 @@ class _StackProjections:
 class _StackContinuation:
     def command_stack_close(self, *args, **kwargs):
         return command_stack_close(*args, **kwargs)
+
+
+def _desk_lifecycle(repo_root):
+    return DeskLifecycle(_StackRepository(repo_root), _governed_worktrees(repo_root))
 
 
 def _stack_lifecycle(repo_root):
