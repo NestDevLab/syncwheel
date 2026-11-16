@@ -130,7 +130,7 @@ the repository does not own.
 
 ## Migration
 
-Use `repo tracking set` to migrate between modes:
+With the shared manifest selected, use `repo tracking set` to migrate between modes:
 
 - `local-only -> git-tracked`: writes the manifest policy, adds the managed
   `.gitignore` block, removes the managed `.git/info/exclude` block, and stages
@@ -142,6 +142,14 @@ Use `repo tracking set` to migrate between modes:
 The CLI only edits Syncwheel-managed blocks. If `.gitignore` contains manual
 `.syncwheel/` ignore entries outside the managed block, `repo tracking set
 git-tracked --apply` stops and asks for manual audit.
+
+With a personal manifest selected, the command updates only its policy and private
+ledger. This applies to both `git-tracked` and `local-only`, including a personal
+manifest selected through `--manifest`, a profile or an alias. The personal
+manifest and ledger must already be ignored and untracked. The command leaves
+shared `.gitignore`, `info/exclude`, hooks, the manifest README and Git indexes
+unchanged, including when the primary has unrelated unstaged product changes.
+A personal policy change does not authorize migration of shared repository files.
 
 Tracking-policy migration does not silently upgrade a legacy manifest to
 active-active coordination. After confirming the publication remote and shared

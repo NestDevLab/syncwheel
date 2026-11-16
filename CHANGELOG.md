@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.15 - 2026-11-16
+
+- Keep personal-manifest tracking updates within the selected manifest and its private ledger. Neither tracking value rewrites shared ignore files, changes hooks, stages files or removes the shared manifest README from the index. Preserve unrelated dirty primary files and report actions for the selected manifest.
+
 ## 0.47.14 - 2026-11-16
 
 - Let lane and personal manifests without an authority declaration inherit the primary shared manifest's policy. Explicit declarations may restrict that policy but cannot grant additional capabilities. Report the effective policy and its source without copying inherited authority into the selected manifest.
