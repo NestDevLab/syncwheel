@@ -48,6 +48,7 @@ from syncwheel_manifest import (
     stack_integration_only_commits,
     stack_map,
     validate_stack_dependency_graph,
+    validate_stack_adoption,
 )
 from syncwheel_publication import (
     PublicationCoordinator,
@@ -71,6 +72,7 @@ from syncwheel_replay import (
 
 from syncwheel_coordination_state import CoordinationStateReader
 from syncwheel_worktrees import GovernedWorktrees
+from syncwheel_stack_adoption import StackAdoption
 
 
 class StackRepository(Protocol):
@@ -2325,6 +2327,8 @@ class StackLifecycle:
 
     def command_stack_sync(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        if require_stack(manifest, args.stack).get('adopted_history'):
+            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
         self.complete_pending_promote_intents(manifest, manifest_path)
         stack = require_stack(manifest, args.stack)
         commits = self.repository.rev_list(repo_root, f"{stack['base']}..{stack['branch']}")
@@ -2343,6 +2347,8 @@ class StackLifecycle:
     def command_stack_absorb(self, args, manifest, manifest_path):
         repo_root = self.repository.root
         stack = require_stack(manifest, args.stack)
+        if stack.get('adopted_history'):
+            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
         integration_branch = stack.get('integration_branch') or manifest['integration']['branch']
         current_branch = self.repository.get_current_branch(repo_root)
         if current_branch != integration_branch and not args.force:
@@ -2445,6 +2451,10 @@ class StackLifecycle:
 
     def command_stack_set(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        if getattr(args, 'base', None) or getattr(args, 'adopt_tip', None):
+            return StackAdoption(self).execute_stack_adoption(args, manifest, manifest_path)
+        if getattr(args, 'plan_digest', None) or getattr(args, 'apply', False):
+            raise SyncwheelError('--plan-digest and --apply require --base and --adopt-tip')
         stack = require_stack(manifest, args.stack)
         target_branch = getattr(args, 'target_branch', None)
         if args.published:
@@ -2468,6 +2478,7 @@ class StackLifecycle:
             for spec in args.specs:
                 commits.extend(self.repository.commit_list_for_spec(repo_root, spec))
             stack['commits'] = list(dict.fromkeys(commits))
+            stack.pop('adopted_history', None)
         if target_branch is not None:
             stack['target_branch'] = target_branch
         context = {'stack': args.stack, 'branch': stack['branch'], 'actor': self.repository.governed_worktree_owner()}
@@ -2699,6 +2710,7 @@ class StackLifecycle:
 
     def validate_stack_update(self, manifest, stack, previous_commits):
         repo_root = self.repository.root
+        validate_stack_adoption(stack)
         report = self.projections.stack_reconcile_report(repo_root, manifest, stack)
         if report.get('projection_error'):
             stack['commits'] = previous_commits
@@ -2785,6 +2797,13 @@ class StackLifecycle:
     ):
         """Rebuild one stack through the shared replay executor and ledger path."""
         repo_root = self.repository.root
+        adopted = validate_stack_adoption(stack)
+        if adopted:
+            current = self.repository.ref_tip(repo_root, stack['branch'])
+            if current != adopted['tip']:
+                raise SyncwheelError('adopted stack tip changed; use an explicit stack set adoption')
+            print(f"{stack['id']}: preserving adopted tip {current}")
+            return {'status': 'ok', 'before_tip': current, 'after_tip': current, 'mode': mode}
         require_nonempty_desk_stack_rebuild(stack, mode)
         if not dry_run and mode == 'in-place':
             self.projections.ensure_in_place_target(repo_root, stack['branch'], manifest, stack['id'])
@@ -2921,10 +2940,14 @@ class StackLifecycle:
 
     def command_stack_push(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        stack = require_stack(manifest, args.stack)
+        adopted = validate_stack_adoption(stack)
+        if adopted and self.repository.ref_tip(repo_root, stack['branch']) != adopted['tip']:
+            raise SyncwheelError('adopted stack source changed; inspect and adopt the exact intended tip')
         retained = self.projections.verify_retained_captured_worktrees(repo_root, manifest, args)
         for item in retained:
             print(f"preserving captured worktree {item['lane']['id']}: {item['tip']}; "
-                  f"{args.retain_captured_worktrees.strip()}")
+                  f"{(args.retain_captured_worktrees or 'active publication source').strip()}")
         self.complete_pending_promote_intents(
             manifest,
             manifest_path,
@@ -2964,7 +2987,8 @@ class StackLifecycle:
             # Control persistence is local housekeeping, not publication authority
             # over the integration projection or any other stack.
             changed_refs = {
-                f"refs/heads/{stack['branch']}": self.repository.ref_tip(repo_root, stack['branch'])
+                f"refs/heads/{stack['branch']}": (adopted['tip'] if adopted else
+                    retained[0]['tip'] if retained else self.repository.ref_tip(repo_root, stack['branch']))
             }
             try:
                 publication_operation = (
@@ -3034,14 +3058,15 @@ class StackLifecycle:
         remote = stack_push_remote(manifest, stack, args.remote)
         push_args = push_args_with_options(args)
         retained = self.projections.verify_retained_captured_worktrees(repo_root, manifest, args)
-        refspec = (f"{retained[0]['tip']}:refs/heads/{stack['branch']}"
-                   if retained else stack['branch'])
+        publication_tip = adopted['tip'] if adopted else (retained[0]['tip'] if retained else None)
+        refspec = (f"{publication_tip}:refs/heads/{stack['branch']}"
+                   if publication_tip else stack['branch'])
         command = ['git', 'push', *push_args, remote, refspec]
         if args.dry_run:
             print(quoted(command))
             return 0
         if self.repository.forced_push_requested(push_args):
-            local_tip = retained[0]['tip'] if retained else self.repository.ref_tip(repo_root, stack['branch'])
+            local_tip = publication_tip or self.repository.ref_tip(repo_root, stack['branch'])
             leases = self.repository.legacy_stack_push_lease(
                 repo_root, stack, remote, local_tip, push_args, manifest_path,
             )
@@ -3057,7 +3082,7 @@ class StackLifecycle:
                 'stack': stack['id'],
                 'branch': stack['branch'],
                 'remote': remote,
-                'tip': self.repository.ref_tip(repo_root, stack['branch']),
+                'tip': publication_tip or self.repository.ref_tip(repo_root, stack['branch']),
                 'actor': self.repository.governed_worktree_owner(),
             },
             manifest_path,

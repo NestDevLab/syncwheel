@@ -11,16 +11,27 @@ The AI agent should own **judgment, communication, validation, and safe executio
 
 ## Agent contract
 
-Before editing branches, the agent should run:
+Before editing branches in delivery mode, the agent should run:
 ```bash
 python3 scripts/syncwheel.py status --fetch
 python3 scripts/syncwheel.py validate
 python3 scripts/syncwheel.py plan --json
 ```
 
+For journal mode, use `syncwheel check --no-fetch` for local validation and
+`syncwheel journal status` for the remote tip. Journal mode has no stack plan.
+
 Before the first use of each mutating subcommand in a session, and after an
 upgrade or syntax error, run its exact nested `--help`. Treat the installed
 help as authoritative for flags and defaults; do not infer them from memory.
+Pass `--reason` when the subcommand supports it. For commands without the flag,
+such as `stack add`, record the reason and command in the work receipt.
+
+If Syncwheel refuses an operation on managed state, stop and report the command,
+its error, and the documented remedy. Use read-only diagnostics to verify the
+remedy's preconditions. Do not bypass the refusal with a raw `git push`, a
+manual managed manifest or coordination state edit, or an internal mutation
+helper.
 
 After delivery, close by proof: use `stack close <id> --reason merged` only
 when the declared commits are ancestors of the target; use `--reason absorbed`

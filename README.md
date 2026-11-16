@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.8`
+Current version: `0.47.11`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -109,14 +109,19 @@ git worktree lock --reason "Keep validated source for inspection" <captured-work
 syncwheel stack push feature-a --retain-captured-worktrees "Keep validation evidence"
 ```
 
-This does not release, remove, unlock or change the copy or its ignored dependencies.
-Every retained lane must have completed native capture, remain registered and locked,
-have no tracked or untracked source edits or interrupted cleanup, and have exactly
-the publication HEAD. All its commits must belong to the selected stack. These proofs
-are checked again before publication. Legacy pushes pin that HEAD in the refspec.
+A retained captured copy must have completed native capture and remain locked.
+A clean, registered active lane at the exact declared tip can also be published
+with or without the retention option. Both forms preserve the active lane.
+Every lane used as a source must have the exact publication HEAD, no tracked or
+untracked changes, and no interrupted cleanup. All its commits must belong to
+the selected stack. Syncwheel rechecks these proofs before publication.
+Legacy pushes pin that HEAD in the refspec.
 The Git lock protects against cleanup, not subsequent edits; publication uses the
 commit, not the copy's mutable files.
 The default recovery requirement and destructive-operation guards remain unchanged.
+
+Use [stack history adoption](docs/stack-adoption.md) to declare an existing
+merge graph and publish its exact reviewed tip.
 
 Further committed corrections to an already captured copy can be recaptured without
 cleanup using the same explicit option:
@@ -1422,6 +1427,7 @@ an allowlisted working tree without PR stacks or integration. The manifest's
 `max_file_bytes`, and an optional `interval` (default `30m`).
 
 ```bash
+syncwheel check --no-fetch            # validate local journal state
 syncwheel journal status
 syncwheel journal snapshot            # plan
 syncwheel journal snapshot --apply    # locked temporary-index commit
@@ -1436,6 +1442,11 @@ syncwheel journal schedule install    # plan a Linux systemd user timer
 syncwheel journal schedule install --apply
 syncwheel journal schedule install --committed-only --apply
 ```
+
+Journal `check` validates the configured branch, remote, and repository guards
+using local state with `--no-fetch`. `--strict` fails on warnings or a dirty
+worktree. It does not validate an integration projection or prove the remote
+journal is current; use `journal status` for the remote tip.
 
 `journal publish` prints `excluded_count` and `pull.kept_local_count` in both
 plan and apply results. Its other result fields remain available. Use
@@ -1529,8 +1540,8 @@ Four ratified working rules, in full in
    resolve through `stack absorb` / `stack resolve-integration`
 3. integration composition is declared and visible — check `syncwheel int show` before
    testing there or blaming your own code
-4. every mutating command carries `--reason`, mandatory in `ai-managed` repositories,
-   surfaced in `syncwheel ledger show` with the actor and command
+4. record a reason for each mutation: pass `--reason` where the subcommand's
+   help lists it; otherwise record the reason and command in the work receipt
 
 Recommended sequence:
 1. `repo tracking status`

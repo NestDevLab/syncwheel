@@ -408,6 +408,8 @@ class PublicationCoordinator:
                 snapshot_stack['state'] = stack['state']
             if stack.get('depends_on'):
                 snapshot_stack['depends_on'] = list(stack['depends_on'])
+            if stack.get('adopted_history'):
+                snapshot_stack['adopted_history'] = dict(stack['adopted_history'])
             resolution = {key: copy.deepcopy(stack[key])
                           for key in ('integration_commits', 'integration_only_commits', 'integration_resolution')
                           if key in stack}

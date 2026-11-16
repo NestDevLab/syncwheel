@@ -10,13 +10,14 @@ Run these before branch, worktree, push, PR, recovery, or final handoff work:
 
 ```bash
 syncwheel repo tracking status
-syncwheel status --fetch
-syncwheel validate
-syncwheel reconcile
+syncwheel check --no-fetch
 ```
 
 If `syncwheel_tracking` is missing, stop and ask whether the repo should be `git-tracked` or
 `local-only`. Persist the answer with `syncwheel repo tracking set ... --apply` before continuing.
+
+In delivery mode, run `syncwheel status --fetch` and `syncwheel reconcile` to
+refresh and inspect the planned actions before a mutation.
 
 For a version 2 or 3 manifest with `coordination.mode: "active-active"`, run this
 read-only handoff check before planning a mutation or taking over from another
@@ -29,7 +30,8 @@ syncwheel handoff
 ## Mutation Rules
 
 For `repository_mode: "journal"`, do not use stack or integration commands.
-Run `journal status`, then plan with `journal snapshot` or `journal publish`;
+Use `check --no-fetch` for local journal validation and `journal status` for the
+remote tip. Then plan with `journal snapshot` or `journal publish`;
 add `--apply` only for an authorized commit or exact-lease push. To catch up
 with other writers, use `journal pull` (plan) and `journal pull --apply`, never
 a raw `git merge` or `git pull`; `journal publish --apply` pulls first. Resolve
@@ -70,15 +72,17 @@ provider journal is prepared. The provider never publishes the resulting draft.
   refuse draft-stack publication; ephemeral channels may use drafts, and
   active-active channels must use the coordination remote.
 - Never mutate branches from a dirty checkout.
+- Use `--reason` when the exact subcommand's help lists it. Otherwise, record
+  the reason and command in the work receipt.
 - Rebuilds do not create a worktree. Start routine implementation, dependency installation, builds,
   and tests on integration. Use `--replay-mode desk` only to resolve a conflict or validate a
   non-empty materialized stack when integration cannot safely run it; put it under the declared
   Syncwheel worktree root.
 - A plumbing conflict stops and prints the `--replay-mode desk` retry command. Take it: `stack absorb`
   and `stack resolve-integration` need a checkout that plumbing never created.
-- For active-active repositories, never bypass `publish`, `stack push`, or
-  `int push` with a raw `git push`; they provide the required atomic state and
-  exact leases.
+- After a refusal on managed state, stop and report the command, error, and documented
+  remedy. Do not bypass it with a raw `git push`, a manual managed manifest or
+  coordination state edit, or an internal mutation helper.
 - If publication reports a mergeable race, inspect `handoff` and use
   `publish --accept-merge` only after explicitly accepting the disjoint-stack
   merge. Do not retry a failed lease silently.

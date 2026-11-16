@@ -1,11 +1,19 @@
 # Changelog
 
-## 0.47.8 - 2026-11-16
+## 0.47.11 - 2026-11-16
 
 - Resolve a paused rebase through its per-worktree branch record, so `int git -- rebase --continue` and `--abort` find the detached checkout. Missing unrelated checkout directories do not prevent recovery; missing matching records still count when refusing ambiguous matches.
 
 - Close the ways around the primary guard through `int git`. It refuses `update-ref`, `symbolic-ref` writes, branch and config writes, Git aliases, guarded configuration overrides and options that redirect Git to another repository, before creating an optional checkout. Attached `-c` and `-C` arguments are checked too. `fetch --update-head-ok`, its long abbreviations and short option bundles containing `-u` are refused even with guard hooks disabled. Only commit, reset, merge, rebase, cherry-pick, revert and am receive integration-ref authorization; all other commands run without a generated or inherited token. Branch listing and explicit config reads remain supported. A command that leaves the integration worktree on another branch exits non-zero and names the branch to switch back to.
 - Classify Git passthroughs by their real command: global options before it, such as `-c name=value`, are no longer mistaken for the command name. `worktree list`, `stash list` and `stash show`, `reflog show` (each only with the subcommand first), `symbolic-ref` reads, `merge-base`, `ls-tree`, `diff-tree`, `range-diff` and a few more read-only commands now count as reads, so `int git -- worktree list --porcelain` no longer stops on a dirty primary.
+
+## 0.47.10 - 2026-11-16
+
+- Allow stack publication from clean, registered active lanes at the exact declared source tip without changing their owner, capture state, files or retention locks. Explicit retention also accepts active lanes; pending cleanup and changed source state still stop publication.
+- Add digest-bound `stack set --base BASE --adopt-tip TIP` to adopt an existing merge tip and its explicitly listed history without rewriting commits. The base must be its unique direct projection parent. Prepared ref/manifest updates are recoverable through the same CLI operation; stale recovery states are preserved and refused. Channel pins and direct landing explicitly refuse adopted histories until those operations support them.
+- Let `worktree open --into STACK --base BASE` materialize a missing empty stack branch at its exact base, using compare-and-swap and preserving concurrent work.
+- Make `check` and `ck` validate journal repositories without changing their mode or evaluating an integration projection. Strict checks also report uncommitted journal changes.
+- Align the skill and guides with supported `--reason` flags and require refusal reporting instead of raw-push, internal-helper or manual-state fallbacks.
 
 ## 0.47.7 - 2026-11-16
 
