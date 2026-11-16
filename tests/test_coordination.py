@@ -12042,9 +12042,12 @@ sys.exit(module.main())
             fixture['module'].branch_exists(fixture['repo'], 'syncwheel/draft/rebuilt')
         )
 
-    def test_sync_completes_a_landed_promotion_first(self):
+    def test_sync_requires_explicit_recovery_of_a_landed_promotion(self):
         fixture = self.prepare_landed_promotion('round9-sync-first', 'synced')
-        self.assert_landed_promotion_completes(fixture, 'stack', 'sync', 'synced')
+        repo = fixture['repo']
+        result = self.run_cli(repo, 'stack', 'sync', 'synced', expected=2)
+        self.assertIn('syncwheel stack promote synced', result.stderr)
+        self.assert_landed_promotion_completes(fixture, 'stack', 'promote', 'synced')
 
     def test_promote_adopts_an_equivalent_promotion_from_another_clone(self):
         origin = self.create_remote('round9-foreign-promotion')

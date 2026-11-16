@@ -357,12 +357,15 @@ normal Syncwheel commands do not install it implicitly. Once installed, an
 unresolvable stable CLI or an altered/partial hook bundle makes the guard fail closed
 and `hooks status` reports `degraded` with the cause. Syncwheel's guard runs before
 every chained user hook, both execute, and either failure rejects the operation.
-Use the same `--personal` or `--manifest` selector for `hooks install`, `status`, and
-reasoned removal. The clone has one effective guard target; another selected profile
-or a renamed integration branch is degraded until an installation with the same
-selector and `--reason "..."` retargets it. Retargeting appends an intent with actor,
-old target, new target, and reason to the selected ledger before changing
-`guard.json`.
+The clone has one primary guard target. Install or retarget it only with the
+manifest that owns the primary checkout. A lane or personal manifest that does
+not own that checkout is checked against its own refs; selecting it is not a
+reason to retarget the shared guard. An intentional primary integration rename
+requires `hooks install --reason "..."` with the owning manifest. Retargeting
+records the actor, old target, new target and reason before changing `guard.json`.
+An explicit `--manifest` overrides an inherited personal profile or environment
+selection without changing that profile. Explicit `--manifest` and `--personal`
+remain mutually exclusive.
 If a publication reports a mergeable race, review `handoff` and use
 `publish --accept-merge` only after the user explicitly accepts that disjoint
 stack merge.
@@ -427,7 +430,9 @@ Product-changing mutations refuse while the shared primary checkout is dirty. Bo
 metadata operations may preserve unrelated unstaged changes: authority on an untracked
 personal manifest, private PR merge policy set/clear, empty non-coordinated draft close
 with its default reason or `closed` and without force or branch deletion, and
-non-coordinated archive. Conflicts, unrelated staged
+non-coordinated archive, and stack sync without pending recovery. Stack sync updates
+the selected manifest and ledger; it does not recover promotions or clean up lanes.
+Conflicts, unrelated staged
 paths and dirty shared control metadata still stop these operations. Pending control
 recovery requires the printed explicit remedy; metadata commands never start it on a
 dirty primary. Authority saves do not force-stage the manifest, and profile/ledger saves

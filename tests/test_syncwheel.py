@@ -2538,6 +2538,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         ))
 
     def test_mutations_never_remove_expired_lanes_of_other_agents(self):
+        with (self.repo / '.git' / 'info' / 'exclude').open('a') as exclude:
+            exclude.write('\n.syncwheel/ledger/\n')
         beta = self.git('rev-parse', 'HEAD')
         commands = {
             'stack set': ('stack', 'set', 'feature-a', beta),
@@ -2640,8 +2642,11 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 return_value={'reaped': [], 'failures': []},
             ) as reap:
                 module.governed_worktree_preflight(args)
-            reap.assert_called_once()
-            self.assertEqual(reap.call_args.kwargs['candidate_ids'], {'captured'})
+            if command is module.command_stack_sync:
+                reap.assert_not_called()
+            else:
+                reap.assert_called_once()
+                self.assertEqual(reap.call_args.kwargs['candidate_ids'], {'captured'})
 
     def test_preflight_selects_nothing_when_no_cleanup_was_started(self):
         module = self.load_syncwheel_module()
@@ -5376,6 +5381,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertIn('syncwheel stack capture-integration feature-b HEAD', result.stderr)
 
     def test_stack_sync_updates_manifest_from_branch(self):
+        with (self.repo / '.git' / 'info' / 'exclude').open('a') as exclude:
+            exclude.write('\n.syncwheel/ledger/\n')
         self.git('switch', '-q', 'pr/feature-a')
         Path(self.repo / 'gamma.txt').write_text('gamma\n')
         self.git('add', 'gamma.txt')

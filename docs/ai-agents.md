@@ -158,7 +158,7 @@ terminalized under the same rule as any other intent whose evidence is absent.
 Write exactly one terminal record per operation token, refusing a second when it
 is written rather than when the ledger is read. A landed promotion still owes
 only its manifest save; `stack promote`, `stack push`, `int push`,
-`stack create`, `stack close`, `stack rebuild`, `stack sync`, `stack add`, and
+`stack create`, `stack close`, `stack rebuild`, `stack add`, and
 `reconcile --apply` complete it from the published state and rebuild the
 promoted branch instead of requiring a particular local branch layout, anchoring
 a diverged draft branch under `refs/syncwheel/recovery/drafts/` before dropping
@@ -167,6 +167,13 @@ intent, `stack promote` may adopt it only from exact published stack, ref, and
 tombstone evidence; adoption must not publish a new remote state. Never leave a
 publish intent that no command can terminalize, and never let
 a foreign pending intent be the reason an unrelated publication cannot run.
+`stack sync` only records the stack branch in the selected manifest. It preserves
+unrelated unstaged primary product files, the index, ignore files and other refs.
+It refuses pending promotion or control recovery with an explicit remedy instead
+of performing recovery or worktree cleanup as a side effect.
+An explicit `--manifest` overrides an inherited personal profile or environment
+selection without changing that profile. Explicit `--manifest` and `--personal`
+flags remain mutually exclusive.
 
 For draft close, the order is intent, remote tombstone claim plus state CAS,
 local manifest save, terminal event. Do not reintroduce remote observations

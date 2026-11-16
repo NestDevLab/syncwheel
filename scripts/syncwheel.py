@@ -2944,13 +2944,13 @@ def resolve_personal(repo_root, personal=None):
 
 
 def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, personal=None):
+    if manifest_override:
+        if personal:
+            raise SyncwheelError('use either --personal or --manifest, not both')
+        return Path(manifest_override).expanduser()
     personal = resolve_personal(repo_root, personal)
     if personal:
-        if manifest_override:
-            raise SyncwheelError('use either --personal or --manifest, not both')
         return personal_manifest_path(repo_root, personal)
-    if manifest_override:
-        return Path(manifest_override).expanduser()
     if repo_value:
         registry, _ = load_repo_registry()
         alias_entry = registry.get(repo_value)
@@ -2960,6 +2960,9 @@ def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, pe
 
 
 def resolve_command_manifest_selection(args):
+    pinned = getattr(args, '_stack_sync_selection', None)
+    if pinned is not None:
+        return pinned
     tracking_selection = getattr(args, '_tracking_selection', None)
     if tracking_selection is not None:
         _, repo_root, manifest_path, _ = tracking_selection
@@ -5062,8 +5065,9 @@ def channel_receipt(channel, plan, status, tip=None, published_revision=None, co
     }
 
 
-def rev_list(repo_root, rev_range):
-    result = git(repo_root, 'rev-list', '--reverse', rev_range)
+def rev_list(repo_root, rev_range, *, offline=False):
+    options = {'env': {'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': ''}} if offline else {}
+    result = git(repo_root, 'rev-list', '--reverse', rev_range, **options)
     commits = [line for line in result.stdout.splitlines() if line.strip()]
     remember_commits(repo_root, commits)
     return commits
@@ -6362,8 +6366,9 @@ def exclusive_metadata_lock(
     stale_seconds,
     busy_error,
     metadata=None,
+    stale_lock_remedy=None,
 ):
-    """Hold an fsynced, owner-describing lock and recover a provably dead owner."""
+    """Hold an fsynced, owner-describing lock, optionally recovering a dead owner."""
     if fcntl is None:
         raise SyncwheelError(
             f'crash-safe {label} locking requires POSIX file locking support'
@@ -6428,6 +6433,10 @@ def exclusive_metadata_lock(
                         lock_age=lock_age,
                     )
                     if stale_reason:
+                        if stale_lock_remedy:
+                            raise SyncwheelError(
+                                f'{label} lock needs recovery at {lock_path}; {stale_lock_remedy}'
+                            )
                         stale_token = uuid.uuid4().hex
                         stale_path = lock_path.with_name(
                             f'{lock_path.name}.stale-{syncwheel_timestamp()}-{stale_token[:12]}'
@@ -8845,8 +8854,8 @@ def coordination_publication_lock_path(repo_root):
     return _publication_coordinator(repo_root).coordination_publication_lock_path()
 
 
-def coordination_publication_lock(repo_root):
-    return _publication_coordinator(repo_root).coordination_publication_lock()
+def coordination_publication_lock(repo_root, **options):
+    return _publication_coordinator(repo_root).coordination_publication_lock(**options)
 
 
 def coordination_publication_lock_required(function):
@@ -15531,10 +15540,23 @@ def command_stack_demote(args):
     return _stack_lifecycle(repo_root).command_stack_demote(args, manifest, manifest_path)
 
 
+def stack_sync_remedy_selection(repo_root, manifest_path):
+    selection = ['--repo', str(repo_root)]
+    if _manifest_storage.is_personal_manifest_path(repo_root, manifest_path):
+        selection.extend(('--personal', manifest_path.name.removesuffix('.local.json')))
+    else:
+        selection.extend(('--manifest', str(manifest_path)))
+    return shlex.join(selection)
+
+
 def command_stack_sync(args):
-    repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
-    return _stack_lifecycle(repo_root).command_stack_sync(args, manifest, manifest_path)
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+    if manifest is None:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
+    return _stack_lifecycle(repo_root).command_stack_sync(
+        args, manifest, manifest_path, stack_sync_remedy_selection(repo_root, manifest_path),
+    )
 
 
 def command_stack_absorb(args):
@@ -19526,9 +19548,55 @@ def git_resume_requested(git_args, operation):
     )
 
 
+def require_stack_sync_metadata_paths(repo_root, manifest_path):
+    require_private_tracking_path(repo_root, manifest_path)
+    ledger = _manifest_storage.ledger_root(repo_root, manifest_path)
+    events = _manifest_storage.ledger_events_dir(repo_root, manifest_path)
+    require_private_tracking_path(repo_root, events, directory=True)
+    for path in (*events.glob('*.jsonl'), ledger / 'ledger.lock',
+                 _manifest_storage.ledger_checkpoint_path(repo_root, manifest_path)):
+        require_private_tracking_path(repo_root, path)
+
+
+def resolve_stack_sync_selection(args):
+    repo_value = args.repo or os.environ.get(ENV_REPO)
+    checkout = resolve_repo_root(repo_value)
+    manifest_path = Path(os.path.abspath(
+        resolve_manifest_path(checkout, repo_value, args.manifest, args.personal)
+    ))
+    primary = primary_authority_manifest_path(checkout).parent.parent
+    for root in dict.fromkeys((checkout, primary)):
+        if manifest_path.is_relative_to(root):
+            require_stack_sync_metadata_paths(root, manifest_path)
+            return root, manifest_path
+    raise SyncwheelError('stack sync requires a manifest in the current or primary checkout')
+
+
+def refuse_stack_sync_control_recovery(repo_root, manifest_path):
+    shared_path = primary_authority_manifest_path(repo_root)
+    for root, path in dict.fromkeys(((repo_root, manifest_path), (shared_path.parent.parent, shared_path))):
+        require_stack_sync_metadata_paths(root, path)
+        pending = pending_control_manifest_intents(load_ledger_events(root, path))
+        if pending:
+            intent = pending[0]['payload']
+            if explicit_control_recovery_intent(intent):
+                selection = stack_sync_remedy_selection(root, path)
+                raise SyncwheelError(
+                    f'{_manifest_storage.explicit_control_recovery_refusal()}. '
+                    f'Use syncwheel manifest recover-control --from-backup BACKUP {selection}'
+                )
+            selection = stack_sync_remedy_selection(root, path)
+            raise SyncwheelError(
+                'control manifest recovery is pending; from a clean primary checkout run '
+                f'syncwheel reconcile --apply {selection} before stack sync'
+            )
+
+
 def uses_metadata_primary_scope(args, repo_root, manifest_path, manifest):
     if command_behavior(args)['primaryScope'] != 'metadata':
         return False
+    if args.func == command_stack_sync:
+        return True
     if args.func == command_repo_authority_set:
         return (
             _manifest_storage.is_personal_manifest_path(repo_root, manifest_path)
@@ -19588,6 +19656,14 @@ def primary_checkout_preflight(args):
     }:
         return
     repo_root, selected_path = resolve_command_manifest_selection(args)
+    if args.func == command_stack_sync:
+        primary_root = primary_authority_manifest_path(repo_root).parent.parent
+        require_metadata_primary_index(primary_root)
+        if repo_root != primary_root:
+            require_metadata_primary_index(repo_root)
+        args._metadata_primary_root = primary_root
+        args._metadata_preserve_primary = True
+        return
     tracking_selection = getattr(args, '_tracking_selection', None)
     if tracking_selection is not None:
         primary_root = tracking_selection[3]
@@ -19729,6 +19805,7 @@ def governed_worktree_mutation_requested(args):
         command_int_rebuild,
         command_stack_create,
         command_stack_add,
+        command_stack_sync,
     }:
         return False
     always_mutating = {
@@ -19737,7 +19814,7 @@ def governed_worktree_mutation_requested(args):
         command_stack_absorb, command_stack_add, command_stack_capture_integration,
         command_stack_close, command_stack_create,
         command_stack_demote, command_stack_promote,
-        command_stack_resolve_integration, command_stack_set, command_stack_sync,
+        command_stack_resolve_integration, command_stack_set,
     }
     apply_gated = {
         command_reconcile,
@@ -20014,18 +20091,22 @@ def coordination_publication_lock_for_command(args):
     if not coordination_publication_lock_requested(args):
         yield None
         return
-    repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(
-        repo_root, args.repo, getattr(args, 'manifest', None),
-        getattr(args, 'personal', None),
-    )
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    options = {}
+    if args.func == command_stack_sync:
+        refuse_stack_sync_control_recovery(repo_root, manifest_path)
+        selection = stack_sync_remedy_selection(repo_root, manifest_path)
+        _stack_lifecycle(repo_root).refuse_pending_stack_sync_promotion(manifest_path, selection)
+        options['stale_lock_remedy'] = (
+            f'from a clean primary checkout run syncwheel reconcile --apply {selection}'
+        )
     manifest, _ = (
         _manifest_storage.load_manifest(repo_root, manifest_path) if manifest_path.exists() else (None, None)
     )
     if manifest is None or not coordination_is_active(manifest):
         yield None
         return
-    with coordination_publication_lock(repo_root) as owner:
+    with coordination_publication_lock(repo_root, **options) as owner:
         yield owner
 
 
@@ -20050,6 +20131,9 @@ def recover_control_manifest_before_command(args):
         # it replaces the source the interrupted operation was persisting.
         return None
     repo_root, manifest_path = resolve_command_manifest_selection(args)
+    if args.func == command_stack_sync:
+        refuse_stack_sync_control_recovery(repo_root, manifest_path)
+        return None
     if getattr(args, '_tracking_selection', None) is not None:
         validate_selected_primary_authority_path(repo_root, manifest_path)
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
@@ -20096,10 +20180,7 @@ def stack_adoption_preflight(args):
 def execute_parsed_command(args):
     recover_control_manifest_before_command(args)
     if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
-        repo_root = resolve_repo_root(args.repo)
-        manifest_path = resolve_manifest_path(
-            repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
-        )
+        repo_root, manifest_path = resolve_command_manifest_selection(args)
         manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
         if manifest and manifest.get('repository_mode') == 'journal':
             raise SyncwheelError(
@@ -20215,7 +20296,9 @@ def main():
                 if args._tracking_selection[0] == 'personal':
                     return command_repo_tracking_set(args)
                 args.repo = str(args._tracking_selection[1])
-        if not guard_callback:
+        if args.func == command_stack_sync:
+            args._stack_sync_selection = resolve_stack_sync_selection(args)
+        if not guard_callback and args.func != command_stack_sync:
             SYNCWHEEL_OWNS_REF_MOVES = True
             if hasattr(args, 'repo'):
                 SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
@@ -20237,10 +20320,11 @@ def main():
         # preflights: those inspect other worktrees and must not run there.
         if args.command != 'revision-provider' and not guard_callback:
             primary_checkout_preflight(args)
-            maybe_handle_startup_update_policy(args)
+            if args.func != command_stack_sync:
+                maybe_handle_startup_update_policy(args)
             governed_worktree_preflight(args)
             converge_default_repository_hooks(args)
-        with coordination_publication_lock_for_command(args):
+        with coordination_publication_lock_for_command(args) as publication_owner:
             if manifest_mutation_requested(args) and hasattr(args, 'repo'):
                 repo_root, manifest_path = resolve_command_manifest_selection(args)
                 if args.func != command_init and manifest_path.exists():
@@ -20257,6 +20341,12 @@ def main():
                         if not selected or not uses_metadata_primary_scope(args, repo_root, manifest_path, selected):
                             raise SyncwheelError('metadata update scope changed before apply; review and retry')
                         require_metadata_primary_index(primary_root)
+                        if args.func == command_stack_sync:
+                            if coordination_is_active(selected) and publication_owner is None:
+                                raise SyncwheelError('stack sync coordination changed before apply; retry')
+                            require_stack_sync_metadata_paths(repo_root, manifest_path)
+                            if repo_root != primary_root:
+                                require_metadata_primary_index(repo_root)
                         if not args._metadata_preserve_primary and primary_checkout_dirty_entries(primary_root):
                             raise SyncwheelError('primary checkout changed before metadata apply; review and retry')
                         require_private_metadata_paths(args, repo_root, manifest_path)

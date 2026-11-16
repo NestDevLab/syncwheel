@@ -1196,7 +1196,7 @@ class PublicationCoordinator:
         return self.repository.git_common_dir(repo_root) / 'syncwheel' / 'coordination-publication.lock'
 
     @contextlib.contextmanager
-    def coordination_publication_lock(self):
+    def coordination_publication_lock(self, *, stale_lock_remedy=None):
         """Serialize the whole intent, push, local remainder and terminal-event cycle.
 
         Held across a network push, so a contender refuses instead of waiting it out.
@@ -1221,6 +1221,7 @@ class PublicationCoordinator:
             timeout_seconds=COORDINATION_PUBLICATION_LOCK_TIMEOUT_SECONDS,
             stale_seconds=COORDINATION_PUBLICATION_LOCK_STALE_SECONDS,
             busy_error=coordination_publication_busy_error,
+            stale_lock_remedy=stale_lock_remedy,
         ) as (_held_path, metadata):
             holders[key] = {'depth': 1, 'metadata': metadata}
             try:

@@ -1163,13 +1163,12 @@ def entrypoint_behavior_table(commands, internal_writers=()):
     ), mutates='always')
     register((commands['command_worktree_open'],), mutates='always', remedy=True)
     register((commands['command_stack_set'],), mutates='stack-set', manifest_mutates='stack-set')
-    register((commands['command_stack_close'],), mutates='always',
+    register((commands['command_stack_close'], commands['command_stack_sync']), mutates='always',
              manifest_mutates='always', primary_scope='metadata')
     register((
         commands['command_stack_create'],
         commands['command_stack_promote'],
         commands['command_stack_demote'],
-        commands['command_stack_sync'],
         commands['command_stack_absorb'],
         commands['command_stack_resolve_integration'],
         commands['command_stack_add'],
