@@ -1104,7 +1104,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
 
     def register(
         functions, *, mutates='never', manifest_mutates='never', remedy=False,
-        command=True,
+        command=True, primary_scope='product',
     ):
         for function in functions:
             if function in table:
@@ -1114,6 +1114,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
                 'mutates': mutates,
                 'manifestMutates': manifest_mutates,
                 'primaryGuardRemedy': remedy,
+                'primaryScope': primary_scope,
             }
 
     register((
@@ -1162,8 +1163,9 @@ def entrypoint_behavior_table(commands, internal_writers=()):
     ), mutates='always')
     register((commands['command_worktree_open'],), mutates='always', remedy=True)
     register((commands['command_stack_set'],), mutates='stack-set', manifest_mutates='stack-set')
+    register((commands['command_stack_close'],), mutates='always',
+             manifest_mutates='always', primary_scope='metadata')
     register((
-        commands['command_stack_close'],
         commands['command_stack_create'],
         commands['command_stack_promote'],
         commands['command_stack_demote'],
@@ -1180,10 +1182,13 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         remedy=True,
     )
     register((
-        commands['command_repo_tracking_set'],
         commands['command_repo_authority_set'],
         commands['command_repo_pr_merge_policy_set'],
         commands['command_repo_pr_merge_policy_clear'],
+        commands['command_stack_archive'],
+    ), mutates='apply', manifest_mutates='apply', primary_scope='metadata')
+    register((
+        commands['command_repo_tracking_set'],
         commands['command_coordination_init'],
         commands['command_coordination_disable'],
         commands['command_coordination_compose'],
@@ -1206,7 +1211,6 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         commands['command_stack_classify_integration'],
         commands['command_stack_land'],
         commands['command_stack_merge_pr'],
-        commands['command_stack_archive'],
         commands['command_worktree_release'],
         commands['command_gc'],
     ), mutates='apply', manifest_mutates='apply')

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.47.13 - 2026-11-16
+
+- Allow bounded metadata operations with unrelated unstaged primary changes: personal manifest authority, private PR merge policy set/clear, empty non-coordinated draft close, and non-coordinated stack archive. Preserve product bytes, staging, ignore files and unrelated refs; retain the existing conflict and staged-path guards.
+- Remove incidental manifest staging from authority updates and ignore-file normalization from profile and ledger saves. Pending control recovery refuses on a dirty primary and names its explicit remedy instead of starting automatically.
+
 ## 0.47.12 - 2026-11-16
 
 - Scope guard policy to the selected manifest's managed refs when it does not own the primary checkout. A different lane integration branch no longer degrades the shared primary guard, and lane diagnostics do not recommend retargeting that guard. Primary-owner mismatches and damaged hook bundles remain visible.

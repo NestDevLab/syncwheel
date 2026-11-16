@@ -475,9 +475,10 @@ def write_ledger_checkpoint(repo_root, state, manifest_path=None):
         _write_ledger_checkpoint_unlocked(repo_root, authoritative, manifest_path)
 
 
-def next_ledger_segment_path(repo_root, manifest_path=None):
+def next_ledger_segment_path(repo_root, manifest_path=None, *, create_directory=True):
     directory = ledger_events_dir(repo_root, manifest_path)
-    ensure_directory_durable(directory)
+    if create_directory:
+        ensure_directory_durable(directory)
     segments = sorted(directory.glob('*.jsonl'))
     if not segments:
         return directory / '000001.jsonl'
@@ -985,9 +986,6 @@ class ManifestStore:
                 ledger_checkpoint_path(repo_root, manifest_path),
                 ledger_events_dir(repo_root, manifest_path) / '000001.jsonl',
             ])
-        elif not is_external_manifest_path(repo_root, manifest_path):
-            tracking, worktree_root = manifest_policy_from_file(manifest_path or repo_root / '.syncwheel' / 'manifest.json')
-            self.workspace.ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
         require_manifest_transaction_current(
             manifest_path or repo_root / '.syncwheel' / 'manifest.json'
         )

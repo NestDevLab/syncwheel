@@ -24,7 +24,8 @@ Follow these four operating rules before changing a managed repository.
    ```
    As of 0.42.4, where the guard hooks are installed, this is enforced: a manual commit on
    the primary, or an unauthorized move of the integration ref there, is refused, and every
-   mutating Syncwheel command refuses to run while the primary has tracked changes. Arm the
+   product-changing Syncwheel command refuses while the primary has unrelated tracked
+   changes. Bounded metadata operations preserve those edits (see below). Arm the
    guard once per clone:
    ```bash
    syncwheel hooks install --apply
@@ -422,8 +423,15 @@ through plumbing; older Git uses a self-removing temporary worktree.
 `syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
 wheel metaphor helps, but the manifest field remains `stacks`.
 
-Never run a built-in mutation while the shared primary checkout is dirty: it stops before side effects
-and names `worktree open` or `stack capture-integration` as the remedy. Read-only commands remain
+Product-changing mutations refuse while the shared primary checkout is dirty. Bounded
+metadata operations may preserve unrelated unstaged changes: authority on an untracked
+personal manifest, private PR merge policy set/clear, empty non-coordinated draft close
+with its default reason or `closed` and without force or branch deletion, and
+non-coordinated archive. Conflicts, unrelated staged
+paths and dirty shared control metadata still stop these operations. Pending control
+recovery requires the printed explicit remedy; metadata commands never start it on a
+dirty primary. Authority saves do not force-stage the manifest, and profile/ledger saves
+do not normalize ignore files. Change tracking exclusions explicitly. Read-only commands remain
 available and emit a yellow TTY warning with the dirty-file count; treat the changes as foreign to the
 invoking user. Use `--dry-run` on rebuild/push commands. If the manifest and Git disagree, fix the
 manifest or call out the conflict — do not claim a repo is aligned while integration and PR branches

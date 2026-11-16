@@ -115,6 +115,7 @@ from syncwheel_manifest_store import (
 
 from syncwheel_stacks import (
     StackLifecycle,
+    ordinary_empty_draft_close,
     stack_closed_payload,
     manifest_scope_options,
     stack_close_command,
@@ -4537,6 +4538,32 @@ def recover_incomplete_control_manifest_persistence(
     repo_root, manifest_path, manifest, allow_new_operation=False,
     recovery_state=None, intents_only=False,
 ):
+    worktrees = get_worktrees(repo_root)
+    primary = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+    status = local_worktree_status(primary)
+    if status is None:
+        raise SyncwheelError(f'cannot inspect primary checkout: {primary}')
+    if any(not primary_checkout_state_entry(entry) for entry in status):
+        # Do not repair a ledger tail, create a recovery intent or move refs
+        # merely because an unrelated command is running on a dirty primary.
+        locations = {
+            (primary, primary / '.syncwheel' / 'manifest.json'),
+            (repo_root, manifest_path),
+        }
+        for root, path in locations:
+            pending = pending_control_manifest_intents(load_ledger_events(root, path))
+            if pending:
+                intent = pending[0]['payload']
+                if explicit_control_recovery_intent(intent):
+                    raise SyncwheelError(_manifest_storage.explicit_control_recovery_refusal())
+                command = intent.get('command') or 'the interrupted Syncwheel command'
+                raise SyncwheelError(
+                    'primary checkout is dirty and control manifest recovery is pending. '
+                    f'Preserve the checkout changes and retry {command} from a clean primary checkout'
+                )
+        if recovery_state is not None:
+            recovery_state.update({'recovered': False, 'control_commit': None})
+        return manifest
     return _manifest_store().recover_incomplete_control_manifest_persistence(
         repo_root, manifest_path, manifest, allow_new_operation, recovery_state, intents_only,
     )
@@ -5144,13 +5171,19 @@ def load_repo_profile(repo_root):
     return data
 
 
-def save_repo_profile(repo_root, profile):
-    tracking, worktree_root = _manifest_storage.manifest_policy_from_file(repo_root / '.syncwheel' / 'manifest.json')
-    ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
+def checked_repo_profile_path(repo_root):
     path = repo_profile_path(repo_root)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(profile, indent=2, sort_keys=True) + '\n')
+    if path.parent.is_symlink():
+        raise SyncwheelError(f'profile directory is a symbolic link: {path.parent}')
+    if path.is_symlink():
+        raise SyncwheelError(f'profile path is a symbolic link: {path}')
+    if path.exists() and not path.is_file():
+        raise SyncwheelError(f'profile path is not a regular file: {path}')
     return path
+
+
+def save_repo_profile(repo_root, profile):
+    return atomic_write_private_json(checked_repo_profile_path(repo_root), profile, indent=2)
 
 
 def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
@@ -5286,7 +5319,7 @@ def github_pr_merge_policy_status(repo_root):
 
 
 def ensure_github_pr_merge_policy_is_private(repo_root):
-    path = repo_profile_path(repo_root)
+    path = checked_repo_profile_path(repo_root)
     if git_path_is_tracked(repo_root, path):
         raise SyncwheelError(
             f'{path} is tracked; refusing to write a private PR merge policy'
@@ -9051,7 +9084,10 @@ def apply_pending_coordination_merge(
 
 
 def local_worktree_status(path):
-    result = run(['git', '-C', str(path), 'status', '--porcelain'], check=False)
+    result = run(
+        ['git', '-C', str(path), 'status', '--porcelain'],
+        check=False, env={'GIT_OPTIONAL_LOCKS': '0'},
+    )
     if result.returncode != 0:
         return None
     return [line for line in result.stdout.splitlines() if line.strip()]
@@ -11113,6 +11149,10 @@ def command_init(args):
                 repo_root, manifest_path, ref_tip(repo_root, integration_branch)
             )
     _manifest_storage.save_manifest(manifest_path, manifest)
+    if not _manifest_storage.is_external_manifest_path(repo_root, manifest_path):
+        ensure_syncwheel_metadata_excluded(
+            repo_root, manifest.get('syncwheel_tracking'), syncwheel_worktree_root(manifest),
+        )
     append_ledger_event(repo_root, 'manifest_initialized', manifest_event_payload(manifest_path, manifest, 'init'), manifest_path)
     print(manifest_path)
     return 0
@@ -18108,8 +18148,6 @@ def command_repo_authority_set(args):
     save_manifest_with_ledger(
         repo_root, manifest_path, manifest, 'repo_authority_set', {'authority': proposed}
     )
-    if manifest.get('syncwheel_tracking') == SYNCWHEEL_TRACKING_GIT_TRACKED:
-        git_add_paths(repo_root, [manifest_path], force_paths=[manifest_path])
     report = authority_report(repo_root, manifest_path)
     if args.json:
         print(json.dumps(report, indent=2))
@@ -18450,6 +18488,7 @@ def command_repo_tracking_set(args):
         return 0
 
     readme_path = repo_root / '.syncwheel' / 'manifests' / 'README.md'
+    ensure_syncwheel_metadata_excluded(repo_root, tracking, worktree_root)
     if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
         readme_path = ensure_manifests_readme(repo_root)
         save_manifest_with_ledger(
@@ -19216,6 +19255,60 @@ def git_resume_requested(git_args, operation):
     )
 
 
+def uses_metadata_primary_scope(args, repo_root, manifest_path, manifest):
+    if command_behavior(args)['primaryScope'] != 'metadata':
+        return False
+    if args.func == command_repo_authority_set:
+        return (
+            _manifest_storage.is_personal_manifest_path(repo_root, manifest_path)
+            and manifest_path.is_file() and not manifest_path.is_symlink()
+            and not git_path_is_tracked(repo_root, manifest_path)
+        )
+    if args.func in {command_repo_pr_merge_policy_set, command_repo_pr_merge_policy_clear}:
+        return manifest_path == repo_root / '.syncwheel' / 'manifest.json'
+    if coordination_is_active(manifest) or _manifest_storage.is_external_manifest_path(repo_root, manifest_path):
+        return False
+    if args.func == command_stack_archive:
+        return True
+    lifecycle = _stack_lifecycle(repo_root)
+    if lifecycle.pending_stack_close_operation(manifest_path, args.stack):
+        return False
+    reason = args.reason or lifecycle.abandoned_close_reason(manifest_path, args.stack)
+    return ordinary_empty_draft_close(manifest, stack_map(manifest).get(args.stack), args, reason)
+
+
+def require_metadata_primary_index(primary_root):
+    if git(primary_root, 'ls-files', '-u').stdout.strip():
+        raise SyncwheelError('primary checkout has index conflicts')
+    staged = git(primary_root, 'diff', '--cached', '--name-only', '-z').stdout.split('\0')
+    if any(staged):
+        raise SyncwheelError('primary checkout has unrelated staged paths: '
+                             + ', '.join(sorted(set(staged) - {''})))
+    if git(primary_root, 'diff', '--quiet', '--', '.syncwheel/manifest.json',
+           check=False, env={'GIT_OPTIONAL_LOCKS': '0'}).returncode != 0:
+        raise SyncwheelError('primary checkout control manifest is dirty')
+
+
+def require_private_metadata_paths(args, repo_root, manifest_path):
+    paths = [
+        _manifest_storage.ledger_root(repo_root, manifest_path) / 'ledger.lock',
+        _manifest_storage.ledger_checkpoint_path(repo_root, manifest_path),
+        _manifest_storage.ledger_events_dir(repo_root, manifest_path) / '000001.jsonl',
+        _manifest_storage.next_ledger_segment_path(repo_root, manifest_path, create_directory=False),
+    ]
+    if args.func == command_repo_authority_set:
+        paths.append(manifest_path)
+    elif args.func in {command_repo_pr_merge_policy_set, command_repo_pr_merge_policy_clear}:
+        paths.append(checked_repo_profile_path(repo_root))
+    try:
+        require_ignored_ledger_paths(repo_root, paths)
+    except SyncwheelError as exc:
+        raise SyncwheelError(
+            'metadata update requires untracked, already ignored private metadata. '
+            'Review the repository exclusions and retry'
+        ) from exc
+
+
 def primary_checkout_preflight(args):
     if not hasattr(args, 'repo') or args.func in {
         command_hooks_guard,
@@ -19226,10 +19319,20 @@ def primary_checkout_preflight(args):
     repo_root = resolve_repo_root(args.repo)
     worktrees = get_worktrees(repo_root)
     primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+    selected_path = resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
     manifest_path = resolve_manifest_path(
         primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
     )
     manifest, _ = _manifest_storage.load_manifest(primary_root, manifest_path)
+    metadata_scope = False
+    if command_behavior(args)['primaryScope'] == 'metadata' and syncwheel_mutation_requested(args):
+        selected, _ = _manifest_storage.load_manifest(repo_root, selected_path)
+        if selected:
+            metadata_scope = uses_metadata_primary_scope(args, repo_root, selected_path, selected)
+            if manifest is None:
+                manifest, manifest_path = selected, selected_path
     if manifest is None:
         return
     # Journal repositories deliberately turn tracked working-tree changes into
@@ -19237,6 +19340,9 @@ def primary_checkout_preflight(args):
     # shared integration checkout guard does not apply there.
     if manifest.get('repository_mode') == 'journal':
         return
+    if metadata_scope:
+        args._metadata_primary_root = primary_root
+        args._metadata_preserve_primary = bool(primary_checkout_dirty_entries(primary_root))
     emit_primary_checkout_dirty_warnings(
         primary_root, manifest, json_mode=bool(getattr(args, 'json', False))
     )
@@ -19284,6 +19390,9 @@ def primary_checkout_preflight(args):
                 for path in _manifest_storage.status_line_paths(entry)
             }:
                 raise SyncwheelError('primary checkout control manifest is dirty')
+            return
+        if metadata_scope:
+            require_metadata_primary_index(primary_root)
             return
         if args.func in scoped_primary_commands:
             if git(primary_root, 'ls-files', '-u').stdout.strip():
@@ -19858,7 +19967,21 @@ def main():
                     existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
                         ensure_managed_repository_hooks(repo_root, existing_manifest, manifest_path)
-                with manifest_write_transaction(repo_root, manifest_path, 'manifest-command'):
+                with manifest_write_transaction(
+                    repo_root, manifest_path, 'manifest-command',
+                    commit_tracked_changes=not getattr(args, '_metadata_preserve_primary', False),
+                ):
+                    primary_root = getattr(args, '_metadata_primary_root', None)
+                    if primary_root is not None:
+                        selected, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+                        if not selected or not uses_metadata_primary_scope(args, repo_root, manifest_path, selected):
+                            raise SyncwheelError('metadata update scope changed before apply; review and retry')
+                        require_metadata_primary_index(primary_root)
+                        if not args._metadata_preserve_primary and primary_checkout_dirty_entries(primary_root):
+                            raise SyncwheelError('primary checkout changed before metadata apply; review and retry')
+                        require_private_metadata_paths(args, repo_root, manifest_path)
+                        transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+                        transaction['preserveGitignore'] = True
                     return execute_parsed_command(args)
             return execute_parsed_command(args)
     except SyncwheelError as exc:

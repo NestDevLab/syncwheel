@@ -25,7 +25,8 @@ Follow these four operating rules before changing a managed repository.
    `manifest.integration.branch`. Open a governed lane: `syncwheel worktree open <lane>
    [--into <stack>] [--full]`. As of 0.42.4, where hooks are installed
    (`syncwheel hooks install --apply`), a manual commit or unauthorized integration-ref
-   move in the primary is refused, and mutating commands refuse while it is dirty. The only
+   move in the primary is refused. Product-changing mutations refuse while it is dirty;
+   bounded metadata operations preserve unrelated edits as described below. The only
    opt-out is a reasoned, ledgered disable: `syncwheel hooks remove --disable --reason
    "<why>" --apply`. Export `SYNCWHEEL_LANE_OWNER=<agent-name>` for the whole session:
    it owns the lanes you open and is recorded as `actor` on stack create, add, set,
@@ -201,8 +202,14 @@ active-active channel must use the coordination remote.
 - when the calling checkout is behind the stack, use `worktree open <lane> --into
   <stack> --base <stack-branch>`; the explicit base must resolve to the stack's
   exact current projected tip, and the lane records that commit as its base
-- do not run a built-in mutation while the primary is dirty: it stops before side
-  effects and names `worktree open` or `stack capture-integration` for the work
+- product-changing mutations stop on unrelated dirty primary files. Personal authority
+  updates, private PR policy set/clear, empty non-coordinated draft close with its default
+  reason or `closed` and without force or branch deletion, and non-coordinated archive
+  may proceed while preserving those
+  files. Index conflicts, unrelated staged paths and a dirty shared control manifest
+  still stop these operations. Pending control recovery requires its explicit remedy
+- metadata saves do not normalize ignore files or force-stage authority changes;
+  use explicit tracking configuration when exclusions need updating
 - read-only diagnostics remain usable when the primary is dirty; treat their yellow
   dirty-primary warning as foreign work, not permission to repair it
 - use `syncwheel stack capture-integration <stack> HEAD` only for already committed

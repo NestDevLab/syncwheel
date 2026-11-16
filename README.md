@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.12`
+Current version: `0.47.13`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1277,8 +1277,22 @@ did not go through Syncwheel. Syncwheel's own control and in-place rebuild commi
 through a short-lived, single-use, per-process nonce; dedicated feature worktrees and
 plumbing-materialized branches are unaffected. A refusal names `syncwheel worktree open
 <lane> --into <stack>` for new work or `syncwheel stack capture-integration <stack> HEAD`
-for work already committed on the primary. Every built-in mutation also refuses to start
-while the primary has tracked changes, naming the same remedies.
+for work already committed on the primary. Mutations that can change primary product
+paths refuse to start while the primary has unrelated tracked changes.
+
+Bounded metadata operations can preserve those changes in place: setting authority
+on an untracked personal manifest, setting or clearing the private PR merge policy,
+closing an empty non-coordinated draft with the default reason or `--reason closed`,
+without forcing or deleting its branch, and
+archiving a non-coordinated stack through its exact plan. Existing index conflicts,
+unrelated staged paths and a dirty shared control manifest still stop them. Archive
+keeps the required recovery refs; close retains the source branch by default.
+
+Authority updates do not force-stage the selected manifest. Saving a local profile
+or appending a ledger event does not normalize ignore files; configure tracking
+explicitly when exclusions need to change. Pending control recovery on a dirty
+primary remains a refusal with an explicit recovery remedy, never an incidental
+part of a metadata operation.
 
 `int git` authorizes every ref move of its own Git process, so a cherry-pick range or rebase
 lands completely. If such an operation pauses on the primary, finish it with

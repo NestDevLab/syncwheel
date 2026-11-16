@@ -75,6 +75,16 @@ from syncwheel_worktrees import GovernedWorktrees
 from syncwheel_stack_adoption import StackAdoption
 
 
+def ordinary_empty_draft_close(manifest, stack, args, reason):
+    return bool(
+        stack and stack.get('state') == 'draft' and not coordination_is_active(manifest)
+        and not stack.get('commits') and not stack_integration_commits(stack)
+        and not stack.get('integration_resolution') and not stack.get('adopted_history')
+        and not stack.get('integration_resolved')
+        and not args.delete_branch and not args.force and reason in (None, 'closed')
+    )
+
+
 class StackRepository(Protocol):
     root: Path
     def branch_contains(self, *args, **kwargs): ...
@@ -859,8 +869,10 @@ class StackLifecycle:
 
         # The stack's pinned base is historical; delivery ancestry belongs to the
         # current target ref, observed and fetched for this close attempt.
+        empty_draft = ordinary_empty_draft_close(manifest, stack, args, reason)
         needs_delivery_ancestry = (
-            landed_close is None and not archive_proof and (reason == 'merged' or not args.force)
+            landed_close is None and not archive_proof and not empty_draft
+            and (reason == 'merged' or not args.force)
         )
         ancestry_ref = (
             delivery_tip if reason == 'absorbed' else
@@ -892,7 +904,7 @@ class StackLifecycle:
             )
 
         merged_note = (
-            '' if unmerged or landed_close is not None or archive_proof
+            '' if unmerged or landed_close is not None or archive_proof or empty_draft
             else f' (all commits confirmed in {ancestry_label})'
         )
 
@@ -904,7 +916,7 @@ class StackLifecycle:
                 s for s in manifest['integration']['stacks'] if s != args.stack
             ]
 
-        if pending_close is None and args.reason is None and recovered_reason is None:
+        if not empty_draft and pending_close is None and args.reason is None and recovered_reason is None:
             reason = 'merged' if not unmerged else 'closed'
         if pending_close and pending_close.get('remote_first') and reason != pending_close.get('reason'):
             raise SyncwheelError(

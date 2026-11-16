@@ -122,7 +122,14 @@ the primary. The only deliberate local escape hatch is the reasoned, clone-local
 visible. This is an operational recovery path, not an identity boundary.
 
 Before a built-in mutation starts, Syncwheel also checks the primary working tree.
-Tracked changes stop the operation before side effects and name the same remedies.
+Tracked changes stop product-changing operations before side effects. Bounded metadata
+operations may preserve unrelated unstaged changes: authority on an untracked personal
+manifest, private PR merge policy set/clear, empty non-coordinated draft close with its
+default reason or `closed` and without force or branch deletion, and non-coordinated
+archive. Their scoped guard still rejects
+index conflicts, unrelated staged paths and dirty shared control metadata. Their saves
+do not force-stage authority manifests or normalize ignore files. A pending control
+recovery on a dirty primary refuses with its explicit remedy rather than running.
 Those remedy commands themselves bypass this preflight so recovery remains possible,
 and so does a guard disabled with a recorded reason, because that opt-out is the
 clone's declaration that shared work in the primary is expected. Repo-local
