@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.21 - 2026-11-16
+
+- Register persistent stack replay desks and provide a reviewed CLI release path. Preserve the desk tip, index and working changes in verified local recovery refs before removing its checkout, with explicit selection for legacy desks. Stack archive names the desk release or pending-release remedy.
+
 ## 0.47.20 - 2026-11-16
 
 - Validate the complete proposed integration before capturing commits into a stack. Keep capture preflight observational and require explicit recovery for pending control operations, so projection refusals do not leave manifest commits or ledger events. Capture no longer stages or commits tracked control metadata automatically.

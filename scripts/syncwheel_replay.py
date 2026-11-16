@@ -810,6 +810,9 @@ class ReplayEngine:
                         raise self.integration_replay_step_failure(
                             plan, index, exc
                         ) from exc
+                    register_desk = plan.get('register_created_desk')
+                    if register_desk and argv[:3] == ['git', 'worktree', 'add']:
+                        register_desk(Path(argv[-2]))
                 elif step['kind'] == 'shell':
                     process_env = self.repository.managed_process_env(step['env'])
                     result_shell = self.repository.shell(
