@@ -19,6 +19,25 @@ class ResetIntercept(RuntimeError):
         self.path = Path(path).resolve()
 
 
+def _git_info_exclude_bytes(case, repo):
+    path = case.git(
+        repo, "rev-parse", "--path-format=absolute", "--git-path", "info/exclude",
+    ).stdout.strip()
+    return Path(path).read_bytes()
+
+
+def _published_replay_fixture(case, name):
+    fixture = case.a14_published_tip_reuse_fixture(
+        name, integration_strategy="cherry-pick",
+    )
+    syncwheel = fixture["module"]
+    gitignore = fixture["follower"] / ".gitignore"
+    case.assertTrue(syncwheel.managed_block_exists(
+        gitignore, syncwheel.SYNCWHEEL_GITIGNORE_MARKER,
+    ))
+    return fixture
+
+
 def _reset_sensitive_snapshot(case, repo, manifest_path):
     return {
         "readme": (repo / "README.md").read_bytes(),
@@ -29,13 +48,12 @@ def _reset_sensitive_snapshot(case, repo, manifest_path):
         ).stdout,
         "manifest": manifest_path.read_bytes(),
         "gitignore": (repo / ".gitignore").read_bytes(),
+        "git_info_exclude": _git_info_exclude_bytes(case, repo),
     }
 
 
 def _fixture(case, name):
-    fixture = case.a14_published_tip_reuse_fixture(
-        name, integration_strategy="cherry-pick"
-    )
+    fixture = _published_replay_fixture(case, name)
     caller = fixture["follower"]
     syncwheel = fixture["module"]
     integration_branch = fixture["manifest"]["integration"]["branch"]

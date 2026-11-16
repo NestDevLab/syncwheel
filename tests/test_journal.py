@@ -945,11 +945,11 @@ class JournalScopedOperationsTest(unittest.TestCase):
         service, _ = module.journal_unit_contents(self.repo, manifest, committed_only=True)
         self.assertIn('--committed-only --apply', service)
 
-    def configure_delivery(self):
+    def configure_delivery(self, tracking='git-tracked'):
         path = self.repo / '.syncwheel/manifest.json'
         path.write_text(json.dumps({
             'version': 3, 'repository_mode': 'delivery',
-            'syncwheel_tracking': 'git-tracked',
+            'syncwheel_tracking': tracking,
             'defaults': {'canonical_remote': 'origin', 'publication_remote': 'origin',
                          'base_ref': 'origin/journal'},
             'integration': {'branch': 'journal', 'base': 'origin/journal', 'stacks': []},
@@ -957,7 +957,11 @@ class JournalScopedOperationsTest(unittest.TestCase):
                              'state_branch': 'syncwheel/state/mode-test'},
             'customMetadata': {'preserve': True},
         }))
-        self.git('add', '.syncwheel/manifest.json')
+        if tracking == 'local-only':
+            self.load_module().ensure_syncwheel_metadata_excluded(self.repo, tracking)
+            self.git('rm', '--cached', '.syncwheel/manifest.json')
+        else:
+            self.git('add', '.syncwheel/manifest.json')
         self.git('commit', '-qm', 'Configure delivery fixture')
         self.git('branch', 'main')
         return path
@@ -965,9 +969,14 @@ class JournalScopedOperationsTest(unittest.TestCase):
     def test_mode_migration_plan_apply_preserves_manifest_and_archives(self):
         path = self.configure_delivery()
         original = path.read_bytes()
+        index_exclude = self.repo / '.git' / 'info' / 'exclude'
+        before_exclude = index_exclude.read_bytes()
+        ignore = self.repo / '.gitignore'
         args = ('repo', 'mode', 'set', 'journal', '--branch', 'main', '--reason', 'Converged linear history')
         planned = json.loads(self.cli(*args).stdout)
         self.assertEqual(path.read_bytes(), original)
+        self.assertFalse(ignore.exists())
+        self.assertEqual(index_exclude.read_bytes(), before_exclude)
         self.assertEqual(planned['manifest']['version'], 1)
         self.assertNotIn('coordination', planned['manifest'])
         applied = json.loads(self.cli(*args, '--apply').stdout)
@@ -975,8 +984,35 @@ class JournalScopedOperationsTest(unittest.TestCase):
         self.assertEqual(self.git('branch', '--show-current'), 'main')
         self.assertEqual(manifest['customMetadata'], {'preserve': True})
         self.assertNotIn('integration', manifest)
+        self.assertEqual(manifest['syncwheel_tracking'], 'git-tracked')
+        self.assertIn('.syncwheel/ledger/', ignore.read_text().splitlines())
+        self.assertEqual(index_exclude.read_bytes(), before_exclude)
+        self.assertEqual(self.git('ls-files', '--', '.syncwheel/manifest.json'), '.syncwheel/manifest.json')
         self.assertEqual((Path(applied['archive']) / 'manifest.json').read_bytes(), original)
         self.assertTrue(applied['archive_refs'])
+
+    def test_mode_migration_preserves_local_only_exclusions(self):
+        path = self.configure_delivery(tracking='local-only')
+        module = self.load_module()
+        ignore = self.repo / '.gitignore'
+        exclude = self.repo / '.git' / 'info' / 'exclude'
+        before_exclude = exclude.read_bytes()
+        self.assertIn(module.SYNCWHEEL_LOCAL_EXCLUDE_MARKER, before_exclude.decode())
+        self.assertFalse(ignore.exists())
+        self.assertEqual(self.git('check-ignore', '.syncwheel/manifest.json'), '.syncwheel/manifest.json')
+        args = ('repo', 'mode', 'set', 'journal', '--branch', 'main', '--reason', 'Converged linear history')
+        self.cli(*args)
+        self.assertFalse(ignore.exists())
+        self.assertEqual(exclude.read_bytes(), before_exclude)
+        self.cli(*args, '--apply')
+        manifest = json.loads(path.read_text())
+        self.assertEqual(manifest['repository_mode'], 'journal')
+        self.assertEqual(manifest['syncwheel_tracking'], 'local-only')
+        self.assertFalse(ignore.exists())
+        self.assertEqual(exclude.read_bytes(), before_exclude)
+        self.assertEqual(self.git('check-ignore', '.syncwheel/manifest.json'), '.syncwheel/manifest.json')
+        self.assertEqual(self.git('ls-files', '--', '.syncwheel/manifest.json'), '')
+        self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_mode_migration_refuses_unconverged_target(self):
         self.configure_delivery()

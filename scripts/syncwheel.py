@@ -4538,6 +4538,13 @@ def recover_incomplete_control_manifest_persistence(
     repo_root, manifest_path, manifest, allow_new_operation=False,
     recovery_state=None, intents_only=False,
 ):
+    return _manifest_store().recover_incomplete_control_manifest_persistence(
+        repo_root, manifest_path, manifest, allow_new_operation, recovery_state, intents_only,
+    )
+
+
+def skip_implicit_control_recovery_on_dirty_primary(repo_root, manifest_path):
+    """Refuse implicit recovery of either selected or canonical control state."""
     worktrees = get_worktrees(repo_root)
     primary = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
     status = local_worktree_status(primary)
@@ -4546,11 +4553,11 @@ def recover_incomplete_control_manifest_persistence(
     if any(not primary_checkout_state_entry(entry) for entry in status):
         # Do not repair a ledger tail, create a recovery intent or move refs
         # merely because an unrelated command is running on a dirty primary.
-        locations = {
+        locations = (
             (primary, primary / '.syncwheel' / 'manifest.json'),
             (repo_root, manifest_path),
-        }
-        for root, path in locations:
+        )
+        for root, path in dict.fromkeys(locations):
             pending = pending_control_manifest_intents(load_ledger_events(root, path))
             if pending:
                 intent = pending[0]['payload']
@@ -4561,12 +4568,8 @@ def recover_incomplete_control_manifest_persistence(
                     'primary checkout is dirty and control manifest recovery is pending. '
                     f'Preserve the checkout changes and retry {command} from a clean primary checkout'
                 )
-        if recovery_state is not None:
-            recovery_state.update({'recovered': False, 'control_commit': None})
-        return manifest
-    return _manifest_store().recover_incomplete_control_manifest_persistence(
-        repo_root, manifest_path, manifest, allow_new_operation, recovery_state, intents_only,
-    )
+        return True
+    return False
 
 
 def ref_tip(repo_root, ref):
@@ -16217,7 +16220,7 @@ def command_reconcile(args):
         repo_root, manifest, manifest_path,
         apply=bool(getattr(args, 'apply', False)),
     )
-    if args.apply:
+    if args.apply and not getattr(args, '_skip_implicit_control_recovery', False):
         manifest = recover_incomplete_control_manifest_persistence(
             repo_root, manifest_path, manifest
         )
@@ -17252,12 +17255,13 @@ def command_int_rebuild(args):
         )
     if not args.dry_run:
         complete_pending_promote_intents(repo_root, manifest, manifest_path, apply=True)
-        manifest = recover_incomplete_control_manifest_persistence(
-            repo_root,
-            manifest_path,
-            manifest,
-            allow_new_operation=bool(args.reason),
-        )
+        if not getattr(args, '_skip_implicit_control_recovery', False):
+            manifest = recover_incomplete_control_manifest_persistence(
+                repo_root,
+                manifest_path,
+                manifest,
+                allow_new_operation=bool(args.reason),
+            )
     _manifest_storage.preflight_control_manifest_digest(repo_root, manifest_path, manifest)
     if getattr(args, 'replay_mode', None) == 'desk' and integration_desk_is_detached(repo_root, manifest, args):
         if args.dry_run:
@@ -17501,9 +17505,10 @@ def command_int_push(args):
         raise SyncwheelError('--adopt-remote only applies to a coordinated (active-active) manifest')
     if coordination_is_active(manifest):
         if not args.dry_run:
-            manifest = recover_incomplete_control_manifest_persistence(
-                repo_root, manifest_path, manifest
-            )
+            if not getattr(args, '_skip_implicit_control_recovery', False):
+                manifest = recover_incomplete_control_manifest_persistence(
+                    repo_root, manifest_path, manifest
+                )
             replay_tip = ref_tip(repo_root, manifest['integration']['branch'])
             if replay_tip:
                 restore_control_manifest_after_integration_rebuild(
@@ -18283,12 +18288,18 @@ def command_repo_mode_set(args):
         if existing and existing != tip:
             raise SyncwheelError('migration archive ref collision: ' + ref)
     metadata_files = []
-    worktree_root = syncwheel_worktree_root(manifest)
-    for metadata_path, marker, end, patterns in (
-        (root / '.gitignore', SYNCWHEEL_GITIGNORE_MARKER, SYNCWHEEL_GITIGNORE_END_MARKER,
-         syncwheel_gitignore_patterns(worktree_root)),
-        (git_info_exclude_path(root), SYNCWHEEL_LOCAL_EXCLUDE_MARKER, SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER, []),
-    ):
+    worktree_root = syncwheel_worktree_root(normalized)
+    git_tracked = normalized.get('syncwheel_tracking') == SYNCWHEEL_TRACKING_GIT_TRACKED
+    exclusion_targets = [
+        (git_info_exclude_path(root), SYNCWHEEL_LOCAL_EXCLUDE_MARKER, SYNCWHEEL_LOCAL_EXCLUDE_END_MARKER,
+         [] if git_tracked else syncwheel_local_exclude_patterns(worktree_root)),
+    ]
+    if git_tracked:
+        exclusion_targets.insert(0, (
+            root / '.gitignore', SYNCWHEEL_GITIGNORE_MARKER, SYNCWHEEL_GITIGNORE_END_MARKER,
+            syncwheel_gitignore_patterns(worktree_root),
+        ))
+    for metadata_path, marker, end, patterns in exclusion_targets:
         if metadata_path is None:
             continue
         if metadata_path.is_symlink():
@@ -18327,6 +18338,18 @@ def command_repo_mode_set(args):
             'branchTips': {original_branch: ref_tip(root, 'HEAD'), branch: target},
         })
         try:
+            # Installing the retargeted guard can also append an audit event.
+            # Apply the reviewed exclusions before either migration writer.
+            for item in metadata_files:
+                metadata_path = Path(item['path'])
+                if metadata_path.is_symlink() or read_text_if_exists(metadata_path) != item['before']:
+                    raise SyncwheelError('mode migration metadata changed before apply: ' + str(metadata_path))
+                if item['after'] != item['before']:
+                    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+                    metadata_path.write_text(item['after'])
+                    transaction = _manifest_storage.active_manifest_write_transaction(path)
+                    if transaction is not None and metadata_path == root / '.gitignore':
+                        transaction['gitignoreWritten'] = True
             payload['managed_ref_guard'] = install_managed_push_hook(
                 root, apply=True, manifest=normalized, manifest_path=path, reason=args.reason
             )
@@ -19790,14 +19813,19 @@ def recover_control_manifest_before_command(args):
         getattr(args, 'personal', None),
     )
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+    explicit_rebuild = args.func == command_int_rebuild and bool(getattr(args, 'reason', None))
+    if not explicit_rebuild and skip_implicit_control_recovery_on_dirty_primary(repo_root, manifest_path):
+        # An explicit rebuild can resume its own frozen integration lease,
+        # where a ref update may have preceded checkout alignment.
+        args._control_manifest_recovery_state = {'recovered': False, 'control_commit': None}
+        args._skip_implicit_control_recovery = True
+        return manifest
     recovery_state = {}
     recovered = recover_incomplete_control_manifest_persistence(
         repo_root,
         manifest_path,
         manifest,
-        allow_new_operation=(
-            args.func == command_int_rebuild and bool(getattr(args, 'reason', None))
-        ),
+        allow_new_operation=explicit_rebuild,
         recovery_state=recovery_state,
         intents_only=not entrypoint,
     )

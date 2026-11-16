@@ -201,6 +201,12 @@ class MetadataPreflightTest(unittest.TestCase):
         self.assertEqual(self.module.load_ledger_events(self.repo, self.manifest_path), events)
         self.assertEqual(self.state(), before)
 
+        pushed = self.fixture.run_syncwheel('int', 'push')
+        self.assertEqual(pushed.returncode, 2, pushed.stderr)
+        self.assertIn('control manifest recovery is pending', pushed.stderr)
+        self.assertEqual(self.module.load_ledger_events(self.repo, self.manifest_path), events)
+        self.assertEqual(self.state(), before)
+
     def test_private_metadata_without_exclusions_is_refused_before_manifest_write(self):
         personal = self.create_personal_manifest('lane', 'git-tracked')
         self.ignore.write_text('.syncwheel/manifests/*.local.json\n')

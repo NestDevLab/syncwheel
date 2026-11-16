@@ -4713,7 +4713,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         )
         self.assertEqual(self.git('status', '--porcelain'), '')
 
-    def test_git_tracked_stack_create_commits_managed_ignore_upgrade_and_stays_clean(self):
+    def test_git_tracked_stack_create_preserves_explicit_managed_ignore_upgrade(self):
         self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply', expected=0)
         self.git('commit', '-qm', 'test: finish tracked syncwheel setup')
         gitignore_path = self.repo / '.gitignore'
@@ -4726,16 +4726,21 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.git('add', '.gitignore')
         self.git('commit', '-qm', 'test: simulate pre-upgrade managed ignore block')
 
+        self.run_cli('repo', 'tracking', 'set', 'git-tracked', '--apply')
+        self.assertIn('.syncwheel/manifests/*.local-ledger/', gitignore_path.read_text())
+        if self.git('diff', '--cached', '--name-only'):
+            self.git('commit', '-qm', 'test: finish explicit managed ignore upgrade')
+        ignore_before = gitignore_path.read_bytes()
+        exclude_path = self.repo_exclude_path()
+        exclude_before = exclude_path.read_bytes()
+
         self.run_cli('stack', 'create', 'tracked-upgrade', '--branch', 'pr/tracked-upgrade')
 
         self.assertEqual(
-            set(self.git('show', '--format=', '--name-only', 'HEAD').splitlines()),
-            {'.gitignore', '.syncwheel/manifest.json'},
+            self.git('show', '--format=', '--name-only', 'HEAD'), '.syncwheel/manifest.json',
         )
-        self.assertIn(
-            '.syncwheel/manifests/*.local-ledger/',
-            gitignore_path.read_text(),
-        )
+        self.assertEqual(gitignore_path.read_bytes(), ignore_before)
+        self.assertEqual(exclude_path.read_bytes(), exclude_before)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
     def test_local_only_stack_create_does_not_commit(self):
@@ -4880,6 +4885,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         }
         manifest['stacks'] = []
         manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+        self.load_syncwheel_module().ensure_syncwheel_metadata_excluded(self.repo, 'local-only')
         self.git('branch', 'integration/capture', 'main')
         self.git('switch', '-q', 'integration/capture')
         self.run_cli('stack', 'create', 'exploration', '--draft')
@@ -7846,6 +7852,7 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.git('branch', 'integration/control-manifest', 'main')
         self.git('switch', '-q', 'integration/control-manifest')
         module = self.load_syncwheel_module()
+        module.ensure_syncwheel_metadata_excluded(self.repo, 'local-only')
         expected_manifest, _ = module.load_manifest(self.repo, manifest_path)
         expected_digest = module.manifest_digest(expected_manifest)
 

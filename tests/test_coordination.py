@@ -385,6 +385,10 @@ with module.coordination_publication_lock(Path(repo_path)):
         subprocess.run(['git', 'clone', '-q', str(origin), str(path)], check=True)
         self.git(path, 'config', 'user.name', f'Syncwheel {name}')
         self.git(path, 'config', 'user.email', f'syncwheel-{name}@example.com')
+        # Tests switch to historical source and delivery branches that lack
+        # the repository's managed .gitignore block.
+        with (path / '.git' / 'info' / 'exclude').open('a') as exclude:
+            exclude.write('.syncwheel/ledger/\n.syncwheel/profile.local.json\n')
         return path
 
     def mirror_coordinated_clone(self, origin, source, name, branches):
@@ -636,7 +640,17 @@ with module.coordination_publication_lock(Path(repo_path)):
         self.disable_fixture_hooks(repo)
         return self.set_integration_membership(repo, integration_membership)
 
+    def configure_control_exclusions(self, repo):
+        module = self.load_module()
+        manifest, _ = module.load_manifest(repo)
+        module.ensure_syncwheel_metadata_excluded(
+            repo, manifest.get('syncwheel_tracking'), module.syncwheel_worktree_root(manifest),
+        )
+
     def disable_fixture_hooks(self, repo):
+        # Fixture clones can copy a control proposal onto a branch without the
+        # managed ignore block. Set it up explicitly before writing audit data.
+        self.configure_control_exclusions(repo)
         self.run_cli(
             repo,
             'hooks', 'remove', '--disable',
@@ -4412,6 +4426,7 @@ with module.coordination_publication_lock(Path(repo_path)):
                      '-m', f'test: retain source {stack_number} ancestry')
         old = module.ref_tip(repo, integration_branch)
         self.git(repo, 'switch', '-q', 'main')
+        self.configure_control_exclusions(repo)
         manifest, manifest_path = module.load_manifest(repo)
         manifest['integration']['stacks'] = [stack_id for stack_id, _ in stacks]
         manifest_path.write_text(module.canonical_manifest_file_text(manifest))

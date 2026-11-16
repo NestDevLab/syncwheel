@@ -1265,11 +1265,15 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
 
     def test_manifest_a_command_wrote_does_not_refuse_the_next_mutation(self):
+        syncwheel.ensure_syncwheel_metadata_excluded(self.repo, 'git-tracked')
+        gitignore = self.repo / '.gitignore'
+        exclude = self.repo / '.git' / 'info' / 'exclude'
+        ignore_before = gitignore.read_bytes(), exclude.read_bytes()
         subprocess.run(
-            ['git', 'add', '.syncwheel/manifest.json'], cwd=self.repo, check=True
+            ['git', 'add', '.gitignore', '.syncwheel/manifest.json'], cwd=self.repo, check=True
         )
         subprocess.run(
-            ['git', 'commit', '-qm', 'track the manifest'], cwd=self.repo, check=True
+            ['git', 'commit', '-qm', 'track manifest and explicit exclusions'], cwd=self.repo, check=True
         )
         seed_before = (self.repo / 'seed').read_bytes()
         first_parent = subprocess.run(
@@ -1299,9 +1303,10 @@ class ManagedRefGuardTests(unittest.TestCase):
                 ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', first_tip],
                 cwd=self.repo, capture_output=True, text=True, check=True,
             ).stdout.splitlines()),
-            {'.gitignore', '.syncwheel/manifest.json'},
+            {'.syncwheel/manifest.json'},
         )
         self.assertEqual((self.repo / 'seed').read_bytes(), seed_before)
+        self.assertEqual((gitignore.read_bytes(), exclude.read_bytes()), ignore_before)
 
         second = self.run_syncwheel(
             'stack', 'set', 'feature', 'HEAD', '--repo', str(self.repo),
@@ -1328,6 +1333,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             '',
         )
         self.assertEqual((self.repo / 'seed').read_bytes(), seed_before)
+        self.assertEqual((gitignore.read_bytes(), exclude.read_bytes()), ignore_before)
 
         (self.repo / 'seed').write_text('changed\n')
         index_path = Path(subprocess.run(
@@ -1383,6 +1389,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             ).stdout,
             '.syncwheel/manifest.json\n',
         )
+        self.assertEqual((gitignore.read_bytes(), exclude.read_bytes()), ignore_before)
 
     def test_reasoned_disable_explicitly_lifts_staged_primary_guard(self):
         self._install_and_branch('main-integration')
