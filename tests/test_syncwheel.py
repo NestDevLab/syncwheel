@@ -1957,6 +1957,24 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                     ):
                         module.governed_worktree_preflight(args)
 
+    def test_scoped_refusal_names_lane_health_and_remedy(self):
+        module = self.load_syncwheel_module()
+        related = {'id': 'feature-a-dirty', 'target': 'feature-a', 'state': 'active'}
+        args = SimpleNamespace(
+            func=module.command_reconcile, repo=str(self.repo), manifest=None, personal=None,
+            stack=['feature-a'], apply=True, json=False,
+        )
+        with mock.patch.object(
+            module, 'load_governed_worktree_registry', return_value=({'lanes': [related]}, None),
+        ), mock.patch.object(
+            module, 'governed_worktree_diagnostics',
+            return_value={'lanes': [dict(related, code='dirty', remedy='commit the lane changes')]},
+        ), mock.patch.object(module, 'emit_governed_worktree_warnings'):
+            with self.assertRaisesRegex(
+                module.SyncwheelError, r'feature-a-dirty \[dirty\]: commit the lane changes',
+            ):
+                module.governed_worktree_preflight(args)
+
     def test_integration_mutations_do_not_reap_unrelated_dirty_lanes(self):
         module = self.load_syncwheel_module()
         for command in (

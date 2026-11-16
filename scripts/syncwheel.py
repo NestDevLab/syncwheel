@@ -18774,9 +18774,23 @@ def governed_worktree_preflight(args):
             and lane.get('pending_reason') != 'archive_push_failed'
         ]
         if blockers:
+            # Name each lane's health and remedy: the warnings above may have
+            # been collapsed into a summary line on a busy repository.
+            health = {
+                lane['id']: lane
+                for lane in governed_worktree_diagnostics(repo_root, manifest)['lanes']
+                if lane.get('id')
+            }
+
+            def describe(lane):
+                found = health.get(lane['id']) or {}
+                code = found.get('code') or lane.get('pending_reason') or lane.get('state')
+                remedy = found.get('remedy')
+                return f"{lane['id']} [{code}]" + (f': {remedy}' if remedy else '')
+
             raise SyncwheelError(
                 f'governed worktree recovery is required before updating {scoped_stack_label}: '
-                + ', '.join(lane['id'] for lane in blockers)
+                + '; '.join(describe(lane) for lane in blockers)
             )
         return
     # A lane whose remote save failed is intact (branch and folder kept), so
