@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.6 - 2026-11-16
+
+- Stop legacy (uncoordinated) forced stack pushes from discarding work another session pushed. `stack push --force-with-lease` (or `--force`), and the stack pushes of `publish` and `reconcile --push`, now read the live remote tip first. If that tip holds a commit the stack does not own (not declared, not on the local stack branch, and no matching patch ID), the push stops and names the commits. Otherwise the lease is pinned to that exact tip (`--force-with-lease=refs/heads/<branch>:<tip>`) instead of trusting the remote-tracking ref, which a fetch may already have moved onto someone else's commits. Dry runs print the command unchanged.
+
 ## 0.47.3 - 2026-11-15
 
 - Let the GitHub PR merge policy allow release branches by pattern. An entry in `base_branches` (`--base`) can now be `PREFIX/*`, such as `save/*` or `release/*`, which allows any branch under that prefix as a delivery base. Exact names keep matching exactly; bare `*`, other glob characters and patterns with `*` anywhere but the final segment are rejected.

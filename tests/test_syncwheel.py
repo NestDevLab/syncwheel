@@ -5501,6 +5501,52 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         self.assertEqual(rebuilt_validation['details']['integration']['unmapped_commits'], [])
         self.assertTrue((worktree / 'gamma.txt').exists())
 
+    def legacy_pushed_stack_with_remote(self):
+        origin = self.tmp / 'legacy-origin.git'
+        self.git('clone', '--bare', '-q', str(self.repo), str(origin))
+        self.git('remote', 'add', 'origin', str(origin))
+        self.git('fetch', '-q', 'origin')
+        tip = self.git('rev-parse', 'pr/feature-a')
+        parents = self.git('rev-list', '--parents', '-n', '1', tip).split()[1:]
+        rewritten = self.git(
+            'commit-tree', f'{tip}^{{tree}}', *[arg for parent in parents for arg in ('-p', parent)],
+            '-m', 'feat: reworded by this session',
+        )
+        return origin, tip, rewritten
+
+    def test_forced_legacy_stack_push_refuses_to_discard_another_sessions_commit(self):
+        origin, tip, rewritten = self.legacy_pushed_stack_with_remote()
+        foreign = self.foreign_commit_on_remote_stack(origin)
+        # The fetch moves the remote-tracking ref, so a bare lease would pass.
+        self.git('fetch', '-q', 'origin')
+        self.git('update-ref', 'refs/heads/pr/feature-a', rewritten, tip)
+
+        result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
+                              '--force-with-lease', expected=2)
+
+        self.assertIn('does not own', result.stderr)
+        self.assertIn(foreign[:12], result.stderr)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), foreign)
+
+    def foreign_commit_on_remote_stack(self, origin):
+        other = self.tmp / 'other-session'
+        self.git('clone', '-q', '--branch', 'pr/feature-a', str(origin), str(other))
+        (other / 'foreign.txt').write_text('pushed by another session\n')
+        self.git('-C', str(other), 'add', 'foreign.txt')
+        self.git('-C', str(other), '-c', 'user.name=Other', '-c', 'user.email=other@example.invalid',
+                 'commit', '-qm', 'feat: another session')
+        self.git('-C', str(other), 'push', '-q', 'origin', 'pr/feature-a')
+        return self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a')
+
+    def test_forced_legacy_stack_push_pins_the_lease_and_replaces_its_own_rewrite(self):
+        origin, tip, rewritten = self.legacy_pushed_stack_with_remote()
+        self.git('update-ref', 'refs/heads/pr/feature-a', rewritten, tip)
+
+        result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', '--force-with-lease')
+
+        self.assertIn(f'--force-with-lease=refs/heads/pr/feature-a:{tip}', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), rewritten)
+
     def test_stack_push_is_emitted_with_passthrough_args(self):
         result = self.run_cli('stack', 'push', 'feature-a', '--dry-run', '--', '--force-with-lease', expected=0)
         self.assertIn('git push --force-with-lease fork pr/feature-a', result.stdout)
@@ -5821,7 +5867,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             expected=0,
         )
 
-        self.assertIn('git push --force-with-lease fork pr/publish', result.stdout)
+        # The lease is pinned to the live remote tip (absent here), not the tracking ref.
+        self.assertIn('git push --force-with-lease=refs/heads/pr/publish: fork pr/publish', result.stdout)
 
     def test_publish_uses_force_with_lease_by_default(self):
         origin = self.tmp / 'origin.git'
@@ -5849,7 +5896,8 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
             expected=0,
         )
 
-        self.assertIn('git push --force-with-lease fork pr/publish', result.stdout)
+        # The lease is pinned to the live remote tip (absent here), not the tracking ref.
+        self.assertIn('git push --force-with-lease=refs/heads/pr/publish: fork pr/publish', result.stdout)
 
     def test_sync_never_pushes(self):
         origin = self.tmp / 'origin.git'

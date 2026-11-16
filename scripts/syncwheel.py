@@ -2241,6 +2241,65 @@ def refuse_local_only_manifest_push(repo_root, manifest, command, remote):
         )
 
 
+def forced_push_requested(push_args):
+    return any(
+        part in {'--force', '-f', '--force-with-lease'}
+        or part.startswith('--force-with-lease=')
+        for part in push_args
+    )
+
+
+def without_force_push_args(push_args):
+    return [
+        part for part in push_args
+        if part not in {'--force', '-f', '--force-with-lease'}
+        and not part.startswith('--force-with-lease=')
+    ]
+
+
+def legacy_stack_push_lease(repo_root, stack, remote, local_tip):
+    """Return the exact lease for a forced stack push, or refuse to discard work.
+
+    A bare --force-with-lease trusts the remote-tracking ref, which the last
+    fetch already moved onto commits another session pushed; the push would
+    then silently drop them. Observe the live remote tip instead, refuse if
+    it holds a commit the stack does not own, and pin the lease to that tip.
+    """
+    ref = f"refs/heads/{stack['branch']}"
+    try:
+        remote_tip = remote_ref_tips(repo_root, remote, [ref])[ref]
+    except SyncwheelError as exc:
+        raise SyncwheelError(
+            f"stack push {stack['id']}: cannot observe {remote} {ref} before a forced push: {exc}"
+        ) from exc
+    if not remote_tip or remote_tip == local_tip or branch_contains(repo_root, local_tip, remote_tip):
+        return f'--force-with-lease={ref}:{remote_tip or ""}'
+    if not commit_exists(repo_root, remote_tip):
+        raise SyncwheelError(
+            f"stack push {stack['id']}: {remote} {ref} is at {remote_tip}, which this clone "
+            f'has not fetched; fetch it and run `syncwheel check` before a forced push'
+        )
+    owned = {commit_full_sha(repo_root, commit) for commit in stack.get('commits', []) if commit_exists(repo_root, commit)}
+    owned.update(rev_list(repo_root, f"{stack['base']}..{local_tip}"))
+    owned_patch_ids = {patch for patch in (commit_patch_id(repo_root, commit) for commit in owned) if patch}
+    foreign = []
+    for commit in rev_list(repo_root, f'{local_tip}..{remote_tip}'):
+        if commit in owned:
+            continue
+        patch = commit_patch_id(repo_root, commit)
+        if patch and patch in owned_patch_ids:
+            continue
+        foreign.append(commit)
+    if foreign:
+        raise SyncwheelError(
+            f"stack push {stack['id']} STOP: {remote} {ref} holds {len(foreign)} commit(s) this stack "
+            f"does not own ({', '.join(commit[:12] for commit in foreign[:5])}"
+            f"{', ...' if len(foreign) > 5 else ''}); another session pushed there. A forced push "
+            'would discard them: add them to the stack or find out who pushed them first'
+        )
+    return f'--force-with-lease={ref}:{remote_tip}'
+
+
 def run_authorized_push(repo_root, command, remote, refs, check=True, *, manifest):
     refuse_local_only_manifest_push(repo_root, manifest, command, remote)
     path, secret = authorize_syncwheel_push(repo_root, remote, refs)
@@ -15895,7 +15954,15 @@ def command_reconcile(args):
                 })
                 continue
             remote = stack_push_remote(manifest, stack, args.remote)
-            command = ['git', 'push', *push_args, remote, stack['branch']]
+            stack_push_args = list(push_args)
+            if forced_push_requested(stack_push_args):
+                # Same rule as `stack push`: never discard a commit another
+                # session pushed to this stack branch; pin the exact lease.
+                lease = legacy_stack_push_lease(
+                    repo_root, stack, remote, ref_tip(repo_root, stack['branch']),
+                )
+                stack_push_args = [lease, *without_force_push_args(stack_push_args)]
+            command = ['git', 'push', *stack_push_args, remote, stack['branch']]
             run_authorized_push(
                 repo_root, command, remote, [f"refs/heads/{stack['branch']}"],
                 manifest=manifest,
@@ -19915,6 +19982,15 @@ def _manifest_store():
 class _StackRepository:
     def __init__(self, root):
         self.root = root
+
+    def legacy_stack_push_lease(self, *args, **kwargs):
+        return legacy_stack_push_lease(*args, **kwargs)
+
+    def forced_push_requested(self, *args, **kwargs):
+        return forced_push_requested(*args, **kwargs)
+
+    def without_force_push_args(self, *args, **kwargs):
+        return without_force_push_args(*args, **kwargs)
 
     def branch_contains(self, *args, **kwargs):
         return branch_contains(*args, **kwargs)
