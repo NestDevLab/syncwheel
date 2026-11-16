@@ -219,6 +219,9 @@ active-active channel must use the coordination remote.
   use explicit tracking configuration when exclusions need updating
 - read-only diagnostics remain usable when the primary is dirty; treat their yellow
   dirty-primary warning as foreign work, not permission to repair it
+- use `status` without `--fetch`, `check --no-fetch`, or `worktree list` to
+  preserve control metadata and skip startup maintenance and authorization
+  cleanup; delivery validation may still calculate temporary Git projections
 - for uncommitted tracked primary changes, identify their owning stack and use
   `syncwheel stack absorb <stack> <paths> -N -m "message"`. Default amend refuses
   an empty stack; it must not amend the base commit

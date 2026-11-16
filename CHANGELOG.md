@@ -1,8 +1,12 @@
 # Changelog
 
-## 0.47.21 - 2026-11-16
+## 0.47.22 - 2026-11-16
 
 - Register persistent stack replay desks and provide a reviewed CLI release path. Preserve the desk tip, index and working changes in verified local recovery refs before removing its checkout, with explicit selection for legacy desks. Stack archive names the desk release or pending-release remedy.
+
+## 0.47.21 - 2026-11-16
+
+- Keep status without fetch, check with --no-fetch, and worktree list observational on control metadata. Skip implicit startup maintenance, authorization nonce creation or cleanup, and persistent patch-ID cache writes while preserving manifest selection checks and explicit fetch behavior.
 
 ## 0.47.20 - 2026-11-16
 

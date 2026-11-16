@@ -137,6 +137,65 @@ class DeskReleaseTest(unittest.TestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.release_preview()['planDigest'], plan['planDigest'])
 
+    def test_nested_release_preserves_caller_authorization(self):
+        tip = self.rebuild_desk()
+        self.dirty_desk()
+        reviewed = self.release_preview()
+        auth_key = self.module.MANAGED_REF_MOVE_AUTH_ENV
+        auth_dir = self.module.ref_auth_dir(self.repo)
+        original_env = self.module.managed_process_env
+
+        for apply in (False, True):
+            with self.subTest(apply=apply):
+                nonce = self.module.authorize_ref_move(self.repo, reusable=True)
+                argv = ['syncwheel', *self.release_args()]
+                if apply:
+                    argv.extend(('--confirm-writers-stopped', '--plan-digest',
+                                 reviewed['planDigest'], '--apply'))
+                before = self.snapshot()
+                before_nonces = file_tree(auth_dir)
+                output = io.StringIO()
+                errors = io.StringIO()
+                child_nonces = set()
+
+                def inspect_child_env(*args, **kwargs):
+                    result = original_env(*args, **kwargs)
+                    if result.get(auth_key):
+                        child_nonces.add(result[auth_key])
+                    return result
+
+                with (
+                    contextlib.chdir(self.repo),
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                    mock.patch.object(sys, 'argv', argv),
+                    mock.patch.dict(os.environ, {auth_key: nonce}),
+                    mock.patch.object(self.module, 'SYNCWHEEL_REF_AUTH_REPO', self.repo),
+                    mock.patch.object(self.module, 'SYNCWHEEL_OWNS_REF_MOVES', True),
+                    mock.patch.object(self.module, 'managed_process_env', side_effect=inspect_child_env),
+                ):
+                    self.assertEqual(self.module.main(), 0, errors.getvalue())
+                    self.assertEqual(self.module.SYNCWHEEL_REF_AUTH_REPO, self.repo)
+                    self.assertTrue(self.module.SYNCWHEEL_OWNS_REF_MOVES)
+                    self.assertEqual(os.environ[auth_key], nonce)
+
+                self.assertIn(nonce, before_nonces)
+                self.assertEqual(file_tree(auth_dir), before_nonces)
+                self.assertNotIn(nonce, child_nonces)
+                self.assertEqual(len(child_nonces), int(apply))
+                report = json.loads(output.getvalue())
+                if apply:
+                    self.assertEqual(report['status'], 'released')
+                    self.verify_removed(tip)
+                    expected_refs = {ref.encode() for ref in reviewed['recoveryRefs'].values()}
+                    before_refs = set(before['refs'].splitlines())
+                    after_refs = set(self.snapshot()['refs'].splitlines())
+                    self.assertTrue(before_refs.issubset(after_refs))
+                    self.assertEqual({ref.split()[0] for ref in after_refs - before_refs}, expected_refs)
+                else:
+                    self.assertEqual(report, reviewed)
+                    self.assertEqual(self.snapshot(), before)
+
     def test_apply_removes_registration_and_recovers_distinct_index_and_working_tree(self):
         tip = self.rebuild_desk()
         self.dirty_desk()

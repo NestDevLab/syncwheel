@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.21`
+Current version: `0.47.22`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -484,6 +484,12 @@ requires the reviewed plan digest and confirmation that writers have stopped.
 It retains the tip, index and working changes in local recovery refs before
 removing the checkout. See [desk release](docs/stack-archive.md#release-a-replay-desk)
 for the command sequence and the explicit path selection for older desks.
+
+`status` without `--fetch`, `check --no-fetch`, and `worktree list` preserve
+control metadata, including authorization records, persistent caches and
+startup state. They do not start update maintenance or clean up stale authorization records. Delivery
+validation can still calculate projections using temporary Git objects and
+checkouts; explicit fetch remains a separate, requested operation.
 
 To retire a known dead or abandoned lane deliberately, preview the operation
 first and provide a durable reason:
