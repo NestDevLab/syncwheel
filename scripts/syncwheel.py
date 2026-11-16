@@ -2850,10 +2850,13 @@ def _commit_is_known(repo_root, value):
 def commit_exists(repo_root, ref):
     if _commit_is_known(repo_root, ref):
         return True
-    exists = git(repo_root, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}', check=False).returncode == 0
-    if exists:
-        remember_commits(repo_root, [ref])
-    return exists
+    result = git(repo_root, 'rev-parse', '--verify', '--quiet', f'{ref}^{{commit}}', check=False)
+    if result.returncode != 0:
+        return False
+    # Remember the peeled commit, never the input: an annotated tag id is
+    # full-length hex too, and must keep resolving to the commit it names.
+    remember_commits(repo_root, [result.stdout.strip()])
+    return True
 
 
 def branch_contains(repo_root, branch, commit):

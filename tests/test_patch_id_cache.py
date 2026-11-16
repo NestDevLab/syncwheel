@@ -15,6 +15,60 @@ syncwheel = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(syncwheel)
 
 
+class CommitMemoTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.repo = Path(self.temp.name) / 'repo'
+        self.repo.mkdir()
+        for args in (('init', '-q'), ('config', 'user.name', 'Memo'), ('config', 'user.email', 'memo@example.test'),
+                     ('commit', '-q', '--allow-empty', '-m', 'root'), ('commit', '-q', '--allow-empty', '-m', 'second'),
+                     ('tag', '-a', '-m', 'annotated', 'v1')):
+            subprocess.run(['git', *args], cwd=self.repo, check=True, capture_output=True)
+        syncwheel.clear_commit_memo()
+
+    def tearDown(self):
+        syncwheel.clear_commit_memo()
+        self.temp.cleanup()
+
+    def rev(self, *args):
+        return subprocess.run(['git', 'rev-parse', *args], cwd=self.repo, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_annotated_tag_id_keeps_resolving_to_its_commit(self):
+        tag, commit = self.rev('v1'), self.rev('v1^{commit}')
+        self.assertNotEqual(tag, commit)
+        self.assertTrue(syncwheel.commit_exists(self.repo, tag))
+        self.assertEqual(syncwheel.commit_full_sha(self.repo, tag), commit)
+        syncwheel.prime_commits(self.repo, [tag, commit])
+        self.assertEqual(syncwheel.commit_full_sha(self.repo, tag), commit)
+
+    def test_remembered_answers_skip_git_but_refs_are_read_fresh(self):
+        head, root = self.rev('HEAD'), self.rev('HEAD~1')
+        self.assertTrue(syncwheel.commit_exists(self.repo, head))
+        self.assertTrue(syncwheel.branch_contains(self.repo, head, root))
+        self.assertEqual(syncwheel.commit_parents(self.repo, head), [root])
+        with mock.patch.object(syncwheel, 'git', side_effect=AssertionError('git was called')):
+            self.assertTrue(syncwheel.commit_exists(self.repo, head))
+            self.assertEqual(syncwheel.commit_full_sha(self.repo, head), head)
+            self.assertTrue(syncwheel.branch_contains(self.repo, head, root))
+            self.assertEqual(syncwheel.commit_parent_count(self.repo, head), 1)
+        calls = []
+        real_git = syncwheel.git
+
+        def counting(*args, **kwargs):
+            calls.append(args[1:])
+            return real_git(*args, **kwargs)
+
+        with mock.patch.object(syncwheel, 'git', side_effect=counting):
+            syncwheel.branch_contains(self.repo, 'master', root)
+            syncwheel.branch_contains(self.repo, 'master', root)
+            self.assertFalse(syncwheel.commit_exists(self.repo, 'f' * 40))
+            self.assertFalse(syncwheel.commit_exists(self.repo, 'f' * 40))
+        self.assertEqual(len(calls), 4)
+
+
+
+
 class PatchIdCacheTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
