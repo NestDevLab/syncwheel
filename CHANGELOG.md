@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.47.4 - 2026-11-16
+
+- Add `worktree list` (alias `ls`), a read-only view of every governed lane with its state, health code, target stack, branch, path and remedy. `--problems` keeps only lanes that need attention, and `--json` also returns a count per health code.
+- When more than three lanes need attention, commands print one warning line with the count per health code and a pointer to `worktree list --problems`, instead of one line per lane. `sync`, `publish`, `stack land` and unscoped `reconcile`/`resume` likewise print one line for the lanes that need recovery but do not block them.
+
 ## 0.47.3 - 2026-11-15
 
 - Let the GitHub PR merge policy allow release branches by pattern. An entry in `base_branches` (`--base`) can now be `PREFIX/*`, such as `save/*` or `release/*`, which allows any branch under that prefix as a delivery base. Exact names keep matching exactly; bare `*`, other glob characters and patterns with `*` anywhere but the final segment are rejected.

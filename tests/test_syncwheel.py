@@ -2540,6 +2540,40 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
                 result = self.run_cli('status')
                 self.assertIn('governed worktree foreign-0: expired', result.stderr)
 
+    def test_many_lane_warnings_collapse_into_one_summary_line(self):
+        module, lanes, _tips = self.open_expired_foreign_lanes(count=5)
+        result = self.run_cli('status')
+        self.assertIn('WARNING: 5 governed worktree lanes need attention (expired 5)', result.stderr)
+        self.assertIn('syncwheel worktree list --problems', result.stderr)
+        self.assertNotIn('governed worktree foreign-0: expired', result.stderr)
+
+    def test_worktree_list_shows_lanes_and_problems_without_changing_anything(self):
+        module, lanes, tips = self.open_expired_foreign_lanes(count=2)
+        healthy = json.loads(self.run_cli('worktree', 'open', 'healthy-lane', '--json').stdout)['lane']
+        registry_before = Path(module.load_governed_worktree_registry(self.repo)[1]).read_bytes()
+
+        listed = json.loads(self.run_cli('worktree', 'list', '--json').stdout)
+        self.assertEqual(
+            {lane['id'] for lane in listed['lanes']},
+            {'foreign-0', 'foreign-1', 'healthy-lane'},
+        )
+        self.assertEqual(listed['counts'], {'expired': 2})
+
+        problems = json.loads(self.run_cli('worktree', 'list', '--problems', '--json').stdout)
+        self.assertEqual({lane['id'] for lane in problems['lanes']}, {'foreign-0', 'foreign-1'})
+
+        text = self.run_cli('worktree', 'ls')
+        self.assertIn('foreign-0  state=active  health=expired', text.stdout)
+        self.assertIn('healthy-lane  state=active  health=ok', text.stdout)
+        self.assertIn('remedy:', text.stdout)
+        self.assertNotIn('WARNING', text.stderr)
+
+        self.assertEqual(
+            Path(module.load_governed_worktree_registry(self.repo)[1]).read_bytes(), registry_before,
+        )
+        self.assertTrue(Path(healthy['path']).is_dir())
+        self.assert_foreign_lanes_untouched(module, lanes, tips)
+
     def test_preflight_never_selects_an_active_lane_for_cleanup(self):
         module = self.load_syncwheel_module()
         active = {
