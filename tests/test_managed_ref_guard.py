@@ -249,8 +249,8 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('primary checkout commit blocked', result.stderr)
-        self.assertIn('syncwheel worktree open <lane> --into feature', result.stderr)
-        self.assertIn('syncwheel stack capture-integration feature HEAD', result.stderr)
+        self.assertIn('syncwheel stack absorb <stack-id> three --staged -N -m', result.stderr)
+        self.assertNotIn('capture-integration', result.stderr)
         self.assertNotIn('.. Use:', result.stderr)
 
     def test_syncwheel_authorization_permits_primary_control_commit(self):
@@ -966,7 +966,8 @@ class ManagedRefGuardTests(unittest.TestCase):
         )
         self.assertNotEqual(committed.returncode, 0)
         self.assertIn('commit blocked', committed.stderr)
-        self.assertIn('syncwheel stack capture-integration feature HEAD', committed.stderr)
+        self.assertIn('syncwheel worktree open <lane>', committed.stderr)
+        self.assertNotIn('capture-integration', committed.stderr)
 
     def test_feature_worktree_commit_remains_allowed(self):
         subprocess.run(['git', 'branch', '-m', 'main-integration'], cwd=self.repo, check=True)

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.17`
+Current version: `0.47.18`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -515,8 +515,9 @@ warnings for unfinished lanes when stderr is a TTY; `NO_COLOR` removes ANSI
 color and JSON output remains free of ANSI sequences.
 
 When an occupied primary checkout stops a mutating command, Syncwheel names
-manifest-derived capture and queue commands in the error. Capture committed
-primary work with `syncwheel stack capture-integration <stack> HEAD`, or leave
+manifest-derived recovery commands in the error. For uncommitted tracked changes,
+use `syncwheel stack absorb <stack> <paths> -N -m "message"` after identifying
+their owning stack. Capture already committed, unowned primary work with `syncwheel stack capture-integration <stack> HEAD`, or leave
 another agent's primary checkout unchanged and use
 `syncwheel worktree open <lane> --into <stack>`. Capacity and expired-lane
 diagnostics name the corresponding `syncwheel stack add <stack> <base>..<lane>`
@@ -1115,18 +1116,22 @@ missing, it refuses and names the owner.
 
 ### 3. Absorb integration-first work into stacks
 
-When the main checkout is on the integration branch, you can make and test
-changes there first, then assign those changes to the PR stack that owns them:
+When uncommitted changes already exist on the integration checkout, transfer
+them to their owning stack before continuing:
 
 ```bash
-python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts
-python3 scripts/syncwheel.py stack absorb feature-a --staged
+python3 scripts/syncwheel.py stack absorb feature-a path/to/file.ts -N -m "Add feature work"
+python3 scripts/syncwheel.py stack absorb feature-a --staged -N -m "Add staged feature work"
 ```
 
 By default, `stack absorb` amends the stack branch tip, refreshes that stack's
 manifest commits, and reverse-applies the absorbed patch from the integration
 checkout. Pass `--no-amend -m "message"` when the absorbed change should become
-a new stack commit. Use `--staged` after `git add -p` when one file contains
+a new stack commit. An empty stack requires this option: default amend is refused
+so its base commit cannot be amended. If an empty recipe has a branch that has
+already moved away from its base, absorb refuses: preserve that history for
+explicit classification and use a fresh draft for the patch. `capture-integration` assigns existing
+commits; it does not capture dirty working-tree bytes. Use `--staged` after `git add -p` when one file contains
 changes for multiple PR stacks.
 
 Example: two files belong to `feature-a`, one file belongs to `feature-b`, and
@@ -1305,7 +1310,8 @@ Bounded metadata operations can preserve those changes in place: setting authori
 on an untracked personal manifest, setting or clearing the private PR merge policy,
 closing an empty non-coordinated draft with the default reason or `--reason closed`,
 without forcing or deleting its branch, and
-archiving a non-coordinated stack through its exact plan. Existing index conflicts,
+archiving a non-coordinated stack through its exact plan, and stack sync without
+pending recovery. Existing index conflicts,
 unrelated staged paths and a dirty shared control manifest still stop them. Archive
 keeps the required recovery refs; close retains the source branch by default.
 

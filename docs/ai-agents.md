@@ -211,14 +211,17 @@ active-active channel must use the coordination remote.
   exact current projected tip, and the lane records that commit as its base
 - product-changing mutations stop on unrelated dirty primary files. Personal authority
   updates, private PR policy set/clear, empty non-coordinated draft close with its default
-  reason or `closed` and without force or branch deletion, and non-coordinated archive
-  may proceed while preserving those
+  reason or `closed` and without force or branch deletion, non-coordinated archive
+  and stack sync without pending recovery may proceed while preserving those
   files. Index conflicts, unrelated staged paths and a dirty shared control manifest
   still stop these operations. Pending control recovery requires its explicit remedy
 - metadata saves do not normalize ignore files or force-stage authority changes;
   use explicit tracking configuration when exclusions need updating
 - read-only diagnostics remain usable when the primary is dirty; treat their yellow
   dirty-primary warning as foreign work, not permission to repair it
+- for uncommitted tracked primary changes, identify their owning stack and use
+  `syncwheel stack absorb <stack> <paths> -N -m "message"`. Default amend refuses
+  an empty stack; it must not amend the base commit
 - use `syncwheel stack capture-integration <stack> HEAD` only for already committed
   primary work named by a refusal; do not create a new primary commit to use it
 - use `syncwheel hooks remove --disable --reason "..." --apply` only as a deliberate,

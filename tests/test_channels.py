@@ -3,6 +3,7 @@ import importlib.util
 import contextlib
 import json
 import os
+import select
 import shutil
 import subprocess
 import sys
@@ -1219,29 +1220,64 @@ class DeploymentChannelTest(unittest.TestCase):
             'remote': manifest['defaults']['publication_remote'],
             'composition': [module.pin_stack_for_channel(self.repo, manifest, 'a')],
         }
+        next_tip = self.advance_stack('a', 'a.txt', 'a two\n')
+        self.assertEqual(module.require_stack(manifest, 'a')['commits'], [self.a])
         env = os.environ.copy()
         env['SYNCWHEEL_UPDATE_MODE'] = 'off'
-        argv = ['python3', str(CLI), 'stack', 'sync', 'a']
-        with module.channel_mutation_lock(self.repo, manifest_path, 'test-owner'):
-            process = subprocess.Popen(
-                argv, cwd=self.repo, text=True, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=env,
-            )
-            time.sleep(0.2)
-            self.assertIsNone(process.poll())
-            fresh, _ = module.load_manifest(self.repo, manifest_path)
-            fresh.setdefault('channels', []).append(channel)
-            module.save_manifest(manifest_path, fresh)
-            self.git('add', '.syncwheel/manifest.json')
-            self.git('commit', '-qm', 'Persist competing channel update')
-        stdout, stderr = process.communicate(timeout=10)
+        child = r'''
+import fcntl
+import os
+import runpy
+import sys
+from pathlib import Path
+
+cli, lock_path = map(Path, sys.argv[1:])
+lock_stat = lock_path.stat()
+real_flock = fcntl.flock
+
+def observe_flock(fd, operation):
+    if operation == fcntl.LOCK_EX and os.path.samestat(os.fstat(fd), lock_stat):
+        try:
+            real_flock(fd, operation | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print('manifest lock is contended', flush=True)
+        else:
+            raise AssertionError('channel writer does not hold the manifest lock')
+    return real_flock(fd, operation)
+
+fcntl.flock = observe_flock
+sys.path.insert(0, str(cli.parent))
+sys.argv = [str(cli), 'stack', 'sync', 'a']
+runpy.run_path(str(cli), run_name='__main__')
+'''
+        process = None
+        try:
+            with module.channel_mutation_lock(self.repo, manifest_path, 'test-owner') as lock_path:
+                process = subprocess.Popen(
+                    [sys.executable, '-c', child, str(CLI), str(lock_path)],
+                    cwd=self.repo, text=True, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, env=env,
+                )
+                # Once the child reaches the lock, its initial index guard has
+                # passed. Stage and commit only during that contended interval.
+                readable, _, _ = select.select([process.stdout], [], [], 15)
+                self.assertTrue(readable, 'stack sync did not reach the manifest lock')
+                self.assertEqual(process.stdout.readline().strip(), 'manifest lock is contended')
+                self.assertIsNone(process.poll())
+                fresh, _ = module.load_manifest(self.repo, manifest_path)
+                fresh.setdefault('channels', []).append(channel)
+                module.save_manifest(manifest_path, fresh)
+                self.git('add', '.syncwheel/manifest.json')
+                self.git('commit', '-qm', 'Persist competing channel update')
+            stdout, stderr = process.communicate(timeout=10)
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.communicate()
         self.assertEqual(process.returncode, 0, (stdout, stderr))
         final, _ = module.load_manifest(self.repo, manifest_path)
-        self.assertIn('raced', module.channel_map(final))
-        self.assertEqual(
-            module.require_stack(final, 'a')['commits'],
-            module.rev_list(self.repo, 'origin/main..pr/a'),
-        )
+        self.assertEqual(module.channel_map(final)['raced'], channel)
+        self.assertEqual(module.require_stack(final, 'a')['commits'], [self.a, next_tip])
 
     def test_manifest_global_lock_makes_stack_demote_see_new_shared_channel(self):
         self.create('migration', stacks=())

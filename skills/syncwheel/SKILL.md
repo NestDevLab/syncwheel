@@ -426,6 +426,11 @@ through plumbing; older Git uses a self-removing temporary worktree.
 `syncwheel spoke ...` is a readable alias for `syncwheel stack ...` when the
 wheel metaphor helps, but the manifest field remains `stacks`.
 
+For uncommitted tracked primary changes, identify their owning stack and use
+`syncwheel stack absorb <stack> <paths> -N -m "message"`. An empty stack refuses
+default amend to preserve its base. `capture-integration` assigns existing
+unowned commits and cannot capture uncommitted working-tree changes.
+
 Product-changing mutations refuse while the shared primary checkout is dirty. Bounded
 metadata operations may preserve unrelated unstaged changes: authority on an untracked
 personal manifest, private PR merge policy set/clear, empty non-coordinated draft close

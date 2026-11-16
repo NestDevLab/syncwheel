@@ -116,6 +116,7 @@ from syncwheel_manifest_store import (
 from syncwheel_stacks import (
     StackLifecycle,
     ordinary_empty_draft_close,
+    require_stack_absorb_amendable,
     stack_closed_payload,
     manifest_scope_options,
     stack_close_command,
@@ -2960,10 +2961,11 @@ def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, pe
 
 
 def resolve_command_manifest_selection(args):
-    pinned = getattr(args, '_stack_sync_selection', None)
+    options = vars(args)
+    pinned = options.get('_stack_sync_selection') or options.get('_stack_absorb_selection')
     if pinned is not None:
         return pinned
-    tracking_selection = getattr(args, '_tracking_selection', None)
+    tracking_selection = options.get('_tracking_selection')
     if tracking_selection is not None:
         _, repo_root, manifest_path, _ = tracking_selection
         return repo_root, manifest_path
@@ -3776,13 +3778,15 @@ def emit_primary_checkout_dirty_warnings(repo_root, manifest, json_mode=False):
     return lines
 
 
-def require_clean_primary_checkout(repo_root, manifest):
+def require_clean_primary_checkout(repo_root, manifest, manifest_path=None, stack_id=None):
     lines = primary_checkout_dirty_warning_lines(repo_root, manifest)
     if not lines:
         return
     raise SyncwheelError(
         lines[0] + format_remedy_suffix(
-            primary_checkout_remedy_commands(manifest, repo_root=repo_root)
+            primary_checkout_remedy_commands(
+                manifest, stack_id=stack_id, repo_root=repo_root, manifest_path=manifest_path,
+            )
         )
     )
 
@@ -4054,10 +4058,10 @@ def backup_branch_command(repo_root, branch, timestamp):
 
 
 def ensure_in_place_target(
-    repo_root, target_branch, manifest, stack_id=None, allowed_paths=None,
+    repo_root, target_branch, manifest, stack_id=None, allowed_paths=None, manifest_path=None,
 ):
     remedies = primary_checkout_remedy_commands(
-        manifest, stack_id=stack_id, repo_root=repo_root,
+        manifest, stack_id=stack_id, repo_root=repo_root, manifest_path=manifest_path,
     )
     current_branch = get_current_branch(repo_root)
     if current_branch != target_branch:
@@ -5093,8 +5097,82 @@ def manifest_remedy_stack_ids(manifest, stack_id=None):
     return list(dict.fromkeys([*ordered, *sorted(stacks)]))
 
 
-def primary_checkout_remedy_commands(manifest, stack_id=None, repo_root=None):
-    """Name capture and queue commands without guessing ownership of primary changes."""
+def primary_checkout_absorb_commands(repo_root, manifest, manifest_path, stack_ids):
+    if repo_root is None or manifest_path is None:
+        return []
+    entries = [
+        entry for entry in local_worktree_status(repo_root) or []
+        if not entry.startswith('?? ') and not primary_checkout_state_entry(entry)
+    ]
+    if not entries or any(
+        entry[:2] in {'DD', 'AU', 'UD', 'UA', 'DU', 'AA', 'UU'} for entry in entries
+    ):
+        return []
+    staged_paths = git(
+        repo_root, 'diff', '--cached', '--name-only', '--no-renames', '-z', '--', env={'GIT_OPTIONAL_LOCKS': '0'},
+    ).stdout.strip('\0').split('\0')
+    staged = any(staged_paths)
+    if staged and (
+        any(path.startswith('.syncwheel/') for path in staged_paths)
+        or any(entry[0] != ' ' and entry[1] != ' ' for entry in entries)
+    ):
+        return []
+    paths = staged_paths if staged else git(
+        repo_root, 'diff', '--name-only', '--no-renames', '-z', '--', env={'GIT_OPTIONAL_LOCKS': '0'},
+    ).stdout.split('\0')
+    paths = [path for path in paths if path and not path.startswith('.syncwheel/')]
+    if not paths:
+        return []
+    # Preserve exact paths even if a protected file name contains Git
+    # pathspec syntax or would otherwise be parsed as a command option.
+    paths = [
+        ':(literal)' + path if any(char in path for char in '*?[\\') or path.startswith(('-', ':'))
+        else path
+        for path in paths
+    ]
+    branch = get_current_branch(repo_root)
+    default_branch = manifest.get('integration', {}).get('branch')
+    stacks = stack_map(manifest)
+    targets = [
+        identifier for identifier in stack_ids
+        if not stacks[identifier].get('adopted_history')
+        and (stacks[identifier].get('integration_branch') or default_branch) == branch
+    ]
+    has_divergent_target = False
+    if targets and not stacks[targets[0]]['commits']:
+        try:
+            _stack_lifecycle(repo_root).require_empty_stack_absorb_base(stacks[targets[0]])
+        except SyncwheelError:
+            targets = []
+            has_divergent_target = True
+    selection = manifest_path_remedy_options(repo_root, manifest_path)
+    commands = []
+    if (not stack_ids or has_divergent_target) and branch == default_branch:
+        if not staged:
+            commands.append(
+                'syncwheel stack create --draft <stack-id> --purpose "Capture primary checkout work" '
+                + shlex.join(selection)
+            )
+        if not staged or stacks:
+            targets = ['<stack-id>']
+    # Show a bounded set of exact examples. A staged absorb must account
+    # for the whole staged product patch to pass its separate index guard.
+    if staged and len(paths) > 5:
+        return commands
+    path_groups = [paths] if staged else [[path] for path in paths[:5]]
+    for identifier in targets:
+        target = identifier if identifier == '<stack-id>' else shlex.quote(identifier)
+        for group in path_groups:
+            rest = [
+                *group, *(['--staged'] if staged else []),
+                '-N', '-m', 'Describe the changes', *selection,
+            ]
+            commands.append(f'syncwheel stack absorb {target} {shlex.join(rest)}')
+    return commands
+
+
+def primary_checkout_remedy_commands(manifest, stack_id=None, repo_root=None, manifest_path=None):
+    """Offer worktree or patch remedies without treating a patch as a commit."""
     if manifest.get('repository_mode') == 'journal':
         return ['syncwheel journal snapshot --apply', 'syncwheel journal publish --apply']
     operation = interrupted_git_operation(repo_root) if repo_root is not None else None
@@ -5117,19 +5195,18 @@ def primary_checkout_remedy_commands(manifest, stack_id=None, repo_root=None):
             )
         commands.append('syncwheel int rebuild --reason "<why this rebuild>"')
         return commands
-    stack_ids = manifest_remedy_stack_ids(manifest, stack_id)
-    if not stack_ids:
-        return [
-            'syncwheel stack create --draft <stack-id> --purpose "Capture primary checkout work"',
-            'syncwheel stack capture-integration <stack-id> HEAD',
-        ]
-    commands = []
-    for identifier in stack_ids:
-        quoted_stack = shlex.quote(identifier)
-        commands.extend([
-            f'syncwheel stack capture-integration {quoted_stack} HEAD',
-            f'syncwheel worktree open <lane> --into {quoted_stack}',
-        ])
+    stack_ids = manifest_remedy_stack_ids(manifest, stack_id) if stack_id else []
+    commands = primary_checkout_absorb_commands(repo_root, manifest, manifest_path, stack_ids)
+    selection = (
+        ' ' + shlex.join(manifest_path_remedy_options(repo_root, manifest_path))
+        if repo_root is not None and manifest_path is not None else ''
+    )
+    commands.extend(
+        f'syncwheel worktree open <lane> --into {shlex.quote(identifier)}{selection}'
+        for identifier in stack_ids
+    )
+    if not commands:
+        commands.append(f'syncwheel worktree open <lane>{selection}')
     return commands
 
 
@@ -11523,7 +11600,7 @@ def command_coordination_provenance_supersede(args):
         raise SyncwheelError('--path differs from reviewed plan')
     if args.reason and args.reason.strip() != reviewed.get('reason'):
         raise SyncwheelError('--reason differs from reviewed plan')
-    ensure_in_place_target(repo_root, manifest['integration']['branch'], manifest)
+    ensure_in_place_target(repo_root, manifest['integration']['branch'], manifest, manifest_path=manifest_path)
     with coordination_publication_lock(repo_root):
         with derived_provenance_store_lock(repo_root):
             current = coordination_provenance_supersede_plan(
@@ -15540,13 +15617,14 @@ def command_stack_demote(args):
     return _stack_lifecycle(repo_root).command_stack_demote(args, manifest, manifest_path)
 
 
-def stack_sync_remedy_selection(repo_root, manifest_path):
+def manifest_path_remedy_options(repo_root, manifest_path):
+    manifest_path = Path(os.path.abspath(manifest_path))
     selection = ['--repo', str(repo_root)]
     if _manifest_storage.is_personal_manifest_path(repo_root, manifest_path):
-        selection.extend(('--personal', manifest_path.name.removesuffix('.local.json')))
-    else:
-        selection.extend(('--manifest', str(manifest_path)))
-    return shlex.join(selection)
+        personal = manifest_path.name.removesuffix('.local.json')
+        if personal_manifest_path(repo_root, personal) == manifest_path:
+            return [*selection, '--personal', personal]
+    return [*selection, '--manifest', str(manifest_path)]
 
 
 def command_stack_sync(args):
@@ -15555,13 +15633,26 @@ def command_stack_sync(args):
     if manifest is None:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
     return _stack_lifecycle(repo_root).command_stack_sync(
-        args, manifest, manifest_path, stack_sync_remedy_selection(repo_root, manifest_path),
+        args, manifest, manifest_path, shlex.join(manifest_path_remedy_options(repo_root, manifest_path)),
     )
 
 
+def stack_absorb_preflight(args):
+    if args.func != command_stack_absorb:
+        return
+    repo_root, path = resolve_command_manifest_selection(args)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, path)
+    if manifest is not None and manifest.get('repository_mode') != 'journal':
+        stack = require_stack(manifest, args.stack)
+        require_stack_absorb_amendable(stack, args)
+        _stack_lifecycle(repo_root).require_empty_stack_absorb_base(stack)
+
+
 def command_stack_absorb(args):
-    repo_root = resolve_repo_root(args.repo)
-    manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
+    if manifest is None:
+        raise SyncwheelError(f'manifest not found: {manifest_path}')
     return _stack_lifecycle(repo_root).command_stack_absorb(args, manifest, manifest_path)
 
 
@@ -15916,7 +16007,7 @@ def reconcile_worktree_path(repo_root, branch, worktree_root):
     return configured_worktree_path(repo_root, branch, worktree_root)
 
 
-def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root):
+def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root, manifest_path=None):
     """Reject dirty local targets before reconciliation changes any managed state."""
     stack_actions = {'rebuild_stack', 'align_stack_to_remote'}
     integration_actions = {'rebuild_integration', 'align_integration_to_remote'}
@@ -15943,7 +16034,9 @@ def preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_
                     ensure_clean_worktree(
                         path,
                         allowed_path_prefixes=['.syncwheel/'],
-                        remedy_commands=primary_checkout_remedy_commands(manifest),
+                        remedy_commands=primary_checkout_remedy_commands(
+                            manifest, repo_root=repo_root, manifest_path=manifest_path,
+                        ),
                     )
                     checked.add(key)
             else:
@@ -16444,7 +16537,7 @@ def command_reconcile(args):
         raise SyncwheelError('reconcile requires manual review before --apply can continue')
 
     preflight_empty_desk_stack_rebuilds(repo_root, manifest, actions, args, worktree_root)
-    preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root)
+    preflight_reconcile_mutation_targets(repo_root, manifest, actions, worktree_root, manifest_path)
     _manifest_storage.preflight_control_manifest_digest(repo_root, manifest_path, preflight_manifest)
     _manifest_storage.require_manifest_transaction_current(manifest_path)
     if _manifest_storage.is_external_manifest_path(repo_root, manifest_path):
@@ -16602,7 +16695,9 @@ def command_reconcile(args):
                 ensure_clean_worktree(
                     repo_root,
                     allowed_path_prefixes=['.syncwheel/'],
-                    remedy_commands=primary_checkout_remedy_commands(manifest),
+                    remedy_commands=primary_checkout_remedy_commands(
+                        manifest, repo_root=repo_root, manifest_path=manifest_path,
+                    ),
                     allowed_paths=reset_destination_allowed_paths,
                 )
                 reset_destination_allowed_prefixes = ['.syncwheel/']
@@ -16726,7 +16821,9 @@ def command_reconcile(args):
                 ensure_clean_worktree(
                     repo_root,
                     allowed_path_prefixes=['.syncwheel/'],
-                    remedy_commands=primary_checkout_remedy_commands(manifest),
+                    remedy_commands=primary_checkout_remedy_commands(
+                        manifest, repo_root=repo_root, manifest_path=manifest_path,
+                    ),
                 )
                 worktree = None
             else:
@@ -17007,7 +17104,7 @@ def command_int_align_remote(args):
     integration = manifest['integration']
     if args.fetch:
         git(repo_root, 'fetch', '--all', '--prune', '--quiet', check=False)
-    ensure_in_place_target(repo_root, integration['branch'], manifest)
+    ensure_in_place_target(repo_root, integration['branch'], manifest, manifest_path=manifest_path)
     report = integration_sync_report(repo_root, manifest, args.remote)
     if not report['remote_exists']:
         raise SyncwheelError(f"remote integration ref does not exist: {report['remote_ref']}")
@@ -17434,7 +17531,7 @@ def command_int_rebuild(args):
     if not args.dry_run and mode == 'in-place':
         ensure_in_place_target(
             repo_root, manifest['integration']['branch'], manifest,
-            allowed_paths=source_allowance,
+            allowed_paths=source_allowance, manifest_path=manifest_path,
         )
     if not args.dry_run and mode in ('ephemeral', 'plumbing'):
         ensure_non_in_place_target_clean(
@@ -19154,10 +19251,10 @@ def command_hooks_worktree_guard(args):
     branch = get_current_branch(primary_root)
     manifest_path = resolve_manifest_path(primary_root, str(primary_root), args.manifest, args.personal)
     manifest, _ = _manifest_storage.load_manifest(primary_root, manifest_path)
-    remedies = primary_checkout_remedy_commands(manifest) if manifest else [
-        'syncwheel worktree open <lane> --into <stack>',
-        'syncwheel stack capture-integration <stack> HEAD',
-    ]
+    remedies = (
+        primary_checkout_remedy_commands(manifest, repo_root=primary_root, manifest_path=manifest_path)
+        if manifest else ['syncwheel worktree open <lane> --into <stack>']
+    )
     commit_blocked = (
         f'primary checkout commit blocked: {primary_root} is the shared integration projection. '
         'Only a Syncwheel-authorized control commit may be created there'
@@ -19580,12 +19677,12 @@ def refuse_stack_sync_control_recovery(repo_root, manifest_path):
         if pending:
             intent = pending[0]['payload']
             if explicit_control_recovery_intent(intent):
-                selection = stack_sync_remedy_selection(root, path)
+                selection = shlex.join(manifest_path_remedy_options(root, path))
                 raise SyncwheelError(
                     f'{_manifest_storage.explicit_control_recovery_refusal()}. '
                     f'Use syncwheel manifest recover-control --from-backup BACKUP {selection}'
                 )
-            selection = stack_sync_remedy_selection(root, path)
+            selection = shlex.join(manifest_path_remedy_options(root, path))
             raise SyncwheelError(
                 'control manifest recovery is pending; from a clean primary checkout run '
                 f'syncwheel reconcile --apply {selection} before stack sync'
@@ -19764,7 +19861,14 @@ def primary_checkout_preflight(args):
             }:
                 raise SyncwheelError('primary checkout control manifest is dirty')
             return
-        require_clean_primary_checkout(primary_root, manifest)
+        selected, _ = _manifest_storage.load_manifest(repo_root, selected_path)
+        stack_id = getattr(args, 'stack', None)
+        if isinstance(stack_id, list):
+            stack_id = stack_id[0] if len(stack_id) == 1 else None
+        require_clean_primary_checkout(
+            primary_root, selected if selected else manifest,
+            selected_path if selected else manifest_path, stack_id=stack_id,
+        )
 
 
 def default_hook_convergence_requested(args):
@@ -20095,7 +20199,7 @@ def coordination_publication_lock_for_command(args):
     options = {}
     if args.func == command_stack_sync:
         refuse_stack_sync_control_recovery(repo_root, manifest_path)
-        selection = stack_sync_remedy_selection(repo_root, manifest_path)
+        selection = shlex.join(manifest_path_remedy_options(repo_root, manifest_path))
         _stack_lifecycle(repo_root).refuse_pending_stack_sync_promotion(manifest_path, selection)
         options['stale_lock_remedy'] = (
             f'from a clean primary checkout run syncwheel reconcile --apply {selection}'
@@ -20178,6 +20282,7 @@ def stack_adoption_preflight(args):
 
 
 def execute_parsed_command(args):
+    stack_absorb_preflight(args)
     recover_control_manifest_before_command(args)
     if args.command in JOURNAL_FORBIDDEN_COMMANDS and hasattr(args, 'repo'):
         repo_root, manifest_path = resolve_command_manifest_selection(args)
@@ -20298,6 +20403,9 @@ def main():
                 args.repo = str(args._tracking_selection[1])
         if args.func == command_stack_sync:
             args._stack_sync_selection = resolve_stack_sync_selection(args)
+        if args.func == command_stack_absorb:
+            args._stack_absorb_selection = resolve_command_manifest_selection(args)
+            stack_absorb_preflight(args)
         if not guard_callback and args.func != command_stack_sync:
             SYNCWHEEL_OWNS_REF_MOVES = True
             if hasattr(args, 'repo'):
