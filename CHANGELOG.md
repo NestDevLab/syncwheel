@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.47.8 - 2026-11-16
+
+- Close the ways around the primary guard through `int git`, which authorizes integration ref moves for its own Git process. It now refuses `update-ref`, `symbolic-ref` writes, Git aliases (configured, or defined with `-c alias.*`), `-c`/`--config-env` overrides of `core.hooksPath`, `core.worktree`, `core.bare` and includes, and `-C`, `--git-dir`, `--work-tree`, `--namespace`, `--exec-path` and `--super-prefix`, before anything runs. A command that leaves the integration worktree on another branch (outside a paused rebase) exits non-zero and names the branch to switch back to.
+- Classify Git passthroughs by their real command: global options before it, such as `-c name=value`, are no longer mistaken for the command name. `worktree list`, `stash list` and `stash show`, `reflog show`, `symbolic-ref` reads, `merge-base`, `ls-tree`, `diff-tree`, `range-diff` and a few more read-only commands now count as reads, so `int git -- worktree list --porcelain` no longer stops on a dirty primary.
+
 ## 0.47.5 - 2026-11-16
 
 - Speed up whole-repository commands by remembering, for the length of one command, the Git answers that cannot change while it runs: which full commit ids exist, ancestry between two fixed commits, a commit's parents and changed files, and the Git common directory. `validate`, `status` and `check` also learn all declared commits with one `git cat-file --batch-check` instead of one `rev-parse` each. Refs are never remembered. On a 20-stack fixture `int rebuild` drops from 971 to 438 Git processes (3.6 s to 1.7 s) and `int rebuild --dry-run` from 792 to 339; on a busy production repository the patch-ID cache alone had issued 1,771 `rev-parse --git-common-dir` calls per `status`.

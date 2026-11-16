@@ -17212,6 +17212,10 @@ def command_int_git(args):
     git_args = passthrough_args(args.git_args)
     if not git_args:
         raise SyncwheelError('int git requires git arguments after --')
+    refusal = int_git_passthrough_refusal(worktree, git_args, branch)
+    if refusal:
+        raise SyncwheelError(refusal)
+    started_on_branch = get_current_branch(worktree) == branch
     if git_passthrough_mutation_requested(git_args):
         # One passthrough can land many commits (cherry-pick, rebase, am), so the
         # authorization lasts for this process. Output is captured: no editor can open.
@@ -17226,6 +17230,16 @@ def command_int_git(args):
         print(result.stdout, end='')
     if result.stderr:
         print(result.stderr, end='', file=sys.stderr)
+    current = get_current_branch(worktree)
+    # A paused rebase detaches HEAD on purpose; its --continue or --abort returns.
+    if started_on_branch and current != branch and interrupted_git_operation(worktree) is None:
+        print(
+            f'error: int git left {worktree} on {current} instead of '
+            f'the integration branch {branch}; switch it back with '
+            f'`syncwheel int git -- switch {branch}`',
+            file=sys.stderr,
+        )
+        return result.returncode or 2
     return result.returncode
 
 
@@ -18613,15 +18627,119 @@ def primary_guard_remedy_requested(args):
     return command_behavior(args)['primaryGuardRemedy']
 
 
+# Git's own options before the command name that take their value as the next
+# argument. Anything else that starts with a dash is a flag or carries `=value`.
+GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset({
+    '-c', '-C', '--git-dir', '--work-tree', '--namespace', '--config-env',
+    '--super-prefix', '--attr-source',
+})
+# Options that point Git at another repository, worktree or program directory.
+GIT_REDIRECTING_GLOBAL_OPTIONS = frozenset({
+    '-C', '--git-dir', '--work-tree', '--namespace', '--exec-path', '--super-prefix',
+})
+# Configuration a passthrough may not override, since it would rename commands
+# or move the hooks and worktree the guard relies on.
+GIT_GUARDED_CONFIG_PREFIXES = (
+    'alias.', 'core.hookspath', 'core.worktree', 'core.bare', 'include.', 'includeif.',
+)
+GIT_READ_ONLY_COMMANDS = frozenset({
+    'blame', 'cat-file', 'check-attr', 'check-ignore', 'cherry', 'count-objects',
+    'describe', 'diff', 'diff-files', 'diff-index', 'diff-tree', 'for-each-ref',
+    'fsck', 'grep', 'help', 'log', 'ls-files', 'ls-remote', 'ls-tree', 'merge-base',
+    'name-rev', 'range-diff', 'rev-list', 'rev-parse', 'shortlog', 'show',
+    'show-ref', 'status', 'var', 'version', 'whatchanged',
+})
+GIT_READ_ONLY_SUBCOMMANDS = {
+    'worktree': frozenset({'list'}),
+    'stash': frozenset({'list', 'show'}),
+    'reflog': frozenset({'show'}),
+}
+
+
+def split_git_passthrough(git_args):
+    """Split passthrough arguments into Git's global options, command and the rest."""
+    options = []
+    index = 0
+    while index < len(git_args):
+        part = git_args[index]
+        if not part.startswith('-'):
+            break
+        name, has_value, value = part.partition('=')
+        if name in GIT_GLOBAL_OPTIONS_WITH_VALUE and not has_value:
+            value = git_args[index + 1] if index + 1 < len(git_args) else ''
+            index += 1
+        options.append((name, value))
+        index += 1
+    command = git_args[index] if index < len(git_args) else None
+    return options, command, list(git_args[index + 1:])
+
+
+def git_positionals(arguments):
+    return [part for part in arguments if not part.startswith('-')]
+
+
+def symbolic_ref_reads_only(rest):
+    if any(part in {'-d', '--delete', '-m'} for part in rest):
+        return False
+    return len(git_positionals(rest)) <= 1
+
+
 def git_passthrough_mutation_requested(git_args):
     """Fail closed for Git passthroughs except its unambiguous read-only verbs."""
-    read_only = {
-        'blame', 'cat-file', 'describe', 'diff', 'for-each-ref', 'fsck', 'grep',
-        'log', 'ls-files', 'ls-remote', 'name-rev', 'rev-list', 'rev-parse',
-        'shortlog', 'show', 'show-ref', 'status', 'version',
-    }
-    command = next((value for value in git_args if not value.startswith('-')), None)
-    return command not in read_only
+    options, command, rest = split_git_passthrough(git_args)
+    if any(name in GIT_REDIRECTING_GLOBAL_OPTIONS or name in {'-c', '--config-env'}
+           for name, _ in options):
+        return True
+    if command in GIT_READ_ONLY_COMMANDS:
+        return False
+    if command == 'symbolic-ref':
+        return not symbolic_ref_reads_only(rest)
+    if command in GIT_READ_ONLY_SUBCOMMANDS:
+        positionals = git_positionals(rest)
+        return not positionals or positionals[0] not in GIT_READ_ONLY_SUBCOMMANDS[command]
+    return True
+
+
+def int_git_passthrough_refusal(worktree, git_args, branch):
+    """Why `int git` must not run these arguments, or None.
+
+    `int git` authorizes moves of the integration ref for one process, so it
+    only runs Git commands that act on the checked-out integration branch in
+    its own worktree. Direct ref writes, HEAD rewrites, aliases and options that
+    point Git elsewhere would turn that authorization into a way around the
+    guard.
+    """
+    options, command, rest = split_git_passthrough(git_args)
+    prefix = 'int git runs Git on the integration branch in its own worktree'
+    for name, value in options:
+        if name in GIT_REDIRECTING_GLOBAL_OPTIONS:
+            return f'{prefix}; drop {name}, which points Git at another repository or directory'
+        if name in {'-c', '--config-env'}:
+            key = value.split('=', 1)[0].lower()
+            if key.startswith(GIT_GUARDED_CONFIG_PREFIXES):
+                return f'{prefix}; it does not accept `{name} {value}`, which overrides {key}'
+    if command is None:
+        return None
+    if command == 'update-ref':
+        return (
+            f'{prefix}; update-ref moves refs directly. Rebuild the integration branch '
+            'with `syncwheel int rebuild`, or move it with a Git command such as reset '
+            'or cherry-pick'
+        )
+    if command == 'symbolic-ref' and not symbolic_ref_reads_only(rest):
+        return (
+            f'{prefix}; symbolic-ref would repoint HEAD away from {branch} without a checkout. '
+            'Open a lane with `syncwheel worktree open` to work on another branch'
+        )
+    alias = run(
+        ['git', 'config', '--get', f'alias.{command}'], cwd=worktree, check=False,
+    )
+    if alias.returncode == 0:
+        return (
+            f'{prefix}; `{command}` is a Git alias for `{alias.stdout.strip()}`, which it '
+            'does not expand. Spell the Git command out'
+        )
+    return None
 
 
 def interrupted_git_operation(repo_root):
