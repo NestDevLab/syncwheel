@@ -294,6 +294,9 @@ lives in [`skills/syncwheel/SKILL.md`](../skills/syncwheel/SKILL.md).
 Selecting a personal manifest limits `repo tracking set` to that manifest and its
 private ledger. It does not migrate shared ignore files, hooks or the Git index.
 The selected private metadata must already be ignored and untracked.
+The command prepares the manifest and ledger update before publication and restores
+its own writes if publication raises a handled error. This rollback does not
+provide automatic recovery from process termination or power loss.
 
 ## Repository authority
 

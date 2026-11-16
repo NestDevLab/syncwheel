@@ -468,6 +468,106 @@ def _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path=None):
         temporary.unlink(missing_ok=True)
 
 
+def private_tracking_file_image(path):
+    """Observe data and its file identity without following redirects."""
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        return None
+    try:
+        observed = os.fstat(descriptor)
+        if not stat.S_ISREG(observed.st_mode) or observed.st_nlink != 1:
+            raise SyncwheelError(f'private tracking requires a regular, unlinked file: {path}')
+        with os.fdopen(descriptor, 'rb', closefd=False) as stream:
+            return (observed.st_dev, observed.st_ino, stat.S_IMODE(observed.st_mode), stream.read())
+    finally:
+        os.close(descriptor)
+
+
+def remove_private_tracking_temporaries(temporary_paths, *, applied):
+    for path in reversed(temporary_paths):
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            outcome = 'applied' if applied else 'interrupted'
+            print(
+                f'warning: personal tracking {outcome}; could not remove temporary file {path}: {error}',
+                file=sys.stderr,
+            )
+
+
+@contextlib.contextmanager
+def private_tracking_temporaries():
+    temporary_paths = []
+    try:
+        yield temporary_paths
+    except BaseException:
+        remove_private_tracking_temporaries(temporary_paths, applied=False)
+        raise
+    else:
+        remove_private_tracking_temporaries(temporary_paths, applied=True)
+
+
+def stage_private_tracking_file(temporary_paths, path, mode, payload, *, append_at=None):
+    ensure_directory_durable(path.parent)
+    descriptor, name = tempfile.mkstemp(prefix='.tracking-', suffix='.tmp', dir=path.parent)
+    temporary = Path(name)
+    temporary_paths.append(temporary)
+    with os.fdopen(descriptor, 'wb') as stream:
+        os.fchmod(stream.fileno(), mode)
+        if append_at is None:
+            stream.write(payload)
+        else:
+            stream.write(payload[:append_at])
+            stream.flush()
+            ledger_io_checkpoint('event_payload_half_written')
+            stream.write(payload[append_at:])
+        stream.flush()
+        _LEDGER_FSYNC(stream.fileno())
+    return temporary, private_tracking_file_image(temporary)
+
+
+def publish_private_tracking_files(writes, temporary_paths):
+    """Publish staged bytes and undo only the files this transaction still owns."""
+    installed = []
+    try:
+        for path, before, staged, after, rollback, phase in writes:
+            if private_tracking_file_image(path) != before:
+                raise SyncwheelError(f'private tracking metadata changed before write: {path}')
+            os.replace(staged, path)
+            installed.append((path, after, rollback))
+            if phase != 'event_fsynced':
+                ledger_io_checkpoint(phase)
+            ledger_fsync_directory_path(path.parent)
+            if phase == 'event_fsynced':
+                ledger_io_checkpoint(phase)
+    except BaseException as failure:
+        rollback_errors = []
+        for path, after, rollback in reversed(installed):
+            restored = False
+            try:
+                if private_tracking_file_image(path) != after:
+                    raise SyncwheelError('file changed after write')
+                if rollback is None:
+                    path.unlink()
+                else:
+                    os.replace(rollback, path)
+                restored = True
+                ledger_fsync_directory_path(path.parent)
+            except (OSError, SyncwheelError) as error:
+                detail = f'{path}: {error}'
+                if rollback is not None and not restored:
+                    temporary_paths.remove(rollback)
+                    detail += f'; original image retained at {rollback}'
+                rollback_errors.append(detail)
+        if rollback_errors:
+            raise SyncwheelError(
+                f'personal tracking write failed ({failure}); rollback incomplete: '
+                + ', '.join(rollback_errors)
+            ) from failure
+        raise
+
+
 def write_ledger_checkpoint(repo_root, state, manifest_path=None):
     with ledger_write_lock(repo_root, manifest_path):
         _recover_ledger_tail_unlocked(repo_root, manifest_path)
@@ -1049,6 +1149,60 @@ class ManifestStore:
             _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path)
             return event
 
+
+    def save_personal_tracking(self, repo_root, manifest_path, manifest, context):
+        """Save a private tracking declaration and its ledger event as one update."""
+        transaction = active_manifest_write_transaction(manifest_path)
+        if transaction is None or not transaction.get('preserveGitignore'):
+            raise SyncwheelError('personal tracking requires a private manifest transaction')
+        applied = False
+        try:
+            with ledger_write_lock(repo_root, manifest_path), private_tracking_temporaries() as temporary_paths:
+                require_manifest_transaction_current(manifest_path)
+                events = load_ledger_events(repo_root, manifest_path)
+                current = reduce_ledger_state(events)
+                event = {
+                    'schema_version': LEDGER_SCHEMA_VERSION,
+                    'seq': current['last_seq'] + 1,
+                    'ts': iso_utc_now(),
+                    'type': 'manifest_saved',
+                    'payload': manifest_event_payload(manifest_path, manifest, 'repo_tracking_set', context),
+                }
+                state = reduce_ledger_state([*events, event])
+                segment = next_ledger_segment_path(repo_root, manifest_path, create_directory=False)
+                checkpoint = ledger_checkpoint_path(repo_root, manifest_path)
+                self.require_ignored_ledger_paths(repo_root, [manifest_path, segment, checkpoint])
+                before_manifest = private_tracking_file_image(manifest_path)
+                before_segment = private_tracking_file_image(segment)
+                before_checkpoint = private_tracking_file_image(checkpoint)
+                if before_manifest is None:
+                    raise SyncwheelError('personal manifest disappeared before tracking update')
+                existing_segment = before_segment[3] if before_segment else b''
+                record = (json.dumps(event, sort_keys=True) + '\n').encode('utf-8')
+                plan = (
+                    (manifest_path, before_manifest, (json.dumps(manifest, indent=2) + '\n').encode('utf-8'),
+                     None, 'personal_tracking_manifest_replaced'),
+                    (segment, before_segment, existing_segment + record,
+                     len(existing_segment) + max(1, len(record) // 2), 'event_fsynced'),
+                    (checkpoint, before_checkpoint, (json.dumps(state, indent=2, sort_keys=True) + '\n').encode('utf-8'),
+                     None, 'checkpoint_replaced'),
+                )
+                after_digest = manifest_digest(manifest)
+                writes = []
+                for path, before, payload, append_at, phase in plan:
+                    mode = before[2] if before else 0o600
+                    staged, after = stage_private_tracking_file(temporary_paths, path, mode, payload, append_at=append_at)
+                    rollback = stage_private_tracking_file(temporary_paths, path, mode, before[3])[0] if before else None
+                    writes.append((path, before, staged, after, rollback, phase))
+                require_manifest_transaction_current(manifest_path)
+                publish_private_tracking_files(writes, temporary_paths)
+                applied = True
+                transaction['expectedDigest'] = after_digest
+                transaction['manifestWritten'] = True
+        except OSError as error:
+            if not applied:
+                raise SyncwheelError(f'personal tracking write failed: {error}') from error
+            print(f'warning: personal tracking applied; finalization failed: {error}', file=sys.stderr)
 
     def save_manifest_with_ledger(self, repo_root, manifest_path, manifest, reason, context=None, event_type='manifest_saved'):
         if reason == 'stack_create' and context and context.get('operation_token'):

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.16 - 2026-11-16
+
+- Prepare personal tracking updates before writing and restore their manifest and private ledger when a handled write fails. Keep the selected profile, shared ignore files, Git index and refs unchanged.
+
 ## 0.47.15 - 2026-11-16
 
 - Keep personal-manifest tracking updates within the selected manifest and its private ledger. Neither tracking value rewrites shared ignore files, changes hooks, stages files or removes the shared manifest README from the index. Preserve unrelated dirty primary files and report actions for the selected manifest.

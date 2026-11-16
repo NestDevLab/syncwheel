@@ -18743,10 +18743,11 @@ def update_repo_tracking(args, repo_root, manifest_path, *, personal):
         report['effective_worktree_root'] = str(resolve_worktree_root_path(repo_root, worktree_root))
         report['warnings'].extend(warnings)
         if args.apply:
-            save_manifest_with_ledger(
-                repo_root, manifest_path, manifest, 'repo_tracking_set',
+            _manifest_store().save_personal_tracking(
+                repo_root, manifest_path, manifest,
                 {'syncwheel_tracking': tracking, 'syncwheel_worktree_root': worktree_root},
             )
+            report['actions'].clear()
         else:
             report['actions'].append(f'apply syncwheel_tracking={tracking}')
         if personal and args.json:

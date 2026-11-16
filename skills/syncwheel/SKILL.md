@@ -703,6 +703,9 @@ With a personal manifest selected, either tracking value changes only that
 manifest and its private ledger. The command requires already ignored, untracked
 private metadata and preserves shared ignore files, hooks, the manifest README
 and Git indexes. Do not treat a personal policy change as shared migration approval.
+The command prepares the manifest and ledger update before publication and restores
+its own writes if publication raises a handled error. This rollback does not
+provide automatic recovery from process termination or power loss.
 
 ## Handoff checklist
 
