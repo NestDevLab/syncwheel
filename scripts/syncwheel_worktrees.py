@@ -590,8 +590,9 @@ class GovernedWorktrees:
             )
         return lines
 
-    def emit_governed_worktree_warnings(self, manifest, json_mode=False, manifest_path=None):
-        lanes = self.governed_worktree_diagnostics(manifest, manifest_path)['lanes']
+    def emit_governed_worktree_warnings(self, manifest, json_mode=False, manifest_path=None, *, lanes=None):
+        if lanes is None:
+            lanes = self.governed_worktree_diagnostics(manifest, manifest_path)['lanes']
         lines = self.governed_worktree_warning_lines(manifest, manifest_path, lanes=lanes)
         if not lines:
             return lines

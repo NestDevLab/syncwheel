@@ -6635,9 +6635,9 @@ def governed_worktree_warning_lines(repo_root, manifest, manifest_path=None):
     )
 
 
-def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False, manifest_path=None):
+def emit_governed_worktree_warnings(repo_root, manifest, json_mode=False, manifest_path=None, *, lanes=None):
     return _governed_worktrees(repo_root).emit_governed_worktree_warnings(
-        manifest, json_mode, manifest_path,
+        manifest, json_mode, manifest_path, lanes=lanes,
     )
 
 
@@ -12535,6 +12535,10 @@ def command_status(args):
         output['validation'] = validation
         output['plan'] = build_plan(repo_root, manifest, validation)
         output['governed_worktrees'] = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
+        if _READONLY_DIAGNOSTICS.get():
+            emit_governed_worktree_warnings(
+                repo_root, manifest, args.json, manifest_path, lanes=output['governed_worktrees']['lanes'],
+            )
         output['authority'], output['authority_provenance'] = resolve_repository_authority(
             repo_root, manifest, manifest_path,
         )
@@ -12671,6 +12675,8 @@ def command_check(args):
     plan = build_plan(repo_root, manifest, validation)
     diagnostics = [] if journal else integration_commit_diagnostics(repo_root, manifest, validation)
     governed = governed_worktree_diagnostics(repo_root, manifest, manifest_path)
+    if _READONLY_DIAGNOSTICS.get():
+        emit_governed_worktree_warnings(repo_root, manifest, args.json, manifest_path, lanes=governed['lanes'])
     readiness_blockers = []
     if validation['errors']:
         readiness_blockers.append('validation_errors')

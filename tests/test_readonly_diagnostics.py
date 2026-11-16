@@ -96,6 +96,7 @@ class ReadOnlyDiagnosticsTest(unittest.TestCase):
 
     def test_journal_status_and_check_preserve_private_and_git_state(self):
         self.setup_repository(test_journal.JournalModeTest)
+        self.env['PATH'] = os.pathsep.join((str(self.fixture.stable_cli_dir), self.env['PATH']))
         (self.control / 'profile.local.json').unlink()
         self.cli('hooks', 'install', '--apply')
         with (self.git_dir / 'info' / 'exclude').open('a') as exclude:
@@ -117,16 +118,24 @@ class ReadOnlyDiagnosticsTest(unittest.TestCase):
     def test_delivery_worktree_list_and_validator_preserve_private_and_git_state(self):
         self.setup_repository(test_syncwheel.SyncwheelFixtureTest)
         lane = json.loads(self.cli('worktree', 'open', 'diagnostic-lane', '--json').stdout)['lane']
+        registry, _ = self.module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['lease_expires_at'] = '2000-01-01T00:00:00+00:00'
+        self.module.save_governed_worktree_registry(self.repo, registry)
         self.seed_private_state()
         before = self.snapshot()
 
-        lanes = json.loads(self.cli('worktree', 'list', '--json').stdout)
+        listed = self.cli('worktree', 'list', '--problems', '--json')
+        lanes = json.loads(listed.stdout)
         self.assertEqual([row['id'] for row in lanes['lanes']], [lane['id']])
+        self.assertEqual(lanes['counts'], {'expired': 1})
+        self.assertNotIn('WARNING:', listed.stderr)
         self.assert_preserved(before)
 
         for args in [('status', '--json'), ('check', '--no-fetch', '--json')]:
             with self.subTest(command=args[0]):
-                validation = json.loads(self.cli(*args).stdout)['validation']
+                result = self.cli(*args)
+                validation = json.loads(result.stdout)['validation']
+                self.assertIn('WARNING: governed worktree diagnostic-lane: expired', result.stderr)
                 self.assertIn('integration', validation['details'])
                 self.assertEqual([stack['id'] for stack in validation['details']['stacks']],
                                  ['feature-a', 'feature-b'])
