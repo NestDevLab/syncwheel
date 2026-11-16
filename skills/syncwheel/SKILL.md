@@ -694,9 +694,15 @@ Benefits:
 integration tree. Either way, no Syncwheel push carries the manifest to a stack,
 pull-request or delivery branch.
 
-Use `syncwheel repo tracking set ... --apply` to migrate between modes. The CLI
+With the shared manifest selected, use `syncwheel repo tracking set ... --apply`
+to migrate between modes. The CLI
 edits only Syncwheel-managed ignore blocks; if manual `.gitignore` entries would
 hide `.syncwheel/manifest.json`, stop and ask for a repository decision.
+
+With a personal manifest selected, either tracking value changes only that
+manifest and its private ledger. The command requires already ignored, untracked
+private metadata and preserves shared ignore files, hooks, the manifest README
+and Git indexes. Do not treat a personal policy change as shared migration approval.
 
 ## Handoff checklist
 

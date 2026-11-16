@@ -291,6 +291,10 @@ ask for the intended mode and persist it with
 full policy and migration behavior. An installable agent skill that encodes this
 lives in [`skills/syncwheel/SKILL.md`](../skills/syncwheel/SKILL.md).
 
+Selecting a personal manifest limits `repo tracking set` to that manifest and its
+private ledger. It does not migrate shared ignore files, hooks or the Git index.
+The selected private metadata must already be ignored and untracked.
+
 ## Repository authority
 
 The manifest can also say how much of the delivery pipeline you may run without

@@ -2959,6 +2959,17 @@ def resolve_manifest_path(repo_root, repo_value=None, manifest_override=None, pe
     return repo_root / '.syncwheel' / 'manifest.json'
 
 
+def resolve_command_manifest_selection(args):
+    tracking_selection = getattr(args, '_tracking_selection', None)
+    if tracking_selection is not None:
+        _, repo_root, manifest_path, _ = tracking_selection
+        return repo_root, manifest_path
+    repo_root = resolve_repo_root(args.repo)
+    return repo_root, resolve_manifest_path(
+        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
+    )
+
+
 def branch_exists(repo_root, branch):
     return git(repo_root, 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}', check=False).returncode == 0
 
@@ -18094,7 +18105,67 @@ def managed_block_exists(path, marker):
     return any(line.strip() == marker for line in read_text_if_exists(path).splitlines())
 
 
+def tracking_manifest_scope(repo_root, manifest_path):
+    """Classify the selected path before following any metadata symlinks."""
+    checkout = Path(repo_root).resolve()
+    shared_path = primary_authority_manifest_path(checkout)
+    primary = shared_path.parent.parent
+    selected = Path(os.path.abspath(manifest_path))
+    if selected == shared_path:
+        return 'shared', primary, primary
+    for owner in dict.fromkeys((checkout, primary)):
+        if (
+            selected.parent == owner / '.syncwheel' / 'manifests'
+            and selected.name.endswith('.local.json')
+        ):
+            return 'personal', owner, primary
+    return 'alternate', checkout, primary
+
+
+def require_private_tracking_path(owner, path, *, directory=False):
+    """Refuse redirects or special files anywhere in a private metadata path."""
+    relative = path.relative_to(owner)
+    candidate = owner
+    for part in relative.parts:
+        candidate /= part
+        try:
+            observed = candidate.lstat()
+        except FileNotFoundError:
+            return
+        mode = observed.st_mode
+        if stat.S_ISLNK(mode):
+            raise SyncwheelError(f'private tracking metadata cannot be a symbolic link: {candidate}')
+        if directory or candidate != path:
+            if not stat.S_ISDIR(mode):
+                raise SyncwheelError(f'private tracking metadata directory is not a directory: {candidate}')
+        elif not stat.S_ISREG(mode) or observed.st_nlink > 1:
+            raise SyncwheelError(f'private tracking metadata must be a regular, unlinked file: {candidate}')
+
+
+def tracking_set_selection(args):
+    repo_value = args.repo or os.environ.get(ENV_REPO)
+    repo_root = resolve_repo_root(repo_value)
+    manifest_path = resolve_manifest_path(repo_root, repo_value, args.manifest, args.personal)
+    scope, owner, primary = tracking_manifest_scope(repo_root, manifest_path)
+    if scope == 'personal':
+        manifest_path = Path(os.path.abspath(manifest_path))
+        require_private_tracking_path(owner, manifest_path)
+    elif scope != 'shared' or repo_root.resolve() != primary:
+        raise SyncwheelError(
+            'tracking migration requires the canonical manifest in the primary checkout; '
+            'select a personal manifest to change private tracking'
+        )
+    else:
+        validate_selected_primary_authority_path(repo_root, manifest_path)
+    return scope, owner, Path(os.path.abspath(manifest_path)), primary
+
+
 def syncwheel_tracking_report(repo_root, manifest_path):
+    scope, owner, _ = tracking_manifest_scope(repo_root, manifest_path)
+    if scope == 'personal':
+        manifest_path = Path(os.path.abspath(manifest_path))
+        require_private_tracking_path(owner, manifest_path)
+        repo_root = owner
     validate_selected_primary_authority_path(repo_root, manifest_path)
     manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     manifest_present = manifest is not None
@@ -18108,7 +18179,19 @@ def syncwheel_tracking_report(repo_root, manifest_path):
     warnings = []
     actions = []
 
-    if not manifest_present:
+    if scope != 'shared':
+        if scope == 'personal':
+            if not manifest_present:
+                actions.append('select an existing personal manifest')
+            elif manifest_tracked or git(
+                repo_root, 'check-ignore', '--quiet', '--no-index', '--', manifest_relative, check=False,
+            ).returncode != 0:
+                warnings.append('personal tracking requires an untracked, already ignored manifest')
+            elif tracking is None:
+                actions.append('set tracking on the selected personal manifest with --apply')
+        else:
+            actions.append('select the canonical or a personal manifest to change tracking')
+    elif not manifest_present:
         actions.append('create a manifest with syncwheel init, then set syncwheel_tracking')
     elif tracking is None:
         warnings.append('syncwheel_tracking is not set; choose git-tracked or local-only before branch/push/PR work')
@@ -18135,6 +18218,7 @@ def syncwheel_tracking_report(repo_root, manifest_path):
         resolve_repository_authority(repo_root, manifest, manifest_path) if manifest_present else (None, None)
     )
     return {
+        'tracking_scope': scope,
         'repo_root': str(repo_root),
         'manifest_path': str(manifest_path),
         'manifest_present': manifest_present,
@@ -18157,6 +18241,7 @@ def syncwheel_tracking_report(repo_root, manifest_path):
 
 
 def print_syncwheel_tracking_report(report):
+    print(f"tracking_scope: {report['tracking_scope']}")
     print(f"repo: {report['repo_root']}")
     print(f"manifest: {report['manifest_path'] if report['manifest_present'] else 'missing'}")
     print(f"syncwheel_tracking: {report['syncwheel_tracking'] or 'missing'}")
@@ -18586,9 +18671,50 @@ def git_rm_cached_paths(repo_root, paths):
         git(repo_root, 'rm', '--cached', '--ignore-unmatch', '--', *relatives)
 
 
+def require_private_tracking_update(args, owner, manifest_path, primary):
+    from syncwheel_stack_adoption import pending_adoptions
+
+    require_private_tracking_path(owner, manifest_path)
+    require_metadata_primary_index(primary)
+    if owner != primary:
+        require_metadata_primary_index(owner)
+    for root, path in dict.fromkeys(((owner, manifest_path), (primary, primary / '.syncwheel' / 'manifest.json'))):
+        events_dir = _manifest_storage.ledger_events_dir(root, path)
+        require_private_tracking_path(root, events_dir, directory=True)
+        for segment in events_dir.glob('*.jsonl'):
+            require_private_tracking_path(root, segment)
+        events = load_ledger_events(root, path)
+        if pending_control_manifest_intents(events):
+            raise SyncwheelError('control manifest recovery is pending; complete the interrupted operation first')
+        if path == manifest_path and pending_adoptions(events):
+            raise SyncwheelError('interrupted stack adoption; complete the pending adoption first')
+    private_paths = (
+        _manifest_storage.ledger_root(owner, manifest_path) / 'ledger.lock',
+        _manifest_storage.ledger_checkpoint_path(owner, manifest_path),
+    )
+    for path in private_paths:
+        require_private_tracking_path(owner, path)
+    require_private_metadata_paths(args, owner, manifest_path)
+
+
 def command_repo_tracking_set(args):
-    repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(repo_root, args.repo, args.manifest, args.personal)
+    selection = getattr(args, '_tracking_selection', None) or tracking_set_selection(args)
+    scope, repo_root, manifest_path, primary = selection
+    if scope == 'personal' and args.apply:
+        require_private_tracking_update(args, repo_root, manifest_path, primary)
+        with manifest_write_transaction(
+            repo_root, manifest_path, 'personal-tracking', commit_tracked_changes=False,
+        ):
+            require_private_tracking_update(args, repo_root, manifest_path, primary)
+            transaction = _manifest_storage.active_manifest_write_transaction(manifest_path)
+            transaction['preserveGitignore'] = True
+            return update_repo_tracking(args, repo_root, manifest_path, personal=True)
+    return update_repo_tracking(args, repo_root, manifest_path, personal=scope == 'personal')
+
+
+def update_repo_tracking(args, repo_root, manifest_path, *, personal):
+    if not personal:
+        validate_selected_primary_authority_path(repo_root, manifest_path)
     manifest, manifest_path = _manifest_storage.load_manifest(repo_root, manifest_path)
     if not manifest:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
@@ -18599,7 +18725,7 @@ def command_repo_tracking_set(args):
     manifest['syncwheel_worktree_root'] = worktree_root
 
     warnings = []
-    if tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
+    if not personal and tracking == SYNCWHEEL_TRACKING_GIT_TRACKED:
         conflicts = gitignore_manual_syncwheel_conflicts(repo_root)
         if conflicts:
             warnings.append(
@@ -18609,16 +18735,26 @@ def command_repo_tracking_set(args):
     if warnings and args.apply:
         raise SyncwheelError('; '.join(warnings))
 
-    if not args.apply:
+    if personal or not args.apply:
         report = syncwheel_tracking_report(repo_root, manifest_path)
         report['syncwheel_tracking'] = tracking
         report['syncwheel_tracking_present'] = True
         report['syncwheel_worktree_root'] = worktree_root
         report['effective_worktree_root'] = str(resolve_worktree_root_path(repo_root, worktree_root))
         report['warnings'].extend(warnings)
-        report['actions'].append(f'apply syncwheel_tracking={tracking}')
-        print_syncwheel_tracking_report(report)
-        print('dry_run: pass --apply to write this setup')
+        if args.apply:
+            save_manifest_with_ledger(
+                repo_root, manifest_path, manifest, 'repo_tracking_set',
+                {'syncwheel_tracking': tracking, 'syncwheel_worktree_root': worktree_root},
+            )
+        else:
+            report['actions'].append(f'apply syncwheel_tracking={tracking}')
+        if personal and args.json:
+            print(json.dumps({**report, 'apply': args.apply}, indent=2))
+        else:
+            print_syncwheel_tracking_report(report)
+            if not args.apply:
+                print('dry_run: pass --apply to write this setup')
         return 0
 
     readme_path = repo_root / '.syncwheel' / 'manifests' / 'README.md'
@@ -19430,7 +19566,7 @@ def require_private_metadata_paths(args, repo_root, manifest_path):
         _manifest_storage.ledger_events_dir(repo_root, manifest_path) / '000001.jsonl',
         _manifest_storage.next_ledger_segment_path(repo_root, manifest_path, create_directory=False),
     ]
-    if args.func == command_repo_authority_set:
+    if args.func in {command_repo_authority_set, command_repo_tracking_set}:
         paths.append(manifest_path)
     elif args.func in {command_repo_pr_merge_policy_set, command_repo_pr_merge_policy_clear}:
         paths.append(checked_repo_profile_path(repo_root))
@@ -19450,15 +19586,17 @@ def primary_checkout_preflight(args):
         command_hooks_ref_guard,
     }:
         return
-    repo_root = resolve_repo_root(args.repo)
-    worktrees = get_worktrees(repo_root)
-    primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
-    selected_path = resolve_manifest_path(
-        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
-    )
-    manifest_path = resolve_manifest_path(
-        primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
-    )
+    repo_root, selected_path = resolve_command_manifest_selection(args)
+    tracking_selection = getattr(args, '_tracking_selection', None)
+    if tracking_selection is not None:
+        primary_root = tracking_selection[3]
+        manifest_path = selected_path
+    else:
+        worktrees = get_worktrees(repo_root)
+        primary_root = Path(worktrees[0]['path']).resolve() if worktrees else repo_root
+        manifest_path = resolve_manifest_path(
+            primary_root, str(primary_root), getattr(args, 'manifest', None), getattr(args, 'personal', None)
+        )
     manifest, _ = _manifest_storage.load_manifest(primary_root, manifest_path)
     metadata_scope = False
     if command_behavior(args)['primaryScope'] == 'metadata' and syncwheel_mutation_requested(args):
@@ -19559,10 +19697,7 @@ def default_hook_convergence_requested(args):
 def converge_default_repository_hooks(args):
     if not default_hook_convergence_requested(args):
         return None
-    repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(
-        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
-    )
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
     if not manifest_path.exists():
         return None
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
@@ -19621,10 +19756,7 @@ def governed_worktree_mutation_requested(args):
 def governed_worktree_preflight(args):
     if not hasattr(args, 'repo'):
         return
-    repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(
-        repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
-    )
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         return
@@ -19916,13 +20048,9 @@ def recover_control_manifest_before_command(args):
         # Every other manifest writer must still settle a pending intent before
         # it replaces the source the interrupted operation was persisting.
         return None
-    repo_root = resolve_repo_root(args.repo)
-    manifest_path = resolve_manifest_path(
-        repo_root,
-        args.repo,
-        getattr(args, 'manifest', None),
-        getattr(args, 'personal', None),
-    )
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    if getattr(args, '_tracking_selection', None) is not None:
+        validate_selected_primary_authority_path(repo_root, manifest_path)
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if args.func == command_int_rebuild:
         require_int_rebuild_reason(args, repo_root, manifest, manifest_path)
@@ -19950,9 +20078,7 @@ def stack_adoption_preflight(args):
     if not hasattr(args, 'repo') or not syncwheel_mutation_requested(args):
         return
     from syncwheel_stack_adoption import pending_adoptions
-    root = resolve_repo_root(args.repo)
-    path = resolve_manifest_path(root, args.repo, getattr(args, 'manifest', None),
-                                 getattr(args, 'personal', None))
+    root, path = resolve_command_manifest_selection(args)
     pending = pending_adoptions(load_ledger_events(root, path))
     if not pending:
         return
@@ -20079,12 +20205,19 @@ def main():
         command_hooks_worktree_guard,
         command_hooks_ref_guard,
     }
-    if not guard_callback:
-        global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
-        SYNCWHEEL_OWNS_REF_MOVES = True
-        if hasattr(args, 'repo'):
-            SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
+    global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
     try:
+        if args.func in {command_repo_tracking_set, command_repo_tracking_status}:
+            args.repo = args.repo or os.environ.get(ENV_REPO)
+            if args.func == command_repo_tracking_set:
+                args._tracking_selection = tracking_set_selection(args)
+                if args._tracking_selection[0] == 'personal':
+                    return command_repo_tracking_set(args)
+                args.repo = str(args._tracking_selection[1])
+        if not guard_callback:
+            SYNCWHEEL_OWNS_REF_MOVES = True
+            if hasattr(args, 'repo'):
+                SYNCWHEEL_REF_AUTH_REPO = resolve_repo_root(args.repo)
         if args.func in {
             command_status, command_repo_tracking_status,
             command_repo_authority_status, command_repo_authority_set,
@@ -20108,10 +20241,7 @@ def main():
             converge_default_repository_hooks(args)
         with coordination_publication_lock_for_command(args):
             if manifest_mutation_requested(args) and hasattr(args, 'repo'):
-                repo_root = resolve_repo_root(args.repo)
-                manifest_path = resolve_manifest_path(
-                    repo_root, args.repo, getattr(args, 'manifest', None), getattr(args, 'personal', None)
-                )
+                repo_root, manifest_path = resolve_command_manifest_selection(args)
                 if args.func != command_init and manifest_path.exists():
                     existing_manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
                     if existing_manifest:
