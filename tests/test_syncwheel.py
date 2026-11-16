@@ -5524,8 +5524,9 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin',
                               '--force-with-lease', expected=2)
 
-        self.assertIn('does not own', result.stderr)
+        self.assertIn('never had on the stack', result.stderr)
         self.assertIn(foreign[:12], result.stderr)
+        self.assertIn(f'--force-with-lease=refs/heads/pr/feature-a:{foreign}', result.stderr)
         self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), foreign)
 
     def foreign_commit_on_remote_stack(self, origin):
@@ -5545,6 +5546,44 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', '--force-with-lease')
 
         self.assertIn(f'--force-with-lease=refs/heads/pr/feature-a:{tip}', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), rewritten)
+
+    def test_forced_legacy_stack_push_replaces_an_earlier_rewrite_this_clone_pushed(self):
+        origin, tip, rewritten = self.legacy_pushed_stack_with_remote()
+        # A rebuild whose diff differs from the next one: same parents, another
+        # tree, so neither ancestry nor patch-id links it to the later rewrite.
+        parents = self.git('rev-list', '--parents', '-n', '1', tip).split()[1:]
+        (self.repo / 'draft.txt').write_text('first rebuild only\n')
+        self.git('add', 'draft.txt')
+        draft_tree = self.git('write-tree')
+        self.git('rm', '-q', '--cached', 'draft.txt')
+        (self.repo / 'draft.txt').unlink()
+        earlier = self.git(
+            'commit-tree', draft_tree, *[arg for parent in parents for arg in ('-p', parent)],
+            '-m', 'feat: earlier rebuild',
+        )
+        self.git('update-ref', 'refs/heads/pr/feature-a', earlier, tip)
+        self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', '--force-with-lease')
+        self.git('fetch', '-q', 'origin')
+        self.git('update-ref', 'refs/heads/pr/feature-a', rewritten, earlier)
+
+        result = self.run_cli('stack', 'push', 'feature-a', '--remote', 'origin', '--force-with-lease')
+
+        self.assertIn(f'--force-with-lease=refs/heads/pr/feature-a:{earlier}', result.stdout)
+        self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), rewritten)
+
+    def test_forced_legacy_stack_push_keeps_a_lease_pinned_to_the_exact_tip(self):
+        origin, tip, rewritten = self.legacy_pushed_stack_with_remote()
+        foreign = self.foreign_commit_on_remote_stack(origin)
+        self.git('fetch', '-q', 'origin')
+        self.git('update-ref', 'refs/heads/pr/feature-a', rewritten, tip)
+
+        result = self.run_cli(
+            'stack', 'push', 'feature-a', '--remote', 'origin', '--',
+            '--force', f'--force-with-lease=refs/heads/pr/feature-a:{foreign}',
+        )
+
+        self.assertIn(f'git push --force-with-lease=refs/heads/pr/feature-a:{foreign} origin', result.stdout)
         self.assertEqual(self.git('--git-dir=' + str(origin), 'rev-parse', 'pr/feature-a'), rewritten)
 
     def test_stack_push_is_emitted_with_passthrough_args(self):

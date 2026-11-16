@@ -3042,8 +3042,10 @@ class StackLifecycle:
             return 0
         if self.repository.forced_push_requested(push_args):
             local_tip = retained[0]['tip'] if retained else self.repository.ref_tip(repo_root, stack['branch'])
-            lease = self.repository.legacy_stack_push_lease(repo_root, stack, remote, local_tip)
-            command = ['git', 'push', lease, *self.repository.without_force_push_args(push_args), remote, refspec]
+            leases = self.repository.legacy_stack_push_lease(
+                repo_root, stack, remote, local_tip, push_args, manifest_path,
+            )
+            command = ['git', 'push', *leases, *self.repository.without_force_push_args(push_args), remote, refspec]
         self.repository.run_authorized_push(
             repo_root, command, remote, [f"refs/heads/{stack['branch']}"], manifest=manifest,
         )

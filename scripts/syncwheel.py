@@ -2252,19 +2252,46 @@ def forced_push_requested(push_args):
 def without_force_push_args(push_args):
     return [
         part for part in push_args
-        if part not in {'--force', '-f', '--force-with-lease'}
+        if part not in {'--force', '-f', '--force-with-lease', '--no-force-with-lease'}
         and not part.startswith('--force-with-lease=')
     ]
 
 
-def legacy_stack_push_lease(repo_root, stack, remote, local_tip):
-    """Return the exact lease for a forced stack push, or refuse to discard work.
+def explicit_push_leases(push_args):
+    """Leases the caller pinned to an exact expected tip, kept as written."""
+    return [
+        part for part in push_args
+        if part.startswith('--force-with-lease=') and ':' in part
+    ]
+
+
+def stack_tips_from_ledger(repo_root, stack_id, manifest_path=None):
+    """Every tip this clone itself rebuilt or pushed for one stack."""
+    tips = []
+    for event in load_ledger_events(repo_root, manifest_path):
+        payload = event.get('payload') or {}
+        if payload.get('stack') != stack_id:
+            continue
+        if event.get('type') == 'stack_rebuilt':
+            tips.extend([payload.get('before_tip'), payload.get('after_tip')])
+        elif event.get('type') == 'stack_pushed':
+            tips.append(payload.get('tip'))
+    return [tip for tip in dict.fromkeys(tips) if isinstance(tip, str) and tip]
+
+
+def legacy_stack_push_lease(repo_root, stack, remote, local_tip, push_args=(), manifest_path=None):
+    """Return the lease arguments for a forced stack push, or refuse to discard work.
 
     A bare --force-with-lease trusts the remote-tracking ref, which the last
     fetch already moved onto commits another session pushed; the push would
     then silently drop them. Observe the live remote tip instead, refuse if
-    it holds a commit the stack does not own, and pin the lease to that tip.
+    it holds a commit this clone never had on the stack, and pin the lease to
+    that tip. A lease the caller pinned to an exact tip is kept as written:
+    naming the tip is the explicit acknowledgement of what it replaces.
     """
+    explicit = explicit_push_leases(push_args)
+    if explicit:
+        return explicit
     ref = f"refs/heads/{stack['branch']}"
     try:
         remote_tip = remote_ref_tips(repo_root, remote, [ref])[ref]
@@ -2272,32 +2299,51 @@ def legacy_stack_push_lease(repo_root, stack, remote, local_tip):
         raise SyncwheelError(
             f"stack push {stack['id']}: cannot observe {remote} {ref} before a forced push: {exc}"
         ) from exc
+    lease = [f'--force-with-lease={ref}:{remote_tip or ""}']
     if not remote_tip or remote_tip == local_tip or branch_contains(repo_root, local_tip, remote_tip):
-        return f'--force-with-lease={ref}:{remote_tip or ""}'
+        return lease
     if not commit_exists(repo_root, remote_tip):
         raise SyncwheelError(
             f"stack push {stack['id']}: {remote} {ref} is at {remote_tip}, which this clone "
             f'has not fetched; fetch it and run `syncwheel check` before a forced push'
         )
-    owned = {commit_full_sha(repo_root, commit) for commit in stack.get('commits', []) if commit_exists(repo_root, commit)}
-    owned.update(rev_list(repo_root, f"{stack['base']}..{local_tip}"))
-    owned_patch_ids = {patch for patch in (commit_patch_id(repo_root, commit) for commit in owned) if patch}
-    foreign = []
-    for commit in rev_list(repo_root, f'{local_tip}..{remote_tip}'):
-        if commit in owned:
-            continue
-        patch = commit_patch_id(repo_root, commit)
-        if patch and patch in owned_patch_ids:
-            continue
-        foreign.append(commit)
+    # Owned history: the local tip, the stack's declared commits and base, and
+    # every tip this clone rebuilt or pushed for the stack, so an earlier
+    # rewrite of the same stack is recognised even when its patch-id changed.
+    owned_tips = [local_tip, stack.get('base'), *stack.get('commits', []),
+                  *stack_tips_from_ledger(repo_root, stack['id'], manifest_path)]
+    owned_tips = [
+        tip for tip in dict.fromkeys(owned_tips)
+        if isinstance(tip, str) and tip and commit_exists(repo_root, tip)
+    ]
+    candidates = [
+        line for line in git(
+            repo_root, 'rev-list', remote_tip, '--not', *owned_tips,
+        ).stdout.splitlines() if line.strip()
+    ]
+    foreign = candidates
+    if candidates:
+        base = stack.get('base')
+        local_range = f'{base}..{local_tip}' if base and commit_exists(repo_root, base) else local_tip
+        local_commits = rev_list(repo_root, local_range)
+        local_patch_ids = {
+            patch for patch in commit_patch_ids(repo_root, local_commits).values() if patch
+        }
+        candidate_patch_ids = commit_patch_ids(repo_root, candidates)
+        foreign = [
+            commit for commit in candidates
+            if not candidate_patch_ids.get(commit)
+            or candidate_patch_ids[commit] not in local_patch_ids
+        ]
     if foreign:
         raise SyncwheelError(
-            f"stack push {stack['id']} STOP: {remote} {ref} holds {len(foreign)} commit(s) this stack "
-            f"does not own ({', '.join(commit[:12] for commit in foreign[:5])}"
+            f"stack push {stack['id']} STOP: {remote} {ref} holds {len(foreign)} commit(s) this "
+            f"clone never had on the stack ({', '.join(commit[:12] for commit in foreign[:5])}"
             f"{', ...' if len(foreign) > 5 else ''}); another session pushed there. A forced push "
-            'would discard them: add them to the stack or find out who pushed them first'
+            'would discard them: add them to the stack, or, once you know they may go, pass '
+            f'`--force-with-lease={ref}:{remote_tip}` to replace exactly that tip'
         )
-    return f'--force-with-lease={ref}:{remote_tip}'
+    return lease
 
 
 def run_authorized_push(repo_root, command, remote, refs, check=True, *, manifest):
@@ -15958,10 +16004,11 @@ def command_reconcile(args):
             if forced_push_requested(stack_push_args):
                 # Same rule as `stack push`: never discard a commit another
                 # session pushed to this stack branch; pin the exact lease.
-                lease = legacy_stack_push_lease(
+                leases = legacy_stack_push_lease(
                     repo_root, stack, remote, ref_tip(repo_root, stack['branch']),
+                    stack_push_args, manifest_path,
                 )
-                stack_push_args = [lease, *without_force_push_args(stack_push_args)]
+                stack_push_args = [*leases, *without_force_push_args(stack_push_args)]
             command = ['git', 'push', *stack_push_args, remote, stack['branch']]
             run_authorized_push(
                 repo_root, command, remote, [f"refs/heads/{stack['branch']}"],
@@ -19991,6 +20038,9 @@ class _StackRepository:
 
     def without_force_push_args(self, *args, **kwargs):
         return without_force_push_args(*args, **kwargs)
+
+    def explicit_push_leases(self, *args, **kwargs):
+        return explicit_push_leases(*args, **kwargs)
 
     def branch_contains(self, *args, **kwargs):
         return branch_contains(*args, **kwargs)
