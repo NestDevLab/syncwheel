@@ -392,9 +392,12 @@ python3 scripts/syncwheel.py manifest require-integration --apply
   PR, merge; `runtime_change`: release, deploy, service restart);
   `destructive_rewrite` (force pushes, history rewrites, deleting work) is
   always denied and can never be allowed. `human-gated` allows nothing;
-  `ai-managed` needs at least one allowed class. An absent block means
-  `human-gated`. Set it with `syncwheel repo authority set`; it is never
-  enabled automatically and is not part of coordination state
+  `ai-managed` needs at least one allowed class. An absent block in the primary
+  shared manifest means `human-gated`. Lane and personal manifests without a
+  declaration inherit that primary policy; an explicit declaration may retain
+  or restrict its grants, never widen them. Inheritance is resolved at use time
+  and is not serialized into the selected manifest. Set a declaration with
+  `syncwheel repo authority set`; authority is not part of coordination state
 - `syncwheel_worktree_root` defaults to repo-relative `.syncwheel/wt`
 - `governed_worktree_capacity` is optional: `limit` (positive integer, default
   `4`) sets the active governed lane threshold per clone. `enforcement` defaults

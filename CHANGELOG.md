@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.47.14 - 2026-11-16
+
+- Let lane and personal manifests without an authority declaration inherit the primary shared manifest's policy. Explicit declarations may restrict that policy but cannot grant additional capabilities. Report the effective policy and its source without copying inherited authority into the selected manifest.
+- Bind GitHub merge plans to the authority policy and recheck it before merging, so a revoked grant cannot be used by an earlier preview.
+
 ## 0.47.13 - 2026-11-16
 
 - Allow bounded metadata operations with unrelated unstaged primary changes: personal manifest authority, private PR merge policy set/clear, empty non-coordinated draft close, and non-coordinated stack archive. Preserve product bytes, staging, ignore files and unrelated refs; retain the existing conflict and staged-path guards.

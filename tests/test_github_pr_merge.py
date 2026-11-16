@@ -274,6 +274,7 @@ class GithubPrMergeTest(unittest.TestCase):
         self.head = self.git('rev-parse', 'HEAD')
         self.git('push', '-q', 'origin', 'pr/feature')
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
         profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
         profile['github_pr_merge'] = self.policy()
         (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
@@ -289,6 +290,7 @@ class GithubPrMergeTest(unittest.TestCase):
 
     def test_base_change_between_observation_and_fetch_blocks_merge(self):
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
         profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
         profile['github_pr_merge'] = self.policy()
         (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
@@ -313,6 +315,7 @@ class GithubPrMergeTest(unittest.TestCase):
         self.git('commit', '-qm', 'advance main')
         self.git('push', '-q', 'origin', 'main')
         self.manifest['authority'] = {'mode': 'ai-managed', 'allow': ['source_change'], 'deny': []}
+        self.manifest_path.write_text(json.dumps(self.manifest, indent=2) + '\n')
         profile = json.loads((self.repo / '.syncwheel' / 'profile.local.json').read_text())
         profile['github_pr_merge'] = self.policy()
         (self.repo / '.syncwheel' / 'profile.local.json').write_text(json.dumps(profile) + '\n')
