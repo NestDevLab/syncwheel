@@ -1305,6 +1305,7 @@ class PublicationCoordinator:
         creation_remedy=False,
         operation_token=None,
         publication_manifest=None,
+        adopt_remote_tips=None,
     ):
         repo_root = self.repository.root
         config = coordination_config(manifest)
@@ -1520,7 +1521,9 @@ class PublicationCoordinator:
                 for source_ref, claim_ref in claim_refs.items()
             }
         self.repository.require_new_managed_refs_absent(
-            config, expected.get('state'), changed_refs, observed_refs
+            config, expected.get('state'), changed_refs, observed_refs,
+            repo_root, adopt_remote_tips,
+            integration_ref=integration_ref,
         )
         for source_ref, claim_tip in observed_claims.items():
             if not claim_tip:

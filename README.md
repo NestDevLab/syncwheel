@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.46.26`
+Current version: `0.47.8`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -84,6 +84,10 @@ Default behavior is conservative:
 - once coordination state is published, a new managed branch (stack, channel
   or promotion target) is never published onto an existing remote branch the
   state does not manage; such a branch stops the push
+- the first coordinated publication only moves an existing remote branch
+  forward; if the remote holds commits the local tip lacks, it stops and names
+  the tip, and `int push --adopt-remote <tip>` replaces exactly that tip once
+  nothing on it may be lost
 - public coordination state uses typed canonical and publication remote roles,
   rejects ambiguous aliases that cannot be normalized safely, and makes a
   reused managed branch immediately supersede its old cleanup tombstone
