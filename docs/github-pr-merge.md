@@ -45,10 +45,20 @@ At least one provenance filter (`--pr-author`, `--commit-author`, or
 empty lists, unknown keys, tokens, commands, and secrets are rejected.
 
 `--checks all` is the fail-closed default: at least one check must exist and
-every observed check must finish successfully or be skipped. A repository
-without CI may explicitly use `--checks none`; the merge plan then records a
-`checks_not_required` warning. This opt-out is clone-local and does not bypass
-required checks reported by GitHub branch protection or rulesets.
+every current check must finish successfully or be skipped. For the exact PR
+head, Syncwheel groups check runs by check name and verified workflow identity
+and evaluates the latest run in each group. A rerun attempt is compared only
+within its own run. Superseded runs are reported as informational warnings; a
+latest queued, cancelled or failed run still blocks. Ambiguous identity or
+ordering never hides a blocking observation. Incomplete or truncated check
+history blocks the merge even when the rows received so far are green. Legacy status contexts remain
+separate from workflow checks. The same selection applies to required checks,
+so success in an unrelated workflow with the same check name cannot hide a
+failure.
+
+A repository without CI may explicitly use `--checks none`; the merge plan
+then records a `checks_not_required` warning. This opt-out is clone-local and
+does not bypass required checks reported by GitHub branch protection or rulesets.
 
 `private_free_rules` is a narrow fallback for private repositories on GitHub
 Free. It applies only when GitHub returns its explicit plan-limit response for

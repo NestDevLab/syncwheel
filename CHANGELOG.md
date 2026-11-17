@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.23 - 2026-11-16
+
+- Evaluate the latest verified check run per workflow and check name for PR merges. Report superseded runs as informational while preserving blocks for current failures, pending checks, distinct workflows and ambiguous history. Apply the same selection to required checks.
+
 ## 0.47.22 - 2026-11-16
 
 - Register persistent stack replay desks and provide a reviewed CLI release path. Preserve the desk tip, index and working changes in verified local recovery refs before removing its checkout, with explicit selection for legacy desks. Stack archive names the desk release or pending-release remedy.

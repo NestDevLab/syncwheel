@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
   "name": "NestDevLab/syncwheel",
-  "version": "0.47.22",
+  "version": "0.47.23",
   "provides": [
     {
       "type": "skills",
