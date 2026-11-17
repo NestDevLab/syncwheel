@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.24 - 2026-11-17
+
+- Let stack sync report a verified, consistent adoption as a read-only no-op with the next rebuild or push previews. Keep explicit adoption guidance for stale source history. Explain why absorb cannot edit pinned history and preserve its patch while naming an existing draft as the destination.
+
 ## 0.47.23 - 2026-11-16
 
 - Evaluate the latest verified check run per workflow and check name for PR merges. Report superseded runs as informational while preserving blocks for current failures, pending checks, distinct workflows and ambiguous history. Apply the same selection to required checks.

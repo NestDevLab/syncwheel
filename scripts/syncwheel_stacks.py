@@ -79,8 +79,6 @@ from syncwheel_stack_adoption import StackAdoption
 
 
 def require_stack_absorb_amendable(stack, args):
-    if stack.get('adopted_history'):
-        raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
     if args.amend and not stack['commits']:
         raise SyncwheelError(
             f"stack {stack['id']!r} has no commits to amend; "
@@ -2366,12 +2364,68 @@ class StackLifecycle:
                     f'syncwheel stack promote {quoted([pending_stack])} {remedy_selection}'
                 )
 
+    def consistent_stack_adoption(self, stack, remedy_selection):
+        adopted = validate_stack_adoption(stack)
+        if not adopted:
+            return None
+        root = self.repository.root
+        ref = f"refs/heads/{stack['branch']}"
+        offline = {'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': '', 'GIT_OPTIONAL_LOCKS': '0'}
+
+        def observe(*args, allowed=(0,)):
+            result = self.repository.git(root, *args, check=False, env=offline)
+            if result.returncode not in allowed:
+                raise SyncwheelError(
+                    f'cannot verify adopted history: Git {args[0]} failed; inspect repository objects before retrying'
+                )
+            return result
+
+        stale = (
+            observe('symbolic-ref', '--quiet', ref, allowed=(0, 1)).returncode == 0
+            or observe('rev-parse', '--verify', '--quiet', ref, allowed=(0, 1)).stdout.strip() != adopted['tip']
+            or any(observe('cat-file', '-t', oid).stdout.strip() != 'commit'
+                   for oid in (adopted['base'], adopted['tip']))
+        )
+        if not stale and adopted['tip'] != adopted['base']:
+            parents = observe('rev-list', '--parents', '-n', '1', adopted['tip']).stdout.split()[1:]
+            contained = [parent for parent in parents
+                         if observe('merge-base', '--is-ancestor', parent, adopted['base'], allowed=(0, 1)).returncode == 0]
+            stale = contained != [adopted['base']]
+        if stale:
+            raise SyncwheelError(
+                'adopted history is stale; use explicit '
+                f"syncwheel stack set {quoted([stack['id']])} --base BASE --adopt-tip TIP {remedy_selection}"
+            )
+        return adopted
+
+    def require_stack_absorb_allowed(self, stack, args, remedy_selection):
+        if self.consistent_stack_adoption(stack, remedy_selection):
+            mode = ['--staged'] if args.staged else []
+            paths = ['--', *args.paths] if args.paths else []
+            remedy = quoted(['syncwheel', 'stack', 'absorb', 'DRAFT', *mode, '-N', '-m', 'MESSAGE'])
+            raise SyncwheelError(
+                'stack is adopted; cannot absorb into its pinned history. Patch remains unchanged. '
+                'Use an existing non-adopted draft; primary ownership and staged-path guards still apply. '
+                'Replace DRAFT and MESSAGE in: '
+                f'{remedy} {remedy_selection} {quoted(paths)}'
+            )
+        require_stack_absorb_amendable(stack, args)
+
+    def observe_adopted_stack_sync(self, args, stack, remedy_selection):
+        if not self.consistent_stack_adoption(stack, remedy_selection):
+            return None
+        print(f'{args.stack}: stack is adopted; nothing to sync. Next: int rebuild / push')
+        print(f'  syncwheel int rebuild --dry-run {remedy_selection}')
+        print(f'  syncwheel stack push {quoted([args.stack])} --dry-run {remedy_selection}')
+        return 0
+
     def command_stack_sync(self, args, manifest, manifest_path, remedy_selection):
         repo_root = self.repository.root
         stack = require_stack(manifest, args.stack)
-        if stack.get('adopted_history'):
-            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
         self.refuse_pending_stack_sync_promotion(manifest_path, remedy_selection)
+        observed = self.observe_adopted_stack_sync(args, stack, remedy_selection)
+        if observed is not None:
+            return observed
         commits = self.repository.rev_list(
             repo_root, f"{stack['base']}..{stack['branch']}", offline=True,
         )
@@ -2403,10 +2457,10 @@ class StackLifecycle:
         return base, tip
 
 
-    def command_stack_absorb(self, args, manifest, manifest_path):
+    def command_stack_absorb(self, args, manifest, manifest_path, remedy_selection=''):
         repo_root = self.repository.root
         stack = require_stack(manifest, args.stack)
-        require_stack_absorb_amendable(stack, args)
+        self.require_stack_absorb_allowed(stack, args, remedy_selection)
         empty_start = self.require_empty_stack_absorb_base(stack)
         integration_branch = stack.get('integration_branch') or manifest['integration']['branch']
         current_branch = self.repository.get_current_branch(repo_root)
