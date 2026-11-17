@@ -70,6 +70,43 @@ active lane. Either form preserves the lane. Keeping a previously captured
 copy still requires the explicit retention option and a Git worktree lock.
 Channel pins and `stack land` currently reject adopted histories.
 
+## Deliver an equivalent candidate while preserving the lane
+
+When an adopted candidate differs in history from a preserved lane, qualify
+and publish it explicitly:
+
+```bash
+syncwheel stack push STACK --retain-captured-worktrees "Keep reviewed source" \
+  --allow-equivalent-candidate --dry-run
+syncwheel stack push STACK --retain-captured-worktrees "Keep reviewed source" \
+  --allow-equivalent-candidate
+```
+
+The stack must already adopt the exact candidate tip. Its complete Git tree
+must equal the preserved lane tree, including file modes, symlinks and binary
+objects. This deliberately accepts exact tree equivalence only; patch-id
+similarity alone cannot prove that content remains present. The candidate
+must descend from the current published remote head, which must exist and be
+available locally. Fetch and inspect an unknown remote head before retrying.
+Caller force and passthrough push options are refused. The legacy transport
+uses an internal exact lease after proving fast-forward ancestry, so a remote
+deletion or advance between verification and push fails atomically. This lease
+never authorizes replacing remote history.
+
+Every selected lane must retain its native registration, generation and clean
+source state; captured lanes also need completed native capture evidence.
+Both active and captured lanes require an explicit Git worktree lock in this
+mode. Interrupted cleanup, dirty or missing lanes, tree differences and stale
+observations refuse publication. The existing retention path still requires
+identical heads unless this option is supplied.
+
+The push uses the pinned candidate SHA through the normal authorized pre-push
+hook and coordinated publication path. It never moves or deletes a lane ref,
+worktree or registry entry. A `preserved_candidate_delivery_prepared` ledger
+event records the reason, preserved ref and tip, candidate tip, observed remote
+head and exact tree before publication; `stack_pushed` carries the same proof
+on success. A prepared event alone does not prove a successful push.
+
 ## Resume an interrupted apply
 
 Inspect the ledger and current source ref and manifest before resuming. Run
