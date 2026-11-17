@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.28 - 2026-11-17
+
+- Publish an adopted fast-forward candidate with the exact tree of a locked preserved lane through an explicit retention option. Recheck remote ancestry and lane evidence, pin the candidate push source, and record both refs without rewriting or cleaning up the lane.
+
 ## 0.47.27 - 2026-11-17
 
 - Validate adopted stack history against its pinned interval and exact source tip during GitHub merge preflight, while retaining required integration validation.

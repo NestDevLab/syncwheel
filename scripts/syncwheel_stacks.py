@@ -3174,6 +3174,13 @@ class StackLifecycle:
         for item in retained:
             print(f"preserving captured worktree {item['lane']['id']}: {item['tip']}; "
                   f"{(args.retain_captured_worktrees or 'active publication source').strip()}")
+        delivery = [item['candidate_delivery'] for item in retained if 'candidate_delivery' in item]
+        if delivery and not args.dry_run:
+            self.ledger.append_ledger_event(
+                repo_root, 'preserved_candidate_delivery_prepared',
+                {'stack': stack['id'], 'reason': args.retain_captured_worktrees.strip(),
+                 'proofs': delivery, 'actor': self.repository.governed_worktree_owner()}, manifest_path,
+            )
         self.complete_pending_promote_intents(
             manifest,
             manifest_path,
@@ -3214,7 +3221,7 @@ class StackLifecycle:
             # over the integration projection or any other stack.
             changed_refs = {
                 f"refs/heads/{stack['branch']}": (adopted['tip'] if adopted else
-                    retained[0]['tip'] if retained else self.repository.ref_tip(repo_root, stack['branch']))
+                    retained[0]['target_tip'] if retained else self.repository.ref_tip(repo_root, stack['branch']))
             }
             try:
                 publication_operation = (
@@ -3269,6 +3276,7 @@ class StackLifecycle:
                         'coordination_status': result['status'],
                         'operation_token': publication_operation['operation_token'],
                         'recovered': bool(result.get('recovered')),
+                        **({'preserved_candidate_delivery': delivery} if delivery else {}),
                         'actor': self.repository.governed_worktree_owner(),
                     },
                     manifest_path,
@@ -3284,7 +3292,7 @@ class StackLifecycle:
         remote = stack_push_remote(manifest, stack, args.remote)
         push_args = push_args_with_options(args)
         retained = self.projections.verify_retained_captured_worktrees(repo_root, manifest, args)
-        publication_tip = adopted['tip'] if adopted else (retained[0]['tip'] if retained else None)
+        publication_tip = adopted['tip'] if adopted else (retained[0]['target_tip'] if retained else None)
         refspec = (f"{publication_tip}:refs/heads/{stack['branch']}"
                    if publication_tip else stack['branch'])
         command = ['git', 'push', *push_args, remote, refspec]
@@ -3309,6 +3317,7 @@ class StackLifecycle:
                 'branch': stack['branch'],
                 'remote': remote,
                 'tip': publication_tip or self.repository.ref_tip(repo_root, stack['branch']),
+                **({'preserved_candidate_delivery': delivery} if delivery else {}),
                 'actor': self.repository.governed_worktree_owner(),
             },
             manifest_path,

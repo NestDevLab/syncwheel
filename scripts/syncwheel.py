@@ -12590,7 +12590,7 @@ def governed_worktree_commit_set(repo_root, lane):
     )
 
 
-def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, capture=False, active_only=False):
+def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, capture=False, active_only=False, candidate_remote=None):
     """Prove that retained copies cannot contribute unpublished working-tree state."""
     stack = require_stack(manifest, stack_id)
     registry, _ = load_governed_worktree_registry(repo_root)
@@ -12598,6 +12598,22 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
     target_tip = ref_tip(repo_root, stack['branch'])
     root = governed_worktree_root(repo_root, manifest).resolve(strict=False)
     snapshots = []
+    candidate = None
+    if candidate_remote is not None:
+        adopted = validate_stack_adoption(stack)
+        if not adopted or target_tip != adopted['tip']:
+            raise SyncwheelError('equivalent candidate delivery requires an unchanged adopted stack tip')
+        ref = f"refs/heads/{stack['branch']}"
+        if git(repo_root, 'symbolic-ref', '-q', ref, check=False).returncode == 0:
+            raise SyncwheelError('equivalent candidate delivery requires a direct source ref')
+        remote_tip = remote_ref_tips(repo_root, candidate_remote, [ref]).get(ref)
+        if not remote_tip or not commit_exists(repo_root, remote_tip):
+            raise SyncwheelError('equivalent candidate delivery requires an existing remote head available locally; fetch and inspect it first')
+        if not branch_contains(repo_root, target_tip, remote_tip):
+            raise SyncwheelError('equivalent candidate must fast-forward the published remote head')
+        candidate = {'remote': candidate_remote, 'remote_ref': ref,
+                     'remote_tip': remote_tip, 'candidate_tip': target_tip,
+                     'tree': ref_tree(repo_root, target_tip), 'equivalence': 'exact-tree'}
     for lane in registry['lanes']:
         if lane.get('target') != stack_id or lane['state'] == 'reaped':
             continue
@@ -12627,7 +12643,7 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
         if not worktree or Path(worktree['path']).resolve(strict=False) != path:
             refuse('the Git worktree registration does not match')
         lock = worktree.get('locked')
-        if not active and (not lock or lock == governed_worktree_cleanup_lock_reason(lane)):
+        if (not active or candidate) and (not lock or lock == governed_worktree_cleanup_lock_reason(lane)):
             refuse('an explicit Git worktree retention lock is required')
         status = git(path, 'status', '--porcelain=v1', '--untracked-files=all',
                      '--ignore-submodules=none', check=False)
@@ -12635,12 +12651,20 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
             refuse('tracked or untracked source changes remain; if already declared, preview: '
                    + retire_copy_remedy(lane['id']))
         tip = ref_tip(repo_root, lane['branch'])
-        if not target_tip or not tip or ref_tip(path, 'HEAD') != tip or (not capture and tip != target_tip):
+        if candidate and (
+            git(repo_root, 'symbolic-ref', '-q', f"refs/heads/{lane['branch']}", check=False).returncode == 0
+            or git(path, 'symbolic-ref', '-q', 'HEAD', check=False).stdout.strip()
+            != f"refs/heads/{lane['branch']}"
+        ):
+            refuse('the preserved lane must retain its direct branch and attached HEAD')
+        if not target_tip or not tip or ref_tip(path, 'HEAD') != tip or (not capture and not candidate and tip != target_tip):
             refuse('the captured HEAD and stack publication HEAD must match exactly')
         commits = governed_worktree_commit_set(repo_root, lane)
         unowned = [commit for commit in commits if commit not in owned
                    and not branch_contains(repo_root, stack['base'], commit)]
-        if (unowned or (tip not in owned and tip != commit_full_sha(repo_root, stack['base']))):
+        if candidate and ref_tree(repo_root, tip) != candidate['tree']:
+            refuse('candidate tree differs from the preserved lane; exact tree equivalence is required')
+        if not candidate and (unowned or (tip not in owned and tip != commit_full_sha(repo_root, stack['base']))):
             refuse('the captured commits are not fully owned by the selected stack')
         if capture:
             base = commit_full_sha(repo_root, stack['base'])
@@ -12658,7 +12682,11 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
         snapshots.append({
             'lane': dict(lane), 'tip': tip, 'target_tip': target_tip, 'lock': lock,
             'owned_commits': sorted(owned),
+            **({'candidate_delivery': {**candidate, 'preserved_ref': f"refs/heads/{lane['branch']}",
+                                       'preserved_tip': tip}} if candidate else {}),
         })
+    if candidate and not snapshots:
+        raise SyncwheelError('equivalent candidate delivery requires a preserved governed lane')
     return sorted(snapshots, key=lambda item: item['lane']['id'])
 
 
@@ -12683,7 +12711,8 @@ def verify_retained_captured_worktrees(repo_root, manifest, args, *, after_captu
     capture = args.func == command_stack_capture_integration and not after_capture
     proposed = retained_capture_manifest(repo_root, manifest, args) if capture else manifest
     observed = retained_captured_worktree_snapshot(
-        repo_root, proposed, args.stack, capture=capture, active_only=active_only
+        repo_root, proposed, args.stack, capture=capture, active_only=active_only,
+        candidate_remote=getattr(args, '_preserved_candidate_remote', None),
     )
     if after_capture and expected is not None:
         expected = [{**item, 'target_tip': item['tip']} for item in expected]
@@ -20656,6 +20685,17 @@ def governed_worktree_preflight(args):
         scoped_stack_label = 'this stack'
     elif args.func in {command_reconcile, command_resume} and getattr(args, 'stack', None):
         scoped_stacks = set(args.stack)
+    if args.func == command_stack_push and getattr(args, 'allow_equivalent_candidate', False):
+        if getattr(args, 'retain_captured_worktrees', None) is None:
+            raise SyncwheelError('--allow-equivalent-candidate requires --retain-captured-worktrees REASON')
+        if args.force_with_lease:
+            raise SyncwheelError('equivalent candidate delivery refuses force options')
+        stack = require_stack(manifest, args.stack)
+        remote = stack_push_remote(manifest, stack, args.remote)
+        if coordination_is_active(manifest):
+            coordinated_push_remote(args, coordination_config(manifest))
+            remote = coordination_config(manifest)['remote']
+        args._preserved_candidate_remote = remote
     if args.func in {command_stack_push, command_stack_capture_integration} and getattr(
         args, 'retain_captured_worktrees', None
     ) is not None:
@@ -20663,7 +20703,8 @@ def governed_worktree_preflight(args):
             raise SyncwheelError('--retain-captured-worktrees requires a non-empty reason')
         proposed = retained_capture_manifest(repo_root, manifest, args)
         args._retained_captured_worktree_snapshot = retained_captured_worktree_snapshot(
-            repo_root, proposed, args.stack, capture=args.func == command_stack_capture_integration
+            repo_root, proposed, args.stack, capture=args.func == command_stack_capture_integration,
+            candidate_remote=getattr(args, '_preserved_candidate_remote', None),
         )
         return
     if args.func == command_stack_push:

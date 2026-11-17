@@ -996,6 +996,10 @@ def build_parser(commands, version):
         '--retain-captured-worktrees', metavar='REASON',
         help='preserve locked, clean captured copies whose HEAD exactly matches the published stack',
     )
+    stack_push_p.add_argument(
+        '--allow-equivalent-candidate', action='store_true',
+        help='with retention, publish an adopted fast-forward candidate with the exact preserved lane tree',
+    )
     stack_push_p.set_defaults(func=commands['command_stack_push'])
 
     stack_land_p = stack_sub.add_parser(
