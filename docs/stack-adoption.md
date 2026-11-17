@@ -39,9 +39,25 @@ the entire `BASE..TIP` graph as declared stack history. The source ref advances
 locally to the reviewed commit without replay or reconstruction. Adoption
 leaves worktree registration and cleanup to their own commands.
 
-Review a new tip or base through another explicit adoption. `stack sync` and
-`stack absorb` refuse to change an adopted history, and automatic reconciliation
-refuses to rebuild or realign its source branch. If resume finds an undeclared
+Review a new tip or base through another explicit adoption. When the manifest,
+pinned commits and direct source ref still match the adoption, `stack sync`
+succeeds without changing anything: the stack is adopted and has nothing to
+sync. It prints integration rebuild and stack push previews as next steps.
+A missing, symbolic or changed source ref remains a stale adoption and requires
+explicit review of the base and tip. Pending adoption, control recovery and
+promotion operations must still be resolved before synchronization.
+
+`stack absorb` cannot edit pinned adopted history. For a consistent adoption it
+leaves the selected patch intact and names absorption into an existing,
+non-adopted draft, using `-N -m MESSAGE` for a new commit. Select a draft you own
+and keep the printed manifest and path selection. Existing primary ownership and
+staged-path guards still apply: unrelated staged work must be preserved for its
+owner, and can block this follow-up. This refusal is not a request
+to repeat the completed adoption, and does not claim the patch was absorbed.
+A stale adoption retains the explicit base/tip review remedy.
+
+Automatic reconciliation refuses to rebuild or realign the adopted source
+branch. If resume finds an undeclared
 integration commit likely owned by the adopted stack, it requests manual review
 and preserves the adopted history.
 

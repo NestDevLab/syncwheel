@@ -118,7 +118,6 @@ from syncwheel_manifest_store import (
 from syncwheel_stacks import (
     StackLifecycle,
     ordinary_empty_draft_close,
-    require_stack_absorb_amendable,
     stack_closed_payload,
     manifest_scope_options,
     stack_close_command,
@@ -15817,7 +15816,9 @@ def stack_absorb_preflight(args):
     manifest, _ = _manifest_storage.load_manifest(repo_root, path)
     if manifest is not None and manifest.get('repository_mode') != 'journal':
         stack = require_stack(manifest, args.stack)
-        require_stack_absorb_amendable(stack, args)
+        _stack_lifecycle(repo_root).require_stack_absorb_allowed(
+            stack, args, shlex.join(manifest_path_remedy_options(repo_root, path)),
+        )
         _stack_lifecycle(repo_root).require_empty_stack_absorb_base(stack)
 
 
@@ -15826,7 +15827,31 @@ def command_stack_absorb(args):
     manifest, _ = _manifest_storage.load_manifest(repo_root, manifest_path)
     if manifest is None:
         raise SyncwheelError(f'manifest not found: {manifest_path}')
-    return _stack_lifecycle(repo_root).command_stack_absorb(args, manifest, manifest_path)
+    return _stack_lifecycle(repo_root).command_stack_absorb(
+        args, manifest, manifest_path, shlex.join(manifest_path_remedy_options(repo_root, manifest_path)),
+    )
+
+
+def observed_adopted_stack_command(args):
+    if args.func == command_stack_sync:
+        args._stack_sync_selection = resolve_stack_sync_selection(args)
+    root, path = resolve_command_manifest_selection(args)
+    manifest, _ = _manifest_storage.load_manifest(root, path)
+    if not manifest or manifest.get('repository_mode') == 'journal':
+        return None
+    stack = require_stack(manifest, args.stack)
+    if not stack.get('adopted_history'):
+        return None
+    validate_selected_primary_authority_path(root, path)
+    selection = shlex.join(manifest_path_remedy_options(root, path))
+    stack_adoption_preflight(args)
+    refuse_stack_sync_control_recovery(root, path, 'adopted stack command')
+    lifecycle = _stack_lifecycle(root)
+    lifecycle.refuse_pending_stack_sync_promotion(path, selection)
+    if args.func == command_stack_sync:
+        return lifecycle.command_stack_sync(args, manifest, path, selection)
+    lifecycle.require_stack_absorb_allowed(stack, args, selection)
+    raise SyncwheelError('adopted stack changed during observation; inspect and retry')
 
 
 def resolve_stack_absorb_location(repo_root, manifest_path, manifest, stack, args):
@@ -20125,7 +20150,7 @@ def governed_worktree_preflight(args):
         return
     if args.func in {command_stack_sync, command_stack_absorb}:
         if require_stack(manifest, args.stack).get('adopted_history'):
-            raise SyncwheelError('adopted history requires explicit stack set --base BASE --adopt-tip TIP')
+            raise SyncwheelError('stack adoption changed after observation; inspect the selected manifest and retry')
     if args.func == command_stack_set and (getattr(args, 'base', None) or getattr(args, 'adopt_tip', None)):
         # Adoption has an exact plan and never cleans up lanes.
         return
@@ -20578,6 +20603,9 @@ def main():
             parser.error('unrecognized arguments: ' + ' '.join(extras))
         args.specs = [*args.specs, *extras]
     args.git_args = passthrough
+    if args.func == command_stack_absorb:
+        args.paths.extend(passthrough)
+        args.git_args = []
     # Syncwheel owns the managed branches, so its own child Git processes are
     # allowed to rewind them. The guard exists to stop every other caller.
     guard_callback = args.func in {
@@ -20587,12 +20615,23 @@ def main():
     }
     global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
     desk_release = args.func == command_stack_release_desk
+    adopted_metadata = False
     readonly_diagnostics = (
         args.func == command_worktree_list
         or (args.func in {command_status, command_check} and not args.fetch)
         or (desk_release and not args.apply)
     )
     try:
+        if args.func in {command_stack_sync, command_stack_absorb}:
+            adopted_metadata = True
+            observation = _READONLY_DIAGNOSTICS.set(True)
+            try:
+                result = observed_adopted_stack_command(args)
+            finally:
+                _READONLY_DIAGNOSTICS.reset(observation)
+            if result is not None:
+                return result
+            adopted_metadata = False
         if desk_release:
             args.repo = args.repo or os.environ.get(ENV_REPO)
         if readonly_diagnostics or desk_release:
@@ -20682,7 +20721,7 @@ def main():
         print(f'error: {exc}', file=sys.stderr)
         return 2
     finally:
-        if not readonly_diagnostics and not desk_release:
+        if not readonly_diagnostics and not desk_release and not adopted_metadata:
             if SYNCWHEEL_REF_AUTH_REPO:
                 clear_ref_authorizations(SYNCWHEEL_REF_AUTH_REPO)
             SYNCWHEEL_REF_AUTH_REPO = None

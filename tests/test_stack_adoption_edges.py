@@ -59,8 +59,8 @@ class StackAdoptionEdgeTest(unittest.TestCase):
     def test_stack_sync_and_absorb_preserve_adopted_history_and_primary_patch(self):
         self.case.apply(self.case.preview())
         clean_state = self.repository_state()
-        result = self.f.run_cli('stack', 'sync', 'replay', expected=2)
-        self.assertIn('adopted history requires explicit stack set', result.stderr)
+        result = self.f.run_cli('stack', 'sync', 'replay')
+        self.assertIn('stack is adopted; nothing to sync', result.stdout)
         self.assertEqual(self.repository_state(), clean_state)
 
         source = self.f.repo / 'pending.txt'
@@ -69,7 +69,7 @@ class StackAdoptionEdgeTest(unittest.TestCase):
         source.write_text('additional working tree change\n')
         before = self.repository_state()
         result = self.f.run_cli('stack', 'absorb', 'replay', '--staged', expected=2)
-        self.assertIn('adopted history requires explicit stack set', result.stderr)
+        self.assertIn('cannot absorb into its pinned history', result.stderr)
         self.assertEqual(self.repository_state(), before)
 
     def test_resume_planner_requires_review_for_an_undeclared_adopted_stack_commit(self):
