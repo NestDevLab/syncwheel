@@ -18,7 +18,7 @@ from syncwheel_errors import SyncwheelError
 from syncwheel_contracts import PROFILE_FILENAME, ZERO_OBJECT_ID, syncwheel_timestamp
 from syncwheel_manifest import (
     REPLAY_MODE_CHOICES, normalize_replay_mode, stack_map,
-    stack_integration_base_commits, stack_integration_only_commits,
+    stack_integration_base_commits, stack_integration_only_commits, validate_stack_adoption,
 )
 
 EPHEMERAL_WORKTREE_PLACEHOLDER = '<syncwheel-ephemeral-worktree>'
@@ -484,15 +484,52 @@ class ReplayEngine:
             )
         return ['cherry-pick', '-m', str(contained[0]), commit]
 
-    def plumbing_replay_script(self, branch, base, commits, expected_tip=None):
+    def adopted_integration_tips(self, manifest):
+        """Validate exact adopted recipes before preserving their ancestry in replay."""
+        repo = self.repository
+        tips = set()
+        stacks = stack_map(manifest)
+        for identifier in manifest['integration']['stacks']:
+            stack = stacks[identifier]
+            adopted = validate_stack_adoption(stack)
+            if not adopted or stack.get('integration_resolution'):
+                continue
+            source_tip = repo.ref_tip(repo.root, stack['branch'])
+            if ((source_tip is not None and source_tip != adopted['tip'])
+                    or not repo.branch_contains(repo.root, adopted['tip'], adopted['base'])):
+                raise SyncwheelError(f"adopted history for stack {identifier!r} differs from its source")
+            if stack['commits']:
+                tips.add(adopted['tip'])
+        return tips
+
+    def plumbing_replay_script(self, branch, base, commits, expected_tip=None, preserved_tips=()):
         """Render an object-only replay as one POSIX shell transaction."""
         repo_root = self.repository.root
         lines = ['set -e']
         head = base
         for declared_commit in commits:
             commit = self.repository.commit_full_sha(repo_root, declared_commit)
-            self.replay_cherry_pick_args(commit, base, projection=False)
             parent = shell_ref(head)
+            if commit in preserved_tips:
+                message = shlex.quote(f'Merge adopted stack tip {commit}')
+                commit_tree = quoted_with_env(self.replay_commit_env(commit), ['git', 'commit-tree'])
+                lines.extend([
+                    f'if git merge-base --is-ancestor {parent} {commit}; then',
+                    f'  N={commit}',
+                    f'elif git merge-base --is-ancestor {commit} {parent}; then',
+                    f'  N={parent}',
+                    'else',
+                    f'  T=$(git merge-tree --write-tree {parent} {commit}) || {{',
+                    '    status=$?',
+                    "    printf '%s\n' \"$T\" >&2",
+                    '    exit "$status"',
+                    '  }',
+                    f'  N=$({commit_tree} "$T" -p {parent} -p {commit} -m {message})',
+                    'fi',
+                ])
+                head = '$N'
+                continue
+            self.replay_cherry_pick_args(commit, base, projection=False)
             merge_tree = ' '.join([
                 quoted(['git', 'merge-tree', '--write-tree', f'--merge-base={commit}^']),
                 parent,
@@ -566,6 +603,7 @@ class ReplayEngine:
             'reset_destination_lease': target.get('reset_destination_lease'),
             'emit_output': not projection,
         }
+        preserved_tips = self.adopted_integration_tips(manifest) if replay_kind == 'integration' else set()
         steps = []
         stacks = {}
         if projection:
@@ -626,6 +664,7 @@ class ReplayEngine:
                     base,
                     plumbing_commits,
                     expected_tip=target.get('expected_tip'),
+                    preserved_tips=preserved_tips,
                 ),
                 plumbing=True,
             ))
@@ -647,10 +686,12 @@ class ReplayEngine:
             stacks_by_id = stacks = stack_map(manifest)
             for stack_id in integration['stacks']:
                 for commit in stack_integration_base_commits(stacks_by_id[stack_id]):
+                    argv = ([*prefix, 'merge', '--ff', '--no-edit', commit,
+                             '-m', f'Merge adopted stack tip {commit}']
+                            if commit in preserved_tips else
+                            [*prefix, *self.replay_cherry_pick_args(commit, base, projection=projection)])
                     steps.append(replay_exec_step(
-                        [*prefix, *self.replay_cherry_pick_args(commit, base, projection=projection)],
-                        self.replay_commit_env(commit),
-                        stack_id=stack_id,
+                        argv, self.replay_commit_env(commit), stack_id=stack_id,
                     ))
             for stack_id in integration['stacks']:
                 for commit in stack_integration_only_commits(stacks_by_id[stack_id]):
