@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.25 - 2026-11-17
+
+- Add a previewed worktree retire-copy command for dirty lane files already present in one declared stack commit. Verify each changed layer, preserve recovery patches and untracked files before cleanup, and keep the lane HEAD and registration. Push and release point to the preview when dirty copies block them.
+
 ## 0.47.24 - 2026-11-17
 
 - Let stack sync report a verified, consistent adoption as a read-only no-op with the next rebuild or push previews. Keep explicit adoption guidance for stale source history. Explain why absorb cannot edit pinned history and preserve its patch while naming an existing draft as the destination.

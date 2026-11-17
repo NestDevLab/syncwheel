@@ -972,11 +972,15 @@ class GovernedWorktrees:
                 'code': 'unavailable',
                 'remedy': 'restore the worktree before retrying cleanup',
             }
-        tracked = self.repository.run(
-            ['git', '-C', str(path), 'diff-index', '--quiet', anchored_tip, '--'],
-            check=False,
-        )
-        if untracked.stdout or tracked.returncode != 0:
+        # A clean index built from the anchored tree has no cached stat data.
+        # Porcelain diff verifies the bytes without refreshing the real index.
+        diff = ['git', '-C', str(path), 'diff', '--quiet', '--no-ext-diff', '--no-textconv',
+                '--ignore-submodules=none']
+        staged = self.repository.run([*diff, '--cached', anchored_tip, '--'],
+                                     check=False, env={'GIT_OPTIONAL_LOCKS': '0'})
+        tracked = self.repository.run([*diff, anchored_tip, '--'],
+                                      check=False, env={'GIT_OPTIONAL_LOCKS': '0'})
+        if untracked.stdout or staged.returncode != 0 or tracked.returncode != 0:
             return {
                 'code': 'dirty',
                 'remedy': 'the worktree became dirty before removal; retain or commit its changes, then retry release',

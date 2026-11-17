@@ -532,6 +532,18 @@ def build_parser(commands, version):
     worktree_release_p.add_argument('-j', '--json', action='store_true')
     worktree_release_p.set_defaults(func=commands['command_worktree_release'])
 
+    retire_copy_p = worktree_sub.add_parser(
+        'retire-copy', parents=[common], help='preview cleanup of a proven duplicate lane copy',
+    )
+    retire_copy_p.add_argument('lane')
+    retire_copy_p.add_argument('--commit', metavar='REV', help='select one declared comparison commit')
+    retire_copy_p.add_argument('--reason', required=True, help='record why this duplicate is being retired')
+    retire_copy_p.add_argument('-a', '--apply', action='store_true')
+    retire_copy_p.add_argument('--plan-digest')
+    retire_copy_p.add_argument('--confirm-writers-stopped', action='store_true')
+    retire_copy_p.add_argument('-j', '--json', action='store_true', help='output JSON (the default)')
+    retire_copy_p.set_defaults(func=commands['command_worktree_retire_copy'])
+
     worktree_lock_p = worktree_sub.add_parser('lock', parents=[common])
     worktree_lock_p.add_argument('stack')
     worktree_lock_p.set_defaults(func=commands['command_worktree_lock'])
@@ -1226,6 +1238,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
         commands['command_worktree_release'],
         commands['command_gc'],
     ), mutates='apply', manifest_mutates='apply')
+    register((commands['command_worktree_retire_copy'],), mutates='apply')
     register((
         commands['command_coordination_claims_backfill'],
         commands['command_coordination_provenance_supersede'],

@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.24`
+Current version: `0.47.25`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -108,6 +108,10 @@ To publish without removing a captured validation copy, explicitly retain it:
 git worktree lock --reason "Keep validated source for inspection" <captured-worktree>
 syncwheel stack push feature-a --retain-captured-worktrees "Keep validation evidence"
 ```
+
+If dirty lane files are already present in one declared stack commit, preview
+`worktree retire-copy LANE --reason REASON`. It proves and backs up the copy before
+cleaning only those paths; see [retiring a declared lane copy](docs/worktree-retire-copy.md).
 
 A retained captured copy must have completed native capture and remain locked.
 A clean, registered active lane at the exact declared tip can also be published
