@@ -188,6 +188,11 @@ directory is printed at startup.
 
 ### Tracked control recovery after an interrupted local replay
 
+For a dirty declaration written by native stack operations, use the separate
+[ledger-owned stack withdrawal](manifest-stack-recovery.md) preview. Its exact
+plan preserves all proven commit generations and records the withdrawal. Do not
+restore that file to HEAD by hand or treat a replay backup as a generic undo.
+
 An ephemeral replay may reset a checked-out integration branch to a tree carrying
 an older tracked manifest. The normal persistence checkpoint accepts only the
 manifest content proved by that replay, including manifests with omitted

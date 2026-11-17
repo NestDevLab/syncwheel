@@ -1432,7 +1432,7 @@ runpy.run_path(str(cli), run_name='__main__')
             for owner, name in registered
         }
         # Deliberate alarm when the registered manifest-mutating surface changes.
-        self.assertEqual(len(registered), 59)
+        self.assertEqual(len(registered), 60)
         normal = analyze_manifest_writer_guard(CLI.parent, registered)
         assert_manifest_writer_guard(self, normal)
         self.assertEqual(normal['manual_edges'], 6)
