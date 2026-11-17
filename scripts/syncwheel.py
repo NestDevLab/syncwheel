@@ -15849,7 +15849,7 @@ def observed_adopted_stack_command(args):
     lifecycle = _stack_lifecycle(root)
     lifecycle.refuse_pending_stack_sync_promotion(path, selection)
     if args.func == command_stack_sync:
-        return lifecycle.command_stack_sync(args, manifest, path, selection)
+        return lifecycle.observe_adopted_stack_sync(args, stack, selection)
     lifecycle.require_stack_absorb_allowed(stack, args, selection)
     raise SyncwheelError('adopted stack changed during observation; inspect and retry')
 

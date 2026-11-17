@@ -2411,15 +2411,21 @@ class StackLifecycle:
             )
         require_stack_absorb_amendable(stack, args)
 
+    def observe_adopted_stack_sync(self, args, stack, remedy_selection):
+        if not self.consistent_stack_adoption(stack, remedy_selection):
+            return None
+        print(f'{args.stack}: stack is adopted; nothing to sync. Next: int rebuild / push')
+        print(f'  syncwheel int rebuild --dry-run {remedy_selection}')
+        print(f'  syncwheel stack push {quoted([args.stack])} --dry-run {remedy_selection}')
+        return 0
+
     def command_stack_sync(self, args, manifest, manifest_path, remedy_selection):
         repo_root = self.repository.root
         stack = require_stack(manifest, args.stack)
         self.refuse_pending_stack_sync_promotion(manifest_path, remedy_selection)
-        if self.consistent_stack_adoption(stack, remedy_selection):
-            print(f'{args.stack}: stack is adopted; nothing to sync. Next: int rebuild / push')
-            print(f'  syncwheel int rebuild --dry-run {remedy_selection}')
-            print(f'  syncwheel stack push {quoted([args.stack])} --dry-run {remedy_selection}')
-            return 0
+        observed = self.observe_adopted_stack_sync(args, stack, remedy_selection)
+        if observed is not None:
+            return observed
         commits = self.repository.rev_list(
             repo_root, f"{stack['base']}..{stack['branch']}", offline=True,
         )
