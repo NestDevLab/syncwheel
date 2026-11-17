@@ -51,6 +51,9 @@ from syncwheel_projection import (
 
 import syncwheel_manifest_store as _manifest_storage
 from syncwheel_desks import DeskLifecycle
+from syncwheel_stack_recovery import COMMIT_ID as RECOVERY_COMMIT_ID
+from syncwheel_stack_recovery import MANIFEST as STACK_RECOVERY_MANIFEST
+from syncwheel_stack_recovery import StackRecovery
 from syncwheel_retire_copy import (
     RetireCopy,
     observed_file as retire_copy_observed_file,
@@ -18454,6 +18457,309 @@ def command_manifest_recover_control(args):
     return 0
 
 
+class _StackRecoveryPorts:
+    """Bridge local withdrawal proof to native manifest, ledger and Git services."""
+
+    def __init__(self, root, path, common):
+        self.root = root
+        self.path = path
+        self.common = common
+        self.store = _manifest_store()
+        self.env = managed_process_env({
+            'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1',
+            'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': '',
+        }, authorize=False)
+        actual = Path(os.fsdecode(self.binary_git('rev-parse', '--absolute-git-dir').strip()))
+        if actual != common or common.resolve() != common:
+            raise SyncwheelError('stack withdrawal requires the original primary Git administration')
+        self.index = common / 'index'
+        self.registry = governed_worktree_registry_path(root)
+        self.native_refs_prepared = False
+
+    def binary_git(self, *arguments, allowed=(0,), index=None):
+        env = self.env.copy()
+        options = ['-c', 'core.fsmonitor=false']
+        if index is not None:
+            env['GIT_INDEX_FILE'] = str(index)
+            # A temporary proof index must never invoke post-index-change for
+            # an index that is not the repository's real one.
+            options.extend(('-c', 'core.hooksPath=/dev/null'))
+        result = subprocess.run(['git', *options, *arguments], cwd=self.root,
+                                env=env, capture_output=True)
+        if result.returncode not in allowed:
+            raise SyncwheelError(result.stderr.decode(errors='replace').strip()
+                                 or f'Git {arguments[0]} failed ({result.returncode})')
+        return result.stdout
+
+    def git(self, *arguments, **kwargs):
+        return os.fsdecode(self.binary_git(*arguments, **kwargs))
+
+    def require_ledger_paths(self):
+        ledger = _manifest_storage.ledger_root(self.root, self.path)
+        directory = _manifest_storage.ledger_events_dir(self.root, self.path)
+        for item in (ledger, directory):
+            require_private_tracking_path(self.root, item, directory=True)
+        paths = [ledger / 'ledger.lock', _manifest_storage.ledger_checkpoint_path(self.root, self.path),
+                 directory / '000001.jsonl', *sorted(directory.glob('*.jsonl'))]
+        for item in paths:
+            require_private_tracking_path(self.root, item)
+        self.store.require_ignored_ledger_paths(self.root, list(dict.fromkeys(paths)))
+
+    def ledger_segments(self, *, raw=False):
+        self.require_ledger_paths()
+        directory = _manifest_storage.ledger_events_dir(self.root, self.path)
+        result = {}
+        for item in sorted(directory.glob('*.jsonl')):
+            before, value = retire_copy_observed_file(item)
+            if before is None or not stat.S_ISREG(before['stat'][2]):
+                raise SyncwheelError('native ledger segment changed during stack withdrawal')
+            result[item.name] = value if raw else {'size': len(value), 'sha256': before['sha256']}
+        return result
+
+    def pending_index_lock(self):
+        return os.path.lexists(self.index.with_name('index.lock'))
+
+    def require_supported_git(self, own_lock):
+        from syncwheel_retire_copy import same_inode
+        if (
+            any(os.path.lexists(self.common / part) for part in ('info/grafts', 'shallow'))
+            or any(name in os.environ for name in ('GIT_GRAFT_FILE', 'GIT_REPLACE_REF_BASE', 'GIT_SHALLOW_FILE'))
+            or self.git('for-each-ref', '--format=%(refname)', 'refs/replace').strip()
+        ):
+            raise SyncwheelError('stack withdrawal refuses Git history replacements, grafts, or shallow history')
+        for name in ('HEAD.lock', 'MERGE_HEAD', 'MERGE_MSG', 'CHERRY_PICK_HEAD', 'REVERT_HEAD',
+                     'rebase-merge', 'rebase-apply', 'sequencer', 'BISECT_LOG', 'AUTO_MERGE'):
+            # Git's prepared native ref transaction can temporarily hold HEAD.lock
+            # when updating the checked-out branch. It stays forbidden elsewhere.
+            if name == 'HEAD.lock' and self.native_refs_prepared:
+                continue
+            if os.path.lexists(self.common / name):
+                raise SyncwheelError(f'stack withdrawal refuses an interrupted Git operation ({name})')
+        if self.pending_index_lock() and (own_lock is None or not same_inode(self.index.with_name('index.lock'), own_lock)):
+            raise SyncwheelError('Git index is locked by another writer')
+        if self.git('config', '--get-regexp', r'^filter\.', allowed=(0, 1)).strip():
+            raise SyncwheelError('stack withdrawal refuses configured Git filters during checkout proof')
+        attributes = self.binary_git('check-attr', '-z', '--all', '--', STACK_RECOVERY_MANIFEST).split(b'\0')
+        if any(attribute in {b'filter', b'working-tree-encoding', b'text', b'eol', b'ident', b'crlf'}
+               for attribute in attributes[1::3]):
+            raise SyncwheelError('stack withdrawal refuses conversion attributes on the canonical manifest')
+        if self.git('rev-parse', '--shared-index-path').strip() or self.git(
+            'config', '--type=bool', '--get', 'core.sparseCheckout', allowed=(0, 1)
+        ).strip() == 'true':
+            raise SyncwheelError('stack withdrawal refuses sparse or split indexes')
+
+    def observe(self, own_lock):
+        from syncwheel_retire_copy import checked_parent, directory_key
+        self.require_supported_git(own_lock)
+        direct_head = self.git('symbolic-ref', '--quiet', 'HEAD', allowed=(0, 1)).strip()
+        if not direct_head.startswith('refs/heads/'):
+            raise SyncwheelError('stack withdrawal requires a primary branch checkout')
+        branch = direct_head.removeprefix('refs/heads/')
+        head = self.direct_ref(direct_head)
+        if not head:
+            raise SyncwheelError('primary integration ref is missing')
+        index, _ = retire_copy_observed_file(self.index, allow_link=own_lock is not None)
+        if index is None:
+            raise SyncwheelError('primary Git index is missing')
+        if any(not line.startswith(b'H ') for line in
+               self.binary_git('ls-files', '-v', '-z').split(b'\0') if line):
+            raise SyncwheelError('stack withdrawal refuses an index with special entry flags')
+        entries = self.index_entries()
+        registry, _ = retire_copy_observed_file(self.registry)
+        require_private_tracking_path(self.common, self.registry)
+        with checked_parent(self.root, STACK_RECOVERY_MANIFEST) as (parent, leaf, parents):
+            file, _ = retire_copy_observed_file(Path(f'/proc/self/fd/{parent}') / leaf)
+            if file and not stat.S_ISREG(file['stat'][2]):
+                raise SyncwheelError('stack withdrawal requires an original regular manifest file')
+        status = [row for row in self.git(
+            'status', '--porcelain=v1', '-z', '--untracked-files=all',
+            '--ignore-submodules=none', '--no-renames',
+        ).split('\0') if row]
+        if retire_copy_observed_file(self.index, allow_link=own_lock is not None)[0] != index:
+            raise SyncwheelError('primary Git index changed during stack withdrawal observation')
+        return {
+            'head': head, 'branch': branch, 'ref': direct_head, 'index': index,
+            'status': status, 'indexEntriesDigest': canonical_json_digest(entries),
+            'registry': registry, 'manifest': file,
+            'manifestParents': parents, 'rootIdentity': directory_key(self.root),
+            'commonIdentity': directory_key(self.common),
+        }
+
+    def index_entries(self, index=None):
+        rows = []
+        for row in self.git('ls-files', '--stage', '-z', index=index).split('\0'):
+            if not row:
+                continue
+            header, name = row.split('\t', 1)
+            mode, oid, stage = header.split()
+            if stage != '0':
+                raise SyncwheelError('stack withdrawal refuses a conflicted index')
+            rows.append([name, mode, oid])
+        return sorted(rows)
+
+    def tree_entries(self, commit):
+        rows = []
+        for row in self.git('ls-tree', '-r', '-z', commit).split('\0'):
+            if row:
+                header, name = row.split('\t', 1)
+                mode, _, oid = header.split()
+                rows.append([name, mode, oid])
+        return sorted(rows)
+
+    def tree_entries_digest(self, commit):
+        return canonical_json_digest(self.tree_entries(commit))
+
+    def build_index(self, commit, index):
+        self.git('-c', 'core.splitIndex=false', 'read-tree', commit, index=index)
+        if self.index_entries(index=index) != self.tree_entries(commit):
+            raise SyncwheelError('prepared withdrawal index does not match its isolated control commit')
+
+    def head_manifest(self, head):
+        return self.binary_git('show', f'{head}:{STACK_RECOVERY_MANIFEST}')
+
+    def direct_ref(self, ref):
+        if self.git('symbolic-ref', '--quiet', ref, allowed=(0, 1)).strip():
+            raise SyncwheelError(f'stack withdrawal refuses symbolic ref {ref!r}')
+        return self.git('rev-parse', '--verify', '--quiet', '--end-of-options',
+                        f'{ref}^{{commit}}', allowed=(0, 1)).strip() or None
+
+    def commit(self, expression):
+        return self.git('rev-parse', '--verify', '--end-of-options', f'{expression}^{{commit}}').strip()
+
+    def full_declared_commit(self, oid):
+        if not isinstance(oid, str) or not RECOVERY_COMMIT_ID.fullmatch(oid) or self.commit(oid) != oid:
+            raise SyncwheelError('the native withdrawal ledger contains an unresolved commit generation')
+        return oid
+
+    def require_mode(self, head, dirty, branch):
+        if any(
+            item.get('repository_mode') != 'delivery'
+            or item.get('syncwheel_tracking') != SYNCWHEEL_TRACKING_GIT_TRACKED
+            or coordination_is_active(item)
+            or item['integration']['branch'] != branch
+            for item in (head, dirty)
+        ):
+            raise SyncwheelError('stack withdrawal requires local git-tracked delivery on the primary integration branch')
+        if os.path.lexists(coordination_publication_lock_path(self.root)):
+            raise SyncwheelError('stack withdrawal refuses a pending coordination publication')
+        _, coordination = coordination_profile(self.root)
+        if local_lease_is_active(coordination):
+            raise SyncwheelError('stack withdrawal refuses an active local coordination lease')
+
+    def require_unpublished_tracking(self, branch):
+        tracking = self.git('for-each-ref', '--format=%(refname)', 'refs/remotes').splitlines()
+        if any(ref.removeprefix('refs/remotes/').partition('/')[2] == branch for ref in tracking):
+            raise SyncwheelError('local remote-tracking refs show prior stack publication')
+
+    def unresolved(self, stack, events):
+        from syncwheel_stack_adoption import pending_adoptions
+        if pending_adoptions(events) or unmatched_stack_create_operations(self.root, self.path, stack):
+            raise SyncwheelError('a native stack creation or adoption is unresolved')
+        if pending_stack_close_operation(self.root, self.path, stack):
+            raise SyncwheelError('a native close is unresolved for this stack')
+
+    def verify_anchors(self, anchors):
+        if any(self.direct_ref(ref) != expected for ref, expected in anchors.items()):
+            raise SyncwheelError('withdrawal recovery ref changed or is missing')
+
+    def publish_refs(self, plan, control, anchors, check_prepared):
+        if any(self.direct_ref(ref) is not None for ref in anchors):
+            raise SyncwheelError('an unjournaled withdrawal recovery ref already exists')
+        primary_ref = plan['observation']['ref']
+        records = [
+            f"verify {plan['sourceRef']} {plan['sourceTip']}",
+            *(f'create {ref} {commit}' for ref, commit in anchors.items()),
+            f"update {primary_ref} {control} {plan['beforeHead']}",
+        ]
+        # Native reference-transaction hooks receive the scoped authorization.
+        # The no-write diagnostics context is restored before further observation.
+        def verify_prepared_checkout():
+            self.native_refs_prepared = True
+            try:
+                check_prepared()
+            finally:
+                self.native_refs_prepared = False
+
+        diagnostic_scope = _READONLY_DIAGNOSTICS.set(False)
+        try:
+            require_private_tracking_path(self.common, ref_auth_dir(self.root), directory=True)
+            with ref_move_authorization(self.root) as nonce:
+                env = {
+                    MANAGED_REF_MOVE_AUTH_ENV: nonce, 'GIT_OPTIONAL_LOCKS': '0',
+                    'GIT_NO_LAZY_FETCH': '1', 'GIT_ALLOW_PROTOCOL': '', 'GIT_NO_REPLACE_OBJECTS': '1',
+                }
+                _StackRepository(self.root).capture_ref_transaction(
+                    records, env, checked_out_ref=primary_ref, check_prepared=verify_prepared_checkout,
+                    fsync_refs=True,
+                )
+        finally:
+            _READONLY_DIAGNOSTICS.reset(diagnostic_scope)
+
+    def stale_lock_reason(self, owner):
+        return governed_worktree_stale_lock_reason(owner)
+
+    def lock_metadata(self):
+        return governed_worktree_lock_metadata()
+
+    def write_private_json(self, path, payload):
+        require_private_tracking_path(self.common, path)
+        atomic_write_private_json(path, payload)
+        fsync_directory_path(path.parent)
+
+    def refresh_checkpoint(self, operation, plan, token):
+        from syncwheel_ledger import reduce_ledger_state
+        checkpoint = _manifest_storage.ledger_checkpoint_path(self.root, self.path)
+
+        def expected_image():
+            events = operation.events()
+            operation.require_ledger(plan, events, token)
+            state = reduce_ledger_state(events)
+            return (json.dumps(state, indent=2, sort_keys=True) + '\n').encode()
+
+        if retire_copy_observed_file(checkpoint)[1] == expected_image():
+            return
+        with ledger_write_lock(self.root, self.path):
+            payload = expected_image()
+            if retire_copy_observed_file(checkpoint)[1] != payload:
+                # The native checkpoint is a projection of the authoritative
+                # event frames under this same ledger lock.
+                _manifest_storage.write_ledger_checkpoint(self.root, None, self.path)
+
+    def persist_stack_withdrawal(self, operation, plan, desired, token, intent):
+        branch = plan['observation']['branch']
+        require_private_tracking_path(self.common, governed_worktree_lock_path(self.root))
+        require_private_tracking_path(self.common, control_manifest_lock_path(self.root, branch))
+        with manifest_write_transaction(self.root, self.path, 'manifest-recover-stack', commit_tracked_changes=False):
+            transaction = _manifest_storage.active_manifest_write_transaction(self.path)
+            transaction['preserveGitignore'] = True
+            with control_manifest_branch_lock(self.root, branch), governed_worktree_registry_lock(self.root):
+                return self.store.persist_explicit_stack_withdrawal(
+                    self.root, self.path, desired, plan, token, operation, intent,
+                )
+
+
+def command_manifest_recover_stack(args):
+    try:
+        root, path = resolve_command_manifest_selection(args)
+        root = Path(root)
+        canonical = primary_authority_manifest_path(root)
+        path = Path(os.path.abspath(path))
+        if (args.personal or path != canonical or root != canonical.parent.parent
+                or path.resolve() != path):
+            raise SyncwheelError('manifest recover-stack requires the canonical primary checkout and manifest')
+        stack = safe_ref_segment(args.stack)
+        if stack != args.stack:
+            raise SyncwheelError('manifest recover-stack requires the exact stack id')
+        common = git_common_dir(root)
+        operation: StackRecovery = StackRecovery(_StackRecoveryPorts(root, path, common), root, path,
+                                                 common, stack, args.reason.strip())
+        result = operation.execute_stack_withdrawal(apply=args.apply, token=args.plan_digest)
+    except (OSError, UnicodeError) as exc:
+        raise SyncwheelError(f'stack withdrawal could not complete: {exc}') from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_manifest_compare(args):
     repo_root = resolve_repo_root(args.repo)
     left, left_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -20044,6 +20350,15 @@ def uses_metadata_primary_scope(args, repo_root, manifest_path, manifest):
     return ordinary_empty_draft_close(manifest, stack_map(manifest).get(args.stack), args, reason)
 
 
+def dirty_primary_control_manifest_refusal(primary_root):
+    preview = shlex.join([
+        'syncwheel', 'manifest', 'recover-stack', 'STACK',
+        '--repo', str(primary_root), '--reason', 'REASON',
+    ])
+    return ('primary checkout control manifest is dirty; '
+            f'if it contains one native stack declaration, preview with {preview}')
+
+
 def require_metadata_primary_index(primary_root):
     if git(primary_root, 'ls-files', '-u').stdout.strip():
         raise SyncwheelError('primary checkout has index conflicts')
@@ -20053,7 +20368,7 @@ def require_metadata_primary_index(primary_root):
                              + ', '.join(sorted(set(staged) - {''})))
     if git(primary_root, 'diff', '--quiet', '--', '.syncwheel/manifest.json',
            check=False, env={'GIT_OPTIONAL_LOCKS': '0'}).returncode != 0:
-        raise SyncwheelError('primary checkout control manifest is dirty')
+        raise SyncwheelError(dirty_primary_control_manifest_refusal(primary_root))
 
 
 def require_private_metadata_paths(args, repo_root, manifest_path):
@@ -20165,11 +20480,9 @@ def primary_checkout_preflight(args):
                 primary_root, 'diff', '--cached', '--quiet', check=False
             ).returncode != 0:
                 raise SyncwheelError('primary checkout has index changes or conflicts')
-            if '.syncwheel/manifest.json' in {
-                path for entry in primary_checkout_dirty_entries(primary_root)
-                for path in _manifest_storage.status_line_paths(entry)
-            }:
-                raise SyncwheelError('primary checkout control manifest is dirty')
+            if git(primary_root, 'diff', '--quiet', '--', '.syncwheel/manifest.json',
+                   check=False, env={'GIT_OPTIONAL_LOCKS': '0'}).returncode != 0:
+                raise SyncwheelError(dirty_primary_control_manifest_refusal(primary_root))
             return
         if metadata_scope:
             require_metadata_primary_index(primary_root)
@@ -20189,11 +20502,9 @@ def primary_checkout_preflight(args):
             if staged:
                 raise SyncwheelError('primary checkout has unrelated staged paths: '
                                      + ', '.join(sorted(staged)))
-            if '.syncwheel/manifest.json' in {
-                path for entry in primary_checkout_dirty_entries(primary_root)
-                for path in _manifest_storage.status_line_paths(entry)
-            }:
-                raise SyncwheelError('primary checkout control manifest is dirty')
+            if git(primary_root, 'diff', '--quiet', '--', '.syncwheel/manifest.json',
+                   check=False, env={'GIT_OPTIONAL_LOCKS': '0'}).returncode != 0:
+                raise SyncwheelError(dirty_primary_control_manifest_refusal(primary_root))
             return
         selected, _ = _manifest_storage.load_manifest(repo_root, selected_path)
         stack_id = getattr(args, 'stack', None)
@@ -20744,12 +21055,13 @@ def main():
     global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
     desk_release = args.func == command_stack_release_desk
     retire_copy = args.func == command_worktree_retire_copy
+    recover_stack = args.func == command_manifest_recover_stack
     adopted_metadata = False
     # Retire-copy owns its explicit, locally journaled writes. Standard
     # startup reconciliation, hooks, and implicit ref authorizations stay off.
     readonly_diagnostics = (
         args.func == command_worktree_list
-        or retire_copy
+        or retire_copy or recover_stack
         or (args.func in {command_status, command_check} and not args.fetch)
         or (desk_release and not args.apply)
     )
@@ -20768,7 +21080,7 @@ def main():
             args.repo = args.repo or os.environ.get(ENV_REPO)
         if readonly_diagnostics or desk_release:
             diagnostic_scope = _READONLY_DIAGNOSTICS.set(readonly_diagnostics)
-            authorization_scope = _EXPLICIT_REF_AUTHORIZATION.set(desk_release and args.apply)
+            authorization_scope = _EXPLICIT_REF_AUTHORIZATION.set((desk_release or recover_stack) and args.apply)
             try:
                 return args.func(args)
             finally:
@@ -20958,6 +21270,7 @@ def command_handlers():
         'command_ledger_show': command_ledger_show,
         'command_manifest_compare': command_manifest_compare,
         'command_manifest_recover_control': command_manifest_recover_control,
+        'command_manifest_recover_stack': command_manifest_recover_stack,
         'command_manifest_require_integration': command_manifest_require_integration,
         'command_plan': command_plan,
         'command_publish': command_publish,
@@ -21763,14 +22076,16 @@ class _StackRepository:
         with ref_move_authorization(self.root) as nonce:
             self.capture_ref_transaction(operations, {MANAGED_REF_MOVE_AUTH_ENV: nonce})
 
-    def capture_ref_transaction(self, operations, authorization=None):
+    def capture_ref_transaction(self, operations, authorization=None, *, checked_out_ref=None,
+                                check_prepared=None, fsync_refs=False):
         commands = ['start']
         for operation in operations:
             commands.extend(('option no-deref', operation))
         # Old-OID checks on some Git versions accept symbolic references to
         # that same OID. Inspect ref kinds after Git has acquired its locks.
+        options = ['-c', 'core.fsync=reference'] if fsync_refs else []
         with tempfile.TemporaryFile(mode='w+t') as errors, subprocess.Popen(
-            ['git', 'update-ref', '--stdin'],
+            ['git', *options, 'update-ref', '--stdin'],
             cwd=self.root, env=managed_process_env(authorization),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errors, text=True,
         ) as process:
@@ -21801,10 +22116,12 @@ class _StackRepository:
                     action, ref, *_ = operation.split()
                     if git(self.root, 'symbolic-ref', '--quiet', ref, check=False).returncode == 0:
                         raise SyncwheelError(f'capture ref became symbolic before commit: {ref}')
-                    if action != 'verify' and find_worktree_for_branch(
+                    if action != 'verify' and ref != checked_out_ref and find_worktree_for_branch(
                         self.root, ref.removeprefix('refs/heads/'),
                     ):
                         raise SyncwheelError(f'capture ref is checked out before commit: {ref}')
+                if check_prepared is not None:
+                    check_prepared()
                 process.stdin.write('commit\n')
                 process.stdin.flush()
                 require_response('commit: ok')

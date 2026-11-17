@@ -85,6 +85,7 @@ _CHANNEL_MUTATION_LOCK_STATE = threading.local()
 _MANIFEST_WRITE_TRANSACTION_STATE = threading.local()
 
 _CONTROL_MANIFEST_LOCK_STATE = threading.local()
+_LEDGER_WRITE_LOCK_STATE = threading.local()
 
 _LEDGER_FSYNC = os.fsync
 
@@ -317,6 +318,14 @@ def ledger_write_lock(repo_root, manifest_path=None):
     root = ledger_root(repo_root, manifest_path)
     ensure_directory_durable(root)
     lock_path = root / 'ledger.lock'
+    identity = str(lock_path.resolve())
+    held = getattr(_LEDGER_WRITE_LOCK_STATE, 'held', None)
+    if held is None:
+        held = set()
+        _LEDGER_WRITE_LOCK_STATE.held = held
+    if identity in held:
+        yield
+        return
     existed = lock_path.exists()
     with lock_path.open('a+b') as handle:
         if not existed:
@@ -324,9 +333,11 @@ def ledger_write_lock(repo_root, manifest_path=None):
             _LEDGER_FSYNC(handle.fileno())
             ledger_fsync_directory_path(root)
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        held.add(identity)
         try:
             yield
         finally:
+            held.remove(identity)
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
@@ -953,7 +964,8 @@ def explicit_control_recovery_intent(intent):
 def explicit_control_recovery_refusal():
     return ('interrupted explicit control recovery is quarantined; requested command '
             'was not executed. Preserve the checkout and obtain a fresh '
-            'manifest recover-control --from-backup BACKUP plan before explicit apply')
+            'manifest recover-control --from-backup BACKUP plan before explicit apply, '
+            'or retry the original manifest recover-stack invocation and plan digest')
 
 
 def pending_explicit_control_recoveries(repo_root, manifest_path):
@@ -1142,6 +1154,7 @@ class ManifestStore:
 
     def append_ledger_event(
         self, repo_root, event_type, payload, manifest_path=None, idempotency_key=None,
+        *, atomic_segment=False, after_atomic_event=None,
     ):
         transaction = active_manifest_write_transaction_for_repo(repo_root)
         preserve_ignore = transaction is not None and transaction.get('preserveGitignore') is True
@@ -1155,7 +1168,8 @@ class ManifestStore:
             manifest_path or repo_root / '.syncwheel' / 'manifest.json'
         )
         with ledger_write_lock(repo_root, manifest_path):
-            _recover_ledger_tail_unlocked(repo_root, manifest_path)
+            if not atomic_segment:
+                _recover_ledger_tail_unlocked(repo_root, manifest_path)
             events = load_ledger_events(repo_root, manifest_path)
             if idempotency_key is not None:
                 payload = dict(payload)
@@ -1191,6 +1205,13 @@ class ManifestStore:
                 self.require_ignored_ledger_paths(repo_root, [path])
             existed = path.exists()
             encoded = json.dumps(event, sort_keys=True).encode('utf-8')
+            if atomic_segment:
+                self.append_atomic_control_ledger_segment(path, encoded)
+                if after_atomic_event is not None:
+                    after_atomic_event()
+                state = reduce_ledger_state(load_ledger_events(repo_root, manifest_path))
+                _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path)
+                return event
             descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
             try:
                 midpoint = max(1, len(encoded) // 2)
@@ -1210,6 +1231,24 @@ class ManifestStore:
             _write_ledger_checkpoint_unlocked(repo_root, state, manifest_path)
             return event
 
+
+    def append_atomic_control_ledger_segment(self, path, encoded):
+        # Preserve the authoritative prefix and make the next frame visible in
+        # one rename. A stopped writer can leave a temporary file, not a torn
+        # ledger record that unrelated commands might auto-repair.
+        before = private_tracking_file_image(path)
+        prefix = before[3] if before else b''
+        mode = before[2] if before else 0o600
+        with private_tracking_temporaries('explicit control recovery') as temporary:
+            next_image, _ = stage_private_tracking_file(
+                temporary, path, mode, prefix + encoded + b'\n',
+                append_at=len(prefix) + max(1, len(encoded) // 2),
+            )
+            if private_tracking_file_image(path) != before:
+                raise SyncwheelError('native ledger segment changed before control recovery append')
+            os.replace(next_image, path)
+            ledger_fsync_directory_path(path.parent)
+            ledger_io_checkpoint('event_fsynced')
 
     def save_personal_tracking(self, repo_root, manifest_path, manifest, context):
         """Save a private tracking declaration and its ledger event as one update."""
@@ -1341,6 +1380,7 @@ class ManifestStore:
 
     def materialize_control_manifest_commit(
         self, repo_root, manifest, parent, identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
+        *, force_commit=False, message=None,
     ):
         """Build the manifest-only control commit without touching the real index.
 
@@ -1362,15 +1402,15 @@ class ManifestStore:
                 f'100644,{blob},{relative}', env=environment,
             )
             tree = self.repository.git(repo_root, 'write-tree', env=environment).stdout.strip()
-            if tree == self.repository.ref_tree(repo_root, parent):
+            if tree == self.repository.ref_tree(repo_root, parent) and not force_commit:
                 return parent
             commit = self.repository.git(
                 repo_root, 'commit-tree', tree, '-p', parent,
                 # A different object makes older consumers fail their deterministic
                 # object check instead of resuming this explicit-plan-only operation.
-                '-m', ('chore: restore guarded Syncwheel control manifest'
-                       if identity_version == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
-                       else 'chore: restore Syncwheel control manifest'),
+                '-m', message or ('chore: restore guarded Syncwheel control manifest'
+                                  if identity_version == CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
+                                  else 'chore: restore Syncwheel control manifest'),
                 env=self.repository.control_manifest_commit_env(repo_root, parent, identity_version),
             ).stdout.strip()
         finally:
@@ -1382,6 +1422,82 @@ class ManifestStore:
             )
         return commit
 
+
+    def persist_explicit_stack_withdrawal(
+        self, repo_root, manifest_path, desired, plan, token, operation, intent,
+    ):
+        """Use the native control intent and receipt for a reviewed stack withdrawal."""
+        transaction = active_manifest_write_transaction(manifest_path)
+        if transaction is None or not transaction.get('preserveGitignore'):
+            raise SyncwheelError('stack withdrawal requires its native control manifest transaction')
+        version = CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION
+        branch = plan['observation']['branch']
+        replay_tip = plan['beforeHead']
+        command = 'syncwheel manifest recover-stack'
+        kind = 'stack_withdraw'
+        with self.control_manifest_branch_lock(repo_root, branch), ledger_write_lock(repo_root, manifest_path):
+            events = operation.events()
+            operation.require_ledger(plan, events, token)
+            if operation.select_intent(events, token) != intent:
+                raise SyncwheelError('stack withdrawal intent changed under the ledger lock')
+            if intent is None:
+                control_commit = self.materialize_control_manifest_commit(
+                    repo_root, desired, replay_tip, version, force_commit=True,
+                    message=f"chore: withdraw Syncwheel stack {plan['stack']}",
+                )
+                prepared = operation.prepare(plan, desired, token, control_commit)
+                operation.require_fresh_observation(plan)
+                payload = self.control_manifest_intent_payload(
+                    repo_root, desired, plan['manifestDigestBefore'], replay_tip, control_commit,
+                    kind, kind, command, token, identity_version=version,
+                )
+                payload['stack_withdrawal'] = {
+                    'stack': plan['stack'], 'reason': plan['reason'], 'plan': plan,
+                    'desired': desired, 'preparedDigest': canonical_json_digest(prepared),
+                }
+                intent = self.append_ledger_event(
+                    repo_root, 'control_manifest_persistence_intent', payload, manifest_path,
+                    idempotency_key=control_manifest_intent_idempotency_key(token), atomic_segment=True,
+                )
+                operation.checkpoint('intent-saved')
+            else:
+                payload = intent['payload']
+                control_commit = payload['expected_control_commit']
+                prepared = operation.prepared_from_intent(intent, plan, token)
+            operation.require_ledger(plan, operation.events(), token)
+            completed = operation.complete_receipt(operation.events(), token)
+            if completed is not None:
+                operation.verify_completed(plan, prepared, completed)
+                return control_commit
+            destination = operation.durable_directory(token)
+            operation.synchronize(plan, prepared, destination, publish=True)
+            transaction['expectedDigest'] = plan['manifestDigestAfter']
+            operation.require_ledger(plan, operation.events(), token)
+            receipt = self.control_manifest_event_payload(
+                repo_root, manifest_path, desired, control_commit, kind, kind, command,
+                {
+                    'stack': plan['stack'],
+                    'user_reason': plan['reason'],
+                    'plan_digest': token,
+                    'ledger_evidence': plan['ledgerEvidence'],
+                    'source_ref': plan['sourceRef'],
+                    'source_tip': plan['sourceTip'],
+                    'recovery_refs': operation.anchors(plan, token),
+                    'replay_tip': replay_tip,
+                },
+                operation_id=token,
+            )
+            self.append_ledger_event(
+                repo_root, 'manifest_saved', receipt, manifest_path,
+                idempotency_key=control_manifest_event_idempotency_key(
+                    desired, replay_tip, control_commit, command, token
+                ),
+                atomic_segment=True,
+                after_atomic_event=lambda: operation.checkpoint('ledger-event-durable'),
+            )
+            operation.checkpoint('ledger-saved')
+            operation.verify_completed(plan, prepared, operation.complete_receipt(operation.events(), token))
+            return control_commit
 
     def control_manifest_commit_identity_version(self, repo_root, manifest, parent, commit):
         """Return the identity formula that produced this control object, or None."""

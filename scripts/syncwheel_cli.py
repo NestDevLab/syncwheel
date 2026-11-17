@@ -638,6 +638,16 @@ def build_parser(commands, version):
     manifest_recover_p.add_argument('-a', '--apply', action='store_true')
     manifest_recover_p.set_defaults(func=commands['command_manifest_recover_control'])
 
+    manifest_stack_recovery_p = manifest_sub.add_parser(
+        'recover-stack', parents=[common],
+        help='withdraw one stack whose dirty declaration is proven by the native ledger',
+    )
+    manifest_stack_recovery_p.add_argument('stack')
+    manifest_stack_recovery_p.add_argument('--reason', required=True)
+    manifest_stack_recovery_p.add_argument('--plan-digest')
+    manifest_stack_recovery_p.add_argument('-a', '--apply', action='store_true')
+    manifest_stack_recovery_p.set_defaults(func=commands['command_manifest_recover_stack'])
+
     manifest_require_integration_p = manifest_sub.add_parser(
         'require-integration',
         help='require every declared stack to participate in integration',
@@ -1250,6 +1260,7 @@ def entrypoint_behavior_table(commands, internal_writers=()):
     ), mutates='apply')
     register((commands['command_repo_mode_set'],), mutates='apply', manifest_mutates='apply')
     register((commands['command_manifest_recover_control'],), mutates='apply', manifest_mutates='apply', remedy=True)
+    register((commands['command_manifest_recover_stack'],), mutates='apply', manifest_mutates='apply', remedy=True)
     # digest-heal is the one repair class that appends a local ledger event
     # alongside the remote state CAS.
     register((commands['command_coordination_repair'],), mutates='apply', manifest_mutates='apply')

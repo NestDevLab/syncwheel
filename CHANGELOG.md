@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.26 - 2026-11-17
+
+- Recover a dirty shared control manifest only when native ledger evidence proves the exact stack declaration. Preview and bind the withdrawal, retain every proven commit generation, record a compensating event, and finish a manifest-only control commit through an explicit resumable transaction. Unrelated edits still refuse.
+
 ## 0.47.25 - 2026-11-17
 
 - Add a previewed worktree retire-copy command for dirty lane files already present in one declared stack commit. Verify each changed layer, preserve recovery patches and untracked files before cleanup, and keep the lane HEAD and registration. Push and release point to the preview when dirty copies block them.
