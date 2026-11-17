@@ -2,6 +2,8 @@
 import contextlib
 import io
 import json
+import os
+import shlex
 import sys
 from unittest import mock
 import unittest
@@ -33,6 +35,20 @@ class PreservedCandidateTest(unittest.TestCase):
                 '--adopt-tip', self.candidate)
         plan = json.loads(self.f.run_cli(*args).stdout)
         self.f.run_cli(*args, '--plan-digest', plan['planDigest'], '--apply')
+        # Persisted hooks need an executable outside every checkout. Keep the
+        # test independent of a globally installed CLI and exercise this source.
+        bin_dir = self.f.tmp / 'bin'
+        bin_dir.mkdir()
+        executable = bin_dir / 'syncwheel'
+        executable.write_text('#!/bin/sh\nexec ' + shlex.quote(sys.executable) + ' '
+                              + shlex.quote(str(fixtures.CLI)) + ' "$@"\n')
+        executable.chmod(0o755)
+        environment = mock.patch.dict(os.environ, {
+            'PATH': str(bin_dir) + os.pathsep + os.environ.get('PATH', ''),
+            'SYNCWHEEL_UPDATE_MODE': 'off',
+        })
+        environment.start()
+        self.addCleanup(environment.stop)
         self.args = ('stack', 'push', 'feature-a', '--remote', 'origin',
                      '--retain-captured-worktrees', 'Keep reviewed source',
                      '--allow-equivalent-candidate')
