@@ -2462,6 +2462,7 @@ class ManagedRefGuardTests(unittest.TestCase):
             'command_hooks_remove',
             'command_stack_capture_integration',
             'command_manifest_recover_control',
+            'command_manifest_recover_stack',
             'command_worktree_open',
         })
         non_remedy = parser.parse_args([

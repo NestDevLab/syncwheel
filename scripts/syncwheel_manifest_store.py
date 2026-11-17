@@ -1380,7 +1380,7 @@ class ManifestStore:
 
     def materialize_control_manifest_commit(
         self, repo_root, manifest, parent, identity_version=CONTROL_MANIFEST_IDENTITY_VERSION,
-        *, force_commit=False, message=None,
+        *, message=None,
     ):
         """Build the manifest-only control commit without touching the real index.
 
@@ -1402,7 +1402,7 @@ class ManifestStore:
                 f'100644,{blob},{relative}', env=environment,
             )
             tree = self.repository.git(repo_root, 'write-tree', env=environment).stdout.strip()
-            if tree == self.repository.ref_tree(repo_root, parent) and not force_commit:
+            if tree == self.repository.ref_tree(repo_root, parent):
                 return parent
             commit = self.repository.git(
                 repo_root, 'commit-tree', tree, '-p', parent,
@@ -1442,7 +1442,7 @@ class ManifestStore:
                 raise SyncwheelError('stack withdrawal intent changed under the ledger lock')
             if intent is None:
                 control_commit = self.materialize_control_manifest_commit(
-                    repo_root, desired, replay_tip, version, force_commit=True,
+                    repo_root, desired, replay_tip, version,
                     message=f"chore: withdraw Syncwheel stack {plan['stack']}",
                 )
                 prepared = operation.prepare(plan, desired, token, control_commit)

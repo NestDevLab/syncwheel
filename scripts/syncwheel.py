@@ -18662,14 +18662,27 @@ class _StackRecoveryPorts:
         if any(self.direct_ref(ref) != expected for ref, expected in anchors.items()):
             raise SyncwheelError('withdrawal recovery ref changed or is missing')
 
+    def anchors_published(self, anchors):
+        actual = {ref: self.direct_ref(ref) for ref in anchors}
+        if all(tip is None for tip in actual.values()):
+            return False
+        if actual != anchors:
+            raise SyncwheelError('withdrawal recovery refs are incomplete or differ from the reviewed plan')
+        return True
+
     def publish_refs(self, plan, control, anchors, check_prepared):
-        if any(self.direct_ref(ref) is not None for ref in anchors):
+        if self.anchors_published(anchors):
             raise SyncwheelError('an unjournaled withdrawal recovery ref already exists')
         primary_ref = plan['observation']['ref']
+        before = plan['beforeHead']
+        primary_operation = (
+            f'verify {primary_ref} {before}' if control == before
+            else f'update {primary_ref} {control} {before}'
+        )
         records = [
             f"verify {plan['sourceRef']} {plan['sourceTip']}",
             *(f'create {ref} {commit}' for ref, commit in anchors.items()),
-            f"update {primary_ref} {control} {plan['beforeHead']}",
+            primary_operation,
         ]
         # Native reference-transaction hooks receive the scoped authorization.
         # The no-write diagnostics context is restored before further observation.

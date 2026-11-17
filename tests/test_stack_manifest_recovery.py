@@ -17,6 +17,7 @@ class StackManifestRecoveryTest(unittest.TestCase):
     reason = 'Withdraw the declaration created in the wrong manifest'
     environment = {'SYNCWHEEL_UPDATE_MODE': 'off', 'GIT_OPTIONAL_LOCKS': '0',
                    'GIT_NO_LAZY_FETCH': '1', 'PYTHONDONTWRITEBYTECODE': '1',
+                   'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
                    'SYNCWHEEL_LANE_OWNER': 'fixture-recovery-owner'}
 
     def setUp(self):
@@ -40,6 +41,8 @@ class StackManifestRecoveryTest(unittest.TestCase):
         data['defaults'].update(publication_remote='origin', integration_membership='required')
         data['integration'].update(branch='main-integration', stacks=[], strategy='cherry-pick')
         self.manifest.write_text(json.dumps(data, indent=2) + '\n')
+        normalized, _ = self.module.load_manifest(self.repo, self.manifest)
+        self.manifest.write_text(json.dumps(normalized, indent=2, sort_keys=True) + '\n')
         self.module.ensure_syncwheel_metadata_excluded(self.repo, 'git-tracked', 'var/syncwheel')
         self.git('add', '-f', '.syncwheel/manifest.json', '.gitignore')
         self.git('commit', '-qm', 'Track shared control')
@@ -150,6 +153,10 @@ class StackManifestRecoveryTest(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD^').decode().strip(), self.declared_head)
         self.assertEqual(self.git('diff', '--name-only', 'HEAD^', 'HEAD').decode().strip(),
                          '.syncwheel/manifest.json')
+        control = self.git('rev-parse', 'HEAD').decode().strip()
+        self.assertTrue(self.module.is_manifest_only_commit(self.repo, control))
+        self.assertTrue(self.module.integration_control_only_transition(
+            self.repo, control, self.declared_head))
         self.assertEqual(self.git('status', '--porcelain'), b'')
         self.assertEqual(self.f.read_manifest()['stacks'], [])
         self.assertEqual(self.f.read_manifest()['integration']['stacks'], [])
@@ -185,6 +192,99 @@ class StackManifestRecoveryTest(unittest.TestCase):
                            '--plan-digest', 'not-a-reviewed-plan', '--apply', expected=2)
         self.assertIn('manifest recover-stack', refused.stderr)
         self.assertIn('--repo ' + shlex.quote(str(self.repo)), refused.stderr)
+
+    def prepare_declaration_absent_from_head(self):
+        # Simulate a historical native declaration saved before its control
+        # commit became visible. Only this synthetic fixture moves its primary.
+        token = self.module.authorize_ref_move(self.repo)
+        self.env[self.module.MANAGED_REF_MOVE_AUTH_ENV] = token
+        try:
+            self.git('update-ref', 'refs/heads/main-integration', self.base, self.declared_head)
+            self.git('read-tree', self.base)
+        finally:
+            self.env.pop(self.module.MANAGED_REF_MOVE_AUTH_ENV)
+            self.module.clear_ref_authorizations(self.repo)
+        self.declared_head = self.base
+
+    def test_already_desired_head_is_reused_without_an_empty_commit(self):
+        self.prepare_declaration_absent_from_head()
+        plan = self.preview()
+        self.apply(plan)
+        self.assertEqual(self.git('rev-parse', 'HEAD').decode().strip(), self.base)
+        self.assertEqual(self.git('status', '--porcelain'), b'')
+        for ref, tip in plan['anchorRefs'].items():
+            self.assertEqual(self.git('rev-parse', ref).decode().strip(), tip)
+        events = self.module.load_ledger_events(self.repo, self.manifest)
+        terminal = [e for e in events if e['type'] == 'manifest_saved'
+                    and e['payload']['reason'] == 'stack_withdraw']
+        self.assertEqual(len(terminal), 1)
+        before = self.snapshot()
+        self.apply(plan)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_unchanged_head_resumes_after_anchor_transaction(self):
+        self.prepare_declaration_absent_from_head()
+        plan = self.preview()
+        driver = '''
+import os, signal, syncwheel, syncwheel_stack_recovery
+def checkpoint(stage):
+    if stage == 'refs-updated':
+        os.kill(os.getpid(), signal.SIGKILL)
+syncwheel_stack_recovery.stack_recovery_checkpoint = checkpoint
+raise SystemExit(syncwheel.main())
+'''
+        result = subprocess.run(
+            [sys.executable, '-c', driver, *self.arguments(), '--plan-digest', plan['planDigest'], '--apply'],
+            cwd=self.repo, env={**os.environ, **self.env, 'PYTHONPATH': str(fixtures.CLI.parent)},
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr)
+        self.apply(plan)
+        self.assertEqual(self.git('rev-parse', 'HEAD').decode().strip(), self.base)
+        self.assertEqual(self.git('status', '--porcelain'), b'')
+
+    def test_control_patch_publishes_through_a_personal_maintenance_stack(self):
+        # Give the disposable delivery base the old declaration. The real remote
+        # may already lack it, in which case there is no maintenance patch to send.
+        self.git('--git-dir', self.origin, 'fetch', '-q', self.repo, self.declared_head)
+        self.git('--git-dir', self.origin, 'update-ref', 'refs/heads/main', self.declared_head)
+        self.git('fetch', '-q', 'origin', 'main')
+        self.apply(self.preview())
+        control = self.git('rev-parse', 'HEAD').decode().strip()
+        primary = self.manifest.read_bytes()
+        self.cli('init', '--personal', 'maintenance', '--canonical-remote', 'origin',
+                 '--publication-remote', 'origin', '--base-branch', 'main',
+                 '--integration-branch', 'integration/maintenance/main',
+                 '--syncwheel-tracking', 'git-tracked', '--no-coordination',
+                 '--worktree-root', 'var/syncwheel')
+        self.cli('stack', 'create', 'control-maintenance', '--personal', 'maintenance',
+                 '--branch', 'maintenance/withdraw-declaration', '--base', self.declared_head,
+                 '--target-remote', 'origin', '--target-branch', 'main')
+        lane = json.loads(self.cli(
+            'worktree', 'open', 'control-maintenance', '--into', 'control-maintenance',
+            '--base', self.declared_head, '--personal', 'maintenance', '--json',
+        ).stdout)['lane']
+        root = Path(lane['path'])
+        # The base is byte-identical to the recovery parent in this fixture.
+        self.git('restore', '--source', control, '--staged', '--worktree', '--',
+                 '.syncwheel/manifest.json', cwd=root)
+        self.assertEqual(self.git('diff', '--cached', '--name-only', cwd=root).decode().strip(),
+                         '.syncwheel/manifest.json')
+        self.git('commit', '-qm', 'Withdraw shared declaration', cwd=root)
+        tip = self.git('rev-parse', 'HEAD', cwd=root).decode().strip()
+        args = ('stack', 'set', 'control-maintenance', '--personal', 'maintenance',
+                '--base', self.declared_head, '--adopt-tip', tip)
+        plan = json.loads(self.cli(*args).stdout)
+        self.cli(*args, '--plan-digest', plan['planDigest'], '--apply')
+        self.cli('stack', 'push', 'control-maintenance', '--personal', 'maintenance', '--dry-run')
+        self.cli('stack', 'push', 'control-maintenance', '--personal', 'maintenance')
+        self.assertEqual(self.git('--git-dir', self.origin, 'rev-parse',
+                                  'refs/heads/maintenance/withdraw-declaration').decode().strip(), tip)
+        self.assertEqual(self.git('--git-dir', self.origin, 'rev-parse', 'main').decode().strip(),
+                         self.declared_head)
+        self.assertEqual(self.git('rev-parse', 'HEAD').decode().strip(), control)
+        self.assertEqual(self.manifest.read_bytes(), primary)
+        self.assertEqual(self.f.read_manifest()['integration']['stacks'], [])
 
     def test_rebuild_and_push_remedies_always_name_the_primary_checkout(self):
         for command in ('rebuild', 'push'):

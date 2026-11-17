@@ -442,7 +442,12 @@ class StackRecovery:
         control = prepared['controlCommit']
         before = planned['head']
         require(observed['head'] in {before, control}, 'primary HEAD changed outside the withdrawal')
-        if observed['head'] != control:
+        waiting_for_anchors = (
+            control == before and not self.ports.anchors_published(
+                self.anchors(prepared['plan'], prepared['planDigest'])
+            )
+        )
+        if observed['head'] != control or waiting_for_anchors:
             require(state == 'original' and index_state == 'original'
                     and observed['status'] == planned['status'], 'checkout changed before the control ref CAS')
         if index_state == 'clean':
@@ -499,7 +504,7 @@ class StackRecovery:
             current_head, current_index, _ = self.phase(prepared, dest)
             require(current_head == head and current_index == 'original',
                     'primary ref or index changed after taking the index lock')
-            if head != control:
+            if head != control or (control == plan['beforeHead'] and not self.ports.anchors_published(anchors)):
                 require(publish, 'pending withdrawal has no authorized control ref transaction')
                 self.ports.publish_refs(plan, control, anchors, lambda: self.phase(prepared, dest))
                 stack_recovery_checkpoint('refs-updated')
@@ -545,7 +550,10 @@ class StackRecovery:
                 and self.ports.direct_ref(plan['sourceRef']) == plan['sourceTip'],
                 'stack withdrawal source changed before its durable control intent')
         self.ports.require_unpublished_tracking(plan['sourceRef'].removeprefix('refs/heads/'))
-        self.require_ledger(plan, self.events(), canonical_json_digest(plan))
+        token = canonical_json_digest(plan)
+        require(not self.ports.anchors_published(self.anchors(plan, token)),
+                'an unjournaled withdrawal recovery ref already exists')
+        self.require_ledger(plan, self.events(), token)
 
     def require_ledger(self, plan, events, token):
         count = plan['ledgerCount']
