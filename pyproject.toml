@@ -35,6 +35,7 @@ py-modules = [
   "syncwheel_replay",
   "syncwheel_desks",
   "syncwheel_worktrees",
+  "syncwheel_retire_copy",
   "syncwheel_coordination_state",
   "syncwheel_publication_intents",
   "syncwheel_publication",

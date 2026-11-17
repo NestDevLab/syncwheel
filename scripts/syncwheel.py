@@ -51,6 +51,13 @@ from syncwheel_projection import (
 
 import syncwheel_manifest_store as _manifest_storage
 from syncwheel_desks import DeskLifecycle
+from syncwheel_retire_copy import (
+    RetireCopy,
+    observed_file as retire_copy_observed_file,
+    remedy as retire_copy_remedy,
+    require_no_visible_lane_users,
+    stat_key as retire_copy_stat_key,
+)
 from syncwheel_manifest_store import (
     ManifestStore,
     CONTROL_MANIFEST_EXPLICIT_RECOVERY_IDENTITY_VERSION,
@@ -5249,7 +5256,9 @@ def governed_lane_remedy(manifest, lane, *, commit_first=False):
     if not commands:
         commands = primary_checkout_remedy_commands(manifest)
     prefix = 'commit the lane changes, then ' if commit_first else ''
-    return prefix + 'Use: ' + '; '.join(commands)
+    duplicate = (f"If all changes are already declared, preview: {retire_copy_remedy(lane['id'])}. "
+                 if commit_first and lane.get('target') else '')
+    return duplicate + prefix + 'Use: ' + '; '.join(commands)
 
 
 def personal_manifest_path(repo_root, name):
@@ -12243,6 +12252,124 @@ def command_worktree_open(args):
     return 0
 
 
+def command_worktree_retire_copy(args):
+    repo_root, manifest_path = resolve_command_manifest_selection(args)
+    manifest_path = Path(os.path.abspath(manifest_path))
+    lane_id = safe_ref_segment(args.lane)
+    reason = args.reason.strip()
+    if not reason:
+        raise SyncwheelError('worktree retire-copy requires a nonempty --reason')
+    if args.apply and not args.confirm_writers_stopped:
+        raise SyncwheelError('worktree retire-copy --apply requires --confirm-writers-stopped')
+    if not args.apply and (args.plan_digest or args.confirm_writers_stopped):
+        raise SyncwheelError('--plan-digest and --confirm-writers-stopped require --apply')
+    common = git_common_dir(repo_root)
+    primary_root = Path(get_worktrees(repo_root)[0]['path']).resolve()
+    selection = ['--repo', str(primary_root), '--manifest', str(manifest_path)]
+    worktrees = _governed_worktrees(repo_root)
+    git_env = {'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_REPLACE_OBJECTS': '1'}
+    def identify():
+        if ('GIT_REPLACE_REF_BASE' in os.environ
+                or git(repo_root, 'for-each-ref', '--format=%(refname)', 'refs/replace').stdout.strip()):
+            raise SyncwheelError('retire-copy refuses Git replacement refs')
+        if 'GIT_GRAFT_FILE' in os.environ or os.path.lexists(common / 'info' / 'grafts'):
+            raise SyncwheelError('retire-copy refuses Git grafts')
+        if manifest_path.resolve() != manifest_path:
+            raise SyncwheelError('retire-copy requires an exact manifest path without redirects')
+        manifest = read_primary_authority_manifest(manifest_path)
+        if not manifest or manifest.get('repository_mode') != 'delivery':
+            raise SyncwheelError('worktree retire-copy requires a delivery manifest')
+        registry, _ = worktrees.load_governed_worktree_registry()
+        matches = [lane for lane in registry['lanes'] if lane['id'] == lane_id]
+        if len(matches) != 1:
+            raise SyncwheelError(f'unknown or ambiguous governed worktree lane: {lane_id}')
+        lane = matches[0]
+        if (
+            lane['state'] != 'active' or not lane.get('generation_token')
+            or not lane.get('target') or lane.get('pending_reason')
+            or any(key.startswith('cleanup_') for key in lane)
+            or parse_coordination_timestamp(lane.get('lease_expires_at', '')) is None
+        ):
+            raise SyncwheelError('retire-copy requires an active lane with an exact generation, lease, and target stack')
+        if lane.get('owner') != governed_worktree_owner() or lane['owner'].startswith('unknown@'):
+            raise SyncwheelError('retire-copy requires the current, known lane owner')
+        stack = require_stack(manifest, lane['target'])
+        path = Path(lane['path'])
+        root = governed_worktree_root(repo_root, manifest)
+        if (
+            not path.is_absolute() or path.resolve() != path or not path.is_dir()
+            or path == root or not path.is_relative_to(root) or path == primary_root
+            or common.is_relative_to(path)
+        ):
+            raise SyncwheelError('retire-copy requires the original governed linked worktree')
+        admin = worktrees.governed_worktree_admin_dir_for_path(path)
+        worktree = worktrees.governed_worktree_record_for_path(path)
+        if (not admin or str(admin) != lane.get('admin_dir') or not worktree
+                or worktree.get('branch') != lane['branch'] or worktree.get('prunable')
+                or worktree.get('locked') == governed_worktree_cleanup_lock_reason(lane)
+                or not worktrees.governed_worktree_registration_matches(
+                    lane, path, admin, worktree.get('locked')
+                )
+                or admin != Path(git(path, 'rev-parse', '--absolute-git-dir').stdout.strip())
+                or os.path.lexists(admin / 'locked') and (admin / 'locked').is_symlink()):
+            raise SyncwheelError('retire-copy could not verify the original Git worktree registration')
+        dotgit, _ = retire_copy_observed_file(path / '.git')
+        if not dotgit or not stat.S_ISREG(dotgit['stat'][2]):
+            raise SyncwheelError('retire-copy requires a regular linked-worktree .git file')
+        if any(
+            stack['id'] in (coordination.get('locks') or {}) or local_lease_is_active(coordination)
+            for _, coordination in (coordination_profile(checkout)
+                                    for checkout in {repo_root, primary_root, path})
+        ) or os.path.lexists(coordination_publication_lock_path(repo_root)):
+            raise SyncwheelError('retire-copy refuses an active worktree lock or coordination lease')
+        if Path.cwd().resolve().is_relative_to(path):
+            raise SyncwheelError('run retire-copy from outside the lane after stopping its writers')
+        require_no_visible_lane_users(path)
+        source_ref = f"refs/heads/{lane['branch']}"
+        source = ref_tip(repo_root, source_ref)
+        if (not source or source != worktree.get('HEAD') or source != ref_tip(path, 'HEAD')
+                or git(repo_root, 'symbolic-ref', '--quiet', source_ref, check=False).returncode != 1):
+            raise SyncwheelError('retire-copy requires the exact direct lane source ref and HEAD')
+        stack_tip = ref_tip(repo_root, f"refs/heads/{stack['branch']}")
+        if not stack_tip:
+            raise SyncwheelError('retire-copy requires a materialized target stack')
+        history = declared_stack_history(repo_root, stack)
+        requested = (
+            git(repo_root, 'rev-parse', '--verify', '--end-of-options',
+                f'{args.commit}^{{commit}}', env=git_env).stdout.strip() if args.commit else None
+        )
+        if not history or requested and requested not in history:
+            raise SyncwheelError('retire-copy comparison must be a commit declared by the lane target stack')
+        return {
+            'lane': lane, 'path': str(path), 'root': str(root),
+            'rootIdentity': retire_copy_stat_key(root.lstat()),
+            'checkoutIdentity': retire_copy_stat_key(path.lstat()),
+            'admin': str(admin), 'adminIdentity': retire_copy_stat_key(admin.lstat()),
+            'dotGit': dotgit, 'head': source, 'sourceRef': source_ref,
+            'retentionLock': worktree.get('locked'), 'manifest': str(manifest_path),
+            'manifestDigest': manifest_digest(manifest), 'stack': stack['id'], 'stackTip': stack_tip,
+            'declaredHistory': history, 'requestedCommit': requested,
+        }
+
+    operation = RetireCopy(env=managed_process_env(authorize=False), common=common,
+                           lane_id=lane_id, reason=reason, requested_commit=args.commit,
+                           selection=selection, identity=identify,
+                           lock_metadata=governed_worktree_lock_metadata,
+                           stale_lock_reason=governed_worktree_stale_lock_reason)
+    try:
+        if args.apply:
+            require_private_tracking_path(common, governed_worktree_lock_path(repo_root))
+            with worktrees.governed_worktree_registry_lock():
+                result = operation.apply(args.plan_digest)
+        else:
+            plan, token = operation.plan()
+            result = operation.output(plan, token)
+    except OSError as exc:
+        raise SyncwheelError(f'retire-copy could not complete: {exc}') from exc
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
 def command_worktree_release(args):
     repo_root = resolve_repo_root(args.repo)
     manifest, manifest_path = require_manifest(repo_root, args.repo, args.manifest, args.personal)
@@ -12496,7 +12623,8 @@ def retained_captured_worktree_snapshot(repo_root, manifest, stack_id, *, captur
         status = git(path, 'status', '--porcelain=v1', '--untracked-files=all',
                      '--ignore-submodules=none', check=False)
         if status.returncode or status.stdout.strip():
-            refuse('tracked or untracked source changes remain')
+            refuse('tracked or untracked source changes remain; if already declared, preview: '
+                   + retire_copy_remedy(lane['id']))
         tip = ref_tip(repo_root, lane['branch'])
         if not target_tip or not tip or ref_tip(path, 'HEAD') != tip or (not capture and tip != target_tip):
             refuse('the captured HEAD and stack publication HEAD must match exactly')
@@ -20615,9 +20743,13 @@ def main():
     }
     global SYNCWHEEL_OWNS_REF_MOVES, SYNCWHEEL_REF_AUTH_REPO
     desk_release = args.func == command_stack_release_desk
+    retire_copy = args.func == command_worktree_retire_copy
     adopted_metadata = False
+    # Retire-copy owns its explicit, locally journaled writes. Standard
+    # startup reconciliation, hooks, and implicit ref authorizations stay off.
     readonly_diagnostics = (
         args.func == command_worktree_list
+        or retire_copy
         or (args.func in {command_status, command_check} and not args.fetch)
         or (desk_release and not args.apply)
     )
@@ -20879,6 +21011,7 @@ def command_handlers():
         'command_worktree_lock': command_worktree_lock,
         'command_worktree_open': command_worktree_open,
         'command_worktree_release': command_worktree_release,
+        'command_worktree_retire_copy': command_worktree_retire_copy,
         'command_worktree_unlock': command_worktree_unlock,
     }
 
