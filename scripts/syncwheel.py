@@ -5813,18 +5813,24 @@ def github_stack_git_preflight(repo_root, manifest, stack, blockers, warnings, i
         github_blocker(blockers, 'source_branch_missing', 'stack source branch is missing')
     else:
         source_revision = ref_tip(repo_root, stack['branch'])
-        if declared:
+        if declared or stack.get('adopted_history'):
             try:
                 actual = rev_list(repo_root, f"{stack.get('base', '')}..{stack['branch']}")
             except SyncwheelError as exc:
                 github_blocker(blockers, 'stack_base_missing', str(exc))
             else:
-                if actual != declared:
-                    github_blocker(
-                        blockers, 'stack_projection_mismatch',
-                        'source branch does not exactly equal declared stack commits',
-                        declared=declared, actual=actual,
-                    )
+                try:
+                    expected = declared_stack_history(repo_root, stack)
+                    adopted = validate_stack_adoption(stack)
+                except SyncwheelError as exc:
+                    github_blocker(blockers, 'stack_projection_mismatch', str(exc))
+                else:
+                    if actual != expected or (adopted and source_revision != adopted['tip']):
+                        github_blocker(
+                            blockers, 'stack_projection_mismatch',
+                            'source branch does not exactly equal declared stack history',
+                            declared=expected, actual=actual,
+                        )
     remote = stack.get('target_remote') or manifest['defaults']['publication_remote']
     if not remote_is_configured(repo_root, remote):
         github_blocker(blockers, 'publication_remote_missing', f'publication remote is not configured: {remote}')
