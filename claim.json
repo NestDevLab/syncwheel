@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/preserved-candidate"
   ],
-  "claimed_at": "2026-11-17T19:29:00+00:00",
+  "claimed_at": "2026-11-17T19:40:34+00:00",
   "coordination_id": "default",
-  "operation_token": "47ce46e8-4a4b-4f26-9ba5-5b54d0184d8d",
+  "operation_token": "08451ff6-84b9-45bc-8930-59f7bdf9c5b0",
   "publication_scope": "stack:preserved-candidate",
   "source_ref": "refs/heads/pr/preserved-candidate",
   "syncwheel_version": "0.47.27"
