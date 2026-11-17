@@ -494,7 +494,8 @@ class ReplayEngine:
             adopted = validate_stack_adoption(stack)
             if not adopted or stack.get('integration_resolution'):
                 continue
-            if (repo.ref_tip(repo.root, stack['branch']) != adopted['tip']
+            source_tip = repo.ref_tip(repo.root, stack['branch'])
+            if ((source_tip is not None and source_tip != adopted['tip'])
                     or not repo.branch_contains(repo.root, adopted['tip'], adopted['base'])):
                 raise SyncwheelError(f"adopted history for stack {identifier!r} differs from its source")
             if stack['commits']:

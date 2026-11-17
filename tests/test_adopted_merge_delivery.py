@@ -122,6 +122,12 @@ class AdoptedMergeDeliveryTest(unittest.TestCase):
     def test_projection_preserves_adopted_tip(self):
         self.assertEqual(self.replay(projection=True), self.tip)
 
+    def test_missing_source_still_has_a_projection_but_cannot_pass_merge_preflight(self):
+        self.f.git('update-ref', '-d', 'refs/heads/pr/feature', self.tip)
+        self.assertEqual(self.replay(projection=True), self.tip)
+        blockers, _ = self.f.preflight()
+        self.assertIn('source_branch_missing', [b['code'] for b in blockers])
+
     def test_replay_refuses_source_drift_before_execution(self):
         self.f.git('update-ref', 'refs/heads/pr/feature', self.old_tip, self.tip)
         with self.assertRaisesRegex(self.module.SyncwheelError, 'differs from its source'):
