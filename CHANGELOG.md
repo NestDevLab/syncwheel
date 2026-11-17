@@ -3,6 +3,7 @@
 ## 0.47.26 - 2026-11-17
 
 - Recover a dirty shared control manifest only when native ledger evidence proves the exact stack declaration. Preview and bind the withdrawal, retain every proven commit generation, record a compensating event, and finish a manifest-only control commit through an explicit resumable transaction. Unrelated edits still refuse.
+- Make the concurrent index-reader fixture advance file timestamps on every operation, including under a fixed clock and reduced Git stat precision.
 
 ## 0.47.25 - 2026-11-17
 

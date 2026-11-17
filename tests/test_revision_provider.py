@@ -6796,8 +6796,10 @@ class RevisionIndexConcurrentReaderTest(unittest.TestCase):
             payload['paths'] = []
         for relative in ('base.txt', '.gitignore', '.syncwheel/manifest.json'):
             path = fixture.repo / relative
+            previous_mtime = path.stat().st_mtime_ns
             path.write_bytes(path.read_bytes())
-            future = time.time_ns() + 2_000_000_000
+            # Each operation needs a fresh stat mismatch even within one clock tick.
+            future = max(time.time_ns(), previous_mtime) + 2_000_000_000
             os.utime(path, ns=(future, future))
         leased = fixture.raw_index_bytes()
         prepared, _ = fixture.protocol_request(payload)
@@ -6862,7 +6864,7 @@ class RevisionIndexConcurrentReaderTest(unittest.TestCase):
             )],
         )
 
-    def test_reader_between_preflight_and_finalize_accepts_both_operations(self):
+    def assert_reader_between_preflight_and_finalize(self):
         for owned_path in (False, True):
             with self.subTest(owned_path=owned_path):
                 operation_id = f'reader-between-{int(owned_path)}'
@@ -6891,6 +6893,15 @@ class RevisionIndexConcurrentReaderTest(unittest.TestCase):
                         match['semanticDigest'], journal['baselineIndexSemantic']
                     )
                 self.assertEqual(self.fixture.git('status', '--porcelain'), '')
+
+    def test_reader_between_preflight_and_finalize_accepts_both_operations(self):
+        self.assert_reader_between_preflight_and_finalize()
+
+    def test_reader_between_preflight_and_finalize_with_a_fixed_clock(self):
+        self.fixture.git('config', 'core.checkStat', 'minimal')
+        self.fixture.git('config', 'core.trustctime', 'false')
+        with mock.patch.object(time, 'time_ns', return_value=time.time_ns()):
+            self.assert_reader_between_preflight_and_finalize()
 
     def test_status_holding_index_lock_across_tree_checks_does_not_fail(self):
         payload = self.stale_index_request('lock-tree-check', owned_path=True)
