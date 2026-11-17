@@ -20688,8 +20688,8 @@ def governed_worktree_preflight(args):
     if args.func == command_stack_push and getattr(args, 'allow_equivalent_candidate', False):
         if getattr(args, 'retain_captured_worktrees', None) is None:
             raise SyncwheelError('--allow-equivalent-candidate requires --retain-captured-worktrees REASON')
-        if args.force_with_lease:
-            raise SyncwheelError('equivalent candidate delivery refuses force options')
+        if args.force_with_lease or getattr(args, 'git_args', []):
+            raise SyncwheelError('equivalent candidate delivery refuses force and passthrough push options')
         stack = require_stack(manifest, args.stack)
         remote = stack_push_remote(manifest, stack, args.remote)
         if coordination_is_active(manifest):

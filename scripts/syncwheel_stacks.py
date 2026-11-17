@@ -3296,6 +3296,14 @@ class StackLifecycle:
         refspec = (f"{publication_tip}:refs/heads/{stack['branch']}"
                    if publication_tip else stack['branch'])
         command = ['git', 'push', *push_args, remote, refspec]
+        if delivery:
+            # An exact lease is a CAS, not authority to replace history: the
+            # frozen proof above already requires remote_tip <= candidate.
+            # Ref deletion or any concurrent advance must fail atomically.
+            proof = delivery[0]
+            command = ['git', 'push',
+                       f"--force-with-lease={proof['remote_ref']}:{proof['remote_tip']}",
+                       remote, refspec]
         if args.dry_run:
             print(quoted(command))
             return 0

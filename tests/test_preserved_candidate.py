@@ -1,5 +1,9 @@
 """Synthetic divergent histories delivered without moving the preserved lane."""
+import contextlib
+import io
 import json
+import sys
+from unittest import mock
 import unittest
 
 import test_syncwheel as fixtures
@@ -95,6 +99,49 @@ class PreservedCandidateTest(unittest.TestCase):
         stack.pop('adopted_history')
         (self.f.repo / '.syncwheel/manifest.json').write_text(json.dumps(manifest) + '\n')
         self.assertIn('unchanged adopted', self.f.run_cli(*self.args, expected=2).stderr)
+
+    def test_refuses_passthrough_options_including_force_and_ref_selection(self):
+        for option in ('--force', '-f', '--force-with-lease',
+                       '--force-with-lease=refs/heads/pr/feature-a:' + self.remote,
+                       '--no-force-with-lease', '--mirror', '--all', '--delete', '--prune'):
+            with self.subTest(option=option):
+                result = self.f.run_cli(*self.args, '--', option, expected=2)
+                self.assertIn('refuses force and passthrough', result.stderr)
+                self.assertEqual(self.remote_head(), self.remote)
+
+    def assert_remote_race_refused(self, replacement):
+        original = self.module.run_authorized_push
+        ref = 'refs/heads/pr/feature-a'
+
+        def race(*args, **kwargs):
+            command = args[1]
+            self.assertIn('--force-with-lease=' + ref + ':' + self.remote, command)
+            if replacement:
+                self.f.git('--git-dir=' + str(self.origin), 'fetch', str(self.f.repo), replacement)
+                self.f.git('--git-dir=' + str(self.origin), 'update-ref', ref, replacement)
+            else:
+                self.f.git('--git-dir=' + str(self.origin), 'update-ref', '-d', ref)
+            return original(*args, **kwargs)
+
+        argv = ['syncwheel', *self.args, '--repo', str(self.f.repo)]
+        with mock.patch.object(sys, 'argv', argv), \
+                mock.patch.object(self.module, 'run_authorized_push', side_effect=race), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.module.main(), 2)
+        observed = self.module.remote_ref_tips(self.f.repo, 'origin', [ref])[ref]
+        self.assertEqual(observed, replacement)
+        events = self.module.load_ledger_events(self.f.repo, self.f.repo / '.syncwheel/manifest.json')
+        self.assertTrue(any(e['type'] == 'preserved_candidate_delivery_prepared' for e in events))
+        self.assertFalse(any(e['type'] == 'stack_pushed' for e in events))
+        self.assertEqual(self.f.git('rev-parse', 'syncwheel/lane/kept-validation'), self.preserved)
+
+    def test_exact_lease_refuses_remote_deletion_after_qualification(self):
+        self.assert_remote_race_refused(None)
+
+    def test_exact_lease_refuses_remote_advance_after_qualification(self):
+        foreign = self.f.git('commit-tree', self.preserved + '^{tree}',
+                             '-p', self.remote, '-m', 'Concurrent publication')
+        self.assert_remote_race_refused(foreign)
 
     def test_rechecks_remote_and_lane_after_preflight(self):
         args = self.module.build_parser().parse_args([*self.args, '--repo', str(self.f.repo)])

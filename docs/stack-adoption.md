@@ -88,7 +88,10 @@ objects. This deliberately accepts exact tree equivalence only; patch-id
 similarity alone cannot prove that content remains present. The candidate
 must descend from the current published remote head, which must exist and be
 available locally. Fetch and inspect an unknown remote head before retrying.
-Force options are refused.
+Caller force and passthrough push options are refused. The legacy transport
+uses an internal exact lease after proving fast-forward ancestry, so a remote
+deletion or advance between verification and push fails atomically. This lease
+never authorizes replacing remote history.
 
 Every selected lane must retain its native registration, generation and clean
 source state; captured lanes also need completed native capture evidence.
