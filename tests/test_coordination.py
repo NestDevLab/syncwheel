@@ -10675,6 +10675,66 @@ sys.exit(module.main())
         fixture['desk'] = self.tmp / (name + '-desk')
         return fixture
 
+    def adopted_cherry_pick_desk_fixture(self, name):
+        fixture = self.merge_stack_conflict_desk_fixture(name, strategy='cherry-pick')
+        repo, module = fixture['follower'], fixture['module']
+        manifest, path = module.load_manifest(repo)
+        stack = manifest['stacks'][0]
+        source = module.ref_tip(repo, stack['branch'])
+        stack['adopted_history'] = {
+            'base': module.commit_full_sha(repo, source + '^'), 'tip': source,
+        }
+        stack['base'] = stack['adopted_history']['base']
+        stack['commits'] = [source]
+        with module.manifest_write_transaction(repo, path, 'fixture-adopted-source'):
+            module.save_manifest_with_ledger(repo, path, manifest, 'fixture_adopted_source')
+        fixture.update(source=source, manifest=manifest, path=path)
+        return fixture
+
+    def test_adopted_cherry_pick_desk_freezes_merge_source(self):
+        fixture = self.adopted_cherry_pick_desk_fixture('desk-adopted')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        before = self.a14_source_snapshot(fixture)
+        failure = self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                               '--worktree', str(desk), '--reason', 'review adopted source', expected=2)
+        self.assertIn('resolution desk:', failure.stderr)
+        self.assertNotIn('KeyError', failure.stderr)
+        receipt = json.loads(module.integration_desk_receipt_path(repo, fixture['path']).read_text())
+        observed = receipt['inputs']['adopted_sources'][0]
+        self.assertEqual(observed['kind'], 'adopted-stack')
+        self.assertEqual(observed['tip'], fixture['source'])
+        merge = next(step for step in receipt['steps'] if 'merge' in step['argv'])
+        self.assertEqual(merge['argv'][merge['argv'].index('merge') + 2], fixture['source'])
+        self.assertEqual(self.a14_source_snapshot(fixture), before)
+
+    def test_adopted_cherry_pick_desk_refuses_source_drift_during_planning(self):
+        fixture = self.adopted_cherry_pick_desk_fixture('desk-adopted-race')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        manifest, path = fixture['manifest'], fixture['path']
+        original = module.replay_plan
+        def drift(*args, **kwargs):
+            plan = original(*args, **kwargs)
+            module.git(repo, 'update-ref', manifest['stacks'][0]['branch'], fixture['source'] + '^')
+            return plan
+        with mock.patch.object(module, 'replay_plan', side_effect=drift):
+            with self.assertRaisesRegex(module.SyncwheelError, 'adopted stack source changed'):
+                module.rebuild_integration_desk(repo, manifest, path,
+                                               SimpleNamespace(worktree=str(desk)))
+        self.assertFalse(desk.exists())
+        self.assertFalse(module.integration_desk_receipt_path(repo, path).exists())
+
+    def test_adopted_cherry_pick_desk_refuses_changed_source_on_resume(self):
+        fixture = self.adopted_cherry_pick_desk_fixture('desk-adopted-resume')
+        repo, desk, module = fixture['follower'], fixture['desk'], fixture['module']
+        self.run_cli(repo, 'int', 'rebuild', '--replay-mode', 'desk',
+                     '--worktree', str(desk), '--reason', 'review adopted source', expected=2)
+        receipt_path = module.integration_desk_receipt_path(repo, fixture['path'])
+        before = receipt_path.read_bytes()
+        module.git(repo, 'update-ref', fixture['manifest']['stacks'][0]['branch'], fixture['source'] + '^')
+        with self.assertRaisesRegex(module.SyncwheelError, 'adopted stack source changed'):
+            module.read_integration_desk(repo, fixture['manifest'], fixture['path'], desk)
+        self.assertEqual(receipt_path.read_bytes(), before)
+
     def test_cherry_pick_desk_resolves_conflict_while_integration_is_checked_out(self):
         fixture = self.merge_stack_conflict_desk_fixture('desk-cherry-pick', strategy='cherry-pick')
         repo, desk = fixture['follower'], fixture['desk']
