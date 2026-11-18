@@ -17528,11 +17528,30 @@ def integration_desk_receipt_path(repo_root, manifest_path):
 
 
 def integration_desk_inputs(repo_root, manifest, manifest_path):
-    return {
+    inputs = {
         'manifest': manifest_digest(manifest),
         'replay': integration_projection_input_snapshot(repo_root, manifest),
         'integration_tip': ref_tip(repo_root, manifest['integration']['branch']),
     }
+    # Legacy cherry-pick projections preserve adopted tips through merge steps.
+    # Observe their source refs as well as the ordinary projection inputs so a
+    # detached desk freezes every merge operand and detects source-ref drift.
+    if manifest['integration'].get('strategy', 'cherry-pick') != 'merge-stacks':
+        stacks = stack_map(manifest)
+        adopted_sources = []
+        for stack_id in manifest['integration']['stacks']:
+            stack = stacks[stack_id]
+            adopted = validate_stack_adoption(stack)
+            if adopted:
+                observed = integration_projection_ref_observation(
+                    repo_root, 'adopted-stack', stack_id, stack['branch'],
+                )
+                if observed['tip'] != adopted['tip']:
+                    raise SyncwheelError('adopted stack source changed; inspect and adopt the exact intended tip')
+                adopted_sources.append(observed)
+        if adopted_sources:
+            inputs['adopted_sources'] = adopted_sources
+    return inputs
 
 
 def normalized_integration_desk_inputs(repo_root, inputs, previous_tip):
@@ -17752,8 +17771,9 @@ def rebuild_integration_desk(repo_root, manifest, manifest_path, args):
             if inputs != integration_desk_inputs(repo_root, manifest, manifest_path):
                 raise SyncwheelError('integration inputs changed while planning the resolution desk; retry')
             # Execute the observed objects, never a moving source branch name.
-            source_tips = {item['id']: item['tip'] for item in inputs['replay']['refs']
-                           if item['kind'] == 'merge-stack'}
+            source_tips = {item['id']: item['tip'] for item in (
+                inputs['replay']['refs'] + inputs.get('adopted_sources', [])
+            ) if item['kind'] in {'merge-stack', 'adopted-stack'}}
             for step in plan['steps'][1:]:
                 if 'merge' in step['argv']:
                     step['argv'][step['argv'].index('merge') + 2] = source_tips[step['stack_id']]
