@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.29 - 2026-11-18
+
+- Freeze adopted source refs in detached integration desks for legacy cherry-pick projections. Reject source drift during preparation and resume while preserving the declared source history.
+
 ## 0.47.28 - 2026-11-17
 
 - Publish an adopted fast-forward candidate with the exact tree of a locked preserved lane through an explicit retention option. Recheck remote ancestry and lane evidence, pin the candidate push source, and record both refs without rewriting or cleaning up the lane.
