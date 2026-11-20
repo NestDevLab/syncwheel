@@ -23,6 +23,25 @@ spec.loader.exec_module(SYNCWHEEL)
 import syncwheel_github as ADAPTER
 
 
+class GithubAdapterResponseTest(unittest.TestCase):
+    def test_accepts_complete_observation_with_many_checks(self):
+        checks = [{'name': f'check {index}', 'status': 'COMPLETED',
+                   'detailsUrl': f'https://github.example/jobs/{index}'} for index in range(300)]
+        response = {'ok': True, 'observation': {'pr': {'checks': checks}}}
+        body = json.dumps(response)
+        self.assertGreater(len(body), 20_000)
+        result = subprocess.CompletedProcess([], 0, stdout=body, stderr='')
+        with mock.patch.object(SYNCWHEEL.subprocess, 'run', return_value=result):
+            observed = SYNCWHEEL.github_adapter_request(REPO_ROOT, {'operation': 'observe'})
+        self.assertEqual(observed['pr']['checks'], checks)
+
+    def test_rejects_oversized_response_instead_of_truncating_it(self):
+        result = subprocess.CompletedProcess([], 0, stdout=' ' * 1_048_577, stderr='')
+        with mock.patch.object(SYNCWHEEL.subprocess, 'run', return_value=result):
+            with self.assertRaisesRegex(SYNCWHEEL.SyncwheelError, 'exceeds the merge observation size limit'):
+                SYNCWHEEL.github_adapter_request(REPO_ROOT, {'operation': 'observe'})
+
+
 class GithubPrMergeTest(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix='syncwheel-github-pr-merge-'))
