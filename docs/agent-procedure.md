@@ -147,6 +147,11 @@ Given one of those prompts, the agent should:
   post-cleanup state and confirm earlier fixes did not regress; keep the manifest current
   with `stack set <id> <rev-or-range>` pointing at the post-cleanup commit BEFORE rebuilding,
   so the projection includes the latest work.
+- To change only a stack declaration without automatic worktree cleanup, use
+  `stack set <id> <rev-or-range> --preserve-worktrees "<reason>"`. The reason is
+  recorded in the ledger. A shared tracked manifest may still be committed by
+  the repository's normal metadata policy; use an external or personal manifest
+  when the change must not advance the shared checkout.
 
 ## Suggested human/AI split
 

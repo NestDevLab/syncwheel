@@ -20658,8 +20658,19 @@ def governed_worktree_preflight(args):
     if args.func in {command_stack_sync, command_stack_absorb}:
         if require_stack(manifest, args.stack).get('adopted_history'):
             raise SyncwheelError('stack adoption changed after observation; inspect the selected manifest and retry')
+    if args.func == command_stack_set and getattr(args, 'preserve_worktrees', None) is not None and (
+        getattr(args, 'base', None) or getattr(args, 'adopt_tip', None) or getattr(args, 'published', False)
+    ):
+        raise SyncwheelError('--preserve-worktrees cannot be combined with adoption or --published')
     if args.func == command_stack_set and (getattr(args, 'base', None) or getattr(args, 'adopt_tip', None)):
         # Adoption has an exact plan and never cleans up lanes.
+        return
+    if args.func == command_stack_set and getattr(args, 'preserve_worktrees', None) is not None:
+        if not args.preserve_worktrees.strip():
+            raise SyncwheelError('--preserve-worktrees requires a non-empty reason')
+        # Stack set only changes the selected manifest and its ledger. This
+        # explicit mode must not clean up either related or unrelated lanes.
+        emit_governed_worktree_warnings(repo_root, manifest, json_mode=bool(getattr(args, 'json', False)), manifest_path=manifest_path)
         return
     if args.func in {command_worktree_open, command_worktree_list}:
         # Open checks its own target and registry under the lock, and list is

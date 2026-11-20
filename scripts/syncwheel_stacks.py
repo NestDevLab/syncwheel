@@ -2574,6 +2574,10 @@ class StackLifecycle:
 
     def command_stack_set(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        preserved = getattr(args, 'preserve_worktrees', None)
+        if preserved is not None and (not preserved.strip() or getattr(args, 'base', None) or
+                                      getattr(args, 'adopt_tip', None) or getattr(args, 'published', False)):
+            raise SyncwheelError('--preserve-worktrees requires a reason and cannot be combined with adoption or --published')
         if getattr(args, 'base', None) or getattr(args, 'adopt_tip', None):
             return StackAdoption(self).execute_stack_adoption(args, manifest, manifest_path)
         if getattr(args, 'plan_digest', None) or getattr(args, 'apply', False):
@@ -2605,6 +2609,8 @@ class StackLifecycle:
         if target_branch is not None:
             stack['target_branch'] = target_branch
         context = {'stack': args.stack, 'branch': stack['branch'], 'actor': self.repository.governed_worktree_owner()}
+        if getattr(args, 'preserve_worktrees', None) is not None:
+            context['preserved_worktrees_reason'] = args.preserve_worktrees.strip()
         if target_branch is not None:
             context.update(previous_target_branch=previous_target, target_branch=target_branch)
         self.control.save_manifest_with_ledger(

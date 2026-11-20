@@ -927,6 +927,7 @@ def build_parser(commands, version):
     stack_set_p.add_argument('stack')
     stack_set_p.add_argument('specs', nargs='*')
     stack_set_p.add_argument('--target-branch', help='update delivery target metadata without rebuilding refs')
+    stack_set_p.add_argument('--preserve-worktrees', metavar='REASON', help='leave governed worktrees untouched; shared tracked manifests may still be committed')
     stack_set_p.add_argument('--base', help='pin the base for exact history adoption')
     stack_set_p.add_argument('--adopt-tip', help='adopt this existing tip without rewriting its history')
     stack_set_p.add_argument('--plan-digest', help='digest of the exact adoption preview')

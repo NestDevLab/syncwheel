@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.30 - 2026-11-20
+
+- Allow an explicit stack manifest update to preserve all governed worktrees, recording the reason without automatic cleanup.
+
 ## 0.47.29 - 2026-11-18
 
 - Freeze adopted source refs in detached integration desks for legacy cherry-pick projections. Reject source drift during preparation and resume while preserving the declared source history.
