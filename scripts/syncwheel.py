@@ -537,7 +537,7 @@ GITHUB_PR_MERGE_PLAN_SCHEMA_VERSION = 1
 GITHUB_PR_MERGE_POLICY_KEY = 'github_pr_merge'
 GITHUB_PR_MERGE_BYPASSES = {'private_free_rules', 'required_reviews'}
 GITHUB_PR_MERGE_ADAPTER_TIMEOUT_SECONDS = 60
-GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 20000
+GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT = 1_048_576
 GOVERNED_WORKTREE_DEFAULT_LEASE_SECONDS = 120 * 60
 GOVERNED_WORKTREE_LOCK_INCOMPLETE_GRACE_SECONDS = 0.25
 PENDING_STACK_LIST_LIMIT = 2600
@@ -5558,7 +5558,9 @@ def github_adapter_request(repo_root, request):
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SyncwheelError(f'GitHub adapter failed: {exc}') from exc
-    output = (result.stdout or '')[-GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT:]
+    output = result.stdout or ''
+    if len(output) > GITHUB_PR_MERGE_ADAPTER_MAX_OUTPUT:
+        raise SyncwheelError('GitHub adapter response exceeds the merge observation size limit')
     try:
         response = json.loads(output)
     except json.JSONDecodeError as exc:
