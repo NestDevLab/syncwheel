@@ -5408,6 +5408,83 @@ with module.governed_worktree_registry_lock(Path(repo_path)):
         feature_a = next(stack for stack in manifest['stacks'] if stack['id'] == 'feature-a')
         self.assertEqual(feature_a['commits'], [beta, alpha])
 
+    def test_stack_set_can_preserve_unrelated_pending_dirty_worktree(self):
+        dirty = json.loads(self.run_cli('worktree', 'open', 'foreign-owner', '--json').stdout)['lane']
+        dirty_path = Path(dirty['path'])
+        (dirty_path / 'draft.txt').write_text('preserve draft\n')
+        module = self.load_syncwheel_module()
+        registry, _ = module.load_governed_worktree_registry(self.repo)
+        registry['lanes'][0]['state'] = 'captured_pending_cleanup'
+        registry['lanes'][0]['pending_reason'] = 'dirty'
+        module.save_governed_worktree_registry(self.repo, registry)
+        original_tip = module.ref_tip(self.repo, dirty['branch'])
+        original_head = self.git('rev-parse', 'HEAD')
+        original_index = self.git('diff', '--cached', '--binary')
+        result = self.run_cli('stack', 'set', 'feature-a', original_head,
+                              '--preserve-worktrees', 'keep other work intact')
+        self.assertIn('set 1 commits', result.stdout)
+        self.assertEqual((dirty_path / 'draft.txt').read_text(), 'preserve draft\n')
+        self.assertEqual(module.ref_tip(self.repo, dirty['branch']), original_tip)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), original_head)
+        self.assertEqual(self.git('diff', '--cached', '--binary'), original_index)
+        current, _ = module.load_governed_worktree_registry(self.repo)
+        self.assertEqual(current['lanes'][0]['state'], 'captured_pending_cleanup')
+        self.assertIn('keep other work intact', self.run_cli('ledger', 'show', '--json').stdout)
+
+    def test_stack_set_preserve_worktrees_requires_reason_and_disallows_published(self):
+        head = self.git('rev-parse', 'HEAD')
+        before = (self.repo / '.syncwheel' / 'manifest.json').read_bytes()
+        result = self.run_cli('stack', 'set', 'feature-a', head, '--preserve-worktrees', ' ', expected=2)
+        self.assertIn('non-empty reason', result.stderr)
+        result = self.run_cli('stack', 'set', 'feature-a', '--published', '--preserve-worktrees', 'preserve', expected=2)
+        self.assertIn('cannot be combined', result.stderr)
+        self.assertEqual((self.repo / '.syncwheel' / 'manifest.json').read_bytes(), before)
+
+    def test_stack_set_preserves_the_selected_dirty_worktree_and_its_index(self):
+        lane = json.loads(self.run_cli('worktree', 'open', 'selected-owner', '--into', 'feature-a', '--json').stdout)['lane']
+        path = Path(lane['path'])
+        (path / 'staged.txt').write_text('staged draft\n')
+        self.git('-C', str(path), 'add', 'staged.txt')
+        (path / 'unstaged.txt').write_text('unstaged draft\n')
+        before_tip = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        before_index = self.git('-C', str(path), 'diff', '--cached', '--binary')
+        self.run_cli('stack', 'set', 'feature-a', self.git('rev-parse', 'HEAD'),
+                     '--preserve-worktrees', 'preserve the selected lane')
+        self.assertEqual(self.git('-C', str(path), 'rev-parse', 'HEAD'), before_tip)
+        self.assertEqual(self.git('-C', str(path), 'diff', '--cached', '--binary'), before_index)
+        self.assertEqual((path / 'unstaged.txt').read_text(), 'unstaged draft\n')
+        registry, _ = self.load_syncwheel_module().load_governed_worktree_registry(self.repo)
+        self.assertEqual(registry['lanes'][0]['state'], 'active')
+
+    def test_stack_set_external_manifest_preserves_owned_clean_lane_and_commit_order(self):
+        manifest_path = self.tmp / 'personal-manifest.json'
+        manifest_path.write_text(json.dumps(self.read_manifest()) + '\n')
+        lane = json.loads(self.run_cli('worktree', 'open', 'owned-clean', '--into', 'feature-a',
+                                       '--manifest', str(manifest_path), '--json').stdout)['lane']
+        path = Path(lane['path'])
+        base = self.git('-C', str(path), 'rev-parse', 'HEAD')
+        commits = []
+        for n in range(2):
+            (path / f'file-{n}.txt').write_text(f'change {n}\n')
+            self.git('-C', str(path), 'add', f'file-{n}.txt')
+            self.git('-C', str(path), 'commit', '-qm', f'feature {n}')
+            commits.append(self.git('-C', str(path), 'rev-parse', 'HEAD'))
+        module = self.load_syncwheel_module()
+        registry_path = module.governed_worktree_registry_path(self.repo)
+        registry_before = registry_path.read_bytes()
+        refs_before = self.git('for-each-ref', '--format=%(refname) %(objectname)')
+        head_before = self.git('rev-parse', 'HEAD')
+        index_before = self.git('diff', '--cached', '--binary')
+        self.run_cli('stack', 'set', 'feature-a', f'{base}..{commits[-1]}', '--manifest', str(manifest_path),
+                     '--preserve-worktrees', 'keep lane and metadata separate')
+        stack = next(item for item in json.loads(manifest_path.read_text())['stacks'] if item['id'] == 'feature-a')
+        self.assertEqual(stack['commits'], commits)
+        self.assertEqual(registry_path.read_bytes(), registry_before)
+        self.assertTrue(path.is_dir())
+        self.assertEqual(self.git('for-each-ref', '--format=%(refname) %(objectname)'), refs_before)
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head_before)
+        self.assertEqual(self.git('diff', '--cached', '--binary'), index_before)
+
     def test_stack_set_target_preserves_source_and_integration_metadata(self):
         manifest, _ = self.load_syncwheel_module().load_manifest(self.repo)
         stack = manifest['stacks'][1]
