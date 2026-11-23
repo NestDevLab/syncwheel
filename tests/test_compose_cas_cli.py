@@ -164,6 +164,9 @@ class ComposeCasCliTest(unittest.TestCase):
             self.assertEqual(changed, {state_ref, 'refs/heads/pr/' + winner,
                                       'refs/heads/syncwheel/claim/heads/pr/' + winner})
             self.assertEqual(after_refs['refs/heads/pr/' + winner], plans[winner]['sourceTip'])
+            state_parents = call(['git', '--git-dir', str(remote), 'rev-list',
+                                  '--parents', '-n', '1', after_refs[state_ref]]).split()
+            self.assertEqual(state_parents, [after_refs[state_ref], state])
             self.assertNotIn('refs/heads/pr/' + loser, after_refs)
             self.assertNotIn('refs/heads/syncwheel/claim/heads/pr/' + loser, after_refs)
             for name in ('one', 'two'):
