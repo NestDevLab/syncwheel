@@ -8516,7 +8516,20 @@ def coordination_compose_stack_plan(
         repo_root, integration_tip, local_integration_tip
     )
     proposed_manifest = apply_coordination_snapshot(manifest, merged_snapshot)
-    validation = validate_manifest(repo_root, proposed_manifest)
+    # Reapply all pure structural checks before deferring any foreign history.
+    proposed_manifest = normalize_manifest_data(
+        json.loads(json.dumps(proposed_manifest)), '<coordination-compose>'
+    )
+    remote_stacks = {item['id']: item for item in latest['state']['manifest']['stacks']}
+    merged_stacks = {item['id']: item for item in merged_snapshot['stacks']}
+    deferred_foreign_history = (
+        sorted(stack for stack, snapshot in remote_stacks.items()
+               if stack != stack_id and merged_stacks.get(stack) == snapshot)
+        if manifest['version'] == MANIFEST_VERSION_COORDINATED else []
+    )
+    validation = validate_manifest(
+        repo_root, proposed_manifest, defer_stack_histories=deferred_foreign_history,
+    )
     if ref_tip(repo_root, manifest['integration']['branch']) != local_integration_tip:
         raise SyncwheelError('coordination compose local integration changed during planning')
     if validation['errors']:
@@ -8556,6 +8569,8 @@ def coordination_compose_stack_plan(
             local_control_suffix
         ),
         'unmappedIntegrationCommits': unmapped,
+        'deferredForeignHistory': deferred_foreign_history,
+        'unmappedIntegrationClassificationComplete': not bool(deferred_foreign_history),
         'projectionStatus': 'partial',
         'integrationMutation': False,
         'localAddedStacks': composition['localAddedStacks'],
@@ -8740,6 +8755,8 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         'manifest_digest': plan['proposedManifestDigest'],
         'integration_mutated': False,
         'unmapped_integration_commits': plan['unmappedIntegrationCommits'],
+        'unmapped_integration_classification_complete': plan['unmappedIntegrationClassificationComplete'],
+        'deferred_foreign_history': plan['deferredForeignHistory'],
     }
 
 
@@ -10205,12 +10222,14 @@ def collect_repo_snapshot(repo_root, manifest):
     }
 
 
-def validate_manifest(repo_root, manifest, manifest_path=None):
+def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_histories=()):
     warnings = []
     errors = []
+    deferred = frozenset(defer_stack_histories)
     prime_commits(repo_root, [
         commit
         for stack in manifest.get('stacks', [])
+        if stack['id'] not in deferred
         for key in ('commits', 'integration_commits', 'integration_only_commits')
         for commit in (stack.get(key) or [])
         if isinstance(commit, str)
@@ -10318,6 +10337,25 @@ def validate_manifest(repo_root, manifest, manifest_path=None):
 
     for stack in manifest['stacks']:
         state = stack.get('state', 'published')
+        if state not in STACK_STATES:
+            errors.append(
+                f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
+            )
+        if stack['id'] in deferred:
+            # The caller has already bound this unchanged foreign snapshot to
+            # the current remote state and checked every managed remote ref.
+            # Its history is deliberately not dereferenced for this operation.
+            entries = stack_integration_commits(stack)
+            declared_commit_shas.update(
+                item for item in entries
+                if isinstance(item, str) and re.fullmatch(r'[0-9a-f]{40}', item)
+            )
+            details['stacks'].append({
+                'id': stack['id'], 'branch': stack['branch'],
+                'history_validation': 'deferred_remote_unchanged',
+                'integration_commits': entries,
+            })
+            continue
         publication_remote = stack.get('publication_remote') or manifest['defaults']['publication_remote']
         remote_ref = f"{publication_remote}/{stack['branch']}"
         item = {
@@ -10343,10 +10381,6 @@ def validate_manifest(repo_root, manifest, manifest_path=None):
         stack_declared_shas = set()
         stack_declared_patch_ids = set()
         branch_patch_ids = set()
-        if state not in STACK_STATES:
-            errors.append(
-                f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
-            )
         if not item['base_exists']:
             errors.append(f"stack {stack['id']} base ref does not exist: {stack['base']}")
         if not item['branch_exists']:

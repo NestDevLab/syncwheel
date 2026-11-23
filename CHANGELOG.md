@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.32 - 2026-11-23
+
+- Allow additive coordination compose to preserve unchanged foreign stack recipes without requiring their local history. Report when unmapped integration classification is incomplete.
+
 ## 0.47.31 - 2026-11-20
 
 - Read complete GitHub merge observations for pull requests with many checks. Reject responses above the size limit without truncating the JSON.

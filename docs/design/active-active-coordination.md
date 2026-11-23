@@ -337,6 +337,13 @@ later publication is a separate explicit command.
 
 ## Composing additive stack proposals
 
+When composing one version 2 stack, unchanged foreign stack histories may be
+unavailable in this clone. Their snapshots and managed ref tips remain guarded;
+their commit histories are not dereferenced. The plan and result identify those
+stacks and mark unmapped integration classification incomplete, so that list
+cannot establish whether all integration commits are mapped. This operation
+does not make foreign recipe objects available to a fresh clone.
+
 `coordination compose` is separate from repair. It handles a known common state
 whose local and remote descendants independently add stack records. The plan
 binds the exact known base state and its integration-tip control-manifest

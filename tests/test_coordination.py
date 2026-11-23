@@ -7322,6 +7322,185 @@ with module.coordination_publication_lock(Path(repo_path)):
                     remote_before,
                 )
 
+    def test_compose_selected_stack_without_foreign_recipe_objects(self):
+        fixture = self.prepare_additive_compose('compose-foreign-recipe', plan=False)
+        repo, module = fixture['repo'], fixture['module']
+        # A synthetic stable CLI outside the lane is required by the real guard.
+        stable = self.tmp / 'stable-cli'
+        shutil.copytree(REPO_ROOT / 'scripts', stable,
+                        ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
+        wrapper = stable / 'syncwheel'
+        wrapper.write_text('#!/bin/sh\nexec /usr/bin/python3 "$(dirname "$0")/syncwheel.py" "$@"\n')
+        wrapper.chmod(0o755)
+        (self.bin_dir / 'syncwheel').unlink()
+        (self.bin_dir / 'syncwheel').symlink_to(wrapper)
+        self.run_cli(repo, 'hooks', 'install', '--apply')
+        hooks = json.loads(self.run_cli(repo, 'hooks', 'status').stdout)
+        self.assertTrue(hooks['ready'])
+        held = module.governed_worktree_root(repo, fixture['manifest']) / 'syncwheel-lane-held-foreign'
+        self.run_cli(repo, 'worktree', 'open', 'held-foreign',
+                     extra_env={'SYNCWHEEL_LANE_OWNER': 'foreign-owner'})
+        self.git(repo, 'worktree', 'lock', '--reason', 'foreign work', str(held))
+        (held / 'README.md').write_text('staged foreign work\n')
+        self.git(held, 'add', 'README.md')
+        (held / 'README.md').write_text('unstaged foreign work\n')
+        (held / 'untracked.txt').write_text('untracked foreign work\n')
+        with (repo / '.git' / 'info' / 'exclude').open('a') as exclude:
+            exclude.write('ignored-foreign.bin\n')
+        (held / 'ignored-foreign.bin').write_bytes(b'ignored foreign work')
+        os.chmod(held / 'ignored-foreign.bin', 0o600)
+        index_path = Path(self.git(held, 'rev-parse', '--git-path', 'index').stdout.strip())
+        if not index_path.is_absolute():
+            index_path = held / index_path
+
+        def held_snapshot():
+            env = dict(os.environ, GIT_OPTIONAL_LOCKS='0')
+            status = subprocess.check_output(
+                ['git', 'status', '--porcelain=v1', '--ignored'], cwd=held, env=env,
+            )
+            return (
+                self.git(held, 'rev-parse', 'HEAD').stdout,
+                index_path.read_bytes(), status,
+                tuple((path.read_bytes(), path.stat().st_mode) for path in (
+                    held / 'README.md', held / 'untracked.txt', held / 'ignored-foreign.bin',
+                )),
+                next(block for block in self.git(
+                    repo, 'worktree', 'list', '--porcelain').stdout.split('\n\n')
+                     if block.startswith(f'worktree {held}\n')),
+                next(lane for lane in json.loads((repo / '.git' / 'syncwheel' /
+                     'governed-worktrees.json').read_text())['lanes']
+                     if lane['id'] == 'held-foreign'),
+            )
+
+        held_before = held_snapshot()
+        foreign = fixture['orphan_tip']
+        loose = repo / '.git' / 'objects' / foreign[:2] / foreign[2:]
+        self.assertTrue(loose.is_file(), 'fixture must own the loose object')
+        local_refs = self.git(repo, 'for-each-ref', '--format=%(refname) %(objectname)').stdout
+        for line in local_refs.splitlines():
+            ref, tip = line.split()
+            if tip == foreign:
+                self.git(repo, 'update-ref', '-d', ref)
+        loose.unlink()
+        self.assertNotEqual(
+            subprocess.run(['git', 'cat-file', '-e', foreign + '^{commit}'],
+                           cwd=repo, capture_output=True).returncode, 0,
+        )
+        remote_before = self.git(repo, 'ls-remote', '--heads', 'origin').stdout
+        foreign_before = fixture['remote_state']['manifest']['stacks']
+
+        commit_exists = module.commit_exists
+        prime_commits = module.prime_commits
+        commit_patch_id = module.commit_patch_id
+
+        def forbid_foreign_history(repo_root, commit):
+            self.assertNotEqual(commit, foreign, 'must not inspect foreign recipe history')
+            return commit_exists(repo_root, commit)
+
+        def forbid_foreign_prime(repo_root, commits):
+            self.assertNotIn(foreign, commits, 'must not prime foreign recipe history')
+            return prime_commits(repo_root, commits)
+
+        def forbid_foreign_patch_id(repo_root, commit):
+            self.assertNotEqual(commit, foreign, 'must not compute a foreign patch id')
+            return commit_patch_id(repo_root, commit)
+
+        with mock.patch.object(module, 'commit_exists', side_effect=forbid_foreign_history), \
+                mock.patch.object(module, 'prime_commits', side_effect=forbid_foreign_prime), \
+                mock.patch.object(module, 'commit_patch_id', side_effect=forbid_foreign_patch_id):
+            plan, _, _ = module.coordination_compose_stack_plan(
+                repo, fixture['manifest'], 'new-stack', fixture['base_tip'],
+                fixture['base_state']['manifest_digest'],
+            )
+        self.assertEqual(self.git(repo, 'ls-remote', '--heads', 'origin').stdout,
+                         remote_before)
+        self.assertFalse(plan['integrationMutation'])
+        self.assertEqual(plan['expectedIntegrationTip'], fixture['integration_tip'])
+        self.assertEqual(plan['composedSnapshot']['stacks'][:-1], foreign_before)
+        self.assertEqual(plan['deferredForeignHistory'], ['orphan'])
+        self.assertFalse(plan['unmappedIntegrationClassificationComplete'])
+        self.assertEqual(plan['sourceRef'], 'refs/heads/pr/new-stack')
+        cli_preview = self.run_cli(
+            repo, 'coordination', 'compose', '--stack', 'new-stack',
+            '--known-base-state', fixture['base_tip'],
+            '--known-base-manifest-digest', fixture['base_state']['manifest_digest'],
+        )
+        cli_plan = json.loads(cli_preview.stdout)
+        self.assertEqual(cli_plan['planDigest'], plan['planDigest'])
+        self.assertEqual(held_snapshot(), held_before)
+        plan_path = self.tmp / 'selective-compose-plan.json'
+        plan_path.write_text(json.dumps(cli_plan))
+        applied = self.run_cli(repo, 'coordination', 'compose', '--apply',
+                               '--plan-file', str(plan_path))
+        self.assertIn('\"unmapped_integration_classification_complete\": false', applied.stdout)
+        self.assertIn('\"deferred_foreign_history\": [', applied.stdout)
+        _, state_after = self.remote_state(fixture['origin'])
+        self.assertEqual(state_after['manifest']['stacks'][:-1], foreign_before)
+        self.assertEqual(state_after['managed_refs']['refs/heads/integration/shared'],
+                         fixture['integration_tip'])
+        self.assertEqual(state_after['managed_refs']['refs/heads/pr/orphan'],
+                         fixture['remote_state']['managed_refs']['refs/heads/pr/orphan'])
+        self.assertEqual(held_snapshot(), held_before)
+
+    def test_deferred_stack_structural_errors_are_still_rejected(self):
+        fixture = self.prepare_additive_compose('compose-foreign-structure', plan=False)
+        module = fixture['module']
+        remote = fixture['remote_state']['manifest']
+        combined = module.apply_coordination_snapshot(fixture['manifest'], remote)
+        for field, value, message in (
+            ('state', 'invalid-state', 'state must be one of'),
+            ('commits', 42, 'commits must be a string array'),
+            ('meta', 'invalid', 'meta must be an object'),
+            ('integration_commits', [None], 'integration_commits must be a string array'),
+        ):
+            with self.subTest(field=field):
+                invalid = json.loads(json.dumps(combined))
+                foreign = next(item for item in invalid['stacks'] if item['id'] == 'orphan')
+                foreign[field] = value
+                with self.assertRaisesRegex(module.SyncwheelError, message):
+                    module.normalize_manifest_data(invalid, '<test>')
+        invalid = json.loads(json.dumps(combined))
+        foreign = next(item for item in invalid['stacks'] if item['id'] == 'orphan')
+        foreign['state'] = 'invalid-state'
+        validation = module.validate_manifest(fixture['repo'], invalid, defer_stack_histories=['orphan'])
+        self.assertTrue(any('state must be one of' in error for error in validation['errors']))
+
+    def test_deferred_patch_equivalent_history_makes_unmapped_incomplete(self):
+        fixture = self.prepare_additive_compose('compose-patch-equivalent', plan=False)
+        repo, module = fixture['repo'], fixture['module']
+        integration_commit = fixture['integration_commits'][0]
+        tree = self.git(repo, 'rev-parse', integration_commit + '^{tree}').stdout.strip()
+        parent = self.git(repo, 'rev-parse', integration_commit + '^').stdout.strip()
+        duplicate = self.git(repo, 'commit-tree', tree, '-p', parent, '-m', 'equivalent replay').stdout.strip()
+        self.assertNotEqual(duplicate, integration_commit)
+        self.assertEqual(module.commit_patch_id(repo, duplicate), module.commit_patch_id(repo, integration_commit))
+        combined = module.apply_coordination_snapshot(fixture['manifest'], fixture['remote_state']['manifest'])
+        foreign = next(item for item in combined['stacks'] if item['id'] == 'orphan')
+        foreign['integration_commits'] = [duplicate]
+        complete = module.validate_manifest(repo, combined)
+        deferred = module.validate_manifest(repo, combined, defer_stack_histories=['orphan'])
+        self.assertNotIn(integration_commit, complete['details']['integration']['unmapped_commits'])
+        self.assertIn(integration_commit, deferred['details']['integration']['unmapped_commits'])
+
+    def test_compose_still_rejects_missing_selected_recipe_object(self):
+        fixture = self.prepare_additive_compose('compose-own-missing', plan=False)
+        missing = 'f' * 40
+        selected = next(item for item in fixture['manifest']['stacks']
+                        if item['id'] == 'new-stack')
+        selected['commits'] = [missing]
+        remote_before = self.git(fixture['repo'], 'ls-remote', '--heads', 'origin').stdout
+        with self.assertRaisesRegex(
+            fixture['module'].SyncwheelError,
+            'stack new-stack references missing commit: ' + missing,
+        ):
+            fixture['module'].coordination_compose_stack_plan(
+                fixture['repo'], fixture['manifest'], 'new-stack', fixture['base_tip'],
+                fixture['base_state']['manifest_digest'],
+            )
+        self.assertEqual(self.git(fixture['repo'], 'ls-remote', '--heads', 'origin').stdout,
+                         remote_before)
+
+
     def test_compose_publishes_new_stack_and_preserves_remote_stack_and_unmapped_integration(self):
         fixture = self.prepare_additive_compose()
         module = fixture['module']
