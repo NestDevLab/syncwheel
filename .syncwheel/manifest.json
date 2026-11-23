@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
+      "worktree_grace_days": 7
     }
   },
   "defaults": {
@@ -43,9 +43,9 @@
       "independent-publication-contract",
       "selective-publication-v2",
       "linear-adoption-compose",
+      "p0-explicit-review-policy",
       "domain-modularization",
-      "test-slot-qualification",
-      "p0-explicit-review-policy"
+      "test-slot-qualification"
     ],
     "strategy": "cherry-pick"
   },
@@ -279,15 +279,35 @@
       "meta": {}
     },
     {
-      "id": "linear-adoption-compose",
-      "branch": "pr/linear-adoption-compose",
       "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
+      "branch": "pr/linear-adoption-compose",
       "commits": [
         "d6850418b2a08f001b2129f288c214fc08b3e5ac",
         "a8a88a809cd6dbe23422efa0294cbb9e34b394cd"
       ],
+      "id": "linear-adoption-compose",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "id": "p0-explicit-review-policy",
+      "branch": "pr/explicit-review-policy",
+      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+      ],
+      "adopted_history": {
+        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "tip": "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+      },
       "target_remote": "origin",
       "state": "published",
       "publication": {
@@ -324,26 +344,6 @@
         "enabled": true
       },
       "meta": {}
-    },
-    {
-      "id": "p0-explicit-review-policy",
-      "branch": "pr/explicit-review-policy",
-      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {},
-      "adopted_history": {
-        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
-        "tip": "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
-      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
