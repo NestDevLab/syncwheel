@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.33 - 2026-11-23
+
+- Allow an explicit bounded fetch for published recipe recovery without updating local tracking refs or tags.
+
 ## 0.47.32 - 2026-11-23
 
 - Allow additive coordination compose to preserve unchanged foreign stack recipes without requiring their local history. Report when unmapped integration classification is incomplete.

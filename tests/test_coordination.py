@@ -7154,9 +7154,9 @@ with module.coordination_publication_lock(Path(repo_path)):
         original_validate = module.validate_manifest
         raced = False
 
-        def move_local_control_tip(repo_root, manifest):
+        def move_local_control_tip(repo_root, manifest, **kwargs):
             nonlocal raced
-            result = original_validate(repo_root, manifest)
+            result = original_validate(repo_root, manifest, **kwargs)
             if not raced:
                 raced = True
                 observed = module.ref_tip(repo_root, manifest['integration']['branch'])
