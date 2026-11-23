@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 from syncwheel_adoption_transition import verify_adoption_transition
 from syncwheel_errors import SyncwheelError
 
@@ -81,8 +82,8 @@ class AdoptionTransitionIntegrationTest(unittest.TestCase):
         import os
         import shutil
         from unittest import mock
-        from tests.test_coordination import ActiveActiveCoordinationTest
-        from tests.test_syncwheel import SyncwheelFixtureTest
+        from test_coordination import ActiveActiveCoordinationTest
+        from test_syncwheel import SyncwheelFixtureTest
         fixture = ActiveActiveCoordinationTest('runTest')
         fixture.setUp()
         self.addCleanup(fixture.tearDown)
