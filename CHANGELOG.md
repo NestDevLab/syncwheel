@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.33 - 2026-11-23
+
+- Allow a verified linear adopted stack to transition to an ordinary recipe during coordination compose.
+
 ## 0.47.31 - 2026-11-20
 
 - Read complete GitHub merge observations for pull requests with many checks. Reject responses above the size limit without truncating the JSON.

@@ -196,6 +196,7 @@ from syncwheel_manifest import (
     channel_composition_digest,
 )
 from syncwheel_ledger import manifest_channel_history_summary
+from syncwheel_adoption_transition import verify_adoption_transition
 
 import syncwheel_publication_intents as _publication_policy
 from syncwheel_publication_intents import (
@@ -8473,15 +8474,22 @@ def coordination_compose_stack_plan(
         repo_root, latest['state'], config['remote']
     )
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
-    composition = compose_additive_coordination_snapshots(
-        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id
-    )
-    merged_snapshot = composition['merged']
     stack = require_stack(manifest, stack_id)
     source_ref = f"refs/heads/{stack['branch']}"
     source_tip = ref_tip(repo_root, stack['branch'])
     if not source_tip or not re.fullmatch(r'[0-9a-f]{40}', source_tip):
         raise SyncwheelError('coordination compose requested stack has no exact local source tip')
+    old_stack = stack_snapshot_map(base_state['manifest']).get(stack_id)
+    local_stack = stack_snapshot_map(local_snapshot).get(stack_id)
+    transition = None
+    if old_stack and old_stack.get('adopted_history') and local_stack and not local_stack.get('adopted_history'):
+        published_tip = latest['state']['managed_refs'].get(source_ref)
+        transition = verify_adoption_transition(repo_root, old_stack, local_stack, source_tip, published_tip)
+    composition = compose_additive_coordination_snapshots(
+        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id,
+        verified_adoption_transition=bool(transition),
+    )
+    merged_snapshot = composition['merged']
     claimed_refs = list(dict.fromkeys([*latest['state']['managed_refs'], source_ref]))
     require_exclusive_coordination_ownership(repo_root, config, claimed_refs)
     observed_refs = remote_ref_tips(
@@ -8556,6 +8564,7 @@ def coordination_compose_stack_plan(
             local_control_suffix
         ),
         'unmappedIntegrationCommits': unmapped,
+        'adoptionTransition': transition,
         'projectionStatus': 'partial',
         'integrationMutation': False,
         'localAddedStacks': composition['localAddedStacks'],
@@ -8936,9 +8945,10 @@ def coordination_state_chain_contains(repo_root, coordination_id, base_tip, late
     )
 
 
-def compose_additive_coordination_snapshots(base, local, remote, requested_stack):
+def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, verified_adoption_transition=False):
     return _coordination.compose_additive_coordination_snapshots(
         base, local, remote, requested_stack, branch_is_valid=is_valid_coordination_branch_ref,
+        verified_adoption_transition=verified_adoption_transition,
     )
 
 
