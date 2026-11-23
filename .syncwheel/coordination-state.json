@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/preserved-candidate": "068a4342803e82d7d1e809102fcb5523eb23d21c"
+    "refs/heads/pr/independent-publication-contract": "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -27,6 +27,7 @@
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
+    "refs/heads/pr/independent-publication-contract": "e141f6c8ac3798fcbf78de134a67d4ebcdb40179",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/int-desk-cherry-pick": "d29ee725397c65a45cf9e216df71f9e1c373b987",
     "refs/heads/pr/int-git-multi-ref": "feacb00a9a1d19d9fe1f6eef420fafe28d386137",
@@ -119,7 +120,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-17T19:40:34+00:00",
+  "created_at": "2026-11-23T12:43:13+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -156,6 +157,7 @@
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
     "refs/heads/pr/implicit-gc-scope": "b9b613c8d079afc20e05e30771f07e88c1936db7",
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
+    "refs/heads/pr/independent-publication-contract": "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/int-desk-cherry-pick": "7a2efb339b75ec9d79c410ed58d18f791100ac68",
     "refs/heads/pr/int-git-multi-ref": null,
@@ -296,7 +298,8 @@
         "local-replay-guarded",
         "selective-coordination-projection",
         "mgt0249-maintenance-policy",
-        "preserved-candidate"
+        "preserved-candidate",
+        "independent-publication-contract"
       ],
       "strategy": "cherry-pick"
     },
@@ -453,18 +456,28 @@
         "id": "preserved-candidate",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "branch": "pr/independent-publication-contract",
+        "commits": [
+          "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee"
+        ],
+        "id": "independent-publication-contract",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "08451ff6-84b9-45bc-8930-59f7bdf9c5b0",
-  "parent_state": "821a706b2bf31f3b99dac3e48d91717d6c1d7f0f",
+  "operation_token": "5642e3cb-e36c-4ab4-9612-5e8cbc22b306",
+  "parent_state": "943aafd9b654542274ed5071f27bce828ddeeed4",
   "projection_status": "partial",
-  "publication_id": "1970745e-41de-4214-8346-52dd87e678d1",
-  "publication_scope": "stack:preserved-candidate",
+  "publication_id": "51a6a481-da0d-4cc0-b50c-94d945f5677a",
+  "publication_scope": "compose-stack:independent-publication-contract",
   "schema_version": 5,
-  "syncwheel_version": "0.47.27",
+  "syncwheel_version": "0.47.31",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
