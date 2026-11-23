@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/selective-publication-v2"
+  ],
+  "claimed_at": "2026-11-23T17:25:57+00:00",
+  "coordination_id": "default",
+  "operation_token": "dfdd679f-767c-435b-b1fc-969c1a4b921e",
+  "publication_scope": "compose-stack:selective-publication-v2",
+  "source_ref": "refs/heads/pr/selective-publication-v2",
+  "syncwheel_version": "0.47.31"
+}
