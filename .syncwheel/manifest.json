@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "backup_keep": 2,
+      "worktree_grace_days": 7,
       "backup_retention_days": 30,
-      "worktree_grace_days": 7
+      "backup_keep": 2
     }
   },
   "defaults": {
@@ -44,7 +44,8 @@
       "selective-publication-v2",
       "linear-adoption-compose",
       "domain-modularization",
-      "test-slot-qualification"
+      "test-slot-qualification",
+      "p0-explicit-review-policy"
     ],
     "strategy": "cherry-pick"
   },
@@ -314,6 +315,20 @@
       "id": "test-slot-qualification",
       "branch": "pr/test-slot-qualification",
       "base": "origin/main",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "id": "p0-explicit-review-policy",
+      "branch": "pr/explicit-review-policy",
+      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
       "target_remote": "origin",
       "target_branch": "main",
       "integration_branch": "main-integration",
