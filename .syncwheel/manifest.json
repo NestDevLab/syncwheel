@@ -1,25 +1,25 @@
 {
   "authority": {
+    "mode": "ai-managed",
     "allow": [
       "source_change",
       "runtime_change"
     ],
     "deny": [
       "destructive_rewrite"
-    ],
-    "mode": "ai-managed"
+    ]
   },
   "channels": [],
   "coordination": {
-    "gc": {
-      "backup_keep": 2,
-      "backup_retention_days": 30,
-      "worktree_grace_days": 7
-    },
-    "id": "default",
     "mode": "active-active",
+    "id": "default",
     "remote": "origin",
-    "state_branch": "syncwheel/state/default"
+    "state_branch": "syncwheel/state/default",
+    "gc": {
+      "worktree_grace_days": 7,
+      "backup_retention_days": 30,
+      "backup_keep": 2
+    }
   },
   "defaults": {
     "base_branch": "main",
@@ -39,14 +39,15 @@
       "local-replay-guarded",
       "domain-modularization",
       "selective-coordination-projection",
-      "mgt0249-maintenance-policy"
+      "mgt0249-maintenance-policy",
+      "selective-publication-v2"
     ],
     "strategy": "cherry-pick"
   },
   "landing": {
-    "checks": null,
     "mode": "disabled",
-    "strategy": "merge"
+    "strategy": "merge",
+    "checks": null
   },
   "repository_mode": "delivery",
   "stacks": [
@@ -231,6 +232,20 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
+    },
+    {
+      "id": "selective-publication-v2",
+      "branch": "pr/selective-publication-v2",
+      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
     }
   ],
   "syncwheel_tracking": "git-tracked",
