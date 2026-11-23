@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/independent-publication-contract": "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee"
+    "refs/heads/pr/selective-publication-v2": "057e8ebb508bf58a35f92aa888a09708323c0654"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -77,6 +77,7 @@
     "refs/heads/pr/scoped-integration-resolution": "3bad2de14f60dd123005c9f69f8c4d546fe5bfe1",
     "refs/heads/pr/scoped-stack-add": "a13fd09b3f3bb0a122784232b7ac4035f53de5c1",
     "refs/heads/pr/selective-coordination-projection": "ba46f577a3cf7a347039aea8818150873178b37f",
+    "refs/heads/pr/selective-publication-v2": "8313b202bea89930fef3ae4373ae6a6430d291ae",
     "refs/heads/pr/skill-close-guidance": "876423063deb95e8cb356edb4250b609f9a01d15",
     "refs/heads/pr/skill-staging-rule": "cedf54616ca332343c08812026ce97283bda86a6",
     "refs/heads/pr/stack-archive-proof": "ea0cad1a82b882cb76494a873bdcd13d55105a50",
@@ -120,7 +121,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-23T12:43:13+00:00",
+  "created_at": "2026-11-23T17:25:57+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -215,6 +216,7 @@
     "refs/heads/pr/scoped-integration-resolution": "257cc025e05a570e4a97111df5b2b109004896b0",
     "refs/heads/pr/scoped-stack-add": "74561e7e4f4b17eb5a7097b76e6bc8767b9bf2ea",
     "refs/heads/pr/selective-coordination-projection": "c3109e4ef1724e5a391eba2d7aa3b1f1ee96e7f8",
+    "refs/heads/pr/selective-publication-v2": "057e8ebb508bf58a35f92aa888a09708323c0654",
     "refs/heads/pr/skill-close-guidance": "0789a7d33b5990d6f2e17b2b0e33d7337a5aa6ac",
     "refs/heads/pr/skill-staging-rule": "5f514b397d8f386fa8a205eb198d974dc28bfb98",
     "refs/heads/pr/stack-archive-proof": "bb60e10555a6abfb16cc5697c66db2f5cade6693",
@@ -299,7 +301,8 @@
         "selective-coordination-projection",
         "mgt0249-maintenance-policy",
         "preserved-candidate",
-        "independent-publication-contract"
+        "independent-publication-contract",
+        "selective-publication-v2"
       ],
       "strategy": "cherry-pick"
     },
@@ -466,16 +469,30 @@
         "id": "independent-publication-contract",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "adopted_history": {
+          "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+          "tip": "057e8ebb508bf58a35f92aa888a09708323c0654"
+        },
+        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "branch": "pr/selective-publication-v2",
+        "commits": [
+          "057e8ebb508bf58a35f92aa888a09708323c0654"
+        ],
+        "id": "selective-publication-v2",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "5642e3cb-e36c-4ab4-9612-5e8cbc22b306",
-  "parent_state": "943aafd9b654542274ed5071f27bce828ddeeed4",
+  "operation_token": "dfdd679f-767c-435b-b1fc-969c1a4b921e",
+  "parent_state": "59c95ef97f58fb710777652483b1278c67e66884",
   "projection_status": "partial",
-  "publication_id": "51a6a481-da0d-4cc0-b50c-94d945f5677a",
-  "publication_scope": "compose-stack:independent-publication-contract",
+  "publication_id": "923e8f02-7173-4d60-943c-1925a0c9b79a",
+  "publication_scope": "compose-stack:selective-publication-v2",
   "schema_version": 5,
   "syncwheel_version": "0.47.31",
   "tombstones": [
