@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "backup_keep": 2,
+      "worktree_grace_days": 7,
       "backup_retention_days": 30,
-      "worktree_grace_days": 7
+      "backup_keep": 2
     }
   },
   "defaults": {
@@ -43,7 +43,8 @@
       "independent-publication-contract",
       "selective-publication-v2",
       "domain-modularization",
-      "test-slot-qualification"
+      "test-slot-qualification",
+      "linear-adoption-compose"
     ],
     "strategy": "cherry-pick"
   },
@@ -300,6 +301,22 @@
       "target_branch": "main",
       "integration_branch": "main-integration",
       "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "id": "linear-adoption-compose",
+      "branch": "pr/linear-adoption-compose",
+      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "d6850418b2a08f001b2129f288c214fc08b3e5ac"
+      ],
       "state": "published",
       "publication": {
         "enabled": true
