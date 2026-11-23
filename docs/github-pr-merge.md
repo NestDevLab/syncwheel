@@ -18,14 +18,17 @@ syncwheel repo pr-merge-policy set github \
   --repository OWNER/REPO \
   --base main \
   --method squash \
-  --allow-bypass required_reviews \
-  --allow-bypass private_free_rules \
   --merge-actor LOGIN \
   --pr-author LOGIN \
   --commit-author LOGIN \
   --head-repository OWNER/REPO \
   --checks all
 ```
+
+The example authorizes no bypasses. Add `--allow-bypass required_reviews` only
+when an administrator review bypass is explicitly authorized; an unmet review
+otherwise blocks the merge. `--allow-bypass private_free_rules` is independent
+and must also be explicitly configured.
 
 Review the JSON preview, then repeat with `--apply`. Inspect or remove the
 policy with:
