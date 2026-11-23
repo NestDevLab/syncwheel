@@ -16,9 +16,9 @@
     "remote": "origin",
     "state_branch": "syncwheel/state/default",
     "gc": {
-      "worktree_grace_days": 7,
+      "backup_keep": 2,
       "backup_retention_days": 30,
-      "backup_keep": 2
+      "worktree_grace_days": 7
     }
   },
   "defaults": {
@@ -37,10 +37,12 @@
       "concurrency-guidance",
       "pure-cherry-preview",
       "local-replay-guarded",
-      "domain-modularization",
       "selective-coordination-projection",
       "mgt0249-maintenance-policy",
+      "preserved-candidate",
+      "independent-publication-contract",
       "selective-publication-v2",
+      "domain-modularization",
       "test-slot-qualification"
     ],
     "strategy": "cherry-pick"
@@ -64,15 +66,15 @@
       ],
       "id": "prepared-journal-recovery",
       "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Audit linked supersession of unpublished prepared journal operations"
-      },
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
+      "meta": {
+        "purpose": "Audit linked supersession of unpublished prepared journal operations"
+      }
     },
     {
       "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
@@ -109,13 +111,13 @@
       ],
       "id": "local-replay-delivery",
       "integration_branch": "main-integration",
-      "meta": {},
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
+      "meta": {}
     },
     {
       "base": "origin/main",
@@ -125,15 +127,15 @@
       ],
       "id": "concurrency-guidance",
       "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Clarify independent lane authoring and bounded shared-state holds"
-      },
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
+      "meta": {
+        "purpose": "Clarify independent lane authoring and bounded shared-state holds"
+      }
     },
     {
       "base": "origin/main",
@@ -147,15 +149,15 @@
       ],
       "id": "pure-cherry-preview",
       "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
-      },
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
+      "meta": {
+        "purpose": "Qualify a pure frozen cherry-pick preview candidate without recovery apply"
+      }
     },
     {
       "base": "0bee512fa42f1492d10d0645aa52206e56f204dc",
@@ -178,13 +180,101 @@
       ],
       "id": "local-replay-guarded",
       "integration_branch": "main-integration",
-      "meta": {},
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
       "publication": {
         "enabled": true
       },
-      "state": "published",
+      "meta": {}
+    },
+    {
+      "base": "origin/main",
+      "branch": "pr/selective-coordination-projection",
+      "commits": [],
+      "id": "selective-coordination-projection",
+      "integration_branch": "main-integration",
       "target_branch": "main",
-      "target_remote": "origin"
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Publish one additive stack while retaining unrelated local proposals"
+      }
+    },
+    {
+      "base": "origin/main",
+      "branch": "pr/mgt0249-maintenance-policy",
+      "commits": [],
+      "id": "mgt0249-maintenance-policy",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {
+        "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
+      }
+    },
+    {
+      "adopted_history": {
+        "base": "e81b8755292f326681c28e3d231dd0e8b800a9b4",
+        "tip": "068a4342803e82d7d1e809102fcb5523eb23d21c"
+      },
+      "base": "e81b8755292f326681c28e3d231dd0e8b800a9b4",
+      "branch": "pr/preserved-candidate",
+      "commits": [
+        "068a4342803e82d7d1e809102fcb5523eb23d21c"
+      ],
+      "id": "preserved-candidate",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+      "branch": "pr/independent-publication-contract",
+      "commits": [
+        "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee"
+      ],
+      "id": "independent-publication-contract",
+      "integration_branch": "main-integration",
+      "target_branch": "main",
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "id": "selective-publication-v2",
+      "branch": "pr/selective-publication-v2",
+      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [
+        "057e8ebb508bf58a35f92aa888a09708323c0654"
+      ],
+      "adopted_history": {
+        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "tip": "057e8ebb508bf58a35f92aa888a09708323c0654"
+      },
+      "target_remote": "origin",
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
     },
     {
       "base": "origin/main",
@@ -201,58 +291,6 @@
       "state": "published",
       "target_branch": "main",
       "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/selective-coordination-projection",
-      "commits": [],
-      "id": "selective-coordination-projection",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Publish one additive stack while retaining unrelated local proposals"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "base": "origin/main",
-      "branch": "pr/mgt0249-maintenance-policy",
-      "commits": [],
-      "id": "mgt0249-maintenance-policy",
-      "integration_branch": "main-integration",
-      "meta": {
-        "purpose": "Implement and validate preparatory maintenance authority policy without live cleanup"
-      },
-      "publication": {
-        "enabled": true
-      },
-      "state": "published",
-      "target_branch": "main",
-      "target_remote": "origin"
-    },
-    {
-      "id": "selective-publication-v2",
-      "branch": "pr/selective-publication-v2",
-      "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
-      "target_remote": "origin",
-      "target_branch": "main",
-      "integration_branch": "main-integration",
-      "commits": [
-        "057e8ebb508bf58a35f92aa888a09708323c0654"
-      ],
-      "state": "published",
-      "publication": {
-        "enabled": true
-      },
-      "meta": {},
-      "adopted_history": {
-        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
-        "tip": "057e8ebb508bf58a35f92aa888a09708323c0654"
-      }
     },
     {
       "id": "test-slot-qualification",
