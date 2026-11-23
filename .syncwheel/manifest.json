@@ -332,12 +332,18 @@
       "target_remote": "origin",
       "target_branch": "main",
       "integration_branch": "main-integration",
-      "commits": [],
+      "commits": [
+        "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+      ],
       "state": "published",
       "publication": {
         "enabled": true
       },
-      "meta": {}
+      "meta": {},
+      "adopted_history": {
+        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "tip": "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+      }
     }
   ],
   "syncwheel_tracking": "git-tracked",
