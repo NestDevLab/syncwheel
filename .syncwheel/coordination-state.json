@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/linear-adoption-compose": "a8a88a809cd6dbe23422efa0294cbb9e34b394cd"
+    "refs/heads/pr/explicit-review-policy": "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -17,6 +17,7 @@
     "refs/heads/pr/domain-modularization": "9d8c4bc2d9a6386ff3a8e86261610dc2d029c673",
     "refs/heads/pr/draft-promotion-fix": "c1e8bef8e77e315cf1d357f18cf27e5c3268d85b",
     "refs/heads/pr/ephemeral-control-replay": "d7de8ccf7413c689c6d51c583e14b2861135cf91",
+    "refs/heads/pr/explicit-review-policy": "540aef52c37af0648ac80decc6cf493f7a0b7539",
     "refs/heads/pr/fixture-cli-tests": "2b3d0977261181bfcba7e7af8c5287636822339a",
     "refs/heads/pr/github-empty-rules": "2a4a6a5a0edb0292967e3e2f3a9fb13d6375c25f",
     "refs/heads/pr/graph-lock-provenance-supersede": "d2e87dd7face00431e1e044a3fa0492362233acb",
@@ -122,7 +123,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-23T18:38:42+00:00",
+  "created_at": "2026-11-23T19:51:17+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -146,6 +147,7 @@
     "refs/heads/pr/draft-promotion-fix": "fbd456e9f06d850d11adcdbedb832e2271d1f1a5",
     "refs/heads/pr/empty-desk-guard": "36526810886da680f9a4bff2213ba047f4b9a209",
     "refs/heads/pr/ephemeral-control-replay": "64970983fd7fc0eb93a50770d952c14e07ff5480",
+    "refs/heads/pr/explicit-review-policy": "bfbdad84f982b4f2b8fc103829d95fe5fc380683",
     "refs/heads/pr/fast-forward-state-cas": "c273a4be0562007b90343c93c48cdbfad0c0a185",
     "refs/heads/pr/fixture-cli-tests": "45095862a6316f4733bbbc5b4fcb0a01c2406fa3",
     "refs/heads/pr/fleet-coordination-invariants": "17ca0cd1dacf468c7573e45ea1bf9d7fcbfc51d2",
@@ -305,7 +307,8 @@
         "preserved-candidate",
         "independent-publication-contract",
         "selective-publication-v2",
-        "linear-adoption-compose"
+        "linear-adoption-compose",
+        "p0-explicit-review-policy"
       ],
       "strategy": "cherry-pick"
     },
@@ -497,16 +500,30 @@
         "id": "linear-adoption-compose",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "adopted_history": {
+          "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+          "tip": "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+        },
+        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "branch": "pr/explicit-review-policy",
+        "commits": [
+          "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+        ],
+        "id": "p0-explicit-review-policy",
+        "integration_branch": "main-integration",
+        "target_branch": "main"
       }
     ],
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "753a2d30-5358-483b-83a6-291952cc24a6",
-  "parent_state": "6da16bd101d2ca45ca3c2ff56929a5badd504162",
+  "operation_token": "01722e1d-8dc1-4d8f-9f9d-d3f3f8d2a6af",
+  "parent_state": "57485e5d889fd12bd25f6e0ed10cd5ede2ba0e1e",
   "projection_status": "partial",
-  "publication_id": "5c14e7bd-cfb9-4b97-87aa-c4ae03f9cc3f",
-  "publication_scope": "compose-stack:linear-adoption-compose",
+  "publication_id": "9df61830-fc58-43ca-8dfc-e6a47580cf8b",
+  "publication_scope": "compose-stack:p0-explicit-review-policy",
   "schema_version": 5,
   "syncwheel_version": "0.47.31",
   "tombstones": [
