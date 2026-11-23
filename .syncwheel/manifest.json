@@ -40,7 +40,8 @@
       "domain-modularization",
       "selective-coordination-projection",
       "mgt0249-maintenance-policy",
-      "selective-publication-v2"
+      "selective-publication-v2",
+      "test-slot-qualification"
     ],
     "strategy": "cherry-pick"
   },
@@ -237,6 +238,20 @@
       "id": "selective-publication-v2",
       "branch": "pr/selective-publication-v2",
       "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+      "target_remote": "origin",
+      "target_branch": "main",
+      "integration_branch": "main-integration",
+      "commits": [],
+      "state": "published",
+      "publication": {
+        "enabled": true
+      },
+      "meta": {}
+    },
+    {
+      "id": "test-slot-qualification",
+      "branch": "pr/test-slot-qualification",
+      "base": "origin/main",
       "target_remote": "origin",
       "target_branch": "main",
       "integration_branch": "main-integration",
