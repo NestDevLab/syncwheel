@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.32 - 2026-11-23
+
+- Qualify independent publication with a tracked version 1 manifest: advance two existing feature refs while preserving another author's dirty worktree and interrupted cleanup. Keep the foreign-history refusal covered and document the materialized-source precondition and the separate limits of direct landing. Publication behavior is unchanged.
+
 ## 0.47.31 - 2026-11-20
 
 - Read complete GitHub merge observations for pull requests with many checks. Reject responses above the size limit without truncating the JSON.
