@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/linear-adoption-compose"
   ],
-  "claimed_at": "2026-11-23T18:19:15+00:00",
+  "claimed_at": "2026-11-23T18:38:42+00:00",
   "coordination_id": "default",
-  "operation_token": "7d453275-214c-499a-8ff9-e2f0ccd14708",
+  "operation_token": "753a2d30-5358-483b-83a6-291952cc24a6",
   "publication_scope": "compose-stack:linear-adoption-compose",
   "source_ref": "refs/heads/pr/linear-adoption-compose",
   "syncwheel_version": "0.47.31"
