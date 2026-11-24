@@ -119,7 +119,7 @@ Given one of those prompts, the agent should:
 ## Safe execution rules
 
 - Do not run branch-rebuilding commands against a dirty worktree.
-- Start routine implementation, dependency installation, builds, and tests on integration. Let
+- Author and commit in a governed lane; use integration for shared validation. Let
   automatic replay choose plumbing or a self-removing temporary worktree. Use `--replay-mode desk`
   only for conflict resolution or to validate a non-empty materialized stack when integration cannot
   safely run it.

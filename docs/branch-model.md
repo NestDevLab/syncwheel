@@ -78,9 +78,9 @@ for explicit follow-up.
 
 ## Worktrees
 
-Worktrees are desks for conflict resolution or validation of a non-empty materialized stack when
-integration cannot safely run it. Routine implementation, dependency installation, builds, and tests
-begin on integration. Desks are not artifacts of a routine replay: `stack rebuild` and `int rebuild`
+Author and commit in governed lanes; use integration for shared validation. Desks support conflict
+resolution or validation of a non-empty materialized stack when integration cannot safely run it.
+Desks are not artifacts of a routine replay: `stack rebuild` and `int rebuild`
 leave nothing behind unless you ask them to.
 
 The default mode, `auto`, picks the cheapest path that applies:
