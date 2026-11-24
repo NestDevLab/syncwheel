@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.33`
+Current version: `0.47.34`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
