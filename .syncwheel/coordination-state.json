@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/selective-publication-v2": "6520f3abd2f052dcf30815da3150172fb9b7fcea"
+    "refs/heads/pr/p1-recipe-qualification": "fa1ba502cedbb1b11f193a385c865654e9bcbeae"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -58,6 +58,7 @@
     "refs/heads/pr/o3-history-proof": "36bf233506fca6e5b3ca62ef1c5943fa0cd1ef0e",
     "refs/heads/pr/oikuma-control-divergence": "4f02732949e05ce756e36d9c1e5cbaa8ac68c234",
     "refs/heads/pr/oikuma-null-peer-repair": "35e4034cf121fcbfc7c1e028fda401b944b0effa",
+    "refs/heads/pr/p1-recipe-qualification": "05c4ce125208fc886a3571d6702da9d42a321776",
     "refs/heads/pr/p3-documentation-20261124": "85973647a84f6f9a01304b3275dc9965a92d0996",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/partial-intent-desired-refs": "d13d5ad39b31c06b96c9414c0c41d2f6000bccc8",
@@ -124,7 +125,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-24T09:25:05+00:00",
+  "created_at": "2026-11-24T10:13:32+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -194,6 +195,7 @@
     "refs/heads/pr/o3-history-proof": "164d711c7fa5e3f39585c1b6d17aa1eca6252e8e",
     "refs/heads/pr/oikuma-control-divergence": "3e6492e2ecedc6ae4a748ddd2c3238af8d13368c",
     "refs/heads/pr/oikuma-null-peer-repair": "488ca3c567efa7ff6d8c20081d6d7fa429341990",
+    "refs/heads/pr/p1-recipe-qualification": "fa1ba502cedbb1b11f193a385c865654e9bcbeae",
     "refs/heads/pr/p3-documentation-20261124": "5ecb73ad67a63303b7b67d8e704dd94ecffc486e",
     "refs/heads/pr/pack-refs-guard": "f1c908590b18920f51b92badb971f3aefbc233b5",
     "refs/heads/pr/partial-intent-desired-refs": "2e68fd634f7009b3a4056b19fb4468cd64b7c5f5",
@@ -311,7 +313,8 @@
         "selective-publication-v2",
         "linear-adoption-compose",
         "p0-explicit-review-policy",
-        "p3-documentation-20261124"
+        "p3-documentation-20261124",
+        "p1-recipe-qualification"
       ],
       "strategy": "cherry-pick"
     },
@@ -538,18 +541,32 @@
         "id": "p3-documentation-20261124",
         "integration_branch": "main-integration",
         "target_branch": "main"
+      },
+      {
+        "adopted_history": {
+          "base": "6520f3abd2f052dcf30815da3150172fb9b7fcea",
+          "tip": "fa1ba502cedbb1b11f193a385c865654e9bcbeae"
+        },
+        "base": "6520f3abd2f052dcf30815da3150172fb9b7fcea",
+        "branch": "pr/p1-recipe-qualification",
+        "commits": [
+          "fa1ba502cedbb1b11f193a385c865654e9bcbeae"
+        ],
+        "id": "p1-recipe-qualification",
+        "integration_branch": "main-integration",
+        "target_branch": "pr/selective-publication-v2"
       }
     ],
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "83aea8c7-f69f-436b-a342-d14bca94b6b6",
-  "parent_state": "84cddc17ddc5c44f18c27d46969dfa49d280703e",
+  "operation_token": "4d3dd997-11ca-41fc-a203-03fdfe19a071",
+  "parent_state": "00a8268907662036ffe4213f05fa4795439b3594",
   "projection_status": "partial",
-  "publication_id": "8e4d0bdf-2801-4e7c-b2ce-82ea5ff08555",
-  "publication_scope": "compose-stack:selective-publication-v2",
+  "publication_id": "b9ae792b-781b-4263-a59e-ff0fc0ece5ac",
+  "publication_scope": "compose-stack:p1-recipe-qualification",
   "schema_version": 5,
-  "syncwheel_version": "0.47.35",
+  "syncwheel_version": "0.47.33",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
