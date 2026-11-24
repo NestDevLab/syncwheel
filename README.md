@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.33`
+Current version: `0.47.34`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1448,6 +1448,8 @@ directory); refs are always read fresh.
   delivery cost
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
+- `docs/independent-publication.md`: legacy tracked-manifest publication contract,
+  preservation of unrelated work, and reproducible qualification
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
 - `docs/deployment-channels.md`: pinned channel model, CLI, receipts, and CI/CD boundary
 - `docs/ai-agents.md`: short AI behavior contract
