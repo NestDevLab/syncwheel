@@ -57,10 +57,10 @@ already the current one, and an existing desk when the branch already has one.
 Capability is detected at runtime and an inapplicable mode falls back rather
 than failing.
 
-Desk is an escalation/validation surface, not routine authoring: begin routine
-implementation, dependency installation, builds, and tests on integration. Ask
-for a desk only to resolve a conflict or validate a non-empty materialized stack
-when integration cannot safely run it:
+Author and commit in a governed lane; use integration for shared validation. A desk
+is a separate escalation or validation surface, not a replacement for an authoring
+lane. Use one only to resolve a replay conflict or validate a non-empty materialized
+stack when integration cannot safely run it:
 
 ```bash
 syncwheel stack rebuild feature-a --replay-mode desk --worktree <path>
