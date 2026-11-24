@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/linear-adoption-compose": "b9d8e27281a81e1df787df63e249a45cb8cea0ba"
+    "refs/heads/pr/independent-publication-contract": "23d7ec83698f5f547a9f895f30834f31f98d31f4"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -28,7 +28,7 @@
     "refs/heads/pr/historical-coordination-digest-governed": "f57eecfd4a90a1c99c1f1cae9a558db87db3eb6b",
     "refs/heads/pr/implicit-gc-scope": "376358504bcb19d7569c8acbb2bc95c55be6d7be",
     "refs/heads/pr/independent-integration-lanes": "76e773d22618e4cbdb57fd7c74f08ba939bfe3d3",
-    "refs/heads/pr/independent-publication-contract": "e141f6c8ac3798fcbf78de134a67d4ebcdb40179",
+    "refs/heads/pr/independent-publication-contract": "dddb6bb5d27bd4f8edf9f73440a3bc0b7722408b",
     "refs/heads/pr/independent-worktree-open": "6e293cff9b71f5e756501648c6356375f59ebe0b",
     "refs/heads/pr/int-desk-cherry-pick": "d29ee725397c65a45cf9e216df71f9e1c373b987",
     "refs/heads/pr/int-git-multi-ref": "feacb00a9a1d19d9fe1f6eef420fafe28d386137",
@@ -123,7 +123,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-24T08:01:44+00:00",
+  "created_at": "2026-11-24T08:31:27+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -161,7 +161,7 @@
     "refs/heads/pr/historical-coordination-digest-governed": "8128d73c0d9b0e590b7c874266dff2cb068d384d",
     "refs/heads/pr/implicit-gc-scope": "b9b613c8d079afc20e05e30771f07e88c1936db7",
     "refs/heads/pr/independent-integration-lanes": "7f3b06ba782d0fdfab230de3020d8de032dcc94f",
-    "refs/heads/pr/independent-publication-contract": "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee",
+    "refs/heads/pr/independent-publication-contract": "23d7ec83698f5f547a9f895f30834f31f98d31f4",
     "refs/heads/pr/independent-worktree-open": "b29a8aec275d3a7345f4a616335cb6d12358b1ee",
     "refs/heads/pr/int-desk-cherry-pick": "7a2efb339b75ec9d79c410ed58d18f791100ac68",
     "refs/heads/pr/int-git-multi-ref": null,
@@ -467,10 +467,14 @@
         "target_branch": "main"
       },
       {
-        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "adopted_history": {
+          "base": "d55315631401bf344cf82fa1521a6de5d23d271f",
+          "tip": "23d7ec83698f5f547a9f895f30834f31f98d31f4"
+        },
+        "base": "d55315631401bf344cf82fa1521a6de5d23d271f",
         "branch": "pr/independent-publication-contract",
         "commits": [
-          "64cf90ff9be4c979ff3095f0d6281c14ee4e06ee"
+          "23d7ec83698f5f547a9f895f30834f31f98d31f4"
         ],
         "id": "independent-publication-contract",
         "integration_branch": "main-integration",
@@ -522,11 +526,11 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "68b45404-8485-4a19-a2c2-2e9978cf6713",
-  "parent_state": "53a30bf73a927da63ae46c551ca2361b756b44cf",
+  "operation_token": "34e2439c-83cc-48c7-9491-fa8d29baee7a",
+  "parent_state": "7fd2201eece959969dd12de3fb6cec24a8037a1a",
   "projection_status": "partial",
-  "publication_id": "fccf50ca-0126-4fa3-b7d3-46f0ec1e26da",
-  "publication_scope": "compose-stack:linear-adoption-compose",
+  "publication_id": "d28efd15-0f4e-4cad-8577-f3cd20029d40",
+  "publication_scope": "compose-stack:independent-publication-contract",
   "schema_version": 5,
   "syncwheel_version": "0.47.33",
   "tombstones": [
