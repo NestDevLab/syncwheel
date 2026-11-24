@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/p3-documentation-20261124": "f46926c54e1127e878569d0d744d5495678b5ed9"
+    "refs/heads/pr/p3-documentation-20261124": "5ecb73ad67a63303b7b67d8e704dd94ecffc486e"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -58,7 +58,7 @@
     "refs/heads/pr/o3-history-proof": "36bf233506fca6e5b3ca62ef1c5943fa0cd1ef0e",
     "refs/heads/pr/oikuma-control-divergence": "4f02732949e05ce756e36d9c1e5cbaa8ac68c234",
     "refs/heads/pr/oikuma-null-peer-repair": "35e4034cf121fcbfc7c1e028fda401b944b0effa",
-    "refs/heads/pr/p3-documentation-20261124": "611430644543b68cd222a19625675bbe43d79699",
+    "refs/heads/pr/p3-documentation-20261124": "85973647a84f6f9a01304b3275dc9965a92d0996",
     "refs/heads/pr/pack-refs-guard": "5fddf3b061705e3dfe34820622b560c00614d81a",
     "refs/heads/pr/partial-intent-desired-refs": "d13d5ad39b31c06b96c9414c0c41d2f6000bccc8",
     "refs/heads/pr/patch-id-cache-04314": "8c4cd96c79e7c590d007b56bfe46e9b62cca9a87",
@@ -124,7 +124,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-24T08:36:52+00:00",
+  "created_at": "2026-11-24T08:54:08+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -194,7 +194,7 @@
     "refs/heads/pr/o3-history-proof": "164d711c7fa5e3f39585c1b6d17aa1eca6252e8e",
     "refs/heads/pr/oikuma-control-divergence": "3e6492e2ecedc6ae4a748ddd2c3238af8d13368c",
     "refs/heads/pr/oikuma-null-peer-repair": "488ca3c567efa7ff6d8c20081d6d7fa429341990",
-    "refs/heads/pr/p3-documentation-20261124": "f46926c54e1127e878569d0d744d5495678b5ed9",
+    "refs/heads/pr/p3-documentation-20261124": "5ecb73ad67a63303b7b67d8e704dd94ecffc486e",
     "refs/heads/pr/pack-refs-guard": "f1c908590b18920f51b92badb971f3aefbc233b5",
     "refs/heads/pr/partial-intent-desired-refs": "2e68fd634f7009b3a4056b19fb4468cd64b7c5f5",
     "refs/heads/pr/patch-id-cache-04314": "0341d08e6c9ef7fc5e1a8c0c0016c7695eaace20",
@@ -526,11 +526,14 @@
         "target_branch": "main"
       },
       {
-        "base": "d55315631401bf344cf82fa1521a6de5d23d271f",
+        "adopted_history": {
+          "base": "d79771a5330c5cce35826aee5fad0b060be67df0",
+          "tip": "5ecb73ad67a63303b7b67d8e704dd94ecffc486e"
+        },
+        "base": "d79771a5330c5cce35826aee5fad0b060be67df0",
         "branch": "pr/p3-documentation-20261124",
         "commits": [
-          "2e29eb7568c4ccafef22359c53f983dfb1bf1a56",
-          "f46926c54e1127e878569d0d744d5495678b5ed9"
+          "5ecb73ad67a63303b7b67d8e704dd94ecffc486e"
         ],
         "id": "p3-documentation-20261124",
         "integration_branch": "main-integration",
@@ -540,10 +543,10 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "81d7bc80-77d8-4cac-bbe4-37a051f97733",
-  "parent_state": "e443938330fb40ddf030c30d74531347a5e1e944",
+  "operation_token": "31c5ef13-397b-4591-a489-0a15723dc7b7",
+  "parent_state": "5fbec702240e9797686e104f04b39e159b0f4235",
   "projection_status": "partial",
-  "publication_id": "6958a90a-ee77-4b19-99b8-68f6f7512cc2",
+  "publication_id": "dfe4af08-34ad-4c85-b658-641df7e4a684",
   "publication_scope": "compose-stack:p3-documentation-20261124",
   "schema_version": 5,
   "syncwheel_version": "0.47.33",
