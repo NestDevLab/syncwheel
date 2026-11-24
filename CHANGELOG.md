@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.36 - 2026-11-24
+
+- Qualify recovery of ordered published sources from a fresh clone after a contention retry while preserving a foreign worktree.
+
 ## 0.47.35 - 2026-11-24
 
 - Allow an explicit bounded fetch for published recipe recovery without updating local tracking refs or tags.
