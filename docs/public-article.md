@@ -124,7 +124,7 @@ Below is a minimal Git-oriented implementation flow.
 If a repository has multiple active PR branches plus an integration branch, Git worktrees are usually the cleanest operational model.
 
 A very practical setup is:
-- the **repo root** stays on the shared integration branch for daily work
+- the **repo root** stays on the shared integration branch for validation; authors work in their lanes
 - each **PR branch** gets its own worktree
 - `main` remains the clean promotion branch
 

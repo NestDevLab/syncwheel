@@ -368,7 +368,7 @@ The safest default is:
 - keep the primary working checkout on the shared integration branch
 - rebuild and publish every PR branch from there, without checking it out
 - optionally keep a separate administrative checkout for manifest-only work
-- begin routine implementation, dependency installation, builds, and tests on integration
+- open a governed lane for authoring and commits; use integration for shared validation
 - create a desk only to resolve a conflict or validate a non-empty materialized stack
   when integration cannot safely run it
 - an integration branch that is already checked out gets a detached desk, so the primary never moves during review
@@ -380,9 +380,7 @@ already on the target branch, and an existing worktree when the branch has one.
 Pin a mode with `--replay-mode`, with `syncwheel replay-mode <mode>` for a
 repo-local default, or with `defaults.replay_mode` in the manifest.
 
-When another agent has explicitly locked or owns the primary checkout, continue
-authoring only by asking for a governed lane. This is an explicit fallback, not
-an automatic reaction to a lock:
+For authoring, open a governed lane instead of editing the primary checkout:
 
 ```bash
 syncwheel worktree open concise-change

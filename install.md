@@ -73,11 +73,31 @@ agentwheel doctor --adapter claude --user --skill syncwheel --source github:Nest
 agentwheel install github:NestDevLab/syncwheel --adapter claude --user --skill syncwheel
 ```
 
+After installation, run `syncwheel --version` to read the CLI version. In the source
+checkout, set `QUALIFIED_REV` to the qualified Git commit and `INSTALLED_SKILL` to the
+installed skill directory, then compare the file digests:
+
+```bash
+set -o pipefail
+syncwheel --version
+sha256sum "$INSTALLED_SKILL/SKILL.md"
+git show "$QUALIFIED_REV:skills/syncwheel/SKILL.md" | sha256sum
+```
+
+Matching digests prove that this skill file matches the file at that revision; they do
+not establish package provenance or verify additional installed files. Inspect those
+separately through the supported Agentwheel status interface. If source, revision or
+installed contents cannot be established, report the installation as unverified. Do not
+edit generated runtime copies by hand.
+
 ## Success Criteria
 
 - `syncwheel --version` works, or the checkout script fallback works.
 - `syncwheel repo tracking status` runs in the target repo.
 - The companion skill is installed if the user requested it and Agentwheel is available.
+- When the skill is installed, verify its source and revision against the qualified
+  source. If either cannot be established, report the installation as unverified;
+  this verification criterion remains unmet.
 - Any branch, worktree, integration, or push mutation was explicitly requested.
 - Every channel create/edit/refresh/promotion/resolution/apply/publish/close was
   explicitly requested and used its preview's exact `planDigest` with
