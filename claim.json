@@ -2,9 +2,9 @@
   "changed_refs": [
     "refs/heads/pr/selective-publication-v2"
   ],
-  "claimed_at": "2026-11-24T08:57:12+00:00",
+  "claimed_at": "2026-11-24T09:25:05+00:00",
   "coordination_id": "default",
-  "operation_token": "aa918a57-acaf-4263-b2ae-da66ae166711",
+  "operation_token": "83aea8c7-f69f-436b-a342-d14bca94b6b6",
   "publication_scope": "compose-stack:selective-publication-v2",
   "source_ref": "refs/heads/pr/selective-publication-v2",
   "syncwheel_version": "0.47.35"
