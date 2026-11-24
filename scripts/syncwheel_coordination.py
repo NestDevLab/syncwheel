@@ -463,7 +463,8 @@ def additive_coordination_snapshot_delta(base, candidate, side, updated_stack=No
     return {'added': added, 'members': appended}
 
 
-def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, branch_is_valid, verified_adoption_transition=False):
+def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, branch_is_valid,
+                                            verified_base_advance=False, verified_adoption_transition=False):
     local_delta = additive_coordination_snapshot_delta(
         base, local, 'local', updated_stack=requested_stack
     )
@@ -478,7 +479,11 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
     if base_requested is not None:
         before = {**base_requested, 'commits': None}
         after = {**local_map[requested_stack], 'commits': None}
-        if verified_adoption_transition:
+        if verified_base_advance:
+            for field in ('base', 'adopted_history'):
+                before.pop(field, None)
+                after.pop(field, None)
+        elif verified_adoption_transition:
             before.pop('adopted_history', None)
             after.pop('adopted_history', None)
         if before != after:

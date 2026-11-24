@@ -325,6 +325,7 @@ from syncwheel_ledger import (
 )
 
 import syncwheel_coordination as _coordination
+from syncwheel_compose_base_advance import verify_compose_base_advance
 from syncwheel_coordination import (
     COORDINATION_REMOTE_ROLE_CANONICAL,
     COORDINATION_REMOTE_ROLE_PUBLICATION,
@@ -8488,11 +8489,6 @@ def coordination_compose_stack_plan(
     if old_stack and old_stack.get('adopted_history') and local_stack and not local_stack.get('adopted_history'):
         published_tip = latest['state']['managed_refs'].get(source_ref)
         transition = verify_adoption_transition(repo_root, old_stack, local_stack, source_tip, published_tip)
-    composition = compose_additive_coordination_snapshots(
-        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id,
-        verified_adoption_transition=bool(transition),
-    )
-    merged_snapshot = composition['merged']
     claimed_refs = list(dict.fromkeys([*latest['state']['managed_refs'], source_ref]))
     require_exclusive_coordination_ownership(repo_root, config, claimed_refs)
     observed_refs = remote_ref_tips(
@@ -8505,6 +8501,29 @@ def coordination_compose_stack_plan(
     }
     if drifted:
         raise SyncwheelError('coordination compose STOP: remote state does not match managed refs')
+    previous = stack_snapshot_map(base_state['manifest']).get(stack_id)
+    selected = stack_snapshot_map(local_snapshot).get(stack_id)
+    base_advance = None
+    if previous and selected and previous.get('base') != selected.get('base'):
+        target_remote = stack.get('target_remote') or manifest['defaults']['publication_remote']
+        target_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
+        target_ref = f'refs/heads/{target_branch}'
+        if target_remote != config['remote'] or not is_valid_coordination_branch_ref(target_ref):
+            raise SyncwheelError('compose base advance requires a valid target on the coordination remote')
+        target_tip = remote_ref_tips(repo_root, target_remote, [target_ref]).get(target_ref)
+        old_tip = base_state['managed_refs'].get(source_ref)
+        if latest['state']['managed_refs'].get(source_ref) != old_tip:
+            raise SyncwheelError('compose base advance refuses a changed published source')
+        base_advance = verify_compose_base_advance(
+            repo_root, previous, selected, old_tip, source_tip, target_tip,
+        )
+        base_advance['targetRef'] = target_ref
+    composition = compose_additive_coordination_snapshots(
+        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id,
+        verified_base_advance=base_advance is not None,
+        verified_adoption_transition=bool(transition),
+    )
+    merged_snapshot = composition['merged']
     remote_has_composed_snapshot = latest['state']['manifest'] == merged_snapshot
     remote_source_tip = observed_refs.get(source_ref)
     if remote_has_composed_snapshot:
@@ -8527,7 +8546,20 @@ def coordination_compose_stack_plan(
         repo_root, integration_tip, local_integration_tip
     )
     proposed_manifest = apply_coordination_snapshot(manifest, merged_snapshot)
-    validation = validate_manifest(repo_root, proposed_manifest)
+    # Reapply all pure structural checks before deferring any foreign history.
+    proposed_manifest = normalize_manifest_data(
+        json.loads(json.dumps(proposed_manifest)), '<coordination-compose>'
+    )
+    remote_stacks = {item['id']: item for item in latest['state']['manifest']['stacks']}
+    merged_stacks = {item['id']: item for item in merged_snapshot['stacks']}
+    deferred_foreign_history = (
+        sorted(stack for stack, snapshot in remote_stacks.items()
+               if stack != stack_id and merged_stacks.get(stack) == snapshot)
+        if manifest['version'] == MANIFEST_VERSION_COORDINATED else []
+    )
+    validation = validate_manifest(
+        repo_root, proposed_manifest, defer_stack_histories=deferred_foreign_history,
+    )
     if ref_tip(repo_root, manifest['integration']['branch']) != local_integration_tip:
         raise SyncwheelError('coordination compose local integration changed during planning')
     if validation['errors']:
@@ -8567,6 +8599,8 @@ def coordination_compose_stack_plan(
             local_control_suffix
         ),
         'unmappedIntegrationCommits': unmapped,
+        'deferredForeignHistory': deferred_foreign_history,
+        'unmappedIntegrationClassificationComplete': not bool(deferred_foreign_history),
         'adoptionTransition': transition,
         'projectionStatus': 'partial',
         'integrationMutation': False,
@@ -8575,6 +8609,8 @@ def coordination_compose_stack_plan(
         'remoteAddedStacks': composition['remoteAddedStacks'],
         'status': status,
     }
+    if base_advance:
+        payload['baseAdvance'] = base_advance
     payload['planDigest'] = canonical_json_digest(payload)
     return payload, proposed_manifest, latest
 
@@ -8711,6 +8747,20 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         raise SyncwheelError(
             'coordination compose local adoption pending: manifest drifted after remote publication'
         )
+    base_qualification = None
+    if plan.get('baseAdvance'):
+        base_qualification = {
+            'status': 'unqualified',
+            'expectedTargetTip': plan['baseAdvance']['observedTargetTip'],
+            'targetRef': plan['baseAdvance']['targetRef'],
+        }
+        try:
+            base_qualification['observedTargetTip'] = remote_ref_tips(
+                repo_root, coordination_config(proposed_manifest)['remote'],
+                [base_qualification['targetRef']],
+            ).get(base_qualification['targetRef'])
+        except SyncwheelError:
+            base_qualification['observedTargetTip'] = None
     try:
         save_manifest_with_ledger(
             repo_root,
@@ -8724,6 +8774,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
                 'known_base_state': plan['knownBaseStateTip'],
                 'remote_state': plan['expectedRemoteStateTip'],
                 'stack': plan['stack'],
+                **({'base_qualification': base_qualification} if base_qualification else {}),
             },
         )
     except (OSError, SyncwheelError) as exc:
@@ -8740,6 +8791,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         )
     return {
         'status': 'composed' if plan['status'] == 'publish-required' else 'adopted',
+        **({'base_qualification': base_qualification} if base_qualification else {}),
         'plan_digest': supplied_digest,
         'remote_state_tip': (
             read_remote_coordination_state(
@@ -8752,6 +8804,8 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         'manifest_digest': plan['proposedManifestDigest'],
         'integration_mutated': False,
         'unmapped_integration_commits': plan['unmappedIntegrationCommits'],
+        'unmapped_integration_classification_complete': plan['unmappedIntegrationClassificationComplete'],
+        'deferred_foreign_history': plan['deferredForeignHistory'],
     }
 
 
@@ -8948,9 +9002,12 @@ def coordination_state_chain_contains(repo_root, coordination_id, base_tip, late
     )
 
 
-def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, verified_adoption_transition=False):
+def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *,
+                                             verified_base_advance=False,
+                                             verified_adoption_transition=False):
     return _coordination.compose_additive_coordination_snapshots(
         base, local, remote, requested_stack, branch_is_valid=is_valid_coordination_branch_ref,
+        verified_base_advance=verified_base_advance,
         verified_adoption_transition=verified_adoption_transition,
     )
 
@@ -10218,12 +10275,14 @@ def collect_repo_snapshot(repo_root, manifest):
     }
 
 
-def validate_manifest(repo_root, manifest, manifest_path=None):
+def validate_manifest(repo_root, manifest, manifest_path=None, *, defer_stack_histories=()):
     warnings = []
     errors = []
+    deferred = frozenset(defer_stack_histories)
     prime_commits(repo_root, [
         commit
         for stack in manifest.get('stacks', [])
+        if stack['id'] not in deferred
         for key in ('commits', 'integration_commits', 'integration_only_commits')
         for commit in (stack.get(key) or [])
         if isinstance(commit, str)
@@ -10331,6 +10390,25 @@ def validate_manifest(repo_root, manifest, manifest_path=None):
 
     for stack in manifest['stacks']:
         state = stack.get('state', 'published')
+        if state not in STACK_STATES:
+            errors.append(
+                f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
+            )
+        if stack['id'] in deferred:
+            # The caller has already bound this unchanged foreign snapshot to
+            # the current remote state and checked every managed remote ref.
+            # Its history is deliberately not dereferenced for this operation.
+            entries = stack_integration_commits(stack)
+            declared_commit_shas.update(
+                item for item in entries
+                if isinstance(item, str) and re.fullmatch(r'[0-9a-f]{40}', item)
+            )
+            details['stacks'].append({
+                'id': stack['id'], 'branch': stack['branch'],
+                'history_validation': 'deferred_remote_unchanged',
+                'integration_commits': entries,
+            })
+            continue
         publication_remote = stack.get('publication_remote') or manifest['defaults']['publication_remote']
         remote_ref = f"{publication_remote}/{stack['branch']}"
         item = {
@@ -10356,10 +10434,6 @@ def validate_manifest(repo_root, manifest, manifest_path=None):
         stack_declared_shas = set()
         stack_declared_patch_ids = set()
         branch_patch_ids = set()
-        if state not in STACK_STATES:
-            errors.append(
-                f"stack {stack['id']} state must be one of: {', '.join(sorted(STACK_STATES))}"
-            )
         if not item['base_exists']:
             errors.append(f"stack {stack['id']} base ref does not exist: {stack['base']}")
         if not item['branch_exists']:

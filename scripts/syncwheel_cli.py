@@ -932,6 +932,8 @@ def build_parser(commands, version):
     stack_set_p.add_argument('--adopt-tip', help='adopt this existing tip without rewriting its history')
     stack_set_p.add_argument('--plan-digest', help='digest of the exact adoption preview')
     stack_set_p.add_argument('--apply', action='store_true', help='apply the reviewed adoption plan')
+    stack_set_p.add_argument('--published-fetch-ref', help='published ref to fetch explicitly for missing recipe commits')
+    stack_set_p.add_argument('--published-fetch-tip', help='exact observed tip of the explicit published ref')
     stack_set_p.add_argument(
         '--published',
         action='store_true',

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.47.35 - 2026-11-24
+
+- Allow an explicit bounded fetch for published recipe recovery without updating local tracking refs or tags.
+- Allow additive coordination compose to preserve unchanged foreign stack recipes without requiring their local history. Report when unmapped integration classification is incomplete.
+- Allow a scoped published candidate to advance its base after verifying source ancestry, while retaining ownership and lease guards.
+
 ## 0.47.34 - 2026-11-24
 
 - Qualify independent publication with a tracked version 1 manifest: advance two existing feature refs while preserving another author's dirty worktree and interrupted cleanup. Keep the foreign-history refusal covered and document the materialized-source precondition and the separate limits of direct landing. Publication behavior is unchanged.

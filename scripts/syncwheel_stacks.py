@@ -2574,6 +2574,11 @@ class StackLifecycle:
 
     def command_stack_set(self, args, manifest, manifest_path):
         repo_root = self.repository.root
+        fetch_ref = getattr(args, 'published_fetch_ref', None)
+        fetch_tip = getattr(args, 'published_fetch_tip', None)
+        if ((fetch_ref is None) != (fetch_tip is None) or (fetch_ref is not None and (not fetch_ref or not fetch_tip or not args.published
+                or any(getattr(args, field, None) for field in ('base', 'adopt_tip', 'plan_digest', 'apply'))))):
+            raise SyncwheelError('--published-fetch-ref and --published-fetch-tip must be paired with --published')
         preserved = getattr(args, 'preserve_worktrees', None)
         if preserved is not None and (not preserved.strip() or getattr(args, 'base', None) or
                                       getattr(args, 'adopt_tip', None) or getattr(args, 'published', False)):
@@ -2629,9 +2634,23 @@ class StackLifecycle:
         if not coordination_is_active(manifest):
             raise SyncwheelError('stack set --published requires active-active coordination')
         config = coordination_config(manifest)
+        fetch_ref = getattr(args, 'published_fetch_ref', None)
+        fetch_tip = getattr(args, 'published_fetch_tip', None)
+        expected_state_tip = None
+        if fetch_ref:
+            state_ref = coordination_state_ref(config)
+            expected_state_tip = self.state.remote_ref_tips(config['remote'], [state_ref])[state_ref]
+            if not expected_state_tip:
+                raise SyncwheelError(f"{stack['id']}: coordination state is missing")
+            result = self.repository.git(repo_root, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head',
+                                         '--refmap=', config['remote'], state_ref, check=False)
+            if result.returncode:
+                raise SyncwheelError(result.stderr.strip() or 'failed to fetch coordination state')
         observed = self.state.read_remote_coordination_state(
-            config, fetch=True, local_manifest_version=manifest['version'],
+            config, fetch=not bool(fetch_ref), local_manifest_version=manifest['version'],
         )
+        if fetch_ref and observed['tip'] != expected_state_tip:
+            raise SyncwheelError(f"{stack['id']}: coordination state changed; run handoff")
         snapshot = (observed.get('state') or {}).get('manifest') or {}
         if stack['id'] not in stack_snapshot_map(snapshot):
             raise SyncwheelError(
@@ -2651,16 +2670,40 @@ class StackLifecycle:
         missing = [
             commit for commit in published_entry['commits'] if not self.repository.commit_exists(repo_root, commit)
         ]
-        if missing:
+        if fetch_ref:
+            if (not fetch_ref.startswith('refs/heads/')
+                    or self.repository.git(repo_root, 'check-ref-format', fetch_ref, check=False).returncode
+                    or not re.fullmatch(r'[0-9a-f]{40}', fetch_tip)):
+                raise SyncwheelError('published fetch requires an exact branch ref and full SHA-1 tip')
+            state_ref = coordination_state_ref(config)
+            expected_refs = {state_ref: observed['tip'], fetch_ref: fetch_tip}
+            if len(expected_refs) != 2 or self.state.remote_ref_tips(config['remote'], expected_refs) != expected_refs:
+                raise SyncwheelError(f"{stack['id']}: published fetch ref or coordination state changed; run handoff")
+            result = self.repository.git(repo_root, 'fetch', '--quiet', '--no-tags', '--no-write-fetch-head',
+                                         '--refmap=', config['remote'], fetch_ref, check=False)
+            if result.returncode:
+                raise SyncwheelError(result.stderr.strip() or f"{stack['id']}: failed to fetch selected ref")
+            missing = [commit for commit in missing if not self.repository.commit_exists(repo_root, commit)
+                       or self.repository.git(repo_root, 'merge-base', '--is-ancestor', commit,
+                                              fetch_tip, check=False).returncode]
+            if self.state.remote_ref_tips(config['remote'], expected_refs) != expected_refs:
+                raise SyncwheelError(f"{stack['id']}: published fetch ref or coordination state changed; run handoff")
+        elif missing:
+            print('Using legacy remote fetch; configured tracking refs and tags may change.', file=sys.stderr)
             self.repository.git(repo_root, 'fetch', '--quiet', config['remote'], check=False)
             missing = [commit for commit in missing if not self.repository.commit_exists(repo_root, commit)]
         if missing:
             owner = format_stack_owner(self.publication.stack_owner_summary(
                 manifest_path, config, stack['id'], state_tip=observed['tip']
             ))
+            if not fetch_ref:
+                raise SyncwheelError(
+                    f"{stack['id']}: published commit(s) {', '.join(missing)} are not reachable "
+                    f"from {config['remote']}; the owner must publish them ({owner})"
+                )
             raise SyncwheelError(
-                f"{stack['id']}: published commit(s) {', '.join(missing)} are not reachable "
-                f"from {config['remote']}; the owner must publish them ({owner})"
+                f"{stack['id']}: published commit(s) {', '.join(missing)} are unavailable "
+                f"from the selected fetch on {config['remote']} ({owner})"
             )
         previous = list(stack['commits'])
         stack['commits'] = list(published_entry['commits'])

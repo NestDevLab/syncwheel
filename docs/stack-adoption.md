@@ -121,3 +121,51 @@ helpers bypass the recorded evidence.
 Coordinated publication uses state schema 5 when an adoption is present. Older
 clients refuse that state instead of republishing it without the adoption binding.
 Update clients before they operate on a local manifest containing an adoption.
+
+## Recover adopted stacks in a fresh clone
+
+For a repository using coordination, first inspect the current state ref declared
+by its coordination configuration. The following example uses the default state
+branch and `origin`; substitute the configured state ref and coordination remote
+when either differs:
+
+```bash
+git ls-remote origin refs/heads/syncwheel/state/default
+git fetch --no-tags --no-write-fetch-head --refmap= \
+  origin refs/heads/syncwheel/state/default
+git show STATE_SHA:.syncwheel/coordination-state.json
+```
+
+Confirm `STATE_SHA` is still the current state ref before proceeding. Review
+`manifest.integration.stacks` in order, including each selected stack's
+`id`, `branch`, `base`, `adopted_history`, and `commits`. Compare each source tip
+with `managed_refs` and the live remote ref; stop on drift. These reads do not
+import the integration order into the local manifest. Keep the reviewed order
+explicit when selecting stacks for a later composition.
+
+For each selected adopted stack, fetch its published source and verify the exact
+reviewed tip. For example, where a remote-tracking ref is needed:
+
+```bash
+git fetch --no-tags origin refs/heads/BRANCH:refs/remotes/origin/BRANCH
+git rev-parse refs/remotes/origin/BRANCH
+```
+
+Create a missing local declaration with the reviewed base and branch. Preview
+adoption, check its observed remote tip, ancestry, ownership, and worktree guards,
+then apply only the reviewed digest:
+
+```bash
+syncwheel stack create STACK --branch BRANCH --base BASE_SHA
+syncwheel stack set STACK --base BASE_SHA --adopt-tip TIP_SHA
+syncwheel stack set STACK --base BASE_SHA --adopt-tip TIP_SHA \
+  --plan-digest PLAN_DIGEST --apply
+syncwheel stack rebuild STACK
+```
+
+Repeat in the reviewed order and compare each resulting tree to its published
+source. The adoption rules above, including the unique direct projection parent,
+apply. `stack set --published` updates commits of an already compatible local
+entry; it does not import a differing base or `adopted_history`. This procedure
+preserves an acquired adopted tip; it does not import the integration order,
+publish or integrate stacks, or prove future remote object retention.

@@ -337,6 +337,13 @@ later publication is a separate explicit command.
 
 ## Composing additive stack proposals
 
+When composing one version 2 stack, unchanged foreign stack histories may be
+unavailable in this clone. Their snapshots and managed ref tips remain guarded;
+their commit histories are not dereferenced. The plan and result identify those
+stacks and mark unmapped integration classification incomplete, so that list
+cannot establish whether all integration commits are mapped. This operation
+does not make foreign recipe objects available to a fresh clone.
+
 `coordination compose` is separate from repair. It handles a known common state
 whose local and remote descendants independently add stack records. The plan
 binds the exact known base state and its integration-tip control-manifest
@@ -344,7 +351,7 @@ digest, current remote state and public snapshot, local proposal, composed
 snapshot, source and integration tips, all managed-ref observations, and
 unmapped integration commits.
 
-Version 1 is deliberately additive-only: the local side must add exactly the
+The original additive-only mode requires the local side to add exactly the
 requested stack, while the remote side may add stacks. Neither side may remove,
 edit, rename, or reorder existing stacks; change defaults, channels,
 coordination, integration base, branch, or strategy; or alter membership except
@@ -360,6 +367,24 @@ After CAS, Syncwheel independently verifies the child, ownership, and every
 managed ref before adopting the composed manifest locally. A failed local save
 is not retried as publication: the next exact plan is adopt-only when remote
 state already proves the intended composition.
+
+A selected published stack may also advance its base when the previous source
+recipe is proven intact, the new source is a two-parent merge retaining that
+source and the observed target base, and the selected snapshot contains an
+exact adopted base and tip. The source and state publications retain their
+existing ownership checks and leases; foreign snapshots remain unchanged.
+Earlier merges on the source's first-parent path are accepted only when their
+second parents form a monotonic ancestry chain from the previous base to the
+observed new base. This proves ancestry only; it does not prove that those
+second parents were historical target tips. Other merges and octopus histories
+are refused.
+The target tip is observed, not atomically leased. It can advance during or
+after publication, so the resulting candidate is unqualified: a local receipt
+records the expected and observed target tips for diagnosis, not as shared
+approval. Before promotion, re-observe the target, qualify the exact source
+and base with the applicable checks, and repeat qualification if either
+input changes. This publication does not prove the merge gate or remove the
+separate race between its final base observation and the hosting service.
 
 ## Transition an adopted linear source
 
