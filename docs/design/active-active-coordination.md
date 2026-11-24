@@ -385,3 +385,12 @@ approval. Before promotion, re-observe the target, qualify the exact source
 and base with the applicable checks, and repeat qualification if either
 input changes. This publication does not prove the merge gate or remove the
 separate race between its final base observation and the hosting service.
+
+## Transition an adopted linear source
+
+A scoped compose may transition a published adopted source to an ordinary
+recipe only when the base and other metadata are unchanged, the previous
+published source tip is retained, and the selected commits exactly match a
+linear source sequence. The exact source, claim, and coordination state remain
+subject to their ordinary observed leases. Nonlinear or incomplete histories
+are refused. This does not recover recipes whose original objects are absent.

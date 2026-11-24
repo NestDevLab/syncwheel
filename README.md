@@ -3,7 +3,7 @@
 Keep many long-lived pull requests clean, rebuildable, and publishable from one
 manifest.
 
-Current version: `0.47.33`
+Current version: `0.47.35`
 
 `syncwheel` is a small CLI and workflow model for maintainers who carry several
 PR branches against an upstream repository and need those branches to stay
@@ -1148,15 +1148,6 @@ a local entry that differs in anything other than its commits. Published commits
 missing locally are fetched once from the coordination remote; if they are still
 missing, it refuses and names the owner.
 
-For a bounded fetch, provide `--published-fetch-ref refs/heads/NAME` together
-with `--published-fetch-tip FULL_SHA` for an already published branch on the
-coordination remote. Syncwheel fetches that ref without updating local refs,
-tags or FETCH_HEAD, and checks that newly acquired recipe commits are ancestors
-of the specified tip. Existing local objects retain the legacy behavior and do
-not demonstrate remote durability. Source and state are checked for observed
-drift before saving; these reads are not a remote CAS. Without these options,
-the legacy fetch may update configured tracking refs and tags.
-
 ### 3. Absorb integration-first work into stacks
 
 When uncommitted changes already exist on the integration checkout, transfer
@@ -1459,6 +1450,8 @@ directory); refs are always read fresh.
   delivery cost
 - `docs/branch-model.md`: branch role model and safety defaults
 - `docs/deterministic-model.md`: manifest semantics and validation contract
+- `docs/independent-publication.md`: legacy tracked-manifest publication contract,
+  preservation of unrelated work, and reproducible qualification
 - `docs/design/active-active-coordination.md`: active-active publication and recovery protocol
 - `docs/deployment-channels.md`: pinned channel model, CLI, receipts, and CI/CD boundary
 - `docs/ai-agents.md`: short AI behavior contract

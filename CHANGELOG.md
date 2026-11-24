@@ -1,12 +1,21 @@
 # Changelog
 
-## 0.47.33 - 2026-11-23
+## 0.47.35 - 2026-11-24
 
 - Allow an explicit bounded fetch for published recipe recovery without updating local tracking refs or tags.
+- Allow additive coordination compose to preserve unchanged foreign stack recipes without requiring their local history. Report when unmapped integration classification is incomplete.
+
+## 0.47.34 - 2026-11-24
+
+- Qualify independent publication with a tracked version 1 manifest: advance two existing feature refs while preserving another author's dirty worktree and interrupted cleanup. Keep the foreign-history refusal covered and document the materialized-source precondition and the separate limits of direct landing. Publication behavior is unchanged.
+
+## 0.47.33 - 2026-11-23
+
+- Allow a verified linear adopted stack to transition to an ordinary recipe during coordination compose.
 
 ## 0.47.32 - 2026-11-23
 
-- Allow additive coordination compose to preserve unchanged foreign stack recipes without requiring their local history. Report when unmapped integration classification is incomplete.
+- Require explicit authorization for review bypasses in GitHub merge policies, and allow policies without bypasses.
 
 ## 0.47.31 - 2026-11-20
 

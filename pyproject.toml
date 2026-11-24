@@ -40,6 +40,7 @@ py-modules = [
   "syncwheel_stack_recovery",
   "syncwheel_coordination_state",
   "syncwheel_publication_intents",
+  "syncwheel_adoption_transition",
   "syncwheel_publication",
   "syncwheel_revision_backend",
   "syncwheel_stacks",

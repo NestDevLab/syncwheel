@@ -464,7 +464,7 @@ def additive_coordination_snapshot_delta(base, candidate, side, updated_stack=No
 
 
 def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, branch_is_valid,
-                                            verified_base_advance=False):
+                                            verified_base_advance=False, verified_adoption_transition=False):
     local_delta = additive_coordination_snapshot_delta(
         base, local, 'local', updated_stack=requested_stack
     )
@@ -483,6 +483,9 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
             for field in ('base', 'adopted_history'):
                 before.pop(field, None)
                 after.pop(field, None)
+        elif verified_adoption_transition:
+            before.pop('adopted_history', None)
+            after.pop('adopted_history', None)
         if before != after:
             raise SyncwheelError(
                 'coordination compose can only change the commits of a published stack'

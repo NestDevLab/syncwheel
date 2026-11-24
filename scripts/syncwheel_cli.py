@@ -250,7 +250,7 @@ def build_parser(commands, version):
     repo_pr_merge_set_p.add_argument('--repository', required=True)
     repo_pr_merge_set_p.add_argument('--base', action='append', required=True)
     repo_pr_merge_set_p.add_argument('--method', choices=sorted(GITHUB_PR_MERGE_METHODS), required=True)
-    repo_pr_merge_set_p.add_argument('--allow-bypass', action='append', required=True)
+    repo_pr_merge_set_p.add_argument('--allow-bypass', action='append', default=[])
     repo_pr_merge_set_p.add_argument('--merge-actor', action='append', required=True)
     repo_pr_merge_set_p.add_argument('--pr-author', action='append')
     repo_pr_merge_set_p.add_argument('--commit-author', action='append')
