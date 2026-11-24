@@ -1,0 +1,11 @@
+{
+  "changed_refs": [
+    "refs/heads/pr/p3-documentation-20261124"
+  ],
+  "claimed_at": "2026-11-24T08:36:52+00:00",
+  "coordination_id": "default",
+  "operation_token": "81d7bc80-77d8-4cac-bbe4-37a051f97733",
+  "publication_scope": "compose-stack:p3-documentation-20261124",
+  "source_ref": "refs/heads/pr/p3-documentation-20261124",
+  "syncwheel_version": "0.47.33"
+}
