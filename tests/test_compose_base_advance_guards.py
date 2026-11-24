@@ -82,6 +82,48 @@ class ComposeBaseAdvanceGuardsTest(unittest.TestCase):
         graft.write_text(self.old_tip + ' ' + self.base + '\n')
         self.reject(reason='grafted history')
 
+    def test_consecutive_ancestral_base_merges_are_proven(self):
+        middle = self.commit('middle base', self.base)
+        final_base = self.commit('final base', middle)
+        prior = self.commit('previous base merge', self.old_tip, middle)
+        candidate = self.commit('current base merge', prior, final_base)
+        selected = {'base': final_base, 'commits': [candidate],
+                    'adopted_history': {'base': final_base, 'tip': candidate}}
+        before = self.refs()
+        proof = verify_compose_base_advance(self.repo, self.previous, selected,
+                                           self.old_tip, candidate, final_base)
+        self.assertEqual(proof['priorBaseMerges'], [{'commit': prior, 'base': middle}])
+        self.assertEqual(self.refs(), before)
+
+    def test_unrelated_previous_base_merge_is_rejected(self):
+        foreign = self.commit('foreign', self.base)
+        prior = self.commit('foreign merge', self.old_tip, foreign)
+        candidate = self.commit('current merge', prior, self.new_base)
+        selected = {'base': self.new_base, 'commits': [candidate],
+                    'adopted_history': {'base': self.new_base, 'tip': candidate}}
+        self.reject(selected=selected, new_tip=candidate, reason='unrelated or reordered prior base merge')
+
+    def test_reordered_previous_base_merges_are_rejected(self):
+        middle = self.commit('middle base', self.base)
+        final_base = self.commit('final base', middle)
+        later_first = self.commit('later first', self.old_tip, final_base)
+        earlier_second = self.commit('earlier second', later_first, middle)
+        candidate = self.commit('current merge', earlier_second, final_base)
+        selected = {'base': final_base, 'commits': [candidate],
+                    'adopted_history': {'base': final_base, 'tip': candidate}}
+        before = self.refs()
+        with self.assertRaisesRegex(SyncwheelError, 'unrelated or reordered prior base merge'):
+            verify_compose_base_advance(self.repo, self.previous, selected,
+                                       self.old_tip, candidate, final_base)
+        self.assertEqual(self.refs(), before)
+
+    def test_octopus_previous_merge_is_rejected(self):
+        prior = self.commit('octopus', self.old_tip, self.base, self.new_base)
+        candidate = self.commit('current merge', prior, self.new_base)
+        selected = {'base': self.new_base, 'commits': [candidate],
+                    'adopted_history': {'base': self.new_base, 'tip': candidate}}
+        self.reject(selected=selected, new_tip=candidate, reason='non-linear feature-side history')
+
 
 if __name__ == '__main__':
     unittest.main()

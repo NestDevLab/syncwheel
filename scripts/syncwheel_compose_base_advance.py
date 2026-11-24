@@ -82,7 +82,22 @@ def verify_compose_base_advance(repo, previous, selected, old_tip, new_tip, targ
     if git('merge-base', '--is-ancestor', old_tip, feature_tip).returncode:
         raise SyncwheelError('compose base advance feature parent must retain the published tip')
     chain = git('rev-list', '--first-parent', '--parents', f'{old_tip}..{feature_tip}')
-    if chain.returncode or any(len(line.split()) != 2 for line in chain.stdout.splitlines()):
-        raise SyncwheelError('compose base advance refuses additional feature-side merges')
+    if chain.returncode:
+        raise SyncwheelError('compose base advance cannot inspect feature-side history')
+    prior_base = old_base
+    prior_merges = []
+    for line in reversed(chain.stdout.splitlines()):
+        fields = line.split()
+        if len(fields) == 2:
+            continue
+        if len(fields) != 3:
+            raise SyncwheelError('compose base advance refuses non-linear feature-side history')
+        prior_target = fields[2]
+        if (git('merge-base', '--is-ancestor', prior_base, prior_target).returncode
+                or git('merge-base', '--is-ancestor', prior_target, new_base).returncode):
+            raise SyncwheelError('compose base advance refuses an unrelated or reordered prior base merge')
+        prior_merges.append({'commit': fields[0], 'base': prior_target})
+        prior_base = prior_target
     return {'oldBase': old_base, 'newBase': new_base, 'oldTip': old_tip,
-            'newTip': new_tip, 'featureTip': feature_tip, 'observedTargetTip': target_tip}
+            'newTip': new_tip, 'featureTip': feature_tip, 'observedTargetTip': target_tip,
+            'priorBaseMerges': prior_merges}

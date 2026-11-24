@@ -18,6 +18,9 @@ class ComposeBaseAdvanceCliTest(unittest.TestCase):
     def test_linear_published_recipe_advance(self):
         self.run_fixture('linear')
 
+    def test_consecutive_base_advance_applies(self):
+        self.run_fixture('consecutive')
+
     def test_target_drift_rejects_advance(self):
         self.run_fixture('drift')
 
@@ -136,6 +139,16 @@ class ComposeBaseAdvanceCliTest(unittest.TestCase):
             new_base = git(seed, 'rev-parse', 'HEAD')
             git(lane, 'merge', '--no-ff', '-qm', 'merge base', new_base)
             new_tip = git(lane, 'rev-parse', 'HEAD')
+            if mode == 'consecutive':
+                previous_base, previous_merge = new_base, new_tip
+                (seed / 'base-next.txt').write_text('next base\n')
+                git(seed, 'add', 'base-next.txt')
+                git(seed, 'commit', '-qm', 'next base')
+                git(seed, 'push', 'origin', 'main')
+                git(repo, 'fetch', 'origin', 'main')
+                new_base = git(seed, 'rev-parse', 'HEAD')
+                git(lane, 'merge', '--no-ff', '-qm', 'merge next base', new_base)
+                new_tip = git(lane, 'rev-parse', 'HEAD')
             args = ['stack', 'set', 'feature', '--base', new_base, '--adopt-tip', new_tip]
             plan = json.loads(sw(repo, *args).stdout)
             sw(repo, *args, '--plan-digest', plan['planDigest'], '--apply')
@@ -146,6 +159,9 @@ class ComposeBaseAdvanceCliTest(unittest.TestCase):
             self.assertEqual(advance['baseAdvance']['oldTip'], old_tip)
             self.assertEqual(advance['baseAdvance']['newTip'], new_tip)
             self.assertEqual(advance['baseAdvance']['newBase'], new_base)
+            if mode == 'consecutive':
+                self.assertEqual(advance['baseAdvance']['priorBaseMerges'],
+                                 [{'commit': previous_merge, 'base': previous_base}])
             if mode == 'race':
                 (seed / 'base3.txt').write_text('race\n')
                 git(seed, 'add', 'base3.txt')
@@ -185,7 +201,7 @@ class ComposeBaseAdvanceCliTest(unittest.TestCase):
                 self.assertEqual(git(repo, 'ls-remote', 'origin', 'refs/heads/pr/feature').split()[0], new_tip)
                 self.assertNotEqual(new_base, raced_base)
                 return
-            if mode in ('apply', 'linear'):
+            if mode in ('apply', 'linear', 'consecutive'):
                 def refs():
                     out = run(['git', '--git-dir', str(remote), 'for-each-ref',
                                '--format=%(refname) %(objectname)']).stdout.splitlines()
