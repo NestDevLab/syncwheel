@@ -1,6 +1,6 @@
 {
   "changed_refs": {
-    "refs/heads/pr/explicit-review-policy": "bfbdad84f982b4f2b8fc103829d95fe5fc380683"
+    "refs/heads/pr/linear-adoption-compose": "b9d8e27281a81e1df787df63e249a45cb8cea0ba"
   },
   "claims": {
     "refs/heads/main-integration": "f552838ebc034c2190cc112c5fbcdec95430d213",
@@ -41,7 +41,7 @@
     "refs/heads/pr/journal-recover-delivery": "078e2061b8f0288f53088e6c1da024373269878e",
     "refs/heads/pr/journal-scheduler-04311": "1d1bbeb4166b0951dcb1e33a357ac684091a075b",
     "refs/heads/pr/lane-capacity-policy": "ebf6cbce4a4faf7fbedd98fbed65deb6346f26f5",
-    "refs/heads/pr/linear-adoption-compose": "6f6d5efa44a7853c14e471f2020857e444e98204",
+    "refs/heads/pr/linear-adoption-compose": "654b3c935a246113ddeee16da9e39fee9e3296fb",
     "refs/heads/pr/local-only-control-manifest": "fc87f8d59c5c3475cde1b3525997e5ebafb280e1",
     "refs/heads/pr/local-replay-delivery": "a338f853c25e6756d8c766259dffc76a29abb622",
     "refs/heads/pr/local-replay-guarded": "699bd82c35d3a17efa74a23fbc7bffdc5e33dfc9",
@@ -123,7 +123,7 @@
     "refs/heads/syncwheel/draft/worktree-release-dirty-primary": "ce1ff9eea462c861bcf941ad568580cd17713d8e"
   },
   "coordination_id": "default",
-  "created_at": "2026-11-23T19:51:17+00:00",
+  "created_at": "2026-11-24T08:01:44+00:00",
   "installation_id": "e83434d1-e09b-4dd1-8bdf-a5f7970573c6",
   "managed_refs": {
     "refs/heads/feat/required-integration-membership": "d00638b6d0767f45fff06bb4c08ed88661849d01",
@@ -175,7 +175,7 @@
     "refs/heads/pr/journal-recover-delivery": null,
     "refs/heads/pr/journal-scheduler-04311": "ab14140ec86e5d7c3874f4ecba3d5c8efc317189",
     "refs/heads/pr/lane-capacity-policy": "f2ab8a762356392c9a5a80dbd7f10aae3501d6af",
-    "refs/heads/pr/linear-adoption-compose": "a8a88a809cd6dbe23422efa0294cbb9e34b394cd",
+    "refs/heads/pr/linear-adoption-compose": "b9d8e27281a81e1df787df63e249a45cb8cea0ba",
     "refs/heads/pr/local-only-control-manifest": "0e52207481088edea2441320881f0e59fa236c19",
     "refs/heads/pr/local-replay-delivery": "1c297abf9b44b5db0b917b16a60f6dc149884754",
     "refs/heads/pr/local-replay-guarded": "fe7bfd59316cb15c2cb6d059ae7799c8fa22b0a5",
@@ -491,11 +491,14 @@
         "target_branch": "main"
       },
       {
-        "base": "b4bce7ff2f0fecb038dcdd32e6cc347cc900c09b",
+        "adopted_history": {
+          "base": "0362b720d3754139d3dadd822c2e051806661029",
+          "tip": "b9d8e27281a81e1df787df63e249a45cb8cea0ba"
+        },
+        "base": "0362b720d3754139d3dadd822c2e051806661029",
         "branch": "pr/linear-adoption-compose",
         "commits": [
-          "d6850418b2a08f001b2129f288c214fc08b3e5ac",
-          "a8a88a809cd6dbe23422efa0294cbb9e34b394cd"
+          "b9d8e27281a81e1df787df63e249a45cb8cea0ba"
         ],
         "id": "linear-adoption-compose",
         "integration_branch": "main-integration",
@@ -519,13 +522,13 @@
     "version": 2
   },
   "manifest_digest": "dea74b29373cb097f89104992582f6af46ce98d40335341bd5239280db49abe3",
-  "operation_token": "01722e1d-8dc1-4d8f-9f9d-d3f3f8d2a6af",
-  "parent_state": "57485e5d889fd12bd25f6e0ed10cd5ede2ba0e1e",
+  "operation_token": "68b45404-8485-4a19-a2c2-2e9978cf6713",
+  "parent_state": "53a30bf73a927da63ae46c551ca2361b756b44cf",
   "projection_status": "partial",
-  "publication_id": "9df61830-fc58-43ca-8dfc-e6a47580cf8b",
-  "publication_scope": "compose-stack:p0-explicit-review-policy",
+  "publication_id": "fccf50ca-0126-4fa3-b7d3-46f0ec1e26da",
+  "publication_scope": "compose-stack:linear-adoption-compose",
   "schema_version": 5,
-  "syncwheel_version": "0.47.31",
+  "syncwheel_version": "0.47.33",
   "tombstones": [
     {
       "branch": "feat/required-integration-membership",
