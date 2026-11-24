@@ -360,3 +360,12 @@ After CAS, Syncwheel independently verifies the child, ownership, and every
 managed ref before adopting the composed manifest locally. A failed local save
 is not retried as publication: the next exact plan is adopt-only when remote
 state already proves the intended composition.
+
+## Transition an adopted linear source
+
+A scoped compose may transition a published adopted source to an ordinary
+recipe only when the base and other metadata are unchanged, the previous
+published source tip is retained, and the selected commits exactly match a
+linear source sequence. The exact source, claim, and coordination state remain
+subject to their ordinary observed leases. Nonlinear or incomplete histories
+are refused. This does not recover recipes whose original objects are absent.

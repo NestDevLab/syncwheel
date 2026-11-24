@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.33 - 2026-11-23
+
+- Allow a verified linear adopted stack to transition to an ordinary recipe during coordination compose.
+
 ## 0.47.32 - 2026-11-23
 
 - Require explicit authorization for review bypasses in GitHub merge policies, and allow policies without bypasses.
