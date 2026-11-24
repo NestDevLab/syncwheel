@@ -70,8 +70,8 @@ provider journal is prepared. The provider never publishes the resulting draft.
   refuse draft-stack publication; ephemeral channels may use drafts, and
   active-active channels must use the coordination remote.
 - Never mutate branches from a dirty checkout.
-- Rebuilds do not create a worktree. Start routine implementation, dependency installation, builds,
-  and tests on integration. Use `--replay-mode desk` only to resolve a conflict or validate a
+- Rebuilds do not create a worktree. Author and commit in a governed lane; use integration for
+  shared validation. Use `--replay-mode desk` only to resolve a conflict or validate a
   non-empty materialized stack when integration cannot safely run it; put it under the declared
   Syncwheel worktree root.
 - A plumbing conflict stops and prints the `--replay-mode desk` retry command. Take it: `stack absorb`

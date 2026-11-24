@@ -16,7 +16,7 @@ unavailable, blocked, or cannot express the needed recovery.
 
 ## Ratified working rules (read this first)
 
-These four are ratified operating rules (MGT-0206), not suggestions. A real incident
+These four are ratified operating rules, not suggestions. A real incident
 happened because an operator resolved a rebuild conflict with raw git instead of rule 2 —
 the mechanism already existed; only the visibility was missing. Read rule 2 twice.
 
@@ -166,14 +166,12 @@ before the command returns. A clean, bounded integration operation may switch th
 temporarily, but must restore and verify the integration branch before completion. Treat any other
 primary-checkout mismatch as a validation error and blocked handoff.
 
-Desk is an escalation/validation surface, not routine authoring: begin routine implementation,
-dependency installation, builds, and tests on integration. Use `--replay-mode desk` only to resolve a
+Author and commit in a governed lane; use the declared integration projection for shared
+validation. Use `--replay-mode desk` only to resolve a
 conflict or validate a non-empty materialized stack when integration cannot safely run it; it is never
 a side effect of rebuilding.
 
-When the primary checkout is explicitly owned by another agent and authoring
-must continue, use the explicit governed fallback instead of manual worktree
-surgery:
+For authoring, open a governed lane instead of editing the primary checkout:
 
 ```bash
 syncwheel worktree open <lane> [--into <existing-stack>] [--full]
