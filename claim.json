@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/linear-adoption-compose"
   ],
-  "claimed_at": "2026-11-23T18:38:42+00:00",
+  "claimed_at": "2026-11-24T08:01:44+00:00",
   "coordination_id": "default",
-  "operation_token": "753a2d30-5358-483b-83a6-291952cc24a6",
+  "operation_token": "68b45404-8485-4a19-a2c2-2e9978cf6713",
   "publication_scope": "compose-stack:linear-adoption-compose",
   "source_ref": "refs/heads/pr/linear-adoption-compose",
-  "syncwheel_version": "0.47.31"
+  "syncwheel_version": "0.47.33"
 }
