@@ -5324,11 +5324,11 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
     if unknown:
         raise SyncwheelError(f'{path} contains unsupported keys: ' + ', '.join(unknown))
 
-    def string_list(field, *, required=False):
+    def string_list(field, *, required=False, allow_empty=False):
         candidate = value.get(field)
         if candidate is None and not required:
             return None
-        if not isinstance(candidate, list) or not candidate:
+        if not isinstance(candidate, list) or (not candidate and not allow_empty):
             raise SyncwheelError(f'{path}.{field} must be a non-empty string array')
         normalized = []
         for index, item in enumerate(candidate):
@@ -5358,7 +5358,7 @@ def normalize_github_pr_merge_policy(value, path='github_pr_merge'):
         raise SyncwheelError(
             f'{path}.merge_method must be one of: ' + ', '.join(sorted(GITHUB_PR_MERGE_METHODS))
         )
-    bypasses = string_list('allowed_bypasses', required=True)
+    bypasses = string_list('allowed_bypasses', required=True, allow_empty=True)
     if any(item not in GITHUB_PR_MERGE_BYPASSES for item in bypasses):
         accepted = ', '.join(sorted(GITHUB_PR_MERGE_BYPASSES))
         raise SyncwheelError(f'{path}.allowed_bypasses accepts only: {accepted}')
@@ -6134,7 +6134,10 @@ def build_github_pr_merge_plan(repo_root, manifest, manifest_path, stack_id, arg
                         'required_check_failed_or_pending',
                         f'required check did not conclude SUCCESS/SKIPPED: {required_check}',
                     )
-        if decision == 'REVIEW_REQUIRED':
+        if decision == 'REVIEW_REQUIRED' and 'required_reviews' not in policy['allowed_bypasses']:
+            github_blocker(blockers, 'required_reviews_not_authorized', 'review bypass is not allowed by the merge policy')
+            path = 'normal'
+        elif decision == 'REVIEW_REQUIRED':
             path = 'admin-review-bypass'
         else:
             path = 'normal'
