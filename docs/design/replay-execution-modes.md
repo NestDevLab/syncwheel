@@ -117,11 +117,11 @@ working tree is materialized only once it is established that a human is needed.
 
 ### `desk`
 
-The only mode that leaves something behind, and the only one that should be chosen
-explicitly. It is an escalation/validation surface: resolve a conflict, or validate
-a non-empty materialized stack when integration cannot safely run it. Routine
-implementation, dependency installation, builds, and tests begin on integration.
-Neither is a side effect of a routine rebuild.
+A replay mode that leaves a desk behind and is chosen explicitly for conflict
+resolution or validation of a non-empty materialized stack when integration cannot
+safely run it. Author and commit in a governed lane; use integration for shared
+validation. A lane is distinct from a replay desk, and neither is created as a side
+effect of a routine rebuild.
 
 ## Selection
 

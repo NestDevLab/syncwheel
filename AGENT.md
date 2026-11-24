@@ -74,8 +74,8 @@ provider journal is prepared. The provider never publishes the resulting draft.
 - Never mutate branches from a dirty checkout.
 - Use `--reason` when the exact subcommand's help lists it. Otherwise, record
   the reason and command in the work receipt.
-- Rebuilds do not create a worktree. Start routine implementation, dependency installation, builds,
-  and tests on integration. Use `--replay-mode desk` only to resolve a conflict or validate a
+- Rebuilds do not create a worktree. Author and commit in a governed lane; use integration for
+  shared validation. Use `--replay-mode desk` only to resolve a conflict or validate a
   non-empty materialized stack when integration cannot safely run it; put it under the declared
   Syncwheel worktree root.
 - A plumbing conflict stops and prints the `--replay-mode desk` retry command. Take it: `stack absorb`

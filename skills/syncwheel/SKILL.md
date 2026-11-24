@@ -213,14 +213,12 @@ before the command returns. A clean, bounded integration operation may switch th
 temporarily, but must restore and verify the integration branch before completion. Treat any other
 primary-checkout mismatch as a validation error and blocked handoff.
 
-Desk is an escalation/validation surface, not routine authoring: begin routine implementation,
-dependency installation, builds, and tests on integration. Use `--replay-mode desk` only to resolve a
+Author and commit in a governed lane; use the declared integration projection for shared
+validation. Use `--replay-mode desk` only to resolve a
 conflict or validate a non-empty materialized stack when integration cannot safely run it; it is never
 a side effect of rebuilding.
 
-When the primary checkout is explicitly owned by another agent and authoring
-must continue, use the explicit governed fallback instead of manual worktree
-surgery:
+For authoring, open a governed lane instead of editing the primary checkout:
 
 ```bash
 syncwheel worktree open <lane> [--into <existing-stack>] [--full]
