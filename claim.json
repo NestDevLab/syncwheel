@@ -2,10 +2,10 @@
   "changed_refs": [
     "refs/heads/pr/independent-publication-contract"
   ],
-  "claimed_at": "2026-11-23T12:43:13+00:00",
+  "claimed_at": "2026-11-24T08:31:27+00:00",
   "coordination_id": "default",
-  "operation_token": "5642e3cb-e36c-4ab4-9612-5e8cbc22b306",
+  "operation_token": "34e2439c-83cc-48c7-9491-fa8d29baee7a",
   "publication_scope": "compose-stack:independent-publication-contract",
   "source_ref": "refs/heads/pr/independent-publication-contract",
-  "syncwheel_version": "0.47.31"
+  "syncwheel_version": "0.47.33"
 }
