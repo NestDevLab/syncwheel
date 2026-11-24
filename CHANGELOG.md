@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.47.32 - 2026-11-23
+
+- Require explicit authorization for review bypasses in GitHub merge policies, and allow policies without bypasses.
+
 ## 0.47.31 - 2026-11-20
 
 - Read complete GitHub merge observations for pull requests with many checks. Reject responses above the size limit without truncating the JSON.
