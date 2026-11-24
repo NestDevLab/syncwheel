@@ -4,6 +4,7 @@
 
 - Allow an explicit bounded fetch for published recipe recovery without updating local tracking refs or tags.
 - Allow additive coordination compose to preserve unchanged foreign stack recipes without requiring their local history. Report when unmapped integration classification is incomplete.
+- Allow a scoped published candidate to advance its base after verifying source ancestry, while retaining ownership and lease guards.
 
 ## 0.47.34 - 2026-11-24
 
