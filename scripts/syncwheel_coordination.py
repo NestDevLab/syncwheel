@@ -463,7 +463,8 @@ def additive_coordination_snapshot_delta(base, candidate, side, updated_stack=No
     return {'added': added, 'members': appended}
 
 
-def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, branch_is_valid):
+def compose_additive_coordination_snapshots(base, local, remote, requested_stack, *, branch_is_valid,
+                                            verified_base_advance=False):
     local_delta = additive_coordination_snapshot_delta(
         base, local, 'local', updated_stack=requested_stack
     )
@@ -475,13 +476,17 @@ def compose_additive_coordination_snapshots(base, local, remote, requested_stack
         raise SyncwheelError(
             'coordination compose local proposal must add the requested stack'
         )
-    if base_requested is not None and (
-        {**base_requested, 'commits': None}
-        != {**local_map[requested_stack], 'commits': None}
-    ):
-        raise SyncwheelError(
-            'coordination compose can only change the commits of a published stack'
-        )
+    if base_requested is not None:
+        before = {**base_requested, 'commits': None}
+        after = {**local_map[requested_stack], 'commits': None}
+        if verified_base_advance:
+            for field in ('base', 'adopted_history'):
+                before.pop(field, None)
+                after.pop(field, None)
+        if before != after:
+            raise SyncwheelError(
+                'coordination compose can only change the commits of a published stack'
+            )
     overlap = set(local_delta['added']).intersection(remote_delta['added'])
     conflicting = sorted(
         stack_id for stack_id in overlap if local_map[stack_id] != remote_map[stack_id]

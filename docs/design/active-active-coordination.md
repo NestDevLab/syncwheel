@@ -351,7 +351,7 @@ digest, current remote state and public snapshot, local proposal, composed
 snapshot, source and integration tips, all managed-ref observations, and
 unmapped integration commits.
 
-Version 1 is deliberately additive-only: the local side must add exactly the
+The original additive-only mode requires the local side to add exactly the
 requested stack, while the remote side may add stacks. Neither side may remove,
 edit, rename, or reorder existing stacks; change defaults, channels,
 coordination, integration base, branch, or strategy; or alter membership except
@@ -367,3 +367,16 @@ After CAS, Syncwheel independently verifies the child, ownership, and every
 managed ref before adopting the composed manifest locally. A failed local save
 is not retried as publication: the next exact plan is adopt-only when remote
 state already proves the intended composition.
+
+A selected published stack may also advance its base when the previous source
+recipe is proven intact, the new source is a two-parent merge retaining that
+source and the observed target base, and the selected snapshot contains an
+exact adopted base and tip. The source and state publications retain their
+existing ownership checks and leases; foreign snapshots remain unchanged.
+The target tip is observed, not atomically leased. It can advance during or
+after publication, so the resulting candidate is unqualified: a local receipt
+records the expected and observed target tips for diagnosis, not as shared
+approval. Before promotion, re-observe the target, qualify the exact source
+and base with the applicable checks, and repeat qualification if either
+input changes. This publication does not prove the merge gate or remove the
+separate race between its final base observation and the hosting service.

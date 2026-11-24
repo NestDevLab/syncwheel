@@ -324,6 +324,7 @@ from syncwheel_ledger import (
 )
 
 import syncwheel_coordination as _coordination
+from syncwheel_compose_base_advance import verify_compose_base_advance
 from syncwheel_coordination import (
     COORDINATION_REMOTE_ROLE_CANONICAL,
     COORDINATION_REMOTE_ROLE_PUBLICATION,
@@ -8473,10 +8474,6 @@ def coordination_compose_stack_plan(
         repo_root, latest['state'], config['remote']
     )
     local_snapshot = coordination_manifest_snapshot(manifest, repo_root)
-    composition = compose_additive_coordination_snapshots(
-        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id
-    )
-    merged_snapshot = composition['merged']
     stack = require_stack(manifest, stack_id)
     source_ref = f"refs/heads/{stack['branch']}"
     source_tip = ref_tip(repo_root, stack['branch'])
@@ -8494,6 +8491,28 @@ def coordination_compose_stack_plan(
     }
     if drifted:
         raise SyncwheelError('coordination compose STOP: remote state does not match managed refs')
+    previous = stack_snapshot_map(base_state['manifest']).get(stack_id)
+    selected = stack_snapshot_map(local_snapshot).get(stack_id)
+    base_advance = None
+    if previous and selected and previous.get('base') != selected.get('base'):
+        target_remote = stack.get('target_remote') or manifest['defaults']['publication_remote']
+        target_branch = stack.get('target_branch') or manifest['defaults']['base_branch']
+        target_ref = f'refs/heads/{target_branch}'
+        if target_remote != config['remote'] or not is_valid_coordination_branch_ref(target_ref):
+            raise SyncwheelError('compose base advance requires a valid target on the coordination remote')
+        target_tip = remote_ref_tips(repo_root, target_remote, [target_ref]).get(target_ref)
+        old_tip = base_state['managed_refs'].get(source_ref)
+        if latest['state']['managed_refs'].get(source_ref) != old_tip:
+            raise SyncwheelError('compose base advance refuses a changed published source')
+        base_advance = verify_compose_base_advance(
+            repo_root, previous, selected, old_tip, source_tip, target_tip,
+        )
+        base_advance['targetRef'] = target_ref
+    composition = compose_additive_coordination_snapshots(
+        base_state['manifest'], local_snapshot, latest['state']['manifest'], stack_id,
+        verified_base_advance=base_advance is not None,
+    )
+    merged_snapshot = composition['merged']
     remote_has_composed_snapshot = latest['state']['manifest'] == merged_snapshot
     remote_source_tip = observed_refs.get(source_ref)
     if remote_has_composed_snapshot:
@@ -8578,6 +8597,8 @@ def coordination_compose_stack_plan(
         'remoteAddedStacks': composition['remoteAddedStacks'],
         'status': status,
     }
+    if base_advance:
+        payload['baseAdvance'] = base_advance
     payload['planDigest'] = canonical_json_digest(payload)
     return payload, proposed_manifest, latest
 
@@ -8714,6 +8735,20 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         raise SyncwheelError(
             'coordination compose local adoption pending: manifest drifted after remote publication'
         )
+    base_qualification = None
+    if plan.get('baseAdvance'):
+        base_qualification = {
+            'status': 'unqualified',
+            'expectedTargetTip': plan['baseAdvance']['observedTargetTip'],
+            'targetRef': plan['baseAdvance']['targetRef'],
+        }
+        try:
+            base_qualification['observedTargetTip'] = remote_ref_tips(
+                repo_root, coordination_config(proposed_manifest)['remote'],
+                [base_qualification['targetRef']],
+            ).get(base_qualification['targetRef'])
+        except SyncwheelError:
+            base_qualification['observedTargetTip'] = None
     try:
         save_manifest_with_ledger(
             repo_root,
@@ -8727,6 +8762,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
                 'known_base_state': plan['knownBaseStateTip'],
                 'remote_state': plan['expectedRemoteStateTip'],
                 'stack': plan['stack'],
+                **({'base_qualification': base_qualification} if base_qualification else {}),
             },
         )
     except (OSError, SyncwheelError) as exc:
@@ -8743,6 +8779,7 @@ def apply_coordination_compose_stack_plan(repo_root, manifest, manifest_path, pl
         )
     return {
         'status': 'composed' if plan['status'] == 'publish-required' else 'adopted',
+        **({'base_qualification': base_qualification} if base_qualification else {}),
         'plan_digest': supplied_digest,
         'remote_state_tip': (
             read_remote_coordination_state(
@@ -8953,9 +8990,11 @@ def coordination_state_chain_contains(repo_root, coordination_id, base_tip, late
     )
 
 
-def compose_additive_coordination_snapshots(base, local, remote, requested_stack):
+def compose_additive_coordination_snapshots(base, local, remote, requested_stack,
+                                             verified_base_advance=False):
     return _coordination.compose_additive_coordination_snapshots(
         base, local, remote, requested_stack, branch_is_valid=is_valid_coordination_branch_ref,
+        verified_base_advance=verified_base_advance,
     )
 
 
