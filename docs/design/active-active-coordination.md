@@ -374,8 +374,10 @@ source and the observed target base, and the selected snapshot contains an
 exact adopted base and tip. The source and state publications retain their
 existing ownership checks and leases; foreign snapshots remain unchanged.
 Earlier merges on the source's first-parent path are accepted only when their
-second parents advance monotonically from the previous base and are ancestors
-of the observed new base. Other merges and octopus histories are refused.
+second parents form a monotonic ancestry chain from the previous base to the
+observed new base. This proves ancestry only; it does not prove that those
+second parents were historical target tips. Other merges and octopus histories
+are refused.
 The target tip is observed, not atomically leased. It can advance during or
 after publication, so the resulting candidate is unqualified: a local receipt
 records the expected and observed target tips for diagnosis, not as shared

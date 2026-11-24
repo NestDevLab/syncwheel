@@ -14,8 +14,9 @@ _OID = re.compile(r'^[0-9a-f]{40}$')
 def verify_compose_base_advance(repo, previous, selected, old_tip, new_tip, target_tip):
     """Prove a published tip is retained by a merge of the exact target base.
 
-    This proves ancestry and immutable input identities, not that an advancing
-    target branch remains unchanged after the final observation. Source and
+    This proves ancestry and immutable input identities. It does not establish
+    that earlier second parents were historical target tips, or that an
+    advancing target stays unchanged after the final observation. Source and
     coordination-state leases remain the publisher's separate responsibility.
     """
     old_base = previous.get('base')
@@ -96,8 +97,8 @@ def verify_compose_base_advance(repo, previous, selected, old_tip, new_tip, targ
         if (git('merge-base', '--is-ancestor', prior_base, prior_target).returncode
                 or git('merge-base', '--is-ancestor', prior_target, new_base).returncode):
             raise SyncwheelError('compose base advance refuses an unrelated or reordered prior base merge')
-        prior_merges.append({'commit': fields[0], 'base': prior_target})
+        prior_merges.append({'commit': fields[0], 'secondParent': prior_target})
         prior_base = prior_target
     return {'oldBase': old_base, 'newBase': new_base, 'oldTip': old_tip,
             'newTip': new_tip, 'featureTip': feature_tip, 'observedTargetTip': target_tip,
-            'priorBaseMerges': prior_merges}
+            'priorAncestralMerges': prior_merges}

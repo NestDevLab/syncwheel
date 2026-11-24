@@ -160,8 +160,8 @@ class ComposeBaseAdvanceCliTest(unittest.TestCase):
             self.assertEqual(advance['baseAdvance']['newTip'], new_tip)
             self.assertEqual(advance['baseAdvance']['newBase'], new_base)
             if mode == 'consecutive':
-                self.assertEqual(advance['baseAdvance']['priorBaseMerges'],
-                                 [{'commit': previous_merge, 'base': previous_base}])
+                self.assertEqual(advance['baseAdvance']['priorAncestralMerges'],
+                                 [{'commit': previous_merge, 'secondParent': previous_base}])
             if mode == 'race':
                 (seed / 'base3.txt').write_text('race\n')
                 git(seed, 'add', 'base3.txt')

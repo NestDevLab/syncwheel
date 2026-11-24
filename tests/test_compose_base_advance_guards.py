@@ -92,7 +92,7 @@ class ComposeBaseAdvanceGuardsTest(unittest.TestCase):
         before = self.refs()
         proof = verify_compose_base_advance(self.repo, self.previous, selected,
                                            self.old_tip, candidate, final_base)
-        self.assertEqual(proof['priorBaseMerges'], [{'commit': prior, 'base': middle}])
+        self.assertEqual(proof['priorAncestralMerges'], [{'commit': prior, 'secondParent': middle}])
         self.assertEqual(self.refs(), before)
 
     def test_unrelated_previous_base_merge_is_rejected(self):
