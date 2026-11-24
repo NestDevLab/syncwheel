@@ -1,8 +1,12 @@
 # Changelog
 
-## 0.47.32 - 2026-11-23
+## 0.47.33 - 2026-11-24
 
 - Qualify independent publication with a tracked version 1 manifest: advance two existing feature refs while preserving another author's dirty worktree and interrupted cleanup. Keep the foreign-history refusal covered and document the materialized-source precondition and the separate limits of direct landing. Publication behavior is unchanged.
+
+## 0.47.32 - 2026-11-23
+
+- Require explicit authorization for review bypasses in GitHub merge policies, and allow policies without bypasses.
 
 ## 0.47.31 - 2026-11-20
 
